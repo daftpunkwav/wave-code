@@ -1,0 +1,15 @@
+[package]
+name = "wavecode-skills"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+# frontmatter 是 YAML（SPEC §8.1），引入 serde_yaml 而非手写解析；
+# 版本在 workspace 根统一（SPEC §3 纪律）。
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

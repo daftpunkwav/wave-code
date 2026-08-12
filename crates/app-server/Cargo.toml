@@ -1,0 +1,23 @@
+[package]
+name = "wavecode-app-server"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wavecode-protocol = { path = "../protocol" }
+wavecode-core = { path = "../core" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+# 预留：stdio/WS transport 的 JSON-RPC id 生成（M2 启用）
+uuid.workspace = true
+
+[dev-dependencies]
+wavecode-llm = { path = "../llm" }
+wavecode-tools = { path = "../tools" }
+# 测试构造 SessionConfig 需要 Sandbox（库本身只经 core 句柄路由，不依赖）
+wavecode-sandbox = { path = "../sandbox" }
+async-trait.workspace = true
+futures.workspace = true
+tempfile.workspace = true

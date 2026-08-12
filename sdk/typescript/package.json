@@ -1,0 +1,7 @@
+{
+  "name": "@wavecode/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "WaveCode TypeScript SDK — spawn `wavecode exec` 并消费 JSONL 事件流"
+}

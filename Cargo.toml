@@ -1,0 +1,38 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+async-stream = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+clap = { version = "4", features = ["derive"] }
+rustyline = "15"
+toml = "0.8"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+bytes = "1"
+regex = "1"
+glob = "0.3"
+anstream = "1.0"
+anstyle = "1.0"
+pulldown-cmark = "0.13"
+terminal_size = "0.4"
+unicode-width = "0.2"
+# P8 TUI：ratatui 0.29 与 crossterm 0.28 为官方配对版本（ratatui 的默认 backend）
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }

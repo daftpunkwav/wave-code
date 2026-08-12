@@ -1,0 +1,7 @@
+{
+  "name": "@wavecode/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "WaveCode Desktop — Electron 壳，内置浏览器 + CDP 自动化桥"
+}

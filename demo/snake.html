@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>贪吃蛇小游戏</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    color: #eaeaea;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  h1 {
+    font-size: 28px;
+    margin-bottom: 12px;
+    color: #4ade80;
+    text-shadow: 0 0 10px rgba(74, 222, 128, 0.4);
+  }
+  .hud {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 16px;
+    font-size: 18px;
+  }
+  .hud span { color: #fbbf24; font-weight: bold; }
+  canvas {
+    background: #0f172a;
+    border: 2px solid #4ade80;
+    border-radius: 8px;
+    box-shadow: 0 0 20px rgba(74, 222, 128, 0.25);
+  }
+  .hint {
+    margin-top: 16px;
+    font-size: 14px;
+    color: #94a3b8;
+    text-align: center;
+    line-height: 1.6;
+  }
+  .overlay {
+    position: absolute;
+    background: rgba(15, 23, 42, 0.92);
+    border: 2px solid #ef4444;
+    border-radius: 8px;
+    padding: 24px 32px;
+    text-align: center;
+    box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+  }
+  .overlay h2 { color: #ef4444; margin-bottom: 8px; }
+  .overlay button {
+    margin-top: 12px;
+    padding: 8px 20px;
+    background: #4ade80;
+    color: #0f172a;
+    border: none;
+    border-radius: 6px;
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+  }
+  .overlay button:hover { background: #22c55e; }
+</style>
+</head>
+<body>
+  <h1>🐍 贪吃蛇</h1>
+  <div class="hud">
+    <div>得分: <span id="score">0</span></div>
+    <div>最高: <span id="best">0</span></div>
+  </div>
+  <div style="position: relative;">
+    <canvas id="game" width="400" height="400"></canvas>
+  </div>
+  <div class="hint">
+    ↑ ↓ ← → 或 WASD 控制方向 · 撞墙或咬到自己即结束
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const GRID = 20;
+  const COLS = canvas.width / GRID;
+  const ROWS = canvas.height / GRID;
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+
+  let snake, dir, nextDir, food, score, best, alive, speed, tickId;
+
+  best = parseInt(localStorage.getItem('snake-best') || '0', 10);
+  bestEl.textContent = best;
+
+  function reset() {
+    snake = [{x: 10, y: 10}, {x: 9, y: 10}, {x: 8, y: 10}];
+    dir = {x: 1, y: 0};
+    nextDir = {x: 1, y: 0};
+    score = 0;
+    speed = 130;
+    placeFood();
+    updateHUD();
+    alive = true;
+  }
+
+  function placeFood() {
+    while (true) {
+      const f = {x: Math.floor(Math.random()*COLS), y: Math.floor(Math.random()*ROWS)};
+      if (!snake.some(s => s.x === f.x && s.y === f.y)) {
+        food = f; return;
+      }
+    }
+  }
+
+  function updateHUD() {
+    scoreEl.textContent = score;
+    bestEl.textContent = best;
+  }
+
+  function step() {
+    if (!alive) return;
+    dir = nextDir;
+    const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
+
+    if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) {
+      return gameOver();
+    }
+    if (snake.some(s => s.x === head.x && s.y === head.y)) {
+      return gameOver();
+    }
+
+    snake.unshift(head);
+    if (head.x === food.x && head.y === food.y) {
+      score += 10;
+      if (score > best) { best = score; localStorage.setItem('snake-best', best); }
+      if (speed > 60) speed -= 2;
+      placeFood();
+    } else {
+      snake.pop();
+    }
+    updateHUD();
+    draw();
+  }
+
+  function draw() {
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // grid
+    ctx.strokeStyle = 'rgba(74, 222, 128, 0.05)';
+    for (let i = 0; i <= COLS; i++) {
+      ctx.beginPath(); ctx.moveTo(i*GRID, 0); ctx.lineTo(i*GRID, canvas.height); ctx.stroke();
+    }
+    for (let i = 0; i <= ROWS; i++) {
+      ctx.beginPath(); ctx.moveTo(0, i*GRID); ctx.lineTo(canvas.width, i*GRID); ctx.stroke();
+    }
+
+    // food
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.arc(food.x*GRID + GRID/2, food.y*GRID + GRID/2, GRID/2 - 2, 0, Math.PI*2);
+    ctx.fill();
+
+    // snake
+    snake.forEach((s, i) => {
+      ctx.fillStyle = i === 0 ? '#4ade80' : '#22c55e';
+      ctx.fillRect(s.x*GRID + 1, s.y*GRID + 1, GRID - 2, GRID - 2);
+      if (i === 0) {
+        // eyes
+        ctx.fillStyle = '#0f172a';
+        const ex = s.x*GRID, ey = s.y*GRID;
+        if (dir.x === 1) { ctx.fillRect(ex+GRID-7, ey+5, 2, 2); ctx.fillRect(ex+GRID-7, ey+GRID-7, 2, 2); }
+        else if (dir.x === -1) { ctx.fillRect(ex+5, ey+5, 2, 2); ctx.fillRect(ex+5, ey+GRID-7, 2, 2); }
+        else if (dir.y === -1) { ctx.fillRect(ex+5, ey+5, 2, 2); ctx.fillRect(ex+GRID-7, ey+5, 2, 2); }
+        else { ctx.fillRect(ex+5, ey+GRID-7, 2, 2); ctx.fillRect(ex+GRID-7, ey+GRID-7, 2, 2); }
+      }
+    });
+  }
+
+  function gameOver() {
+    alive = false;
+    clearInterval(tickId);
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.innerHTML = `
+      <h2>游戏结束</h2>
+      <p>本次得分: <strong style="color:#fbbf24">${score}</strong></p>
+      <button id="retry">再来一局</button>
+    `;
+    overlay.style.left = (canvas.width/2 - 110) + 'px';
+    overlay.style.top = (canvas.height/2 - 60) + 'px';
+    canvas.parentElement.appendChild(overlay);
+    document.getElementById('retry').addEventListener('click', () => {
+      overlay.remove();
+      reset();
+      tickId = setInterval(step, speed);
+    });
+  }
+
+  function start() {
+    reset();
+    tickId = setInterval(step, speed);
+  }
+
+  document.addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if ((k === 'arrowup' || k === 'w') && dir.y !== 1)  nextDir = {x: 0, y: -1};
+    if ((k === 'arrowdown' || k === 's') && dir.y !== -1) nextDir = {x: 0, y: 1};
+    if ((k === 'arrowleft' || k === 'a') && dir.x !== 1)  nextDir = {x: -1, y: 0};
+    if ((k === 'arrowright' || k === 'd') && dir.x !== -1) nextDir = {x: 1, y: 0};
+    if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
+  });
+
+  start();
+})();
+</script>
+</body>
+</html>

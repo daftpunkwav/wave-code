@@ -1,0 +1,8 @@
+{
+  "name": "wavecode",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.0",
+  "description": "WaveCode — 多平台 AI coding agent（CLI / TUI / Web / Desktop）"
+}

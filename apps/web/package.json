@@ -1,0 +1,7 @@
+{
+  "name": "@wavecode/web",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "WaveCode Web UI — React SPA，经 WebSocket 连接 app-server"
+}

@@ -1,0 +1,11 @@
+[package]
+name = "wavecode-sandbox"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+# PermissionMode / ApprovalKind 是 protocol 线型（SPEC §3 矩阵已补录此边）
+wavecode-protocol = { path = "../protocol" }
+serde_json.workspace = true
+thiserror.workspace = true

@@ -64,8 +64,13 @@ flowchart TB
 
 ```
 WaveCode/
-├── Cargo.toml              # [workspace] members = crates/*，edition 2024，resolver 3
-├── crates/<name>/          # 15 个 crate，包名统一 wavecode-<name>
+├── Cargo.toml              # [workspace] members = crates/*/*（嵌套分层），edition 2024，resolver 3
+├── crates/                 # 嵌套分层：目录即架构图，包名统一 wavecode-<name>
+│   ├── foundation/         # 基础设施：protocol · config · llm · auth
+│   ├── capabilities/       # 业务能力：tools · context · memory · skills · hooks · mcp · sandbox
+│   ├── engine/             # 引擎：core
+│   ├── transport/          # 传输：app-server
+│   └── frontends/          # 前端：cli · tui
 ├── apps/web/               # @wavecode/web（Vite + React + TS，M4 起）
 ├── apps/desktop/           # @wavecode/desktop（Electron，M6 起）
 ├── sdk/typescript/         # @wavecode/sdk（M7 起）
@@ -106,7 +111,7 @@ WaveCode/
 
 ## 4. 协议规范
 
-### 4.1 核心类型（`crates/protocol`）
+### 4.1 核心类型（`crates/foundation/protocol`）
 
 ```rust
 /// 前端 → core 的一次请求；id 由前端生成，关联后续全部事件
@@ -458,7 +463,7 @@ goal_mode = true
 ## 18. 测试策略
 
 - 单元测试与源码同文件/同目录（`*_tests.rs`）；纯逻辑（协议编解码、配置合并、上下文核算、规则匹配）100% 可单测，不依赖网络。
-- 集成测试集中在 `crates/core/tests/`（`suite/` 场景文件 + `common/` mock）：以 **mock provider**（录制/回放流式响应）驱动完整 turn；golden 测试锁定协议事件序列。
+- 集成测试集中在 `crates/engine/core/tests/`（`suite/` 场景文件 + `common/` mock）：以 **mock provider**（录制/回放流式响应）驱动完整 turn；golden 测试锁定协议事件序列。
 - 协议兼容性：`generate-ts` 产物 CI diff 校验；`Op`/`EventMsg` 增删变体的向后兼容测试。
 - UI：TUI 用 insta snapshot；Web 用 Playwright 组件测试（M5 起）。
 - E2E：每里程碑验收场景脚本化（PRD §7 验收标准逐条对应）。

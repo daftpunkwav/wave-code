@@ -9,7 +9,7 @@ tags: [engine, agent-loop, session]
 
 ## 职责
 
-`wavecode-core` 是 agent 引擎（`crates/core/src/lib.rs`）：session 生命周期、turn 状态机循环、任务模型、slash 指令分发、goal / plan 模式、subagent 编排与后台任务。**M1 已落地**：`session` 模块（Session 生命周期与 turn 状态机循环，mock 模型验证）；任务模型 / hooks / subagent 编排随后续里程碑补齐。
+`wavecode-core` 是 agent 引擎（`crates/engine/core/src/lib.rs`）：session 生命周期、turn 状态机循环、任务模型、slash 指令分发、goal / plan 模式、subagent 编排与后台任务。**M1 已落地**：`session` 模块（Session 生命周期与 turn 状态机循环，mock 模型验证）；任务模型 / hooks / subagent 编排随后续里程碑补齐。
 
 只依赖 `wavecode_protocol` / `wavecode_llm` / `wavecode_tools` 的公开接口（config / context / memory / skills / hooks / mcp / sandbox / auth 按 SPEC §3 矩阵留给 M2+ 引回），不感知任何前端形态；与前端的唯一交互通道是 `wavecode_protocol` 的 Submission / Event（经 [app-server](../runtime/app-server.md) 的 actor 驱动）。
 
@@ -34,7 +34,7 @@ stateDiagram-v2
     Done --> [*]: TokenCount + TurnCompleted{Completed|Error}
 ```
 
-循环六步（`crates/core/src/session.rs`）：
+循环六步（`crates/engine/core/src/session.rs`）：
 
 1. **用户消息入历史** + `TurnStarted { turn_id }`（uuid）；中断标志每 turn 自清（上一 turn 的 interrupt 不影响本轮）。
 2. **组装 `ChatRequest`**（system 模板替换 cwd、`messages.clone()`、`registry.specs()`、max_tokens）发起流式采样；`stream()` 失败（或流中途出错）：`fail_turn` 收尾——发 `Error { message, recoverable: false }` + `TurnCompleted { Error }` 防前端悬挂，然后以 Err 返回调用方。
@@ -69,7 +69,7 @@ stateDiagram-v2
 - 每个 turn 以 `TurnStarted` 首发；正常以 `TokenCount + TurnCompleted` 收尾；错误路径 `fail_turn`（`Error { recoverable: false }` + `TurnCompleted{Error}`）后以 Err 返回调用方；中断路径 `TurnCompleted{Interrupted}`。
 - `emit` 尽力投递：send 失败即 receiver 已关闭（前端断开），记 debug 日志并继续执行——历史一致性优先，事件流只是旁观通道；channel 满时 send 自然挂起形成背压。
 
-## 聚焦测试（`crates/core/src/session.rs` tests）
+## 聚焦测试（`crates/engine/core/src/session.rs` tests）
 
 `MockModel`（脚本化：按调用次数返回预排事件序列，记录每次请求供断言回灌）与 `GatedModel`（回放脚本后挂起直到 gate 置位，驱动中断检查点确定性触发）：
 

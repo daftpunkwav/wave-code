@@ -9,7 +9,7 @@ tags: [config, toml, credentials]
 
 ## 职责
 
-`wavecode-config` 负责 TOML 配置加载与 provider 解析（`crates/config/src/lib.rs`）。M1 阶段实现：加载用户级 `~/.wavecode/config.toml`，解析 `model` / `model_provider` / `model_providers` 配置段，并解析当前 provider 的 api key。规划中的分层合并（CLI 参数 > 项目级 `.wavecode/config.toml` > 用户级 > 内置默认值）与 `profiles`、`mcp_servers`、`features` 等能力在后续里程碑落地（SPEC §13）。
+`wavecode-config` 负责 TOML 配置加载与 provider 解析（`crates/foundation/config/src/lib.rs`）。M1 阶段实现：加载用户级 `~/.wavecode/config.toml`，解析 `model` / `model_provider` / `model_providers` 配置段，并解析当前 provider 的 api key。规划中的分层合并（CLI 参数 > 项目级 `.wavecode/config.toml` > 用户级 > 内置默认值）与 `profiles`、`mcp_servers`、`features` 等能力在后续里程碑落地（SPEC §13）。
 
 ## 核心类型
 
@@ -30,7 +30,7 @@ tags: [config, toml, credentials]
 
 `ProviderConfig` 的 `Debug` **手写脱敏**：`api_key` 永不显示真实值（`Some` 显示 `***`、`None` 显示 `None`），防日志 / 错误输出泄露密钥；其余字段正常显示。这是 [cli bootstrap](../runtime/cli.md) 与审查报告（review.md §2.2）确认的凭据全链路防护第一环。
 
-## 聚焦测试（`crates/config/src/lib.rs` tests）
+## 聚焦测试（`crates/foundation/config/src/lib.rs` tests）
 
 | 测试 | 锁定的行为 |
 |---|---|

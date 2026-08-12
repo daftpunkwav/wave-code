@@ -9,7 +9,7 @@ tags: [app-server, transport, actor]
 
 ## 职责
 
-`wavecode-app-server` 以统一服务面暴露 core 能力（`crates/app-server/src/lib.rs`）。目标三种 transport（SPEC §4.2，语义一致）：**stdio**（NDJSON，Desktop/SDK 以子进程接入）、**WebSocket**（Web UI，支持多客户端订阅同一会话）、**进程内**（tokio mpsc 双工通道，零序列化，TUI 用）。**M1 仅落地进程内 transport（`InProcessClient`）**；JSON-RPC 编码层与 stdio/WS transport 随后续里程碑引入。另规划 `generate-ts`（从 `wavecode_protocol` 类型导出 TypeScript schema，SPEC §4.3）。
+`wavecode-app-server` 以统一服务面暴露 core 能力（`crates/transport/app-server/src/lib.rs`）。目标三种 transport（SPEC §4.2，语义一致）：**stdio**（NDJSON，Desktop/SDK 以子进程接入）、**WebSocket**（Web UI，支持多客户端订阅同一会话）、**进程内**（tokio mpsc 双工通道，零序列化，TUI 用）。**M1 仅落地进程内 transport（`InProcessClient`）**；JSON-RPC 编码层与 stdio/WS transport 随后续里程碑引入。另规划 `generate-ts`（从 `wavecode_protocol` 类型导出 TypeScript schema，SPEC §4.3）。
 
 ## InProcessClient
 
@@ -45,7 +45,7 @@ sequenceDiagram
 - `run_turn` 出错（core 已发 Error + TurnCompleted{Error}）：记 error 日志，**actor 继续存活**。
 - 事件回填：`run_turn` 直接用 submission_id 作为 `Event.id`。
 
-## 聚焦测试（`crates/app-server/src/lib.rs` tests）
+## 聚焦测试（`crates/transport/app-server/src/lib.rs` tests）
 
 `MockModel` / `GatedModel`（与 core 同构：脚本化 + 门控尾部；`repeat_tail` 控制 gate 置位后流结束或持续产出 sentinel——中断测试中每个流元素都是中断检查点，置位与处理之间无竞态）：
 

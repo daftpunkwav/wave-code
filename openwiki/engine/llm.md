@@ -9,7 +9,7 @@ tags: [llm, anthropic, sse, streaming]
 
 ## 职责
 
-`wavecode-llm` 是多 provider 抽象层（`crates/llm/src/lib.rs`）。M1 阶段包含：公共类型与 `ChatModel` trait、Anthropic Messages streaming SSE 解析器（`SseParser`）、内置实现 Anthropic Messages API 流式客户端（`AnthropicClient`）。OpenAI 兼容 provider 的 HTTP 客户端、token 计数与模型能力表为后续里程碑。
+`wavecode-llm` 是多 provider 抽象层（`crates/foundation/llm/src/lib.rs`）。M1 阶段包含：公共类型与 `ChatModel` trait、Anthropic Messages streaming SSE 解析器（`SseParser`）、内置实现 Anthropic Messages API 流式客户端（`AnthropicClient`）。OpenAI 兼容 provider 的 HTTP 客户端、token 计数与模型能力表为后续里程碑。
 
 ## 公共类型
 

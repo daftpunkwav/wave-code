@@ -9,7 +9,7 @@ tags: [tools, filesystem, shell, security]
 
 ## 职责
 
-`wavecode-tools` 是工具框架与内置工具集（`crates/tools/src/lib.rs`）。M1 形态：`Tool` trait、`Registry` 注册表，四个内置文件工具（`read_file` / `write_file` / `edit_file` / `list_dir`）与 `shell` 工具。文件工具经 `path_guard` 把所有路径约束在 `ToolCtx::cwd` 之下，防 `..` 越界与绝对路径逃逸。执行管道（schema 校验、hook、权限审批）由 [core](core.md) 编排（M2+ 补 hooks/sandbox 环节）。
+`wavecode-tools` 是工具框架与内置工具集（`crates/capabilities/tools/src/lib.rs`）。M1 形态：`Tool` trait、`Registry` 注册表，四个内置文件工具（`read_file` / `write_file` / `edit_file` / `list_dir`）与 `shell` 工具。文件工具经 `path_guard` 把所有路径约束在 `ToolCtx::cwd` 之下，防 `..` 越界与绝对路径逃逸。执行管道（schema 校验、hook、权限审批）由 [core](core.md) 编排（M2+ 补 hooks/sandbox 环节）。
 
 ## Tool trait 与 Registry
 

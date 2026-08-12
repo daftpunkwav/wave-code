@@ -9,7 +9,7 @@ tags: [cli, repl, rendering, markdown]
 
 ## 职责
 
-`wavecode-cli` 是单二进制入口（`crates/cli/src/main.rs`，bin 名 `wavecode`）。M1 命令面：
+`wavecode-cli` 是单二进制入口（`crates/frontends/cli/src/main.rs`，bin 名 `wavecode`）。M1 命令面：
 
 - `wavecode`（无子命令）：基础交互 REPL（rustyline，流式渲染）；
 - `wavecode exec "<prompt>"`：非交互单 turn；`--json` 时 stdout 输出 JSONL（每行一个 Event），人类可读渲染转 stderr；

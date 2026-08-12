@@ -9,7 +9,7 @@ tags: [protocol, jsonrpc, contract]
 
 ## 职责
 
-`wavecode-protocol` 是前后端协议的**唯一事实源**（`crates/protocol/src/lib.rs`）：定义 `Submission { id, op: Op }`（前端 → core 的请求）与 `Event { id, msg: EventMsg }`（core → 前端的事件流），`id` 用于关联一次请求与其全部后续事件。所有 Rust crate 与前端（TUI / Web / Desktop）共享此协议；TypeScript 侧类型由 `wavecode app-server generate-ts`（规划，SPEC §4.3）从此处导出。
+`wavecode-protocol` 是前后端协议的**唯一事实源**（`crates/foundation/protocol/src/lib.rs`）：定义 `Submission { id, op: Op }`（前端 → core 的请求）与 `Event { id, msg: EventMsg }`（core → 前端的事件流），`id` 用于关联一次请求与其全部后续事件。所有 Rust crate 与前端（TUI / Web / Desktop）共享此协议；TypeScript 侧类型由 `wavecode app-server generate-ts`（规划，SPEC §4.3）从此处导出。
 
 ## 核心类型
 

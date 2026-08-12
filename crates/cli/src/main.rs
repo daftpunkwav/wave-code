@@ -91,7 +91,9 @@ async fn main() -> anyhow::Result<ExitCode> {
     match cli.command {
         Some(Command::Exec { prompt, json }) => run_exec(cfg, &prompt, json).await,
         // P10：会话恢复（SPEC §16）——列表 / replay 恢复后进交互界面。
-        Some(Command::Resume { thread_id }) => run_resume(cfg, mcp_lines, thread_id, cli.repl).await,
+        Some(Command::Resume { thread_id }) => {
+            run_resume(cfg, mcp_lines, thread_id, cli.repl).await
+        }
         // P8：TTY 下默认进入 ratatui TUI；非 TTY（管道/重定向）或 --repl
         // 回退行式 REPL（降级路径，渲染语义不变）。
         None if cli.repl || !std::io::stdout().is_terminal() => run_repl(cfg, mcp_lines).await,

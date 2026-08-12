@@ -143,7 +143,11 @@ impl RolloutRecorder {
             }
         };
         line.push('\n');
-        if let Err(e) = self.file.write_all(line.as_bytes()).and_then(|()| self.file.flush()) {
+        if let Err(e) = self
+            .file
+            .write_all(line.as_bytes())
+            .and_then(|()| self.file.flush())
+        {
             tracing::warn!(error = %e, "rollout 写入失败，持久化停用");
             self.disabled = true;
             return;
@@ -411,7 +415,9 @@ mod tests {
             seq: 2,
             trigger: CompactTrigger::Auto,
             summary_tokens: 42,
-            messages: vec![user_text("[上下文压缩] 早前对话已压缩为以下摘要：\n\n## 目标\nT")],
+            messages: vec![user_text(
+                "[上下文压缩] 早前对话已压缩为以下摘要：\n\n## 目标\nT",
+            )],
         };
         let json = serde_json::to_string(&compact).unwrap();
         assert!(json.contains(r#""kind":"compaction""#), "{json}");
@@ -536,7 +542,11 @@ mod tests {
         })
         .unwrap();
         // 半行：进程死在写中途
-        std::fs::write(&path, format!("{good}\n{{\"kind\":\"message\",\"seq\":2,\"me")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{good}\n{{\"kind\":\"message\",\"seq\":2,\"me"),
+        )
+        .unwrap();
         let load = load_rollout(&path).unwrap();
         assert_eq!(load.records.len(), 1);
         assert_eq!(load.warnings.len(), 1);
@@ -564,7 +574,8 @@ mod tests {
         let write = |id: &str, text: &str| {
             let mut rec = RolloutRecorder::open(&root.join(format!("{id}.jsonl")), 1).unwrap();
             rec.record_message(&user_text(text));
-            rec.record_compaction(CompactTrigger::Auto, 1, &[user_text("摘要")]);
+            let summary = format!("{}\n\n摘要", wavecode_context::SUMMARY_MESSAGE_PREFIX);
+            rec.record_compaction(CompactTrigger::Auto, 1, &[user_text(&summary)]);
             rec.record_message(&user_text("压缩后"));
         };
         write("older", "旧会话的第一句话\n带换行");
@@ -580,10 +591,9 @@ mod tests {
         assert_eq!(threads[0].compaction_count, 1);
         // replay 后历史 = 摘要 + 压缩后 = 2 条。
         assert_eq!(threads[0].message_count, 2);
-        assert_eq!(
-            threads[0].first_user_text.as_deref(),
-            Some("新会话目标：搭建电商平台")
-        );
+        // 首条用户文本取 replay 后可见历史：压缩重置了压缩前消息，
+        // 跳过后带前缀的摘要 meta 消息，落到压缩后的用户文本。
+        assert_eq!(threads[0].first_user_text.as_deref(), Some("压缩后"));
         // 换行合并为单行；跳过压缩摘要 meta 消息取压缩后的用户文本。
         assert_eq!(threads[1].first_user_text.as_deref(), Some("压缩后"));
 

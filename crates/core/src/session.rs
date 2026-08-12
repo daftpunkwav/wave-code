@@ -4397,7 +4397,10 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// P10 测试夹具：注入临时根目录的 rollout 配置。
-    fn p10_rollout(dir: &std::path::Path, thread_id: &str) -> Option<crate::rollout::RolloutConfig> {
+    fn p10_rollout(
+        dir: &std::path::Path,
+        thread_id: &str,
+    ) -> Option<crate::rollout::RolloutConfig> {
         Some(crate::rollout::RolloutConfig {
             root: dir.join("threads"),
             thread_id: thread_id.to_owned(),
@@ -4443,7 +4446,10 @@ mod tests {
         ]));
         let (tx, _rx) = mpsc::channel::<Event>(64);
         let mut session_a = p10_session(model_a, p10_rollout(dir.path(), "thread-1"));
-        let reason = session_a.run_turn("s-1", "创建 hello.txt", tx).await.unwrap();
+        let reason = session_a
+            .run_turn("s-1", "创建 hello.txt", tx)
+            .await
+            .unwrap();
         assert_eq!(reason, StopReason::Completed);
         let history_a = session_a.messages.clone();
 
@@ -4592,7 +4598,9 @@ mod tests {
         let gate = Arc::new(AtomicBool::new(false));
         let model_b = Arc::new(GatedModel {
             script: vec![
-                StreamEvent::TextDelta { text: "再写".into() },
+                StreamEvent::TextDelta {
+                    text: "再写".into(),
+                },
                 StreamEvent::BlockEnd,
                 StreamEvent::ToolUseBegin {
                     id: "t9".into(),
@@ -4620,7 +4628,7 @@ mod tests {
             gate.store(true, Ordering::SeqCst);
             rx
         };
-        let (reason, mut rx) = tokio::join!(session_b.run_turn("s-2", "再写一个", tx), signal);
+        let (reason, rx) = tokio::join!(session_b.run_turn("s-2", "再写一个", tx), signal);
         assert_eq!(reason.unwrap(), StopReason::Interrupted);
         drop(rx);
         let history_b = session_b.messages.clone();
@@ -4854,7 +4862,10 @@ mod tests {
             "FILE-ANCHOR",
             "TODO-ANCHOR",
         ] {
-            assert!(text.contains(anchor), "50 轮压缩后缺要素锚点「{anchor}」: {text}");
+            assert!(
+                text.contains(anchor),
+                "50 轮压缩后缺要素锚点「{anchor}」: {text}"
+            );
         }
         assert!(
             text.contains("第 50 轮迭代完成"),
@@ -4863,7 +4874,8 @@ mod tests {
 
         // rollout 记录面同步受压：50 条压缩记录 + 每轮 2 条消息（首轮另
         // 有种子输入外的 user 消息……精确计数 = 50 压缩 + 100 消息）。
-        let load = crate::rollout::load_rollout(&dir.path().join("threads/t-stress.jsonl")).unwrap();
+        let load =
+            crate::rollout::load_rollout(&dir.path().join("threads/t-stress.jsonl")).unwrap();
         let compactions = load
             .records
             .iter()

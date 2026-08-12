@@ -1,0 +1,17 @@
+[package]
+name = "wavecode-tools"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wavecode-llm = { path = "../llm" }
+serde_json.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+regex.workspace = true
+glob.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

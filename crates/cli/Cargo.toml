@@ -1,0 +1,38 @@
+[package]
+name = "wavecode-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wavecode"
+path = "src/main.rs"
+
+[dependencies]
+wavecode-protocol = { path = "../protocol" }
+wavecode-config = { path = "../config" }
+wavecode-llm = { path = "../llm" }
+wavecode-tools = { path = "../tools" }
+wavecode-core = { path = "../core" }
+wavecode-app-server = { path = "../app-server" }
+# P2：装配 SessionConfig.sandbox（PermissionMode → Sandbox）
+wavecode-sandbox = { path = "../sandbox" }
+# P8：TTY 默认路径进入 ratatui TUI（SPEC §3 矩阵允许 cli→tui）
+wavecode-tui = { path = "../tui" }
+clap.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rustyline.workspace = true
+anstream.workspace = true
+anstyle.workspace = true
+pulldown-cmark.workspace = true
+terminal_size.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

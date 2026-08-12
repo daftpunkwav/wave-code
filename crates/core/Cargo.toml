@@ -1,0 +1,40 @@
+[package]
+name = "wavecode-core"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+wavecode-protocol = { path = "../protocol" }
+wavecode-llm = { path = "../llm" }
+wavecode-tools = { path = "../tools" }
+# P2 落地 sandbox 边（SPEC §3 矩阵允许）：
+# 权限模式判定与审批（AwaitApproval），其余特性层 crate 仍留 M2+ 引回：
+# auth
+wavecode-sandbox = { path = "../sandbox" }
+# P3 落地 context 边（SPEC §3 矩阵允许）：预算核算 / 三级阈值 / 压缩管线
+wavecode-context = { path = "../context" }
+# P6 落地 memory 边（SPEC §3 矩阵允许）：WAVECODE.md / 持久记忆 / 自动提取
+wavecode-memory = { path = "../memory" }
+# P7 落地 skills / hooks 边（SPEC §3 矩阵允许）：SKILL.md 发现与注入 /
+# 生命周期 hook 事件点
+wavecode-skills = { path = "../skills" }
+wavecode-hooks = { path = "../hooks" }
+# P7 落地 config 边（SPEC §3 矩阵允许）：[hooks] 原始配置 → HookEngine 转换
+wavecode-config = { path = "../config" }
+# P9 落地 mcp 边（SPEC §3 矩阵允许）：MCP client/server trait 边界 +
+# 工具桥（mcp__{server}__{tool} 命名注入）+ [mcp_servers] 配置转换
+wavecode-mcp = { path = "../mcp" }
+serde_json.workspace = true
+# P10 rollout 持久化记录 derive（SPEC §16 线格式）
+serde.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

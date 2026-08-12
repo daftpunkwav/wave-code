@@ -1,0 +1,11 @@
+/target
+node_modules/
+dist/
+*.log
+.DS_Store
+# 项目级 wavecode 配置可能含 API key，只准用用户级 ~/.wavecode/config.toml
+.wavecode/
+
+# CodeGraph 本地索引
+.codegraph/
+

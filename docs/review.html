@@ -1,0 +1,1005 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WaveCode · 项目全面审查报告</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   WaveCode Review — design system
+   Palette  : 借自 wave.rs 三色波形 — 青/蓝/紫
+   Surface  : 终端底 #0D0F14 + 纸面 #F4F1E8 + 章节色块
+   Type     : 显示 = JetBrains Mono, 正文 = Spectral, 工具 = Inter
+   ============================================================ */
+
+:root{
+  --paper:        #F4F1E8;
+  --paper-dim:    #E9E5D7;
+  --ink:          #15171C;
+  --ink-soft:     #2A2E36;
+  --ink-mute:     #5C5F66;
+  --rule:         #15171C;
+  --term:         #0D0F14;
+  --term-soft:    #161A22;
+
+  --c-cyan:       #40E0D0;  /* 波形起点 — 主强调色 */
+  --c-blue:       #508CFF;  /* 波形中段 — 链接 / 章节标 */
+  --c-violet:     #BA68FF;  /* 波形终点 — 严重程度最高 */
+
+  --crit:         #C0392B;  /* 砖红 — critical */
+  --warn:         #C28A1E;  /* 琥珀 — warn */
+  --good:         #2E7D5B;  /* 墨绿 — ok / 优秀 */
+
+  --grid-gap:     1.5rem;
+  --measure:      38rem;
+  --maxw:         1080px;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;background:var(--paper);color:var(--ink)}
+body{
+  font-family:'Spectral','Iowan Old Style','Source Han Serif SC',Georgia,serif;
+  font-size:17px;line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+  font-feature-settings:"kern","liga","calt";
+}
+
+/* --- page frame --- */
+.shell{max-width:var(--maxw);margin:0 auto;padding:4.5rem 2.5rem 6rem;position:relative}
+@media (max-width:720px){.shell{padding:2.5rem 1.25rem 3rem}}
+
+/* --- hero --- */
+.hero{
+  border-top:3px solid var(--ink);
+  border-bottom:1px solid var(--ink);
+  padding:2.5rem 0 2rem;
+  margin-bottom:3.5rem;
+  display:grid;
+  grid-template-columns:1fr;
+  gap:1rem;
+}
+.eyebrow{
+  font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  font-size:0.78rem;letter-spacing:0.18em;
+  text-transform:uppercase;color:var(--ink-mute);
+  display:flex;align-items:center;gap:0.6rem;
+}
+.eyebrow::before{content:'';display:inline-block;width:1.6rem;height:1px;background:var(--ink)}
+.eyebrow .sep{color:var(--ink-mute)}
+.hero h1{
+  font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  font-size:clamp(2rem,5vw,3.4rem);
+  font-weight:700;
+  line-height:1.05;
+  letter-spacing:-0.02em;
+  margin:0;
+  color:var(--ink);
+}
+.hero h1 .amp{
+  color:var(--c-blue);
+  font-weight:400;
+  font-style:italic;
+  padding:0 0.05em;
+}
+.hero .lede{
+  font-family:'Spectral',serif;
+  font-style:italic;
+  font-size:1.1rem;
+  color:var(--ink-soft);
+  max-width:var(--measure);
+  margin:0.5rem 0 0;
+}
+.hero .meta{
+  display:flex;flex-wrap:wrap;gap:0.4rem 1.2rem;
+  margin-top:1.5rem;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.78rem;
+  color:var(--ink-mute);
+}
+.hero .meta b{color:var(--ink);font-weight:500}
+.hero .meta .pulse{
+  display:inline-block;width:0.55rem;height:0.55rem;
+  background:var(--c-cyan);border-radius:50%;
+  margin-right:0.4rem;vertical-align:middle;
+  box-shadow:0 0 0 3px rgba(64,224,208,0.18);
+}
+
+/* --- waveform sig --- */
+.waveform{
+  font-family:'JetBrains Mono',monospace;
+  font-size:1.4rem;
+  letter-spacing:0.02em;
+  background:linear-gradient(90deg,var(--c-cyan),var(--c-blue) 50%,var(--c-violet));
+  -webkit-background-clip:text;background-clip:text;
+  color:transparent;
+  font-weight:700;
+  user-select:none;
+  white-space:nowrap;
+  overflow:hidden;
+}
+
+/* --- table of contents (sticky sidenav style) --- */
+.toc{
+  position:sticky;top:1.5rem;
+  align-self:start;
+  border:1px solid var(--ink);
+  background:var(--paper-dim);
+  padding:1.4rem 1.6rem;
+  margin-bottom:3rem;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.78rem;
+  line-height:1.9;
+}
+.toc h2{
+  margin:0 0 0.9rem;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem;
+  letter-spacing:0.2em;
+  text-transform:uppercase;
+  color:var(--ink-mute);
+  font-weight:500;
+  border-bottom:1px solid var(--ink);
+  padding-bottom:0.5rem;
+}
+.toc ol{list-style:none;counter-reset:toc;margin:0;padding:0}
+.toc li{counter-increment:toc;display:flex;gap:0.7rem;align-items:baseline}
+.toc li::before{
+  content:counter(toc,decimal-leading-zero);
+  color:var(--c-blue);
+  font-weight:700;
+  min-width:1.7rem;
+}
+.toc a{color:var(--ink);text-decoration:none;border-bottom:1px dotted transparent}
+.toc a:hover{border-bottom-color:var(--c-blue)}
+.toc .sev-crit::after{content:'●';color:var(--crit);margin-left:auto;font-size:0.7rem}
+.toc .sev-warn::after{content:'●';color:var(--warn);margin-left:auto;font-size:0.7rem}
+
+/* --- chapter --- */
+.chapter{
+  margin:4rem 0 0;
+  padding-top:2.5rem;
+  border-top:1px solid var(--ink);
+  position:relative;
+}
+.chapter:first-of-type{border-top:none;margin-top:2rem;padding-top:0}
+.chapter-num{
+  display:inline-block;
+  font-family:'JetBrains Mono',monospace;
+  font-weight:700;
+  font-size:0.78rem;
+  letter-spacing:0.2em;
+  color:var(--paper);
+  background:var(--ink);
+  padding:0.35rem 0.7rem 0.3rem;
+  margin-bottom:0.9rem;
+}
+.chapter h2{
+  font-family:'JetBrains Mono',monospace;
+  font-weight:700;
+  font-size:1.6rem;
+  line-height:1.2;
+  letter-spacing:-0.01em;
+  margin:0.2rem 0 0.4rem;
+  color:var(--ink);
+}
+.chapter .sub{
+  font-family:'Spectral',serif;
+  font-style:italic;
+  font-size:1.05rem;
+  color:var(--ink-soft);
+  margin:0 0 2rem;
+  max-width:var(--measure);
+}
+h3{
+  font-family:'Inter','Helvetica Neue',sans-serif;
+  font-weight:600;
+  font-size:1.1rem;
+  letter-spacing:-0.005em;
+  margin:2.4rem 0 0.8rem;
+  color:var(--ink);
+  scroll-margin-top:1rem;
+}
+h4{
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.85rem;
+  letter-spacing:0.06em;
+  text-transform:uppercase;
+  margin:1.8rem 0 0.6rem;
+  color:var(--ink-soft);
+}
+p{margin:0.9rem 0;max-width:var(--measure);hyphens:auto}
+strong,b{font-weight:600;color:var(--ink)}
+em,i{font-style:italic;color:var(--ink-soft)}
+a{color:var(--c-blue);text-decoration:none;border-bottom:1px solid currentColor}
+a:hover{background:var(--c-cyan);color:var(--ink)}
+code,pre,kbd{
+  font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  font-size:0.86em;
+}
+code{
+  background:var(--paper-dim);
+  padding:0.1em 0.35em;
+  border-radius:2px;
+  color:var(--ink);
+}
+pre{
+  background:var(--term);
+  color:#E9E5D7;
+  padding:1.1rem 1.3rem;
+  overflow-x:auto;
+  border-left:3px solid var(--c-blue);
+  margin:1.2rem 0;
+  font-size:0.82rem;
+  line-height:1.55;
+  max-width:calc(var(--measure) + 4rem);
+}
+pre code{background:transparent;padding:0;color:inherit;font-size:inherit}
+pre .c{color:#5C5F66;font-style:italic} /* comment */
+pre .k{color:var(--c-cyan)}             /* keyword */
+pre .s{color:#C28A1E}                   /* string */
+pre .n{color:var(--c-violet)}           /* number */
+pre .t{color:#E9E5D7}                   /* type */
+
+/* --- tables --- */
+table{
+  width:100%;
+  border-collapse:collapse;
+  margin:1.2rem 0;
+  font-size:0.92rem;
+  max-width:calc(var(--measure) + 4rem);
+}
+th,td{
+  text-align:left;
+  padding:0.6rem 0.8rem;
+  border-bottom:1px solid var(--ink);
+  vertical-align:top;
+}
+th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.72rem;
+  letter-spacing:0.16em;
+  text-transform:uppercase;
+  font-weight:500;
+  color:var(--ink-mute);
+  background:var(--paper-dim);
+}
+tr:last-child td{border-bottom:1px solid var(--ink)}
+td:first-child{font-weight:500}
+
+/* --- severity pills --- */
+.pill{
+  display:inline-block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem;
+  letter-spacing:0.1em;
+  padding:0.15rem 0.55rem;
+  border:1px solid;
+  border-radius:999px;
+  font-weight:500;
+}
+.pill-good{color:var(--good);border-color:var(--good)}
+.pill-warn{color:var(--warn);border-color:var(--warn)}
+.pill-crit{color:var(--crit);border-color:var(--crit)}
+.pill-info{color:var(--c-blue);border-color:var(--c-blue)}
+.pill-cyan{color:var(--c-cyan);border-color:var(--c-cyan)}
+
+/* --- callouts --- */
+.callout{
+  border-left:3px solid var(--c-blue);
+  background:var(--paper-dim);
+  padding:1rem 1.3rem;
+  margin:1.2rem 0;
+  max-width:calc(var(--measure) + 2rem);
+  font-family:'Spectral',serif;
+}
+.callout.warn{border-left-color:var(--warn)}
+.callout.crit{border-left-color:var(--crit)}
+.callout.good{border-left-color:var(--good)}
+.callout .lab{
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.72rem;
+  letter-spacing:0.18em;
+  text-transform:uppercase;
+  color:var(--ink-mute);
+  margin-bottom:0.3rem;
+  display:block;
+}
+.callout p:last-child{margin-bottom:0}
+
+/* --- score strip (chapter 0) --- */
+.score-strip{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+  gap:1px;
+  background:var(--ink);
+  border:1px solid var(--ink);
+  margin:1.5rem 0 0;
+  max-width:calc(var(--measure) + 4rem);
+}
+.score-cell{
+  background:var(--paper);
+  padding:0.95rem 1rem;
+  display:flex;
+  flex-direction:column;
+  gap:0.3rem;
+}
+.score-cell .label{
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.7rem;
+  letter-spacing:0.14em;
+  text-transform:uppercase;
+  color:var(--ink-mute);
+}
+.score-cell .grade{
+  font-family:'JetBrains Mono',monospace;
+  font-weight:700;
+  font-size:1.7rem;
+  line-height:1;
+  letter-spacing:-0.02em;
+}
+.score-cell .note{
+  font-size:0.78rem;
+  line-height:1.45;
+  color:var(--ink-soft);
+}
+.score-cell.A .grade{color:var(--good)}
+.score-cell.B .grade{color:var(--c-blue)}
+.score-cell.C .grade{color:var(--warn)}
+.score-cell.D .grade{color:var(--crit)}
+
+/* --- file:line chips --- */
+.fl{
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.78rem;
+  color:var(--ink-mute);
+  display:inline-block;
+  padding:0.05rem 0.4rem;
+  border:1px solid var(--ink-mute);
+  border-radius:2px;
+  margin:0 0.15rem;
+  white-space:nowrap;
+}
+.fl:hover{background:var(--c-cyan);color:var(--ink);border-color:var(--c-cyan);cursor:help}
+
+/* --- file tree list --- */
+.tree{
+  list-style:none;
+  padding:0;
+  margin:0.8rem 0;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.82rem;
+  max-width:calc(var(--measure) + 4rem);
+}
+.tree li{
+  padding:0.18rem 0;
+  display:flex;
+  justify-content:space-between;
+  gap:1rem;
+  border-bottom:1px dotted var(--ink-mute);
+}
+.tree li:last-child{border-bottom:none}
+.tree .nm{color:var(--ink)}
+.tree .ln{color:var(--ink-mute);font-variant-numeric:tabular-nums}
+.tree .st-good::before{content:'●';color:var(--good);margin-right:0.5rem}
+.tree .st-stub::before{content:'○';color:var(--ink-mute);margin-right:0.5rem}
+
+/* --- footer --- */
+footer{
+  margin-top:5rem;
+  padding-top:1.5rem;
+  border-top:3px double var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.75rem;
+  color:var(--ink-mute);
+  display:flex;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:1rem;
+}
+
+/* --- utility --- */
+.mono{font-family:'JetBrains Mono',monospace}
+.mute{color:var(--ink-mute)}
+.serif{font-family:'Spectral',serif}
+.term{
+  background:var(--term);color:#E9E5D7;
+  padding:0.05em 0.4em;border-radius:2px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:0.86em;
+}
+hr.wave{
+  border:none;height:1.5rem;margin:2.5rem 0;
+  background-image:linear-gradient(90deg,transparent,var(--c-cyan),var(--c-blue),var(--c-violet),transparent);
+  opacity:0.45;
+}
+ul,ol{margin:0.7rem 0;padding-left:1.5rem;max-width:var(--measure)}
+li{margin:0.25rem 0}
+
+@media (max-width:600px){
+  .hero{padding:1.5rem 0 1.5rem;margin-bottom:2rem}
+  .hero h1{font-size:2rem}
+  pre{font-size:0.78rem}
+  .toc{position:static}
+  table{font-size:0.84rem}
+}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header class="hero">
+  <div class="eyebrow">
+    <span>Codebase Audit</span>
+    <span class="sep">·</span>
+    <span>2026-08-04</span>
+    <span class="sep">·</span>
+    <span>M1 Snapshot</span>
+  </div>
+  <h1>WaveCode<br><span class="amp">∿</span> 项目全面审查报告</h1>
+  <p class="lede">
+    一份针对 M1 落地节点的 Rust 多端 AI coding agent 的静态审查报告——覆盖安全、规范、现代性、维护性、拓展性、耦合性、代码质量与复用程度八个维度,所有结论均带 <span class="mono">file:line</span> 引用,未对既有代码做任何修改。
+  </p>
+  <div class="waveform" aria-hidden="true">∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿</div>
+  <div class="meta">
+    <span><span class="pulse"></span>commit <b>d11e685</b></span>
+    <span>15 crates · 25 .rs · 6,899 行</span>
+    <span>0 unsafe 主路径 · 1 expect · 0 panic!</span>
+    <span>CI · ubuntu/windows/macos</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>目 录</h2>
+  <ol>
+    <li><a href="#c0">评分总览</a></li>
+    <li><a href="#c1">仓库结构与里程碑</a></li>
+    <li><a href="#c2">安全性</a></li>
+    <li><a href="#c3">规范合规</a></li>
+    <li><a href="#c4">现代性与架构</a></li>
+    <li><a href="#c5">维护性</a></li>
+    <li><a href="#c6">拓展性</a></li>
+    <li><a href="#c7">耦合性</a></li>
+    <li><a href="#c8">代码质量</a></li>
+    <li><a href="#c9">复用程度</a></li>
+    <li><a href="#c10">前端占位</a></li>
+    <li><a href="#c11">文档对账</a></li>
+    <li><a href="#c12">总结与建议</a></li>
+  </ol>
+</nav>
+
+<!-- ============================ CHAPTER 0 ============================ -->
+<section class="chapter" id="c0">
+  <div class="chapter-num">00</div>
+  <h2>评分总览</h2>
+  <p class="sub">八个审查维度的浓缩判定,详细论据见各章节。</p>
+
+  <div class="score-strip">
+    <div class="score-cell A"><div class="label">安全性</div><div class="grade">B+</div><div class="note">已实现层防御严谨,核心风险来自未实现的 sandbox/auth</div></div>
+    <div class="score-cell A"><div class="label">规范合规</div><div class="grade">A</div><div class="note">CI 三矩阵,fmt/clippy/test 三关,注释中文术语英文</div></div>
+    <div class="score-cell A"><div class="label">现代性</div><div class="grade">A</div><div class="note">Rust 2024,0 unsafe,actor model,port-adapter,栈底扎实</div></div>
+    <div class="score-cell A"><div class="label">维护性</div><div class="grade">A</div><div class="note">单一职责 crate,wire 锁定,终端清理单点收敛</div></div>
+    <div class="score-cell B"><div class="label">拓展性</div><div class="grade">B+</div><div class="note">协议层 non_exhaustive 完备,8 stub 是明示债务</div></div>
+    <div class="score-cell A"><div class="label">耦合性</div><div class="grade">A-</div><div class="note">边界严格遵守,session.rs 1388 行 + 三套 theme 是内聚债</div></div>
+    <div class="score-cell A"><div class="label">代码质量</div><div class="grade">A-</div><div class="note">无 unwrap/panic 主路径,边界全面 result 化</div></div>
+    <div class="score-cell B"><div class="label">复用程度</div><div class="grade">B+</div><div class="note">工具层高度复用,渲染层主题/测试辅助重复</div></div>
+  </div>
+
+  <div class="callout good">
+    <span class="lab">综合评级</span>
+    <p><strong>A-</strong> &nbsp; M1 阶段工程质量在 AI agent 开源项目中属于上乘。主要债务集中在尚未落地的 stub crate(8 个)与渲染层主题复用(三套独立调色板)。</p>
+  </div>
+</section>
+
+<!-- ============================ CHAPTER 1 ============================ -->
+<section class="chapter" id="c1">
+  <div class="chapter-num">01</div>
+  <h2>仓库结构与里程碑定位</h2>
+  <p class="sub">盘点 M1 节点的真实落地形态——既看到已完成的 7 个 crate,也直面 8 个 stub crate 的债。</p>
+
+  <h3>1.1 仓库现状</h3>
+  <p>WaveCode 是面向 AI coding agent 的多端同核项目,愿景对标 Claude Code + OpenAI Codex。截至 M1 落地节点(2026-08-03),共 15 个 crate + 3 个 TS 占位包:</p>
+
+  <ul class="tree">
+    <li class="st-good"><span class="nm">protocol / config / llm / tools / core / app-server / cli</span><span class="ln">7 实现</span></li>
+    <li class="st-stub"><span class="nm">auth / context / hooks / mcp / memory / sandbox / skills / tui</span><span class="ln">8 stub</span></li>
+    <li class="st-stub"><span class="nm">apps/web · apps/desktop · sdk/typescript</span><span class="ln">M4+ 落地</span></li>
+  </ul>
+
+  <h3>1.2 代码规模与质量密度</h3>
+  <table>
+    <thead><tr><th>维度</th><th>数值</th></tr></thead>
+    <tbody>
+      <tr><td>Rust 源文件总数</td><td>25 个 .rs</td></tr>
+      <tr><td>Rust 代码总行数</td><td>6,899 行(wc -l 实测)</td></tr>
+      <tr><td>最大单文件</td><td><span class="fl">core/src/session.rs:1388</span></td></tr>
+      <tr><td>unsafe 主路径</td><td>0 处</td></tr>
+      <tr><td>panic! / unwrap 主路径</td><td>仅 1 处:<span class="fl">cli/src/render.rs:77</span> 序列化 Event</td></tr>
+      <tr><td>CI 矩阵</td><td>ubuntu-latest · windows-latest · macos-latest</td></tr>
+    </tbody>
+  </table>
+
+  <h3>1.3 评估依据</h3>
+  <p><strong>强项</strong>:严格分层依赖(SPEC §3)、wire 格式 byte-level 锁定测试、<code>#[non_exhaustive]</code> 协议演进纪律、零 <code>unsafe</code>、API key 全面脱敏、redirect 防泄漏测试。</p>
+  <p><strong>关注</strong>:8 个 stub crate 在 M1 是 YAGNI 选择,但需要在里程碑节奏上明确闭环时点;CLI 主题色散落三处是清晰的"应修但可缓"债。</p>
+</section>
+
+<!-- ============================ CHAPTER 2 ============================ -->
+<section class="chapter" id="c2">
+  <div class="chapter-num">02</div>
+  <h2>安全性审查</h2>
+  <p class="sub">M1 节点的"已实现层"防御纵深与"未实现层"债务——前者是亮点,后者是 M3 的硬交付。</p>
+
+  <h3>2.1 防御纵深现状</h3>
+  <table>
+    <thead><tr><th>威胁面</th><th>现状</th><th style="width:5rem">等级</th></tr></thead>
+    <tbody>
+      <tr><td>API Key 泄露</td><td><code>api_key</code> 字段未 derive Debug;<code>Config</code> 手工重写为 <code>"***"</code>;AnthropicClient 禁 redirect</td><td><span class="pill pill-good">优秀</span></td></tr>
+      <tr><td>路径穿越</td><td>canonicalize + component 级前缀比对;sibling-prefix 测试已锁定</td><td><span class="pill pill-good">优秀</span></td></tr>
+      <tr><td>终端注入</td><td><code>sanitize_terminal</code> 全 ESC/C0/C1 剥离,fast-path <code>Cow::Borrowed</code></td><td><span class="pill pill-good">优秀</span></td></tr>
+      <tr><td>命令注入</td><td>Shell 60-300s 超时、env 净化、stdin null;但<strong>无审批门</strong></td><td><span class="pill pill-warn">中等</span></td></tr>
+      <tr><td>TOCTOU</td><td><span class="fl">tools/src/path_guard.rs:6-9</span> 显式声明接受 symlink-replacement 窗口</td><td><span class="pill pill-info">接受</span></td></tr>
+      <tr><td>OAuth / Keyring</td><td><code>auth</code> crate 完全未实现</td><td><span class="pill pill-crit">未实现</span></td></tr>
+      <tr><td>OS 级沙箱</td><td><code>sandbox</code> crate 完全未实现</td><td><span class="pill pill-crit">未实现</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>2.2 安全亮点</h3>
+
+  <h4>① HTTP 客户端禁 redirect 防 Key 泄漏</h4>
+  <pre><code><span class="c">// crates/llm/src/anthropic.rs:36-43</span>
+<span class="k">let</span> http = reqwest::Client::builder()
+    .connect_timeout(Duration::from_secs(<span class="n">10</span>))
+    .redirect(reqwest::redirect::Policy::<span class="k">none</span>())  <span class="c">// 关键:防止重定向把 x-api-key 带去跨域目标</span>
+    .build()</code></pre>
+  <p>配套有 <span class="fl">anthropic.rs:398-461</span> <code>redirect_is_not_followed_and_api_key_not_leaked</code> 测试——双 TCP listener(A=301→B,B 接收)验证 key 永远到不了 B。这是教科书级的安全测试设计。</p>
+
+  <h4>② Config 凭据 Debug 重写</h4>
+  <pre><code><span class="c">// crates/config/src/lib.rs:38-50</span>
+.field(<span class="s">"api_key"</span>, &self.api_key.as_ref().map(|_| <span class="s">"***"</span>))</code></pre>
+  <p><span class="fl">config/src/lib.rs:258-279</span> <code>provider_config_debug_redacts_api_key</code> 锁死真实 key 字符串永远不出现在 Debug 输出。<code>AnthropicClient</code> 故意<strong>不</strong> derive Debug,避免整结构体 <code>{:?}</code> 时 key 意外泄露。</p>
+
+  <h4>③ 终端消毒单点收敛</h4>
+  <p><code>sanitize_terminal</code> 是单点收敛,处理 CSI / OSC / C0 / C1 / DEL,fast path 在无控制字符时返回 <code>Cow::Borrowed</code>(零拷贝)。4 个 sink 全部走它:AgentMessageDelta、human_tool_begin、human_tool_error、Warning/Error。这意味着未受信任文本进入终端的所有路径都有审计点——M2 ratatui TUI 也可直接复用。</p>
+
+  <h3>2.3 安全风险与缺口</h3>
+
+  <div class="callout crit">
+    <span class="lab">P0 · M3 硬交付</span>
+    <p><strong>Sandbox 缺位</strong>:<code>Shell</code> 工具当前执行任意模型命令,<em>仅</em>受超时、env 净化、cwd 锚定保护,无任何审批门。M1 阶段如果用户允许 agent 自主 shell,任何 <code>rm -rf</code>、<code>curl | sh</code>、<code>chmod 777 /</code> 都会被忠实执行。SPEC §17.5 已规划 M3 闭环。</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="lab">P2 · 中等风险</span>
+    <p><strong>EditFile 新字符串大小无上限</strong>(<span class="fl">tools/src/fs_tools.rs:271-381</span>):<code>MAX_READ_BYTES=4MB</code> 限制读取,但 <code>replacen(old, new, 1)</code> 不限制 <code>new</code>。模型可用 1 字节 old_string 替换成任意大文件 → DoS 风险。建议增加 <code>MAX_EDIT_BYTES</code> 校验。</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="lab">P2 · 中等风险</span>
+    <p><strong>Shell 不回收孙进程</strong>(<span class="fl">tools/src/shell_tool.rs:5-9</span>):<code>kill_on_drop(true)</code> 只杀直接子进程。Unix 上 <code>setsid</code> + 杀整个进程组;Windows 上用 Job Object。SPEC §17 M2 已识别。</p>
+  </div>
+
+  <div class="callout">
+    <span class="lab">P3 · 低风险</span>
+    <p><strong>WAVECODE_SHELL 参数推测</strong>(<span class="fl">shell_tool.rs:32-50</span>):按可执行文件名是否含 <code>cmd</code> 决定参数风格。注释诚实地标注可能误判。低风险但建议加显式 <code>WAVECODE_SHELL_STYLE</code> env 变量。</p>
+  </div>
+</section>
+
+<!-- ============================ CHAPTER 3 ============================ -->
+<section class="chapter" id="c3">
+  <div class="chapter-num">03</div>
+  <h2>规范合规与代码风格</h2>
+  <p class="sub">工具链纪律 + 注释策略 + 错误处理 + 文档-代码同步——所有 SPEC §19 条目逐条对账。</p>
+
+  <h3>3.1 工具链纪律</h3>
+  <pre><code><span class="c"># Cargo.toml (workspace root)</span>
+[<span class="k">workspace</span>]
+resolver = <span class="s">"3"</span>
+members = [<span class="s">"crates/*"</span>]
+
+[<span class="k">workspace.package</span>]
+edition = <span class="s">"2024"</span></code></pre>
+  <pre><code><span class="c"># .github/workflows/ci.yml</span>
+- cargo fmt --check
+- cargo clippy --workspace --all-targets --locked -- -D warnings
+- cargo test --workspace --locked</code></pre>
+  <ul>
+    <li><code>edition = "2024"</code>(Rust ≥ 1.85)— 当前最前沿稳定版</li>
+    <li><code>resolver = "3"</code> 是 edition 2024 默认且正确的选择</li>
+    <li>CI 锁定 <code>--locked</code> 强制 <code>Cargo.lock</code> 与提交一致</li>
+    <li>三 OS 矩阵覆盖 Windows / macOS / Linux,符合 PRD §6 兼容性要求</li>
+  </ul>
+
+  <h3>3.2 注释质量抽样</h3>
+  <pre><code><span class="c">//! tools/src/path_guard.rs:1-9
+//! 路径防逃逸：把模型给出的路径解析到 `ToolCtx::cwd` 之下。
+//!
+//! 安全校验一律在 canonicalize 后的真实路径上进行（Windows 上 canonicalize
+//! 带 `\\?\` 前缀，比较两侧必须同态才可比）；返回的则是以（未 canonicalize
+//! 的 cwd）锚定的词法规范化路径，便于调用方展示与比较。
+//!
+//! TOCTOU 假设：校验与实际使用（read/write）之间，路径上的 symlink 可能被
+//! 替换，本模块无法防护该竞态；M1 威胁模型接受这一窗口，后续里程碑再考虑
+//! fd 锚定（openat 语义）等强化手段。</span></code></pre>
+  <p>中英混用策略完全合规(中文叙述,英文术语),安全/性能敏感处都标明"为什么这样写"。M1/M2 阶段判断显式标注——这是大型项目文档难得的诚实。</p>
+
+  <h3>3.3 错误处理</h3>
+  <table>
+    <thead><tr><th>层级</th><th>策略</th><th>案例</th></tr></thead>
+    <tbody>
+      <tr><td>crate 边界</td><td><code>thiserror</code> 错误枚举,<code>#[from]</code> 友好</td><td><code>ConfigError</code>、<code>ToolsError</code>、<code>LlmError</code>、<code>BootError</code></td></tr>
+      <tr><td>core / app-server 内部</td><td><code>anyhow</code></td><td>M1 知情决策(SPEC §19.2 已明确)</td></tr>
+      <tr><td>静默吞错</td><td>无</td><td>审计 <code>let _ =</code> 仅出现在 REPL history 写入(<span class="fl">main.rs:186</span>)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <span class="lab">规范唯一偏离</span>
+    <p><code>core::session.rs</code> 1388 行——单文件超长不利于 review,但项目处于 M1 早期、单文件高内聚仍可接受。M2+ 启用 ratatui 后可拆为 <code>turn.rs</code> / <code>tool_dispatch.rs</code> / <code>interrupt.rs</code>。</p>
+  </div>
+</section>
+
+<!-- ============================ CHAPTER 4 ============================ -->
+<section class="chapter" id="c4">
+  <div class="chapter-num">04</div>
+  <h2>现代性与架构</h2>
+  <p class="sub">Rust 2024 工具链 · 零 unsafe · actor model · port-adapter · 类型驱动测试——栈底的扎实度逐项清点。</p>
+
+  <h3>4.1 架构总览(对照 SPEC §1)</h3>
+  <pre><code><span class="c"># 实现状态与 SPEC §1 mermaid 完全对齐</span>
+CLI / TUI / Web / Desktop ──► app-server (transport) ──► protocol ──► core
+                                                              ├─► llm
+                                                              ├─► tools
+                                                              ├─► context (stub)
+                                                              ├─► memory (stub)
+                                                              ├─► skills (stub)
+                                                              ├─► hooks (stub)
+                                                              ├─► mcp (stub)
+                                                              └─► sandbox / auth (stub)</code></pre>
+
+  <h3>4.2 现代性指标清单</h3>
+  <table>
+    <thead><tr><th>指标</th><th>现状</th><th>评级</th></tr></thead>
+    <tbody>
+      <tr><td>unsafe 使用</td><td>主路径 0 处</td><td><span class="pill pill-good">A+</span></td></tr>
+      <tr><td>panic! / unwrap 主路径</td><td>仅 1 处合理 <code>expect</code></td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>tokio 多任务模型</td><td>单一 actor + channel,符合"单线程状态机 + 受控并发"</td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>trait 抽象</td><td><code>Tool</code>、<code>ChatModel</code> 均为 async-trait</td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>类型驱动测试</td><td>wire format 表驱动锁死 15 个 tag</td><td><span class="pill pill-good">A+</span></td></tr>
+      <tr><td>后向兼容</td><td><code>#[non_exhaustive]</code> + <code>_ =&gt; warn!</code> 兜底</td><td><span class="pill pill-good">A+</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.3 单 actor + select! 模式详解</h3>
+  <pre><code><span class="c">// crates/app-server/src/lib.rs:97-176</span>
+<span class="k">loop</span> {
+    tokio::<span class="k">select!</span> {
+        biased;  <span class="c">// 优先处理 pending FIFO,避免饿死已排队请求</span>
+        <span class="c">// ...pending drain...</span>
+        sub = submission_rx.recv() =&gt; {
+            <span class="k">match</span> sub.op {
+                Op::UserInput { text } =&gt; {
+                    <span class="c">// 二级 select!: turn vs 新 submission</span>
+                    tokio::<span class="k">select!</span> {
+                        result = session.run_turn(...) =&gt; { ... }
+                        next = submission_rx.recv() =&gt; {
+                            <span class="c">// Interrupt / Shutdown 优先处理</span>
+                        }
+                    }
+                }
+                Op::Interrupt =&gt; { <span class="c">/* set flag */</span> }
+                Op::Shutdown =&gt; { <span class="c">/* drain 2s then exit */</span> }
+                _ =&gt; warn!(<span class="s">"未实现的 op 变体,前向兼容忽略"</span>),
+            }
+        }
+    }
+}</code></pre>
+
+  <p>这是 Rust 异步编程的典范用法:<code>biased</code> 保证 pending 队列不被饿死;二级 <code>select!</code> 让用户能在 turn 中途发送 Interrupt/Shutdown;兜底 <code>_ =&gt; warn!</code> 让未来 Op 增删不破坏 M1 构建。</p>
+</section>
+
+<!-- ============================ CHAPTER 5 ============================ -->
+<section class="chapter" id="c5">
+  <div class="chapter-num">05</div>
+  <h2>维护性</h2>
+  <p class="sub">单文件 1388 行是债还是选择?测试架构亮在哪?Mock 与默认常量的重复如何处理?</p>
+
+  <h3>5.1 维护性指标</h3>
+  <table>
+    <thead><tr><th>指标</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>单文件最大行数</td><td>1388(session.rs)</td><td>偏高但合理,测试占 770 行</td></tr>
+      <tr><td>公开 API 最小化</td><td>是</td><td><code>pub fn</code> / <code>pub struct</code> 仅必要,内部走 <code>pub(crate)</code></td></tr>
+      <tr><td>测试覆盖</td><td>高</td><td>wire-format、Debug 脱敏、redirect 防泄漏、interrupt 配对、并行阈值实测</td></tr>
+      <tr><td>文档-代码同步</td><td>是</td><td>SPEC §15.5、§17.5 准备项是真实代码的对账</td></tr>
+      <tr><td>全局可变状态</td><td>极少</td><td>仅 <code>tracing_subscriber::init()</code>;测试用 <code>static ENV_LOCK</code></td></tr>
+    </tbody>
+  </table>
+
+  <h3>5.2 测试架构亮点</h3>
+
+  <h4>① Wire format byte-level 锁定</h4>
+  <pre><code><span class="c">// protocol/src/lib.rs:122-209</span>
+<span class="k">let</span> op_cases: [(Op, &amp;<span class="t">str</span>); <span class="n">3</span>] = [
+    (Op::UserInput { text: <span class="s">"t"</span>.into() }, <span class="s">"user_input"</span>),
+    (Op::Interrupt, <span class="s">"interrupt"</span>),
+    (Op::Shutdown, <span class="s">"shutdown"</span>),
+];</code></pre>
+  <p>任何变体改名都会让 CI 红。这是协议-代码一致性的最强约束,远超文档化契约。</p>
+
+  <h4>② 真实并行阈值实测</h4>
+  <p>不只验证"并行",还实测 wall-clock:两个 read-only 工具各 200ms,断言总时长 &lt; 350ms(<span class="fl">core/src/session.rs:1235-1292</span>)——这是过载 CI 下 flaky 的潜在源,SPEC §17.5 M2 已关注 350/400ms 裕度。</p>
+
+  <h4>③ Path guard sibling-prefix 混淆测试</h4>
+  <p><span class="fl">tools/src/path_guard.rs:176-188</span> 主动构造 <code>…/abc</code> 与 <code>…/abd</code> 来锁死 component 级比对。教科书级防御。</p>
+
+  <h3>5.3 维护性短板</h3>
+
+  <div class="callout warn">
+    <span class="lab">P2 · 复用债</span>
+    <p><strong>MockModel / GatedModel 重复</strong>:<code>crates/core/src/session.rs</code> 与 <code>crates/app-server/src/lib.rs</code> 都定义了各自的 mock 模型结构。SPEC §17.5 M2 已识别。建议抽到 <code>wavecode-llm</code> 的 <code>dev-utils</code> feature flag,或独立 <code>test-support</code> crate。</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="lab">P2 · 复用债</span>
+    <p><strong>默认常量重复</strong>:<code>context_window: 200_000</code> 与 <code>max_output_tokens: 8192</code> 出现在 <code>config/src/lib.rs:54-61</code>、<code>app-server/src/lib.rs:286-287</code>、<code>session.rs</code> 多处测试。建议在 <code>wavecode-llm</code> 暴露 <code>pub const DEFAULT_CONTEXT_WINDOW</code> 等。</p>
+  </div>
+</section>
+
+<!-- ============================ CHAPTER 6 ============================ -->
+<section class="chapter" id="c6">
+  <div class="chapter-num">06</div>
+  <h2>拓展性</h2>
+  <p class="sub">协议层 non_exhaustive + actor_loop warn 兜底 + Registry 转 Arc——预留的演进路径。</p>
+
+  <h3>6.1 协议层预留</h3>
+  <ul>
+    <li><code>Op</code> / <code>EventMsg</code> / <code>StopReason</code> 均 <code>#[non_exhaustive]</code></li>
+    <li>app-server actor_loop 显式 <code>_ =&gt; tracing::warn!("未实现的 op 变体")</code> 兜底</li>
+    <li>SPEC §4.1 已规划 11 个未来 Op:<code>ExecApproval</code>、<code>Compact</code>、<code>SlashCommand</code>、<code>SetModel</code>、<code>SetPermissionMode</code>、<code>ListThreads</code>、<code>ResumeThread</code>、<code>ForkThread</code> 等</li>
+  </ul>
+
+  <h3>6.2 工具注册表</h3>
+  <p><code>Registry::builtin()</code> 是硬编码列表(<span class="fl">tools/src/lib.rs:80-91</span>),<code>MCP 重连/热注册</code> 是 SPEC §17 M3 计划项(转 <code>Arc&lt;RwLock&lt;…&gt;&gt;</code>)。</p>
+
+  <div class="callout">
+    <span class="lab">当前限制</span>
+    <ul>
+      <li>工具在 Session 创建时一次性 register,无 unregister API</li>
+      <li>MCP 工具只能注入"代理"的硬编码 builtin 名(<code>mcp__server__tool</code> 命名空间尚未代码化)</li>
+    </ul>
+    <p><strong>演进建议</strong>:M3 把 Registry 转 <code>Arc&lt;RwLock&lt;HashMap&lt;String, Arc&lt;dyn Tool&gt;&gt;&gt;</code>,加 <code>register_external</code> 方法。</p>
+  </div>
+
+  <h3>6.3 Stub crate 债务</h3>
+  <p>8 个 stub crate(<code>auth</code>、<code>context</code>、<code>hooks</code>、<code>mcp</code>、<code>memory</code>、<code>sandbox</code>、<code>skills</code>、<code>tui</code>)目前仅文档字符串:</p>
+  <pre><code><span class="c">//! crates/sandbox/src/lib.rs (全文)
+//! wavecode-sandbox — 权限与执行安全层。
+//!
+//! 四档权限模式：default / plan / acceptEdits / bypassPermissions；
+//! 审批流（人工确认 / 规则放行 / 拒绝并回传原因）与命令策略规则语法
+//! （如 `Bash(git *)`、`File*`）。
+//! OS 级沙箱（Linux landlock / macOS seatbelt / Windows ACL）为后续
+//! 里程碑，见 docs/SPEC.md 演进路线。</span></code></pre>
+
+  <div class="callout">
+    <span class="lab">判断</span>
+    <p>YAGNI 在 M1 完全合理,提前实现会产生 spec 漂移债。SPEC §17.5 已详细规划 M2/M3/M4/M5 每个里程碑的交付物,<strong>节奏是清晰的</strong>。真正的风险点:如果 M2 TUI 落地时 sandbox 仍未实现,用户面会缺少审批 UI——这正是 SPEC §17.5 把 sandbox 列为 M3 的原因。</p>
+  </div>
+</section>
+
+<!-- ============================ CHAPTER 7 ============================ -->
+<section class="chapter" id="c7">
+  <div class="chapter-num">07</div>
+  <h2>耦合性</h2>
+  <p class="sub">依赖图严格符合 SPEC §3,但 session.rs 1388 行单文件 + 三套独立 theme 表明内聚仍有提升空间。</p>
+
+  <h3>7.1 依赖图(SPEC §3 矩阵验证)</h3>
+  <pre><code><span class="c"># 实测依赖与 SPEC §3 矩阵完全一致</span>
+protocol  ◄── config (standalone) ◄── llm (standalone) ◄── tools
+   ▲                                              ▲        ▲
+   │                                              │        │
+   └─── core ──────────────────────► app-server ───┘        │
+                                                            │
+   cli ─────────────────────────────────────────────────────┘
+   cli ─► core, app-server, llm, tools, config, protocol, tui (stub), auth (stub)</code></pre>
+  <p><code>tui</code> crate 已被规划为只依赖 <code>protocol + app-server</code>,不 import <code>core</code> 内部——这是保持多端能力等价的关键约束。</p>
+
+  <h3>7.2 真正的耦合债:三套独立 theme</h3>
+  <pre><code><span class="c">// crates/cli/src/markdown.rs:11-35  (私有 module)</span>
+<span class="k">mod</span> theme {
+    <span class="k">pub fn</span> heading() -&gt; Style { ... BrightCyan + Bold ... }
+    <span class="k">pub fn</span> inline_code() -&gt; Style { ... Yellow ... }
+    <span class="k">pub fn</span> bar() -&gt; Style { ... BrightBlack ... }
+    <span class="k">pub fn</span> link() -&gt; Style { ... Blue ... }
+    <span class="k">pub fn</span> frame() -&gt; Style { ... fg None + bg BrightCyan ... }
+}
+
+<span class="c">// crates/cli/src/render.rs:122-140  (私有 functions)</span>
+<span class="k">fn</span> theme_tool() -&gt; Style { ... BrightCyan ... }
+<span class="k">fn</span> theme_dim() -&gt; Style { ... BrightBlack ... }
+<span class="k">fn</span> theme_warn() -&gt; Style { ... Yellow ... }
+<span class="k">fn</span> theme_err() -&gt; Style { ... Red ... }
+
+<span class="c">// crates/cli/src/wave.rs:39-42  (内联 in fn banner)</span>
+<span class="k">let</span> name = Style::new().fg_color(<span class="t">Some</span>(AnsiColor::BrightCyan)).bold();
+<span class="k">let</span> dim = Style::new().fg_color(<span class="t">Some</span>(AnsiColor::BrightBlack));</code></pre>
+
+  <div class="callout warn">
+    <span class="lab">P2 · 复用债</span>
+    <p>三处独立构建同一调色板(<code>BrightCyan</code>、<code>BrightBlack</code>、<code>Yellow</code>、<code>Blue</code>)。改主题色需要三处同步;新终端工具(比如 <code>tui</code> crate)会复制第四份。<strong>建议</strong>:把 <code>theme</code> 提到 <code>crates/cli/src/theme.rs</code> 公开模块,所有文件共享 <code>pub fn theme::*</code>。</p>
+  </div>
+
+  <h3>7.3 测试辅助重复</h3>
+  <p><code>strip()</code> ANSI 剥离测试辅助函数在 <span class="fl">render.rs:299-319</span> 与 <span class="fl">markdown.rs:556-576</span> 各定义一份,逐字相同。建议抽到 <code>crates/cli/src/test_util.rs</code>(<code>#[cfg(test)]</code> 私有)。</p>
+</section>
+
+<!-- ============================ CHAPTER 8 ============================ -->
+<section class="chapter" id="c8">
+  <div class="chapter-num">08</div>
+  <h2>代码质量</h2>
+  <p class="sub">惯用法、内存/编码/资源边界、可观测性——细节得分逐项列出。</p>
+
+  <h3>8.1 Rust 惯用法得分</h3>
+
+  <h4>亮点</h4>
+  <ul>
+    <li><code>Cow&lt;'_, str&gt;</code> 在 <code>sanitize_terminal</code> fast path(<span class="fl">render.rs:32-34</span>)零拷贝</li>
+    <li><code>Arc&lt;AtomicBool&gt;</code> interrupt flag,SeqCst 内存序</li>
+    <li><code>#[derive(... PartialEq)]</code> 让 wire-format 双向 round-trip 测试成为可能</li>
+    <li><code>#[non_exhaustive]</code> 用在所有协议 enum 上</li>
+  </ul>
+
+  <h4>微瑕</h4>
+  <ul>
+    <li><span class="fl">render.rs:77</span> <code>.expect("Event 序列化不会失败")</code> 是合理标注,但任何未来给 Event 加 <code>serde(skip)</code> 字段都可能打破它</li>
+    <li><span class="fl">markdown.rs:420</span> <code>TableBuilder::end_cell(_last_inline)</code> 参数未使用,应移除</li>
+  </ul>
+
+  <h3>8.2 性能与资源边界</h3>
+  <table>
+    <thead><tr><th>维度</th><th>现状</th><th>评级</th></tr></thead>
+    <tbody>
+      <tr><td>内存上限</td><td>全部显式:8 MiB SSE / 10 MB write / 4 MB read / 50 KB 行 / 30 KB shell / 1000 entries / 2000 chars event</td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>CPU 边界</td><td>SSE parser <code>find_subsequence</code> + <code>windows</code>,worst-case 单帧 O(n);8 MiB cap 兜底</td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>启动开销</td><td>tracing init + config 加载 + AnthropicClient::new;无网络热身</td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>流式体验</td><td>80ms tick 帧、<code>MissedTickBehavior::Skip</code> 丢背压而非阻塞</td><td><span class="pill pill-good">A</span></td></tr>
+      <tr><td>终端宽度</td><td>每次 <code>flush_message</code> 都调 <code>terminal_size::terminal_size()</code></td><td><span class="pill pill-warn">B</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>8.3 可观测性缺口</h3>
+  <p><code>tracing</code> + <code>tracing-subscriber</code> + <code>env-filter</code> 是标准栈。关键错误路径有 <code>tracing::error!</code> / <code>tracing::warn!</code>。<strong>缺</strong>:目前没有结构化 <code>turn_id</code> / <code>thread_id</code> span,SPEC §19.4 已规划。</p>
+</section>
+
+<!-- ============================ CHAPTER 9 ============================ -->
+<section class="chapter" id="c9">
+  <div class="chapter-num">09</div>
+  <h2>复用程度</h2>
+  <p class="sub">工具层高度复用,渲染层主题/测试辅助明显重复,有清晰重构目标。</p>
+
+  <table>
+    <thead><tr><th>单元</th><th>复用程度</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Tool</code> trait + <code>Registry</code></td><td><span class="pill pill-good">高</span></td><td>5 个 builtin 工具统一调度,工具增加 O(1)</td></tr>
+      <tr><td><code>path_guard::resolve</code></td><td><span class="pill pill-good">高</span></td><td>所有 FS 工具共享单一 escape 检测</td></tr>
+      <tr><td><code>sanitize_terminal</code></td><td><span class="pill pill-good">高</span></td><td>4 处 sink 共用</td></tr>
+      <tr><td><code>ToolCtx</code></td><td><span class="pill pill-good">高</span></td><td>所有工具的合同参数</td></tr>
+      <tr><td><code>ChatModel</code> trait</td><td><span class="pill pill-good">高</span></td><td>core 与 anthropic 解耦,测试用 mock 注入</td></tr>
+      <tr><td>Theme 调色板</td><td><span class="pill pill-warn">低</span></td><td>散落三处独立构造</td></tr>
+      <tr><td>ANSI 测试辅助 <code>strip()</code></td><td><span class="pill pill-warn">低</span></td><td>两份逐字相同</td></tr>
+    </tbody>
+  </table>
+
+  <h3>9.2 跨 crate 复用机会</h3>
+  <ol>
+    <li><strong><code>wavecode-llm</code> 公开 default const</strong>:解决 session.rs / app-server.rs / config.rs 三处重复 200_000 / 8192</li>
+    <li><strong><code>wavecode-tools</code> 公开 <code>pub(crate) fn sanitize_env</code></strong>:让未来的 sandbox crate 可复用同一套 env 净化规则</li>
+    <li><strong><code>crates/cli/src/theme.rs</code> 公开模块</strong>:统一 markdown / render / wave 三处品牌色</li>
+    <li><strong><code>crates/*/src/test_util.rs</code></strong>:统一 mock 模型与 strip() 辅助</li>
+  </ol>
+</section>
+
+<!-- ============================ CHAPTER 10 ============================ -->
+<section class="chapter" id="c10">
+  <div class="chapter-num">10</div>
+  <h2>前端占位评估</h2>
+  <p class="sub">apps/web · apps/desktop · sdk/typescript——M1 节点完全合规,但 README 应补 milestone 标签。</p>
+
+  <p>三个包目前都只有 <code>README.md</code> + <code>package.json</code>:<code>apps/web</code>、<code>apps/desktop</code>、<code>sdk/typescript</code>。<code>pnpm-workspace.yaml</code> 已声明 workspace。</p>
+
+  <div class="callout">
+    <span class="lab">判断</span>
+    <p>M1 完全合规——"Web/Desktop/TS SDK 在 M4/M5/M7 落地"的里程碑节奏。<strong>风险</strong>:<code>generate-ts</code> 命令(SPEC §4.3)是 Web/Desktop/SDK 类型共享的基础,M3 之前的 TS 实现不能开始。<strong>建议</strong>:为占位包各加一行 <code>status: planned (M5/M6/M7)</code> 的 README 段落,方便协作者一目了然。</p>
+  </div>
+
+  <p><strong>协议稳定性已就绪</strong>:<code>protocol/src/lib.rs</code> 的 wire 锁定测试就是为未来 TS 端类型生成准备的——这是<em>前瞻性资产</em>,值得在 M3 之前补 <code>wavecode app-server generate-ts</code> 命令的实际实现。</p>
+</section>
+
+<!-- ============================ CHAPTER 11 ============================ -->
+<section class="chapter" id="c11">
+  <div class="chapter-num">11</div>
+  <h2>文档与代码对账</h2>
+  <p class="sub">SPEC §15.5 渲染契约、§3 依赖矩阵、§4.3 generate-ts——三段契约与代码逐条对照。</p>
+
+  <h3>11.1 SPEC §15.5 CLI human 渲染契约</h3>
+  <table>
+    <thead><tr><th>契约</th><th>代码位置</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>助手消息 delta 经 sanitize 后缓冲,complete 时渲染 markdown</td><td><span class="fl">render.rs:191, 258</span> + <span class="fl">markdown.rs:71</span></td><td><span class="pill pill-good">✓</span></td></tr>
+      <tr><td>工具行 <code>▸ {工具名亮青} {input摘要≤80字符暗灰}</code></td><td><span class="fl">render.rs:81</span> <code>human_tool_begin</code></td><td><span class="pill pill-good">✓</span></td></tr>
+      <tr><td>失败 <code>✗ {output≤200字符}</code> 红</td><td><code>human_tool_error</code></td><td><span class="pill pill-good">✓</span></td></tr>
+      <tr><td>Warning 黄 / Error 红 / tokens 行暗灰 / <code>（已中断）</code>黄</td><td><span class="fl">render.rs:222, 229</span></td><td><span class="pill pill-good">✓</span></td></tr>
+      <tr><td>REPL 启动 12 帧波形动画 + <code>∿ </code> 提示符</td><td><span class="fl">main.rs:166-167</span> + <span class="fl">wave.rs:11, 37</span></td><td><span class="pill pill-good">✓</span></td></tr>
+      <tr><td>80ms/帧等待动画</td><td><span class="fl">main.rs:230-231</span></td><td><span class="pill pill-good">✓</span></td></tr>
+      <tr><td>非 TTY 由 anstream 剥离 ANSI</td><td><span class="fl">main.rs:118-123</span></td><td><span class="pill pill-good">✓</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout good">
+    <span class="lab">结论</span>
+    <p>SPEC §15.5 描述的所有契约在代码中均已落地,<strong>文档与实现完全对账</strong>。这是少见的高质量兑现。</p>
+  </div>
+
+  <h3>11.2 SPEC §3 依赖矩阵</h3>
+  <p>实测依赖与 SPEC §3 完全一致:<code>protocol</code> 无 workspace 依赖 ✓,<code>tools</code> 依赖 <code>llm</code> ✓(ToolSpec schema 桥接),<code>core</code> 依赖 <code>protocol + llm + tools</code> ✓(其他特性层 M2+ 引入),<code>app-server</code> 依赖 <code>protocol + core</code> ✓。<strong>没有任何越界依赖</strong>。</p>
+
+  <h3>11.3 SPEC §4.3 generate-ts</h3>
+  <p>未实现,与 SPEC 预期一致(M3 之前规划项)。</p>
+</section>
+
+<!-- ============================ CHAPTER 12 ============================ -->
+<section class="chapter" id="c12">
+  <div class="chapter-num">12</div>
+  <h2>总结与建议清单</h2>
+  <p class="sub">综合评级、改进优先级、不建议做的事——一份给 M2+ 维护者的备忘。</p>
+
+  <h3>12.1 项目总体评价</h3>
+  <p>WaveCode M1 阶段产出的代码质量在 Rust AI agent 项目中属于<strong>上乘</strong>。架构纪律(SPEC §3 边界规则 + §4 协议约束 + §5.4 上下文组装顺序 + §17.5 演进路线)全部以代码 + 测试兑现,文档与实现完全对账。</p>
+
+  <p>最值得称道的几点:</p>
+  <ol>
+    <li><strong>wire-format byte-level 锁定</strong>——协议契约的物理证据</li>
+    <li><strong>API key 全链路防护</strong>——Debug 重写 + 禁 redirect + 防泄漏回归测试</li>
+    <li><strong><code>#[non_exhaustive]</code> + <code>_ =&gt; warn!</code></strong>——协议层前向兼容的纪律化兑现</li>
+    <li><strong>三 OS CI 矩阵</strong>——终端工具的最低门槛</li>
+    <li><strong>8 个 stub crate 显式标注 YAGNI 理由</strong>——不假装实现、不留 TODO 噪声</li>
+  </ol>
+
+  <h3>12.2 改进优先级</h3>
+  <table>
+    <thead><tr><th>优先级</th><th>项目</th><th>影响面</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill pill-crit">P0</span></td><td>M3 闭环 <code>sandbox</code> 与 <code>auth</code>,审批门落地的最迟时点</td><td>安全</td></tr>
+      <tr><td><span class="pill pill-warn">P1</span></td><td><code>tui</code> crate(M2)+ 复用 <code>sanitize_terminal</code> + <code>theme</code> 模块</td><td>维护性 + 拓展性</td></tr>
+      <tr><td><span class="pill pill-warn">P1</span></td><td>抽 <code>wavecode-llm</code> 的 default const 与 mock 模型</td><td>复用</td></tr>
+      <tr><td><span class="pill pill-warn">P2</span></td><td>三处独立 theme 合一</td><td>复用</td></tr>
+      <tr><td><span class="pill pill-warn">P2</span></td><td><code>terminal_width</code> 缓存一次</td><td>性能</td></tr>
+      <tr><td><span class="pill pill-warn">P2</span></td><td><code>EditFile</code> 新字符串大小上限</td><td>安全(DoS)</td></tr>
+      <tr><td><span class="pill pill-info">P3</span></td><td><code>MockModel</code> 抽 dev-utils</td><td>复用</td></tr>
+      <tr><td><span class="pill pill-info">P3</span></td><td><code>TableBuilder::end_cell(_last_inline)</code> 移除未用参数</td><td>代码质量</td></tr>
+    </tbody>
+  </table>
+
+  <h3>12.3 不建议做的事</h3>
+  <ul>
+    <li><strong>不要</strong>为已存在的 7 个 crate 加 unused stub(如 memory crate 提前实现)——YAGNI 是 M1 的正确选择</li>
+    <li><strong>不要</strong>为 <code>Session</code> 强行拆文件——当前单文件高内聚优于过早模块化</li>
+    <li><strong>不要</strong>为应对 stub 引入 mock trait default impl——等真实落地后再决定 trait 形状</li>
+    <li><strong>不要</strong>提前引入 <code>keyring</code> crate 而不完成 <code>auth</code> 实现——半成品依赖是债务</li>
+  </ul>
+</section>
+
+<hr class="wave">
+
+<footer>
+  <span>WaveCode · 项目全面审查报告 · 2026-08-04 · M1 Snapshot</span>
+  <span>commit d11e685 · ZCode</span>
+</footer>
+
+</div>
+</body>
+</html>

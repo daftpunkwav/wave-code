@@ -9,16 +9,16 @@ name = "wavecode"
 path = "src/main.rs"
 
 [dependencies]
-wavecode-protocol = { path = "../protocol" }
-wavecode-config = { path = "../config" }
-wavecode-llm = { path = "../llm" }
-wavecode-tools = { path = "../tools" }
-wavecode-core = { path = "../core" }
-wavecode-app-server = { path = "../app-server" }
+wavecode-protocol = { path = "../../foundation/protocol" }
+wavecode-config = { path = "../../foundation/config" }
+wavecode-llm = { path = "../../foundation/llm" }
+wavecode-tools = { path = "../../capabilities/tools" }
+wavecode-core = { path = "../../engine/core" }
+wavecode-app-server = { path = "../../transport/app-server" }
 # P2：装配 SessionConfig.sandbox（PermissionMode → Sandbox）
-wavecode-sandbox = { path = "../sandbox" }
+wavecode-sandbox = { path = "../../capabilities/sandbox" }
 # P8：TTY 默认路径进入 ratatui TUI（SPEC §3 矩阵允许 cli→tui）
-wavecode-tui = { path = "../tui" }
+wavecode-tui = { path = "../../frontends/tui" }
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

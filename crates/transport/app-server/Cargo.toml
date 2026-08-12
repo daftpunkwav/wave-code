@@ -5,8 +5,8 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-wavecode-protocol = { path = "../protocol" }
-wavecode-core = { path = "../core" }
+wavecode-protocol = { path = "../../foundation/protocol" }
+wavecode-core = { path = "../../engine/core" }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -14,10 +14,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-wavecode-llm = { path = "../llm" }
-wavecode-tools = { path = "../tools" }
+wavecode-llm = { path = "../../foundation/llm" }
+wavecode-tools = { path = "../../capabilities/tools" }
 # 测试构造 SessionConfig 需要 Sandbox（库本身只经 core 句柄路由，不依赖）
-wavecode-sandbox = { path = "../sandbox" }
+wavecode-sandbox = { path = "../../capabilities/sandbox" }
 async-trait.workspace = true
 futures.workspace = true
 tempfile.workspace = true

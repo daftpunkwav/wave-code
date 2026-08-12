@@ -8,8 +8,8 @@ license.workspace = true
 # 不得依赖 core——本表即依赖断言的事实源，crates/tui/src/lib.rs 的
 # dependency_matrix_locked 测试在测试层锁定（新增 wavecode-* 依赖即红）。
 [dependencies]
-wavecode-protocol = { path = "../protocol" }
-wavecode-app-server = { path = "../app-server" }
+wavecode-protocol = { path = "../../foundation/protocol" }
+wavecode-app-server = { path = "../../transport/app-server" }
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true

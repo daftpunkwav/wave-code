@@ -9,9 +9,9 @@
 //! grep/glob 的目录遍历为同步 API，内部包 `spawn_blocking`）。后续里程碑
 //! 追加 web / 浏览器等工具，执行管道（schema 校验、hook、权限审批）由 core 编排。
 
-mod fs_tools;
+mod fs;
 mod path_guard;
-mod search_tools;
+mod search;
 mod shell_tool;
 pub mod todo_tool;
 
@@ -139,12 +139,12 @@ impl Registry {
             todos: todos.clone(),
             allowlist: ToolAllowlist::default(),
         };
-        reg.register(Arc::new(fs_tools::ReadFile));
-        reg.register(Arc::new(fs_tools::WriteFile));
-        reg.register(Arc::new(fs_tools::EditFile));
-        reg.register(Arc::new(fs_tools::ListDir));
-        reg.register(Arc::new(search_tools::Grep));
-        reg.register(Arc::new(search_tools::Glob));
+        reg.register(Arc::new(fs::ReadFile));
+        reg.register(Arc::new(fs::WriteFile));
+        reg.register(Arc::new(fs::EditFile));
+        reg.register(Arc::new(fs::ListDir));
+        reg.register(Arc::new(search::Grep));
+        reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));
         reg.register(Arc::new(TodoWrite::new(todos)));
         reg

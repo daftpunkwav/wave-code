@@ -155,7 +155,7 @@ mod tests {
             return;
         }
 
-        let w = crate::fs_tools::WriteFile
+        let w = crate::fs::WriteFile
             .execute(
                 serde_json::json!({"path":"link/evil.txt","content":"x"}),
                 &ctx,
@@ -163,7 +163,7 @@ mod tests {
             .await
             .unwrap();
         assert!(w.is_error);
-        let r = crate::fs_tools::ReadFile
+        let r = crate::fs::ReadFile
             .execute(serde_json::json!({"path":"link/evil.txt"}), &ctx)
             .await
             .unwrap();

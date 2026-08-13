@@ -34,7 +34,7 @@ stateDiagram-v2
     Done --> [*]: TokenCount + TurnCompleted{Completed|Error}
 ```
 
-循环六步（`crates/engine/core/src/session.rs`）：
+循环六步（`crates/engine/core/src/session/turn.rs`，`TurnRunner` 状态机；`Session` 构造与句柄在 `mod.rs`、工具编排在 `tool_dispatch.rs`）：
 
 1. **用户消息入历史** + `TurnStarted { turn_id }`（uuid）；中断标志每 turn 自清（上一 turn 的 interrupt 不影响本轮）。
 2. **组装 `ChatRequest`**（system 模板替换 cwd、`messages.clone()`、`registry.specs()`、max_tokens）发起流式采样；`stream()` 失败（或流中途出错）：`fail_turn` 收尾——发 `Error { message, recoverable: false }` + `TurnCompleted { Error }` 防前端悬挂，然后以 Err 返回调用方。
@@ -69,7 +69,7 @@ stateDiagram-v2
 - 每个 turn 以 `TurnStarted` 首发；正常以 `TokenCount + TurnCompleted` 收尾；错误路径 `fail_turn`（`Error { recoverable: false }` + `TurnCompleted{Error}`）后以 Err 返回调用方；中断路径 `TurnCompleted{Interrupted}`。
 - `emit` 尽力投递：send 失败即 receiver 已关闭（前端断开），记 debug 日志并继续执行——历史一致性优先，事件流只是旁观通道；channel 满时 send 自然挂起形成背压。
 
-## 聚焦测试（`crates/engine/core/src/session.rs` tests）
+## 聚焦测试（`crates/engine/core/src/session/mod.rs` tests）
 
 `MockModel`（脚本化：按调用次数返回预排事件序列，记录每次请求供断言回灌）与 `GatedModel`（回放脚本后挂起直到 gate 置位，驱动中断检查点确定性触发）：
 
@@ -78,7 +78,7 @@ stateDiagram-v2
 | `turn_executes_tool_and_completes` | write_file 实际执行、事件序列（turn_started → tool_call_begin/end → token_count → turn_completed）、tool_result 回灌第二次请求 |
 | `unknown_tool_returns_error_result_not_crash` | 未知工具 → ToolCallEnd{ok:false} + is_error ToolResult 回灌，不崩溃 |
 | `read_only_tools_run_in_batch_results_ordered` | 只读批并行、结果按声明序回灌 |
-| `read_only_tools_run_in_parallel_via_spawn_blocking` | 慢工具 200ms + 快工具同批：总耗时 < 350ms（串行应 ≥400ms），证明 spawn_blocking 真并行 |
+| `read_only_tools_run_in_parallel` | 慢工具 200ms + 快工具同批：总耗时 < 350ms（串行应 ≥400ms），证明只读工具真并行 |
 | `interrupt_in_stream_keeps_tool_pairing` | 流给到一半中断：部分结果保留、悬空 tool_use 配对 is_error、无第二次采样 |
 | `interrupt_in_serial_tools_skips_resample` | 串行段中断：剩余调用以 interrupted 收尾、配对完整（t1/t2 声明序）、不重采样 |
 | `invalid_tool_json_returns_error_result_not_execute` | tool input JSON 解析失败：不实际执行、is_error 回灌且配对 |

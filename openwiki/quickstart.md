@@ -52,7 +52,7 @@ flowchart LR
 
 | 意图 / 改动区域 | 页面 | 源码入口 / 关键符号 | 聚焦测试 | 最小验证 |
 |---|---|---|---|---|
-| 改 agent 循环 / 中断 / 工具编排 | [core](engine/core.md) | `crates/engine/core/src/session.rs`：`Session::run_turn`、`execute_tool_calls`、`interrupt_handle` | `turn_executes_tool_and_completes`、`interrupt_in_stream_keeps_tool_pairing`、`read_only_tools_run_in_parallel_via_spawn_blocking` | `cargo test -p wavecode-core` |
+| 改 agent 循环 / 中断 / 工具编排 | [core](engine/core.md) | `crates/engine/core/src/session/`：`turn.rs`（`TurnRunner`）、`tool_dispatch.rs`（`execute_tool_calls`）、`mod.rs`（`Session::run_turn`、`interrupt_handle`） | `turn_executes_tool_and_completes`、`interrupt_in_stream_keeps_tool_pairing`、`read_only_tools_run_in_parallel` | `cargo test -p wavecode-core` |
 | 改模型请求 / SSE 解析 / 加 provider | [llm](engine/llm.md) | `crates/foundation/llm/src/lib.rs`（`ChatModel`）、`anthropic.rs`（`AnthropicClient`、`decode_event_stream`）、`sse.rs`（`SseParser`） | `stream_parses_recorded_sse`、`redirect_is_not_followed_and_api_key_not_leaked`、`stream_errors_and_terminates_when_buffer_exceeds_cap` | `cargo test -p wavecode-llm` |
 | 改内置工具 / 路径护栏 / shell 安全 | [tools](engine/tools.md) | `crates/capabilities/tools/src/`：`Tool` trait、`Registry`、`path_guard::resolve`、`shell_tool::sanitize_env` | `edit_requires_unique_match`、`rejects_escape`、`symlink_escape_is_rejected`、`respects_timeout` | `cargo test -p wavecode-tools` |
 | 改协议类型 / 线上格式 | [protocol](protocol/protocol.md) | `crates/foundation/protocol/src/lib.rs`：`Submission`、`Event`、`Op`、`EventMsg` | `wire_type_tags_locked`（新变体必须登记） | `cargo test -p wavecode-protocol` |

@@ -111,7 +111,7 @@ async fn run_resume(
     thread_id: Option<String>,
     force_repl: bool,
 ) -> anyhow::Result<ExitCode> {
-    let Some(home) = wavecode_core::memory::home_dir() else {
+    let Some(home) = wavecode_memory::home_dir() else {
         eprintln!("错误：无法解析用户主目录（USERPROFILE/HOME），会话持久化不可用");
         return Ok(ExitCode::from(2));
     };
@@ -332,7 +332,7 @@ async fn run_tui(cfg: SessionConfig, mcp_lines: Vec<String>) -> anyhow::Result<E
         memory_index_path: cfg
             .memory
             .as_ref()
-            .map(|m| m.store_root.join(wavecode_core::memory::INDEX_FILE)),
+            .map(|m| m.store_root.join(wavecode_memory::INDEX_FILE)),
         // slash 补全与路由：仅 user-invocable skill 可直调（与 REPL 同判定）。
         skill_names: cfg
             .skills

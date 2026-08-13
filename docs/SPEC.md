@@ -101,7 +101,7 @@ WaveCode/
 | core | protocol, config, llm, tools, context, memory, skills, hooks, mcp, sandbox, auth | agent 引擎 |
 | app-server | protocol, core | JSON-RPC 服务与 transport |
 | tui | protocol, app-server | 终端 UI |
-| cli | protocol, config, llm, tools, core, app-server, tui, auth, sandbox（装配 SessionConfig.sandbox） | 二进制入口 |
+| cli | protocol, config, llm, tools, core, app-server, tui, auth, sandbox（装配 SessionConfig.sandbox）, memory, skills（装配层直装纯数据面，core 不做门面再导出） | 二进制入口 |
 
 边界规则（review 强制；CI 依赖图检查为规划项）：
 

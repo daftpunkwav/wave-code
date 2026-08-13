@@ -63,12 +63,12 @@ pub(crate) async fn run_repl(
                 if text == "/memory" {
                     match &memory_root {
                         Some(root) => {
-                            let store = wavecode_core::memory::MemoryStore::new(root.clone());
+                            let store = wavecode_memory::MemoryStore::new(root.clone());
                             match store.read_index() {
                                 Ok(index) if index.trim().is_empty() => {
                                     println!(
                                         "（暂无持久记忆；索引文件：{}）",
-                                        root.join(wavecode_core::memory::INDEX_FILE).display()
+                                        root.join(wavecode_memory::INDEX_FILE).display()
                                     );
                                 }
                                 Ok(index) => println!("{}", index.trim_end()),

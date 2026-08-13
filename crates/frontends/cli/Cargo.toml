@@ -17,6 +17,10 @@ wavecode-core = { path = "../../engine/core" }
 wavecode-app-server = { path = "../../transport/app-server" }
 # P2：装配 SessionConfig.sandbox（PermissionMode → Sandbox）
 wavecode-sandbox = { path = "../../capabilities/sandbox" }
+# P6/P7：装配层直装能力 crate 的纯数据面（WAVECODE.md 收集 / 持久记忆
+# 存储 / SKILL.md 发现），core 不再做门面再导出（SPEC §3 矩阵 cli 行）
+wavecode-memory = { path = "../../capabilities/memory" }
+wavecode-skills = { path = "../../capabilities/skills" }
 # P8：TTY 默认路径进入 ratatui TUI（SPEC §3 矩阵允许 cli→tui）
 wavecode-tui = { path = "../../frontends/tui" }
 clap.workspace = true

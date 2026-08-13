@@ -3,8 +3,8 @@
 //! 链路：`Config::load`（或 `--config` 指定）→ `resolve_provider` →
 //! `AnthropicClient::new` → [`Boot`]（`Registry::builtin()`、
 //! cwd = 当前目录、`--model` 覆盖 config.model）；P6 追加记忆装配：
-//! WAVECODE.md 指令记忆收集 + 持久记忆索引快照（经 core 的 memory 模块
-//! 再导出，不新增 cli→memory 依赖边）；P9 追加 MCP 装配：`[mcp_servers]`
+//! WAVECODE.md 指令记忆收集 + 持久记忆索引快照（cli→memory 直装，
+//! SPEC §3 矩阵 cli 行已补录）；P9 追加 MCP 装配：`[mcp_servers]`
 //! 原始表经 core 转换为已校验清单（仅解析 + 持有，连接留待真实
 //! transport）。
 
@@ -71,17 +71,16 @@ pub fn load_session_config(
         .unwrap_or(wavecode_protocol::PermissionMode::Default);
 
     let cwd = std::env::current_dir().map_err(BootError::Cwd)?;
-    let home = wavecode_core::memory::home_dir();
+    let home = wavecode_memory::home_dir();
     // P6：记忆装配（SPEC §5.4/§7）——指令记忆收集（用户级 → 项目根 → cwd）
     // 与持久记忆索引快照；两者注入系统提示词槽位，store_root 供
     // memory_write 与 SessionEnd 自动提取。home 不可解析时退化为无记忆
     // 能力（显式警告，不静默降级）。
     let memory = match &home {
         Some(home) => {
-            let instruction =
-                wavecode_core::memory::collect_instruction_memory(Some(home.as_path()), &cwd);
-            let store_root = wavecode_core::memory::MemoryStore::default_root(home);
-            let memory_index = wavecode_core::memory::MemoryStore::new(store_root.clone())
+            let instruction = wavecode_memory::collect(Some(home.as_path()), &cwd);
+            let store_root = wavecode_memory::MemoryStore::default_root(home);
+            let memory_index = wavecode_memory::MemoryStore::new(store_root.clone())
                 .read_index()
                 .unwrap_or_else(|e| {
                     eprintln!("警告：记忆索引读取失败（按无记忆继续）：{e}");
@@ -100,12 +99,12 @@ pub fn load_session_config(
     };
 
     // P7：skills 装配（SPEC §8）——按优先级 builtin < 用户级 < 项目级发现
-    //（builtin 首版无内置技能目录，留 None；MCP 暴露 skill 随 P9 落地）。
-    // 单个坏文件警告跳过（发现产物 warnings），不炸启动；无 skill 时
-    // 不挂技能面（skill 工具不注册、清单不注入）。
+    //（builtin 首版无内置技能目录，留 None；MCP 暴露 skill 随真实
+    // transport 接线）。单个坏文件警告跳过（发现产物 warnings），不炸
+    // 启动；无 skill 时不挂技能面（skill 工具不注册、清单不注入）。
     let skills = {
-        let roots = wavecode_core::skills::standard_roots(None, home.as_deref(), &cwd);
-        let discovery = wavecode_core::skills::discover(&roots);
+        let roots = wavecode_skills::standard_roots(None, home.as_deref(), &cwd);
+        let discovery = wavecode_skills::discover(&roots);
         for warning in &discovery.warnings {
             eprintln!("警告：{warning}");
         }

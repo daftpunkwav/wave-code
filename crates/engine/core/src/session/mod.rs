@@ -2199,10 +2199,10 @@ mod tests {
         assert_eq!(kind, wavecode_protocol::ApprovalKind::Write);
         assert!(detail.contains("memory_write"));
         // 放行后实际写入：类别文件 + 索引。
-        let store = crate::memory::MemoryStore::new(store_root);
+        let store = wavecode_memory::MemoryStore::new(store_root);
         assert_eq!(
             store
-                .read_category(crate::memory::MemoryCategory::User)
+                .read_category(wavecode_memory::MemoryCategory::User)
                 .unwrap(),
             "- 偏好紧凑回复\n"
         );
@@ -2238,7 +2238,7 @@ mod tests {
         assert_eq!(reason, StopReason::Completed);
 
         // —— 会话 B 装配：启动时读索引（cli bootstrap 的同款路径）——
-        let store = crate::memory::MemoryStore::new(store_root);
+        let store = wavecode_memory::MemoryStore::new(store_root);
         let index = store.read_index().unwrap();
         assert!(
             index.contains("[project] 仓库用 pnpm 管理"),
@@ -2252,7 +2252,7 @@ mod tests {
         assert!(system.contains("[project] 仓库用 pnpm 管理"));
         // 条目正文按需加载（模型 read_file 的等价物）。
         let body = store
-            .read_category(crate::memory::MemoryCategory::Project)
+            .read_category(wavecode_memory::MemoryCategory::Project)
             .unwrap();
         assert!(body.contains("不要引入 yarn"), "条目正文可加载: {body}");
     }
@@ -2286,16 +2286,16 @@ mod tests {
 
         let n = session.extract_memories().await.unwrap();
         assert_eq!(n, 2, "应提取 2 条");
-        let store = crate::memory::MemoryStore::new(store_root);
+        let store = wavecode_memory::MemoryStore::new(store_root);
         assert_eq!(
             store
-                .read_category(crate::memory::MemoryCategory::User)
+                .read_category(wavecode_memory::MemoryCategory::User)
                 .unwrap(),
             "- 偏好紧凑回复\n"
         );
         assert_eq!(
             store
-                .read_category(crate::memory::MemoryCategory::Project)
+                .read_category(wavecode_memory::MemoryCategory::Project)
                 .unwrap(),
             "- 仓库用 pnpm 管理\n"
         );
@@ -2331,7 +2331,7 @@ mod tests {
             .unwrap();
         assert!(out.is_error && out.content.contains("'content'"));
         // 未写入任何文件。
-        let store = crate::memory::MemoryStore::new(dir.path().join("memories"));
+        let store = wavecode_memory::MemoryStore::new(dir.path().join("memories"));
         assert_eq!(store.read_index().unwrap(), "");
     }
 

@@ -34,13 +34,10 @@ use wavecode_tools::{Tool, ToolCtx, ToolOutput};
 
 use crate::subagent::{SubagentManager, SubagentType, TaskSpec};
 
-// memory crate 的公开面经 core 再导出：cli 装配层（bootstrap 收集
-// WAVECODE.md 与索引、`/memory` 命令）不新增 cli→memory 依赖边
-//（SPEC §3 矩阵 cli 行无 memory；core 行本已允许）。
-pub use wavecode_memory::{
-    INDEX_FILE, InstructionMemory, MAX_INCLUDE_DEPTH, MemoryCategory, MemoryStore,
-    collect as collect_instruction_memory, find_project_root, home_dir, parse_extracted_entries,
-};
+// memory crate 的纯数据面（WAVECODE.md 收集 / 持久记忆存储）由 cli 装配层
+// 直接依赖（SPEC §3 矩阵 cli 行已补录 memory / skills 边）；core 只
+// import 编排所需的类型，不再做门面再导出。
+use wavecode_memory::{MemoryCategory, MemoryStore, parse_extracted_entries};
 
 /// SPEC §7.2 原设计的整合门控：距上次整合 ≥24h 且期间 ≥5 个新会话才
 /// 触发整合。首版简化为纯追加式提取、不整合——参数留常量备后续落地。

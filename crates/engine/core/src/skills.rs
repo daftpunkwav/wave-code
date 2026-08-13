@@ -32,12 +32,10 @@ use wavecode_tools::{Tool, ToolAllowlist, ToolCtx, ToolOutput};
 
 use crate::subagent::{SubagentManager, SubagentType, TaskSpec};
 
-// skills crate 的公开面经 core 再导出：cli 装配层（bootstrap 发现与注入）
-// 不新增 cli→skills 依赖边（SPEC §3 矩阵 cli 行无 skills；core 行本已允许）。
-pub use wavecode_skills::{
-    Discovery, Skill, SkillContext, SkillError, SkillMeta, SkillRoot, SkillSet, SkillSource,
-    discover, standard_roots,
-};
+// skills crate 的纯数据面（发现 / 解析 / 清单）由 cli 装配层直接依赖
+//（SPEC §3 矩阵 cli 行已补录 memory / skills 边）；core 只 import 编排
+// 所需的类型，不再做门面再导出。
+use wavecode_skills::{Skill, SkillContext, SkillSet};
 
 /// 装配层注入的技能面（`SessionConfig.skills`；None = 无 skills 能力——
 /// 子代理自身的 Session 即此形态，隔离上下文不挂 skill 触发面）。
@@ -241,6 +239,7 @@ impl Tool for SkillTool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use wavecode_skills::{SkillMeta, SkillSource};
 
     fn skill(name: &str, context: SkillContext, allowed: &[&str], invocable: bool) -> Skill {
         Skill {

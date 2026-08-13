@@ -63,10 +63,10 @@ impl ChatModel for AnthropicClient {
                 .text()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
-            return Err(LlmError::Api {
-                kind: format!("http_{}", status.as_u16()),
-                message: truncate_error_body(&body),
-            });
+            return Err(crate::classify_api_error(
+                format!("http_{}", status.as_u16()),
+                truncate_error_body(&body),
+            ));
         }
 
         let byte_stream = response

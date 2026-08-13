@@ -344,20 +344,11 @@ fn output_or_err(out: wavecode_tools::Result<ToolOutput>) -> ToolOutput {
 
 /// 识别 prompt_too_long 类错误（reactive compact 触发条件，SPEC §5.2）。
 ///
-/// llm 的错误分类暂不够细：`LlmError::Api.kind` 只有 `http_{status}` 或
-/// provider 的 error type 字符串（§17.5 M2 待办有 HttpKind 细化计划），
-/// 故以 kind / message 字符串匹配识别已知形态（Anthropic 400
-/// "prompt is too long" / 413 "request_too_large" 及 kind 含
-/// prompt_too_long）。错误分类细化后应改为枚举匹配。
+/// llm 在错误构造点（HTTP 非 2xx 响应与 SSE error 事件）统一分类为
+/// [`LlmError::PromptTooLong`]（见 `classify_api_error`），core 直接枚举
+/// 匹配，不做 kind / message 字符串嗅探。
 fn is_prompt_too_long(e: &LlmError) -> bool {
-    let LlmError::Api { kind, message } = e else {
-        return false;
-    };
-    kind.contains("prompt_too_long")
-        || kind.contains("request_too_large")
-        || message.contains("prompt is too long")
-        || message.contains("prompt_too_long")
-        || message.contains("request_too_large")
+    matches!(e, LlmError::PromptTooLong { .. })
 }
 
 /// 用户拒绝审批的回灌文案：模型须能区分"被人拒绝"与"执行失败"；
@@ -1553,8 +1544,7 @@ mod tests {
             };
             match next {
                 Some(events) => Ok(Box::pin(stream::iter(events.into_iter().map(Ok)))),
-                None => Err(LlmError::Api {
-                    kind: "http_400".into(),
+                None => Err(LlmError::PromptTooLong {
                     message: "prompt is too long: 210000 tokens > 200000 maximum".into(),
                 }),
             }

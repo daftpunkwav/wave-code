@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::{LlmError, StreamEvent, Usage};
+use crate::{StreamEvent, Usage};
 
 /// Anthropic Messages streaming SSE 解析器。
 ///
@@ -33,7 +33,8 @@ impl SseParser {
     /// - `content_block_stop`：[`StreamEvent::BlockEnd`]；
     /// - `message_delta`：合成 [`StreamEvent::MessageComplete`]（含累计的
     ///   input_tokens；`stop_reason` 为 null 时按空串处理）；
-    /// - `error`：[`LlmError::Api`]。
+    /// - `error`：经 `classify_api_error` 分类——超长形态为
+    ///   [`crate::LlmError::PromptTooLong`]，其余为 [`crate::LlmError::Api`]。
     pub fn feed(&mut self, data: &str) -> crate::Result<Option<StreamEvent>> {
         let value: serde_json::Value = serde_json::from_str(data)?;
         let Some(ty) = value.get("type").and_then(|t| t.as_str()) else {
@@ -80,10 +81,7 @@ impl SseParser {
             "message_stop" => Ok(None),
             "error" => {
                 let ev: ErrorEvent = serde_json::from_value(value)?;
-                Err(LlmError::Api {
-                    kind: ev.error.kind,
-                    message: ev.error.message,
-                })
+                Err(crate::classify_api_error(ev.error.kind, ev.error.message))
             }
             _ => Ok(None),
         }

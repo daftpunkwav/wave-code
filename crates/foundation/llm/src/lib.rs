@@ -117,6 +117,12 @@ pub enum LlmError {
     /// API 返回的业务错误（如 overloaded_error）。
     #[error("API 错误 ({kind}): {message}")]
     Api { kind: String, message: String },
+    /// 上下文超长错误（core reactive compact 的触发条件，SPEC §5.2）：
+    /// provider 明确返回 prompt / request 过大（如 Anthropic 400
+    /// "prompt is too long"、413 request_too_large）。从通用 Api 错误中
+    /// 单列变体，让上层做枚举匹配而非字符串嗅探。
+    #[error("prompt 超出上下文上限: {message}")]
+    PromptTooLong { message: String },
     /// SSE 帧解析错误。
     #[error("SSE 解析错误: {0}")]
     Sse(String),
@@ -125,5 +131,72 @@ pub enum LlmError {
     Json(#[from] serde_json::Error),
 }
 
+/// API 错误的统一构造点（anthropic 非 2xx 响应与 SSE error 事件共用）：
+/// 识别 prompt_too_long 已知形态——kind 或 message 含
+/// `prompt_too_long` / `request_too_large` 标记，或 message 含
+/// "prompt is too long"（Anthropic 400 文案）——归入
+/// [`LlmError::PromptTooLong`]；其余按通用 [`LlmError::Api`] 返回。
+/// 分类集中在此单点，新增 provider 形态只改这里。
+pub(crate) fn classify_api_error(kind: String, message: String) -> LlmError {
+    let too_long = kind.contains("prompt_too_long")
+        || kind.contains("request_too_large")
+        || message.contains("prompt is too long")
+        || message.contains("prompt_too_long")
+        || message.contains("request_too_large");
+    if too_long {
+        LlmError::PromptTooLong { message }
+    } else {
+        LlmError::Api { kind, message }
+    }
+}
+
 /// crate 内统一 Result 别名。
 pub type Result<T> = std::result::Result<T, LlmError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_maps_known_too_long_shapes() {
+        // Anthropic 400 文案形态
+        assert!(matches!(
+            classify_api_error(
+                "http_400".into(),
+                "prompt is too long: 210000 tokens > 200000 maximum".into()
+            ),
+            LlmError::PromptTooLong { .. }
+        ));
+        // 413 request_too_large（kind 与 message 两种携带位置）
+        assert!(matches!(
+            classify_api_error("request_too_large".into(), "request too large".into()),
+            LlmError::PromptTooLong { .. }
+        ));
+        assert!(matches!(
+            classify_api_error(
+                "http_413".into(),
+                r#"{"type":"error","error":{"type":"request_too_large"}}"#.into()
+            ),
+            LlmError::PromptTooLong { .. }
+        ));
+        // SSE error 事件的 kind 形态
+        assert!(matches!(
+            classify_api_error("prompt_too_long".into(), "too long".into()),
+            LlmError::PromptTooLong { .. }
+        ));
+    }
+
+    #[test]
+    fn classify_keeps_other_api_errors_generic() {
+        let err = classify_api_error("overloaded_error".into(), "overloaded".into());
+        assert!(
+            matches!(&err, LlmError::Api { kind, message } if kind == "overloaded_error" && message == "overloaded"),
+            "非超长形态应保持 Api 变体: {err:?}"
+        );
+        // 401 等鉴权错误不误判
+        assert!(matches!(
+            classify_api_error("http_401".into(), "invalid api key".into()),
+            LlmError::Api { .. }
+        ));
+    }
+}

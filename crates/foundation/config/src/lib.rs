@@ -11,56 +11,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Provider 类型（配置中的 `type` 字段，kebab-case 形式）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ProviderKind {
-    Anthropic,
-    OpenAiCompatible,
-}
-
-/// 单个 model provider 的配置。
-///
-/// `Debug` 手写脱敏：`api_key` 永不显示真实值（Some 显示 `***`，None 显示
-/// `None`），防日志 / 错误输出泄露密钥；其余字段正常显示。
-#[derive(Clone, serde::Deserialize)]
-pub struct ProviderConfig {
-    #[serde(rename = "type")]
-    pub kind: ProviderKind,
-    pub base_url: String,
-    /// 指向环境变量名，运行时从该环境变量读取 api key。
-    pub env_key: Option<String>,
-    /// 内联 api key（M1 便利项，优先级低于 env_key）。
-    pub api_key: Option<String>,
-    pub context_window: Option<u64>,
-    pub max_output_tokens: Option<u32>,
-}
-
-impl std::fmt::Debug for ProviderConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProviderConfig")
-            .field("kind", &self.kind)
-            .field("base_url", &self.base_url)
-            .field("env_key", &self.env_key)
-            // 脱敏：只保留 Some/None 形态，真实 key 永不进入 Debug 输出。
-            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
-            .field("context_window", &self.context_window)
-            .field("max_output_tokens", &self.max_output_tokens)
-            .finish()
-    }
-}
-
-impl ProviderConfig {
-    /// 上下文窗口大小，默认 200_000。
-    pub fn context_window(&self) -> u64 {
-        self.context_window.unwrap_or(200_000)
-    }
-
-    /// 最大输出 token 数，默认 8192。
-    pub fn max_output_tokens(&self) -> u32 {
-        self.max_output_tokens.unwrap_or(8192)
-    }
-}
+mod hooks;
+mod mcp;
+mod provider;
 
 /// 顶层配置。
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -86,77 +39,9 @@ pub struct Config {
     pub mcp_servers: HashMap<String, McpServerRaw>,
 }
 
-/// 单个 MCP server 的原始配置（SPEC §13 `[mcp_servers.<name>]` 段字段，
-/// P9）。stdio 形态填 `command`（+ 可选 `args` / `env`），http 形态填
-/// `url`（+ 可选 `headers`）；两种形态的二选一校验不在本层（config 无
-/// workspace 内依赖，同 hooks 的原始解析纪律）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct McpServerRaw {
-    /// stdio transport 的可执行命令（stdio 形态必填）。
-    pub command: Option<String>,
-    /// 命令参数。
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 追加注入子进程的环境变量。
-    #[serde(default)]
-    pub env: HashMap<String, String>,
-    /// streamable-http endpoint（http 形态必填）。
-    pub url: Option<String>,
-    /// 追加的请求头。
-    #[serde(default)]
-    pub headers: HashMap<String, String>,
-}
-
-/// 单条 hook 规则（`[hooks.<EventPoint>]` 表的字段，SPEC §9 配置示例）。
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct HookRule {
-    /// 工具名匹配器（可选；语义由 hooks crate 定义）。
-    pub matcher: Option<String>,
-    /// shell 命令串（必填）。
-    pub command: String,
-    /// 超时毫秒（缺省由 hooks crate 补默认值）。
-    pub timeout_ms: Option<u64>,
-    /// 每会话只触发一次（缺省 false）。
-    pub once: Option<bool>,
-}
-
-/// 事件点下的 hook 条目：单表 `[hooks.PreToolUse]` 或表数组
-/// `[[hooks.PreToolUse]]` 两种形态都接受（untagged）。
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(untagged)]
-pub enum HookRuleSet {
-    /// 单表形态。
-    One(HookRule),
-    /// 表数组形态（多条 hook 按配置序执行）。
-    Many(Vec<HookRule>),
-}
-
-impl HookRuleSet {
-    /// 统一为切片视图（两种形态无差别遍历）。
-    pub fn rules(&self) -> &[HookRule] {
-        match self {
-            Self::One(rule) => std::slice::from_ref(rule),
-            Self::Many(rules) => rules,
-        }
-    }
-}
-
-/// 配置加载 / 解析错误。
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    /// 配置文件不存在（或不可读）。
-    #[error("配置文件不存在: {}", .0.display())]
-    NotFound(PathBuf),
-    /// TOML 解析失败。
-    #[error("配置解析失败: {0}")]
-    Parse(#[from] toml::de::Error),
-    /// `model_provider` 未在 `model_providers` 中定义。
-    #[error("未定义的 provider: {0}")]
-    MissingProvider(String),
-    /// provider 缺少可用的 api key。
-    #[error("provider {0} 缺少 api key（env_key 环境变量未设置且无内联 api_key）")]
-    MissingApiKey(String),
-}
+pub use hooks::{ConfigError, HookRule, HookRuleSet};
+pub use mcp::McpServerRaw;
+pub use provider::{ProviderConfig, ProviderKind};
 
 impl Config {
     /// 加载用户级 `~/.wavecode/config.toml`；不存在返回 [`ConfigError::NotFound`]。

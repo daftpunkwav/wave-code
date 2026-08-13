@@ -67,6 +67,17 @@ use wavecode_protocol::{CompactTrigger, Event, EventMsg, PermissionMode, StopRea
 use wavecode_sandbox::{Sandbox, Verdict};
 use wavecode_tools::{Registry, ToolCtx, ToolOutput};
 
+// —— 阶段 1b：子模块声明与重导出（拆自原 session.rs 单文件）——
+mod compact;
+mod memory_extract;
+mod skill_invoke;
+mod tool_dispatch;
+mod turn;
+
+use self::turn::TurnRunner; // run_turn_inner 委托（pub(super) struct）
+pub use memory_extract::MemoryExtractionHandle;
+pub use tool_dispatch::ApprovalGate;
+
 /// ToolCallEnd 事件回显工具输出的字符上限（回灌模型的 ToolResult 不截断）。
 const TOOL_OUTPUT_EVENT_MAX_CHARS: usize = 2000;
 
@@ -3830,14 +3841,3 @@ mod tests {
         assert!(dir.path().join("out.txt").exists(), "文件应被创建");
     }
 }
-
-// —— 阶段 1b：子模块声明与重导出（拆自原 session.rs 单文件）——
-mod compact;
-mod memory_extract;
-mod skill_invoke;
-mod tool_dispatch;
-mod turn;
-
-use self::turn::TurnRunner; // run_turn_inner 委托（pub(super) struct）
-pub use memory_extract::MemoryExtractionHandle;
-pub use tool_dispatch::ApprovalGate;

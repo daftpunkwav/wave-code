@@ -65,7 +65,7 @@ mod task_spawn;
 mod task_stop;
 mod types;
 
-pub(crate) use format::{format_notification, format_result, non_empty_summary, required_str};
+pub(super) use format::{format_notification, format_result, non_empty_summary, required_str};
 pub use manager::SubagentManager;
 pub(crate) use task_output::TaskOutputTool;
 pub(crate) use task_spawn::TaskSpawn;

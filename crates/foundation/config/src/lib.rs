@@ -100,7 +100,7 @@ model_provider = "minimax"
 [model_providers.minimax]
 type = "anthropic"
 base_url = "https://api.minimaxi.com/anthropic"
-env_key = "WAVECODE_TEST_KEY"
+env_key = "TEST_KEY"
 "#;
 
     #[test]
@@ -202,14 +202,14 @@ headers = {{ Authorization = "Bearer t" }}
         assert!(cfg.mcp_servers.is_empty());
     }
 
-    // WAVECODE_TEST_KEY 是进程级状态，依赖它的测试需互斥执行。
+    // TEST_KEY 是进程级状态，依赖它的测试需互斥执行。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn missing_api_key_is_error() {
         let _guard = ENV_LOCK.lock().unwrap();
         // env 未设置且无内联 api_key → MissingApiKey
-        unsafe { std::env::remove_var("WAVECODE_TEST_KEY") };
+        unsafe { std::env::remove_var("TEST_KEY") };
         let cfg: Config = toml::from_str(TOML_OK).unwrap();
         assert!(matches!(
             cfg.resolve_provider(),
@@ -220,12 +220,12 @@ headers = {{ Authorization = "Bearer t" }}
     #[test]
     fn env_key_takes_precedence() {
         let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("WAVECODE_TEST_KEY", "k-from-env") };
+        unsafe { std::env::set_var("TEST_KEY", "k-from-env") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
         let (_p, key) = cfg.resolve_provider().unwrap();
         assert_eq!(key, "k-from-env");
-        unsafe { std::env::remove_var("WAVECODE_TEST_KEY") };
+        unsafe { std::env::remove_var("TEST_KEY") };
     }
 
     #[test]
@@ -241,7 +241,7 @@ headers = {{ Authorization = "Bearer t" }}
     fn empty_env_key_falls_back_to_inline() {
         let _guard = ENV_LOCK.lock().unwrap();
         // export KEY=（空串）：视为未设置，回落内联 api_key
-        unsafe { std::env::set_var("WAVECODE_TEST_KEY", "") };
+        unsafe { std::env::set_var("TEST_KEY", "") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
         let (_p, key) = cfg.resolve_provider().unwrap();
@@ -252,7 +252,7 @@ headers = {{ Authorization = "Bearer t" }}
             cfg.resolve_provider(),
             Err(ConfigError::MissingApiKey(_))
         ));
-        unsafe { std::env::remove_var("WAVECODE_TEST_KEY") };
+        unsafe { std::env::remove_var("TEST_KEY") };
     }
 
     #[test]

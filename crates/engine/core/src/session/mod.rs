@@ -61,20 +61,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::{Notify, mpsc};
-use wavecode_context::{BudgetLevel, ContextConfig};
+use wavecode_context::BudgetLevel;
 use wavecode_llm::{ContentBlock, LlmError, Message, Role};
 use wavecode_protocol::{CompactTrigger, Event, EventMsg, PermissionMode, StopReason};
-use wavecode_sandbox::{Sandbox, Verdict};
-use wavecode_tools::{Registry, ToolCtx, ToolOutput};
+use wavecode_sandbox::Verdict;
+use wavecode_tools::{ToolCtx, ToolOutput};
 
 // —— 阶段 1b：子模块声明与重导出（拆自原 session.rs 单文件）——
 mod compact;
+mod config;
 mod memory_extract;
 mod skill_invoke;
 mod tool_dispatch;
 mod turn;
 
 use self::turn::TurnRunner; // run_turn_inner 委托（pub(super) struct）
+pub use config::{SessionConfig, SessionConfigBuilder};
 pub use memory_extract::MemoryExtractionHandle;
 pub use tool_dispatch::ApprovalGate;
 
@@ -121,47 +123,6 @@ the list with todo_write (mark items completed) before finishing.";
 /// [`ApprovalGate::decide`] 存入决策并唤醒等待者；`run_turn` 在 AwaitApproval
 /// 状态按 call_id 取走决策。以 call_id 为键：同一时刻只有一个待决调用
 ///（非只读串行段逐一审批），键控是为防迟到 / 错号决策被错误消费。
-/// Session 配置（`Session::new` 后冻结为快照）。
-pub struct SessionConfig {
-    /// 模型名（注入采样请求的 `model` 字段）。
-    pub model_name: String,
-    /// 上下文窗口大小（TokenCount 事件的 `window` 字段）。
-    pub context_window: u64,
-    /// 单轮采样输出 token 上限（请求的 `max_tokens`）。
-    pub max_output_tokens: u32,
-    /// 模型通道（流式采样）。
-    pub model: Arc<dyn wavecode_llm::ChatModel>,
-    /// 工具注册表：每轮请求注入 specs，执行管道按名查找。
-    pub registry: Registry,
-    /// 工作目录：系统提示词展示与 [`ToolCtx::cwd`] 的根。
-    pub cwd: std::path::PathBuf,
-    /// 敏感环境变量名（装配层注入 provider 的 `env_key` 等显式名单），
-    /// 透传 [`ToolCtx::deny_env`]：shell 工具 spawn 前从子进程环境剔除。
-    pub deny_env: Vec<String>,
-    /// 权限状态（模式 + allow/deny 规则）：非只读 / 破坏性工具执行前的
-    /// 审批判定（P2，SPEC §12）。
-    pub sandbox: Sandbox,
-    /// 上下文管线配置（P3，SPEC §6）：三级阈值 / 保留条数 / 摘要预算 /
-    /// 估算比率。构造后冻结，会话内不变。
-    pub context: ContextConfig,
-    /// P6 记忆装配（SPEC §7）：指令记忆 / 记忆索引的注入内容与
-    /// memory_write / 自动提取的存储根。`None` = 无记忆能力——子代理
-    /// 自身的 Session 即此形态（隔离上下文不挂持久记忆写入面）。
-    pub memory: Option<crate::memory::MemorySessionConfig>,
-    /// P7 skills 装配（SPEC §8）：skill 工具触发面与清单注入的技能集。
-    /// `None` = 无 skills 能力——子代理自身的 Session 即此形态（隔离
-    /// 上下文不挂 skill 触发面）。
-    pub skills: Option<crate::skills::SkillSessionConfig>,
-    /// P7 hooks 装配（SPEC §9）：command hook 引擎（事件点执行与阻塞
-    /// 语义）。`None` = 无 hooks。once 语义以引擎实例为界（= 会话级）。
-    pub hooks: Option<Arc<wavecode_hooks::HookEngine>>,
-    /// P10 会话持久化装配（SPEC §16）：rollout 文件根目录与 thread id。
-    /// `None` = 不持久化——子代理自身的 Session 即此形态（隔离上下文，
-    /// 持久化以父会话为单位）。构造时文件已存在且非空即 replay 恢复
-    ///（resume 语义：压缩点之后原文 + 摘要即新历史，见 rollout 模块注释）。
-    pub rollout: Option<crate::rollout::RolloutConfig>,
-}
-
 pub struct Session {
     cfg: SessionConfig,
     /// 完整消息历史（`Arc` 共享快照：每轮请求 O(1) 指针克隆；
@@ -470,8 +431,10 @@ mod tests {
     use futures::StreamExt;
     use futures::stream;
     use std::sync::{Arc, Mutex};
+    use wavecode_context::ContextConfig;
     use wavecode_llm::{ChatModel, ChatRequest, StreamEvent, Usage};
     use wavecode_protocol::{Event, EventMsg, StopReason};
+    use wavecode_sandbox::Sandbox;
 
     /// 脚本化 mock：按调用次数返回预排事件序列
     struct MockModel {
@@ -594,21 +557,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "创建 hello.txt", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         assert!(dir.path().join("hello.txt").exists());
@@ -666,21 +624,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "试一下", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         let mut tool_end_ok = None;
@@ -737,21 +690,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         session.run_turn("s-1", "读两个文件", tx).await.unwrap();
         let seen = model.seen.lock().unwrap();
         let second = &seen[1];
@@ -794,21 +742,16 @@ mod tests {
             seen: Mutex::new(vec![]),
         });
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let handle = session.interrupt_handle();
         // join! 同 task 顺序 poll：run_turn 第一轮 poll 即从入口推进到
         // tail 挂起（脚本事件全部立即就绪、send 均不阻塞），故 signal
@@ -904,21 +847,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "写文件", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         // 未实际执行：tempdir 内不产生任何文件
@@ -965,21 +903,16 @@ mod tests {
         ]];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "写长文", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         let mut has_warning = false;
@@ -1030,21 +963,16 @@ mod tests {
         // 取走 begin t1 才能完成——保证 signal 在串行段 i=0 检查点前
         // 完成置位（无 race）。
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(1);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let handle = session.interrupt_handle();
         // 收到首个 ToolCallBegin 即置位（此时串行执行段尚未开始）；
         // 之后继续 drain 直到 channel 关闭（run_turn 结束 tx drop），
@@ -1170,21 +1098,11 @@ mod tests {
             delay: std::time::Duration::from_millis(200),
         }));
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry,
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder("mock", model.clone(), registry, dir.path().to_path_buf())
+                .sandbox(bypass_sandbox())
+                .build(),
+        );
         let start = std::time::Instant::now();
         let reason = session.run_turn("s-1", "并行读", tx).await.unwrap();
         let elapsed = start.elapsed();
@@ -1270,21 +1188,12 @@ mod tests {
         let mut registry = wavecode_tools::Registry::builtin();
         registry.register(probe.clone());
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model,
-            registry,
-            cwd: dir.path().to_path_buf(),
-            deny_env: vec!["MINIMAX_KEY".to_owned()],
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder("mock", model, registry, dir.path().to_path_buf())
+                .deny_env(vec!["MINIMAX_KEY".to_owned()])
+                .sandbox(bypass_sandbox())
+                .build(),
+        );
         let reason = session.run_turn("s-1", "探测", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         assert_eq!(
@@ -1329,21 +1238,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "找入口函数", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         let seen = model.seen.lock().unwrap();
@@ -1396,21 +1300,15 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::without_rules(PermissionMode::Default),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .build(),
+        );
         let gate = session.approval_handle();
         // 收到 ApprovalRequested 即回填放行决策（模拟前端 / actor 路由）；
         // 继续 drain 到通道关闭，顺带记录 ToolCallEnd。
@@ -1473,21 +1371,15 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::without_rules(PermissionMode::Default),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .build(),
+        );
         let gate = session.approval_handle();
         let signal = async {
             let mut rx = rx;
@@ -1536,21 +1428,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::without_rules(PermissionMode::Plan),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(Sandbox::without_rules(PermissionMode::Plan))
+            .build(),
+        );
         let reason = session.run_turn("s-1", "创建 plan.txt", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         // 不执行、不发审批请求
@@ -1586,21 +1473,15 @@ mod tests {
         let scripts = vec![write_file_script("x.txt", "x")];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::without_rules(PermissionMode::Default),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .build(),
+        );
         let interrupt = session.interrupt_handle();
         let signal = async {
             let mut rx = rx;
@@ -1708,17 +1589,17 @@ mod tests {
     /// 估算路径（~2k 开销定额）远低于警告线，threshold 测试经 usage_carry
     /// 种子精确控制水位；keep_recent=2 便于断言压缩后形态。
     fn p3_session(model: Arc<CompactAwareMock>) -> Session {
-        Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 100_000,
-            max_output_tokens: 8192,
-            model,
-            registry: wavecode_tools::Registry::builtin(),
-            // tempdir 转持久路径放弃自动删除（与 app-server 测试同例）。
-            cwd: tempfile::tempdir().unwrap().keep(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig {
+        Session::new(
+            SessionConfig::builder(
+                "mock",
+                model,
+                wavecode_tools::Registry::builtin(),
+                // tempdir 转持久路径放弃自动删除（与 app-server 测试同例）。
+                tempfile::tempdir().unwrap().keep(),
+            )
+            .context_window(100_000)
+            .sandbox(bypass_sandbox())
+            .context(ContextConfig {
                 thresholds: wavecode_context::Thresholds {
                     warning_margin: 200,
                     auto_compact_margin: 100,
@@ -1727,12 +1608,9 @@ mod tests {
                 keep_recent: 2,
                 summary_max_tokens: 500,
                 estimate_chars_per_token: 4,
-            },
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        })
+            })
+            .build(),
+        )
     }
 
     fn collect_events(rx: &mut mpsc::Receiver<Event>) -> Vec<EventMsg> {
@@ -2083,21 +1961,11 @@ mod tests {
         let registry = wavecode_tools::Registry::builtin();
         let todos = registry.todos();
         (
-            Session::new(SessionConfig {
-                model_name: "mock".into(),
-                context_window: 200_000,
-                max_output_tokens: 8192,
-                model,
-                registry,
-                cwd: dir.to_path_buf(),
-                deny_env: Vec::new(),
-                sandbox: bypass_sandbox(),
-                context: ContextConfig::default(),
-                memory: None,
-                skills: None,
-                hooks: None,
-                rollout: None,
-            }),
+            Session::new(
+                SessionConfig::builder("mock", model, registry, dir.to_path_buf())
+                    .sandbox(bypass_sandbox())
+                    .build(),
+            ),
             todos,
         )
     }
@@ -2298,21 +2166,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::without_rules(PermissionMode::Default),
-            context: ContextConfig::default(),
-            memory: p6_memory(&store_root),
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .memory(p6_memory(&store_root))
+            .build(),
+        );
         let gate = session.approval_handle();
         let signal = async {
             let mut rx = rx;
@@ -2360,21 +2223,17 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session_a = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model,
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: p6_memory(&store_root),
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session_a = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model,
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .memory(p6_memory(&store_root))
+            .build(),
+        );
         let reason = session_a.run_turn("s-1", "记住项目约定", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
 
@@ -2412,21 +2271,17 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model,
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: p6_memory(&store_root),
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model,
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .memory(p6_memory(&store_root))
+            .build(),
+        );
         session.run_turn("s-1", "随便聊聊", tx).await.unwrap();
 
         let n = session.extract_memories().await.unwrap();
@@ -2562,21 +2417,18 @@ mod tests {
         hooks: Option<Arc<HookEngine>>,
         skills: Option<crate::skills::SkillSessionConfig>,
     ) -> Session {
-        Session::with_subagents(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model,
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills,
-            hooks,
-            rollout: None,
-        })
+        Session::with_subagents(
+            SessionConfig::builder(
+                "mock",
+                model,
+                wavecode_tools::Registry::builtin(),
+                dir.to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .skills(skills)
+            .hooks(hooks)
+            .build(),
+        )
     }
 
     /// 采样请求历史的全文（text + tool_result + tool_use 摘要），
@@ -3059,21 +2911,16 @@ mod tests {
         let scripts = vec![mcp_echo_script("t1", "hi"), text_then_end("完成。")];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: p9_registry(client.clone()).await,
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                p9_registry(client.clone()).await,
+                dir.path().to_path_buf(),
+            )
+            .sandbox(bypass_sandbox())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "调用 echo", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
 
@@ -3109,21 +2956,15 @@ mod tests {
         let scripts = vec![mcp_echo_script("t1", "hi"), text_then_end("完成。")];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: p9_registry(client.clone()).await,
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::without_rules(PermissionMode::Default),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                p9_registry(client.clone()).await,
+                dir.path().to_path_buf(),
+            )
+            .build(),
+        );
         let gate = session.approval_handle();
         let signal = async {
             let mut rx = rx;
@@ -3172,21 +3013,17 @@ mod tests {
         model: Arc<dyn ChatModel>,
         rollout: Option<crate::rollout::RolloutConfig>,
     ) -> Session {
-        Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model,
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: tempfile::tempdir().unwrap().keep(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout,
-        })
+        Session::new(
+            SessionConfig::builder(
+                "mock",
+                model,
+                wavecode_tools::Registry::builtin(),
+                tempfile::tempdir().unwrap().keep(),
+            )
+            .sandbox(bypass_sandbox())
+            .rollout(rollout)
+            .build(),
+        )
     }
 
     /// rollout 文件全部记录的序号清单（断言连续递增用）。
@@ -3265,16 +3102,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let model = p3_mock(vec![Some(text_then_end("好的"))]);
         let (tx, mut rx) = mpsc::channel::<Event>(64);
-        let mut session_a = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 100_000,
-            max_output_tokens: 8192,
-            model,
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig {
+        let mut session_a = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model,
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .context_window(100_000)
+            .sandbox(bypass_sandbox())
+            .context(ContextConfig {
                 thresholds: wavecode_context::Thresholds {
                     warning_margin: 200,
                     auto_compact_margin: 100,
@@ -3283,12 +3120,10 @@ mod tests {
                 keep_recent: 2,
                 summary_max_tokens: 500,
                 estimate_chars_per_token: 4,
-            },
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: p10_rollout(dir.path(), "t-compact"),
-        });
+            })
+            .rollout(p10_rollout(dir.path(), "t-compact"))
+            .build(),
+        );
         // 上一 turn 结转的权威占用：首次 PreTurn 检查即过自动压缩线。
         session_a.usage_carry = Some(99_950);
         let reason = session_a.run_turn("s-1", "继续干活", tx).await.unwrap();
@@ -3542,16 +3377,16 @@ mod tests {
         let model = Arc::new(StressMock {
             summary_calls: Mutex::new(0),
         });
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 100_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: bypass_sandbox(),
-            context: ContextConfig {
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .context_window(100_000)
+            .sandbox(bypass_sandbox())
+            .context(ContextConfig {
                 thresholds: wavecode_context::Thresholds {
                     warning_margin: 200,
                     auto_compact_margin: 100,
@@ -3560,13 +3395,11 @@ mod tests {
                 keep_recent: 2,
                 summary_max_tokens: 500,
                 estimate_chars_per_token: 4,
-            },
-            memory: None,
-            skills: None,
-            hooks: None,
+            })
             // 压力测试同时压 rollout 记录面（每轮压缩记录 + 消息记录）。
-            rollout: p10_rollout(dir.path(), "t-stress"),
-        });
+            .rollout(p10_rollout(dir.path(), "t-stress"))
+            .build(),
+        );
         // 种子水位：每个 turn 的首次 PreTurn 检查即触发自动压缩。
         session.usage_carry = Some(99_950);
 
@@ -3686,26 +3519,23 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::new(
-                PermissionMode::Default,
-                &[],
-                &["File(secrets/**)".to_string()],
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
             )
-            .unwrap(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+            .sandbox(
+                Sandbox::new(
+                    PermissionMode::Default,
+                    &[],
+                    &["File(secrets/**)".to_string()],
+                )
+                .unwrap(),
+            )
+            .build(),
+        );
         let reason = session
             .run_turn("s-1", "读 secrets/key.pem", tx)
             .await
@@ -3748,26 +3578,23 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::new(
-                PermissionMode::Default,
-                &[],
-                &["File(*.secret)".to_string()],
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
             )
-            .unwrap(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+            .sandbox(
+                Sandbox::new(
+                    PermissionMode::Default,
+                    &[],
+                    &["File(*.secret)".to_string()],
+                )
+                .unwrap(),
+            )
+            .build(),
+        );
         let reason = session.run_turn("s-1", "写 data.secret", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         let mut tool_ok = None;
@@ -3807,21 +3634,16 @@ mod tests {
         ];
         let model = Arc::new(MockModel::new(scripts));
         let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
-        let mut session = Session::new(SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model: model.clone(),
-            registry: wavecode_tools::Registry::builtin(),
-            cwd: dir.path().to_path_buf(),
-            deny_env: Vec::new(),
-            sandbox: Sandbox::new(PermissionMode::Default, &["File(*)".to_string()], &[]).unwrap(),
-            context: ContextConfig::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        });
+        let mut session = Session::new(
+            SessionConfig::builder(
+                "mock",
+                model.clone(),
+                wavecode_tools::Registry::builtin(),
+                dir.path().to_path_buf(),
+            )
+            .sandbox(Sandbox::new(PermissionMode::Default, &["File(*)".to_string()], &[]).unwrap())
+            .build(),
+        );
         let reason = session.run_turn("s-1", "写 out.txt", tx).await.unwrap();
         assert_eq!(reason, StopReason::Completed);
         let mut saw_approval = false;

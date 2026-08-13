@@ -42,6 +42,6 @@ pub mod subagent;
 
 pub use memory::MemorySessionConfig;
 pub use rollout::RolloutConfig;
-pub use session::{ApprovalGate, Session, SessionConfig};
+pub use session::{ApprovalGate, Session, SessionConfig, SessionConfigBuilder};
 pub use skills::SkillSessionConfig;
 pub use subagent::{SubagentManager, SubagentType, TaskResult, TaskState};

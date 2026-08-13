@@ -207,21 +207,18 @@ impl SubagentManager {
             Some(names) => base.name_subset(names),
             None => base,
         };
-        SessionConfig {
-            model_name: self.deps.model_name.clone(),
-            context_window: self.deps.context_window,
-            max_output_tokens: self.deps.max_output_tokens,
-            model: self.deps.model.clone(),
+        SessionConfig::builder(
+            self.deps.model_name.clone(),
+            self.deps.model.clone(),
             registry,
-            cwd: self.deps.cwd.clone(),
-            deny_env: self.deps.deny_env.clone(),
-            sandbox: self.deps.sandbox.clone(),
-            context: self.deps.context.clone(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        }
+            self.deps.cwd.clone(),
+        )
+        .context_window(self.deps.context_window)
+        .max_output_tokens(self.deps.max_output_tokens)
+        .deny_env(self.deps.deny_env.clone())
+        .sandbox(self.deps.sandbox.clone())
+        .context(self.deps.context.clone())
+        .build()
     }
 
     /// 子代理驱动：建 Session 跑一轮 turn 至终态，产出结构化结果；

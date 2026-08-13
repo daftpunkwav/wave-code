@@ -162,35 +162,37 @@ pub fn load_session_config(
     };
 
     Ok(Boot {
-        session: SessionConfig {
-            model_name: model_override
+        session: SessionConfig::builder(
+            model_override
                 .map(str::to_string)
                 .unwrap_or_else(|| config.model.clone()),
-            context_window: provider.context_window(),
-            max_output_tokens: provider.max_output_tokens(),
-            model: std::sync::Arc::new(model),
-            registry: wavecode_tools::Registry::builtin(),
+            std::sync::Arc::new(model),
+            wavecode_tools::Registry::builtin(),
             cwd,
-            // provider 的 env_key 自定义名（如 MINIMAX_KEY）注入 deny_env：
-            // shell 工具的敏感后缀模式挡不住这类名字，须在装配层显式剔除；
-            // 未配 / 空串则无需剔除。
-            deny_env: provider
+        )
+        .context_window(provider.context_window())
+        .max_output_tokens(provider.max_output_tokens())
+        // provider 的 env_key 自定义名（如 MINIMAX_KEY）注入 deny_env：
+        // shell 工具的敏感后缀模式挡不住这类名字，须在装配层显式剔除；
+        // 未配 / 空串则无需剔除。
+        .deny_env(
+            provider
                 .env_key
                 .as_deref()
                 .filter(|name| !name.is_empty())
                 .map(|name| vec![name.to_owned()])
                 .unwrap_or_default(),
-            // TODO(P2 后续)：allow/deny 规则表的配置来源（config 分层 §17.5 M3
-            // 落地后接线），当前仅权限模式来自 config，规则表为空。
-            sandbox: wavecode_sandbox::Sandbox::without_rules(permission_mode),
-            // P3：上下文管线（三级阈值 / 压缩）取默认值；阈值与保留条数的
-            // 配置化随 config 分层（§17.5 M3）接线。
-            context: Default::default(),
-            memory,
-            skills,
-            hooks,
-            rollout,
-        },
+        )
+        // TODO(P2 后续)：allow/deny 规则表的配置来源（config 分层 §17.5 M3
+        // 落地后接线），当前仅权限模式来自 config，规则表为空。
+        .sandbox(wavecode_sandbox::Sandbox::without_rules(permission_mode))
+        // P3：上下文管线（三级阈值 / 压缩）取 builder 默认值；阈值与保留条数
+        // 的配置化随 config 分层（§17.5 M3）接线。
+        .memory(memory)
+        .skills(skills)
+        .hooks(hooks)
+        .rollout(rollout)
+        .build(),
         mcp_servers,
     })
 }

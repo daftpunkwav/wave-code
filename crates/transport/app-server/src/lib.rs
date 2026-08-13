@@ -158,21 +158,14 @@ mod tests {
     ) -> wavecode_core::SessionConfig {
         // tempdir 不能 drop——keep() 转持久路径、放弃自动删除（M1 测试可接受）。
         let cwd = tempfile::tempdir().unwrap().keep();
-        wavecode_core::SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
+        wavecode_core::SessionConfig::builder(
+            "mock",
             model,
-            registry: wavecode_tools::Registry::builtin(),
+            wavecode_tools::Registry::builtin(),
             cwd,
-            deny_env: Vec::new(),
-            sandbox,
-            context: Default::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        }
+        )
+        .sandbox(sandbox)
+        .build()
     }
 
     fn one_shot(text: &str) -> Vec<Vec<StreamEvent>> {

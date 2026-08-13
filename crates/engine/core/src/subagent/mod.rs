@@ -120,21 +120,11 @@ mod tests {
 
     fn parent_config(model: Arc<dyn ChatModel>) -> SessionConfig {
         let cwd = tempfile::tempdir().unwrap().keep();
-        SessionConfig {
-            model_name: "mock".into(),
-            context_window: 200_000,
-            max_output_tokens: 8192,
-            model,
-            registry: Registry::builtin(),
-            cwd,
-            deny_env: Vec::new(),
-            sandbox: wavecode_sandbox::Sandbox::without_rules(PermissionMode::BypassPermissions),
-            context: Default::default(),
-            memory: None,
-            skills: None,
-            hooks: None,
-            rollout: None,
-        }
+        SessionConfig::builder("mock", model, Registry::builtin(), cwd)
+            .sandbox(wavecode_sandbox::Sandbox::without_rules(
+                PermissionMode::BypassPermissions,
+            ))
+            .build()
     }
 
     fn spec(prompt: &str, subagent_type: SubagentType) -> TaskSpec {

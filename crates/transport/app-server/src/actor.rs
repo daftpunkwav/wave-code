@@ -4,7 +4,8 @@ use super::*;
 
 /// Session actor 主循环：串行驱动 turn；turn 期间经 select! 继续监听
 /// submission 通道（响应 Interrupt / Shutdown / ExecApproval /
-/// SetPermissionMode，UserInput / Compact 本地排队）。
+/// SetPermissionMode，UserInput / Compact / SlashCommand 本地排队，队列
+/// 有界——溢出经 [`queue_or_reject`] 显式拒绝）。
 /// submission 通道关闭（客户端全部析构）即退出；event 通道随本任务
 /// 持有的 event_tx 析构而关闭，客户端 next_event 收 None。
 pub(super) async fn actor_loop(
@@ -16,8 +17,9 @@ pub(super) async fn actor_loop(
     permission_mode_handle: Arc<std::sync::Mutex<PermissionMode>>,
 ) {
     // turn 期间到达的 UserInput 本地排队，turn 结束后按序驱动，不丢请求。
-    // 取舍：turn 期间 actor 持续 recv 抽干通道，pending 无界——M1 进程内
-    // 可信客户端可接受；如需上限（不可信前端 / stdio transport）后续再议。
+    // pending 有界（PENDING_QUEUE_CAPACITY）：溢出显式拒绝而非背压挂起——
+    // 背压会把队列头部后面的 Interrupt 也堵在通道里（用户无法中断），
+    // 拒绝让客户端立即得到确定响应。
     let mut pending: VecDeque<Submission> = VecDeque::new();
     loop {
         let sub = match pending.pop_front() {
@@ -48,7 +50,11 @@ pub(super) async fn actor_loop(
                         maybe_sub = submission_rx.recv() => {
                             match maybe_sub {
                                 Some(extra) => match extra.op {
-                                    Op::UserInput { .. } => pending.push_back(extra),
+                                    // 可排队 op（UserInput / Compact /
+                                    // SlashCommand）：队列满时显式拒绝。
+                                    Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. } => {
+                                        queue_or_reject(&mut pending, extra, &event_tx).await
+                                    }
                                     Op::Interrupt => {
                                         interrupt_handle.store(true, Ordering::SeqCst);
                                     }
@@ -65,13 +71,6 @@ pub(super) async fn actor_loop(
                                             .lock()
                                             .expect("mode 锁中毒即进程已有 panic") = mode;
                                     }
-                                    // P3：turn 进行中的 /compact 与 UserInput
-                                    // 同策略——排队到 turn 结束后执行（压缩会
-                                    // 改写历史，turn 中途执行会破坏当轮快照）。
-                                    Op::Compact => pending.push_back(extra),
-                                    // P7：turn 进行中的 slash 直调同样排队
-                                    //（skill 触发会改写历史 / 派生子代理）。
-                                    Op::SlashCommand { .. } => pending.push_back(extra),
                                     Op::Shutdown => {
                                         interrupt_handle.store(true, Ordering::SeqCst);
                                         // 等 turn 收尾（至多 2s），然后退出。
@@ -154,5 +153,37 @@ pub(super) async fn actor_loop(
             // Op 标注 non_exhaustive：未来新增的 op 在 M1 忽略，warn 留痕。
             _ => tracing::warn!(id = %sub.id, "忽略未知 op（M1 未实现）"),
         }
+    }
+}
+
+/// turn 期间到达的可排队 op（UserInput / Compact / SlashCommand）入
+/// pending 队尾，turn 结束后按序驱动（FIFO）。
+///
+/// 排队而非立即执行的原因：Compact 会改写历史、SlashCommand 可能改写
+/// 历史 / 派生子代理，turn 中途执行会破坏当轮快照；UserInput 即新 turn。
+///
+/// 队列满（[`PENDING_QUEUE_CAPACITY`]）时以该 submission 的 id 回填
+/// Error 事件显式拒绝（recoverable）——请求不静默丢弃：拒绝即确定的
+/// 响应（SPEC §4.2"请求不允许丢"的进程内形态；stdio/WS transport 落地
+/// 时同语义映射为 JSON-RPC 错误响应）。控制类 op（Interrupt /
+/// ExecApproval / SetPermissionMode / Shutdown）不入队，不受此限。
+async fn queue_or_reject(
+    pending: &mut VecDeque<Submission>,
+    sub: Submission,
+    event_tx: &mpsc::Sender<Event>,
+) {
+    if pending.len() >= PENDING_QUEUE_CAPACITY {
+        tracing::warn!(id = %sub.id, "pending 队列已满，显式拒绝排队请求");
+        let ev = Event {
+            id: sub.id,
+            msg: EventMsg::Error {
+                message: format!("请求队列已满（{PENDING_QUEUE_CAPACITY} 条待处理），请稍后重试"),
+                recoverable: true,
+            },
+        };
+        // send 失败即接收端已断开：与 core emit 同策略，继续执行不中断。
+        let _ = event_tx.send(ev).await;
+    } else {
+        pending.push_back(sub);
     }
 }

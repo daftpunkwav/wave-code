@@ -20,12 +20,16 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use wavecode_core::{ApprovalGate, Session, SessionConfig};
-use wavecode_protocol::{Event, Op, PermissionMode, Submission};
+use wavecode_protocol::{Event, EventMsg, Op, PermissionMode, Submission};
 
 /// submission 通道容量（前端 → actor）。
 const SUBMISSION_CHANNEL_CAPACITY: usize = 32;
 /// event 通道容量（actor → 前端）。
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+/// turn 期间本地排队（pending）的 submission 上限：溢出以该 submission
+/// 的 id 回填 Error 事件显式拒绝（请求不静默丢弃——拒绝即确定的响应，
+/// SPEC §4.2"请求不允许丢"的进程内形态）；控制类 op 不入队不受限。
+const PENDING_QUEUE_CAPACITY: usize = 64;
 /// Shutdown / 客户端全部析构时，等待活动 turn 收尾的超时。
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -431,6 +435,78 @@ mod tests {
             ),
             "排队 turn 应正常完成"
         );
+    }
+
+    /// pending 队列上限语义锁定：turn 期间第 65 条排队请求收到以自身 id
+    /// 回填的显式 Error 拒绝（recoverable），队列本身不受影响。
+    #[tokio::test]
+    async fn queued_submission_overflow_gets_explicit_error() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let model = GatedModel {
+            scripts: one_shot("busy"),
+            calls: Mutex::new(0),
+            gate: gate.clone(),
+            // repeat_tail：流不结束，turn 一直挂起直到 Shutdown 中断，
+            // 保证全部排队请求都在同一 turn 期间到达。
+            repeat_tail: true,
+        };
+        let mut client = InProcessClient::spawn(cfg_with_model(Arc::new(model)));
+        client
+            .submit(Submission {
+                id: "s-1".into(),
+                op: Op::UserInput { text: "go".into() },
+            })
+            .await
+            .unwrap();
+        next_event_until(&mut client, "turn 1 开始", |ev| {
+            matches!(&ev.msg, EventMsg::TurnStarted { .. })
+        })
+        .await;
+
+        // 填满 pending（64 条），第 65 条应被显式拒绝。
+        for i in 0..64 {
+            client
+                .submit(Submission {
+                    id: format!("q-{i}"),
+                    op: Op::UserInput { text: "go".into() },
+                })
+                .await
+                .unwrap();
+        }
+        client
+            .submit(Submission {
+                id: "overflow".into(),
+                op: Op::UserInput { text: "go".into() },
+            })
+            .await
+            .unwrap();
+
+        let ev = next_event_until(&mut client, "溢出拒绝 Error 事件", |ev| {
+            matches!(
+                &ev.msg,
+                EventMsg::Error {
+                    recoverable: true,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert_eq!(ev.id, "overflow", "第 65 条排队请求应收到显式 Error 拒绝");
+
+        // Shutdown（控制类 op 不受队列上限影响）：中断当前 turn 并退出，
+        // pending 中排队请求随退出丢弃（既有 Shutdown 语义）；事件流关闭。
+        client
+            .submit(Submission {
+                id: "bye".into(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+        next_event_until(&mut client, "事件流关闭", |ev| {
+            matches!(&ev.msg, EventMsg::TurnCompleted { .. })
+        })
+        .await;
+        assert!(client.next_event().await.is_none());
     }
 
     /// 单轮 write_file 调用 + 收尾文本的脚本（default 模式触发审批门）。

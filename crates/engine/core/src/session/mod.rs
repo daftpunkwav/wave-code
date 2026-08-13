@@ -456,8 +456,8 @@ async fn emit_hook_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::stream;
     use futures::StreamExt;
+    use futures::stream;
     use std::sync::{Arc, Mutex};
     use wavecode_llm::{ChatModel, ChatRequest, StreamEvent, Usage};
     use wavecode_protocol::{Event, EventMsg, StopReason};

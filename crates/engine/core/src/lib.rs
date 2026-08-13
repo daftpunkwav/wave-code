@@ -39,6 +39,7 @@ pub mod rollout;
 pub mod session;
 pub mod skills;
 pub mod subagent;
+mod sync;
 
 pub use memory::MemorySessionConfig;
 pub use rollout::RolloutConfig;

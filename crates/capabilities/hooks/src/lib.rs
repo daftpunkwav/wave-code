@@ -24,6 +24,13 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
+/// 锁中毒的统一恢复策略（本 crate 单点决策）：once 已触发集合的临界区
+/// 是单次 insert，持锁期间 panic 不会留下半截不变量——中毒时取回守卫
+/// 继续执行（panic 已沿原线程传播），不做二次 panic 级联。
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// 默认超时（SPEC §9 配置示例）：10s。
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
@@ -185,13 +192,7 @@ impl HookEngine {
                 }
             }
             // once：matcher 命中后的"实际执行"才消耗额度。
-            if def.once
-                && !self
-                    .fired
-                    .lock()
-                    .expect("once 锁中毒即进程已有 panic")
-                    .insert((point, idx))
-            {
+            if def.once && !lock(&self.fired).insert((point, idx)) {
                 continue;
             }
             match run_command(point, def, input).await {

@@ -69,20 +69,17 @@ pub struct TodoStore {
 impl TodoStore {
     /// 整体重写清单（todo_write 语义）。
     pub fn write(&self, items: Vec<TodoItem>) {
-        *self.inner.write().expect("清单锁中毒即进程已有 panic") = items;
+        *crate::write(&self.inner) = items;
     }
 
     /// 当前清单快照。
     pub fn snapshot(&self) -> Vec<TodoItem> {
-        self.inner
-            .read()
-            .expect("清单锁中毒即进程已有 panic")
-            .clone()
+        crate::read(&self.inner).clone()
     }
 
     /// 未完成项计数 `(pending, in_progress)`（stop steering 判据，P4）。
     pub fn unfinished(&self) -> (usize, usize) {
-        let items = self.inner.read().expect("清单锁中毒即进程已有 panic");
+        let items = crate::read(&self.inner);
         let pending = items
             .iter()
             .filter(|i| i.status == TodoStatus::Pending)

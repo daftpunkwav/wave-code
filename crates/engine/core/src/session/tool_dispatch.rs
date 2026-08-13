@@ -31,28 +31,19 @@ impl ApprovalGate {
     /// `Notify::notify_one` 在无等待者时留存一个 permit，与取走决策后的
     /// 下一轮等待无丢失唤醒竞态。
     pub fn decide(&self, call_id: String, decision: ApprovalDecision) {
-        self.decisions
-            .lock()
-            .expect("审批槽锁中毒即进程已有 panic")
-            .insert(call_id, decision);
+        crate::sync::lock(&self.decisions).insert(call_id, decision);
         self.notify.notify_one();
     }
 
     /// 按 call_id 取走决策（一次性消费）。
     fn take(&self, call_id: &str) -> Option<ApprovalDecision> {
-        self.decisions
-            .lock()
-            .expect("审批槽锁中毒即进程已有 panic")
-            .remove(call_id)
+        crate::sync::lock(&self.decisions).remove(call_id)
     }
 
     /// turn 开始时清空残留决策（与中断标志每 turn 自清同理：上一 turn
     /// 未被消费的迟到决策不得影响本轮）。
     pub(super) fn clear(&self) {
-        self.decisions
-            .lock()
-            .expect("审批槽锁中毒即进程已有 panic")
-            .clear();
+        crate::sync::lock(&self.decisions).clear();
     }
 }
 

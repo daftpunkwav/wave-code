@@ -18,7 +18,25 @@ pub mod todo_tool;
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+
+/// 锁中毒的统一恢复策略（本 crate 单点决策）：这些锁保护的都是单操作
+/// 临界区（一次 insert / 赋值 / 读取），持锁期间 panic 不会留下半截
+/// 不变量——中毒时取回守卫继续执行（panic 已沿原线程传播），不做
+/// 二次 panic 级联。
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// [`lock`] 的 RwLock 读侧同例。
+pub(crate) fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// [`lock`] 的 RwLock 写侧同例。
+pub(crate) fn write<T>(l: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    l.write().unwrap_or_else(|e| e.into_inner())
+}
 
 /// 工具执行上下文。
 #[derive(Debug, Clone)]
@@ -104,14 +122,12 @@ pub struct ToolAllowlist {
 impl ToolAllowlist {
     /// 设置白名单（None = 解除限制）。
     pub fn set(&self, names: Option<HashSet<String>>) {
-        *self.inner.lock().expect("白名单锁中毒即进程已有 panic") = names;
+        *lock(&self.inner) = names;
     }
 
     /// 工具是否可执行（无白名单 → true）。
     pub fn is_allowed(&self, name: &str) -> bool {
-        self.inner
-            .lock()
-            .expect("白名单锁中毒即进程已有 panic")
+        lock(&self.inner)
             .as_ref()
             .is_none_or(|set| set.contains(name))
     }

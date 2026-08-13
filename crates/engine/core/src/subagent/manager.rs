@@ -70,20 +70,12 @@ impl SubagentManager {
     /// 挂接父会话事件汇（`run_turn` 入口调用；子代理起止事件以该 turn 的
     /// submission_id 回填）。
     pub fn set_event_sink(&self, events: mpsc::Sender<Event>, submission_id: &str) {
-        *self
-            .event_sink
-            .lock()
-            .expect("事件汇锁中毒即进程已有 panic") = Some((events, submission_id.to_owned()));
+        *crate::sync::lock(&self.event_sink) = Some((events, submission_id.to_owned()));
     }
 
     /// 取走全部待注入通知（turn 循环头调用，一次性消费）。
     pub fn drain_notifications(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .notifications
-                .lock()
-                .expect("通知锁中毒即进程已有 panic"),
-        )
+        std::mem::take(&mut *crate::sync::lock(&self.notifications))
     }
 
     /// 派生后台子代理：登记跟踪槽后在独立 tokio task 中运行，立即返回 id。
@@ -94,10 +86,7 @@ impl SubagentManager {
             interrupt: Mutex::new(None),
             state: Mutex::new(TaskState::Running),
         });
-        self.tasks
-            .lock()
-            .expect("任务表锁中毒即进程已有 panic")
-            .insert(id.clone(), slot.clone());
+        crate::sync::lock(&self.tasks).insert(id.clone(), slot.clone());
         let mgr = self.clone();
         let child_id = id.clone();
         tokio::spawn(async move {
@@ -116,18 +105,8 @@ impl SubagentManager {
 
     /// 查询任务状态（task_output；未知 id 返回 None）。
     pub fn query(&self, task_id: &str) -> Option<TaskState> {
-        let slot = self
-            .tasks
-            .lock()
-            .expect("任务表锁中毒即进程已有 panic")
-            .get(task_id)
-            .cloned()?;
-        Some(
-            slot.state
-                .lock()
-                .expect("状态锁中毒即进程已有 panic")
-                .clone(),
-        )
+        let slot = crate::sync::lock(&self.tasks).get(task_id).cloned()?;
+        Some(crate::sync::lock(&slot.state).clone())
     }
 
     /// 停止后台子代理（task_stop）：置停止标志 + 中断句柄，轮询等待终态
@@ -137,29 +116,15 @@ impl SubagentManager {
     /// 落在"句柄已装配、turn 未开始"的窗口时单次置位会被抹掉；重武装
     /// 保证窗口内置位最终生效。未知 id 返回 None。
     pub async fn stop(&self, task_id: &str) -> Option<TaskState> {
-        let slot = self
-            .tasks
-            .lock()
-            .expect("任务表锁中毒即进程已有 panic")
-            .get(task_id)
-            .cloned()?;
+        let slot = crate::sync::lock(&self.tasks).get(task_id).cloned()?;
         slot.stop_requested.store(true, Ordering::SeqCst);
         let deadline = tokio::time::Instant::now() + STOP_WAIT_TIMEOUT;
         loop {
-            let state = slot
-                .state
-                .lock()
-                .expect("状态锁中毒即进程已有 panic")
-                .clone();
+            let state = crate::sync::lock(&slot.state).clone();
             if matches!(state, TaskState::Finished(_)) || tokio::time::Instant::now() >= deadline {
                 return Some(state);
             }
-            if let Some(handle) = slot
-                .interrupt
-                .lock()
-                .expect("中断槽锁中毒即进程已有 panic")
-                .as_ref()
-            {
+            if let Some(handle) = crate::sync::lock(&slot.interrupt).as_ref() {
                 handle.store(true, Ordering::SeqCst);
             }
             tokio::time::sleep(STOP_POLL_INTERVAL).await;
@@ -173,11 +138,7 @@ impl SubagentManager {
 
     /// 发出子代理事件（事件汇未挂接时静默丢弃——无 turn 期间无旁观方）。
     async fn emit_event(&self, msg: EventMsg) {
-        let sink = self
-            .event_sink
-            .lock()
-            .expect("事件汇锁中毒即进程已有 panic")
-            .clone();
+        let sink = crate::sync::lock(&self.event_sink).clone();
         if let Some((tx, submission_id)) = sink {
             let ev = Event {
                 id: submission_id,
@@ -241,8 +202,7 @@ impl SubagentManager {
         // 注入路径（subagents 字段为 None）。
         let mut session = Session::new(self.child_config(&spec));
         if let Some(slot) = &slot {
-            *slot.interrupt.lock().expect("中断槽锁中毒即进程已有 panic") =
-                Some(session.interrupt_handle());
+            *crate::sync::lock(&slot.interrupt) = Some(session.interrupt_handle());
             // 启动前已请求停止：不进入 turn 直接以 Stopped 收尾——
             // run_turn 入口会清中断标志，此前置位会被抹掉。
             if slot.stop_requested.load(Ordering::SeqCst) {
@@ -319,17 +279,13 @@ impl SubagentManager {
         slot: &Arc<TaskSlot>,
         result: TaskResult,
     ) -> TaskResult {
-        *slot.state.lock().expect("状态锁中毒即进程已有 panic") =
-            TaskState::Finished(result.clone());
-        self.notifications
-            .lock()
-            .expect("通知锁中毒即进程已有 panic")
-            .push(format_notification(
-                &task_id,
-                spec.subagent_type,
-                &spec.description,
-                &result,
-            ));
+        *crate::sync::lock(&slot.state) = TaskState::Finished(result.clone());
+        crate::sync::lock(&self.notifications).push(format_notification(
+            &task_id,
+            spec.subagent_type,
+            &spec.description,
+            &result,
+        ));
         self.emit_event(EventMsg::SubagentCompleted {
             task_id,
             status: result.status,

@@ -15,6 +15,13 @@ use std::sync::{Arc, Mutex};
 
 use wavecode_protocol::{ApprovalKind, PermissionMode};
 
+/// 锁中毒的统一恢复策略（本 crate 单点决策）：模式锁的临界区是单次
+/// 读 / 写，持锁期间 panic 不会留下半截不变量——中毒时取回守卫继续
+/// 执行（panic 已沿原线程传播），不做二次 panic 级联。
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Ask 详情（ApprovalRequested.detail）的字符上限：命令全文可能很长，
 /// 事件载荷须有限；前端渲染另有截断。
 const DETAIL_MAX_CHARS: usize = 500;
@@ -174,7 +181,7 @@ impl Sandbox {
 
     /// 当前权限模式。
     pub fn mode(&self) -> PermissionMode {
-        *self.mode.lock().expect("mode 锁中毒即进程已有 panic")
+        *lock(&self.mode)
     }
 
     /// 模式共享句柄：actor 经此在 turn 进行中切换模式（下一次 decide 生效）。

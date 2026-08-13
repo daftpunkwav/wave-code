@@ -67,9 +67,7 @@ pub(super) async fn actor_loop(
                                     // P2：turn 进行中切换权限模式，下一次
                                     // sandbox 判定即生效。
                                     Op::SetPermissionMode { mode } => {
-                                        *permission_mode_handle
-                                            .lock()
-                                            .expect("mode 锁中毒即进程已有 panic") = mode;
+                                        *lock_mode(&permission_mode_handle) = mode;
                                     }
                                     Op::Shutdown => {
                                         interrupt_handle.store(true, Ordering::SeqCst);
@@ -121,9 +119,7 @@ pub(super) async fn actor_loop(
             // 无活动 turn 的 SetPermissionMode：直接生效（句柄共享，
             // 下一 turn 的 sandbox 判定即用新模式）。
             Op::SetPermissionMode { mode } => {
-                *permission_mode_handle
-                    .lock()
-                    .expect("mode 锁中毒即进程已有 panic") = mode;
+                *lock_mode(&permission_mode_handle) = mode;
             }
             // 无活动 turn 的 Shutdown：直接退出。
             Op::Shutdown => {
@@ -154,6 +150,13 @@ pub(super) async fn actor_loop(
             _ => tracing::warn!(id = %sub.id, "忽略未知 op（M1 未实现）"),
         }
     }
+}
+
+/// 权限模式句柄锁的统一恢复策略（本 crate 单点决策）：临界区是单次
+/// 赋值，持锁期间 panic 不会留下半截不变量——中毒时取回守卫继续执行
+///（panic 已沿原线程传播），不做二次 panic 级联。
+fn lock_mode(m: &std::sync::Mutex<PermissionMode>) -> std::sync::MutexGuard<'_, PermissionMode> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// turn 期间到达的可排队 op（UserInput / Compact / SlashCommand）入

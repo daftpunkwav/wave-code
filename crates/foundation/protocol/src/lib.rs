@@ -108,8 +108,9 @@ impl std::fmt::Display for PermissionMode {
 pub enum ApprovalDecision {
     /// 本次放行（仅当前这一次工具调用）。
     AllowOnce,
-    /// 始终放行并写入 allow 规则。P2 占位：core 当前按 AllowOnce 处理，
-    /// 规则持久化待配置分层（§17.5 M3）落地后接线。
+    /// 始终放行：本次放行，并把该调用形态派生为会话级精确 allow 规则
+    ///（后续同形态调用免审批）。规则活在内存 `Sandbox` 实例上，配置文件
+    /// 持久化待配置分层（§17.5 M3）落地后接线。
     AllowAlways,
     /// 拒绝；reason 回灌模型（可空串，core 会补默认文案）。
     Deny { reason: String },

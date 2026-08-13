@@ -322,7 +322,7 @@ pub trait Tool: Send + Sync {
 
 - **权限模式**（`PermissionMode`，会话级，`/permissions` 或 Shift+Tab 切换）：`default`（写/执行/破坏性逐次审批）、`plan`（仅只读工具可用）、`acceptEdits`（文件编辑自动放行，shell 仍审批）、`bypassPermissions`（全放行，进入时需输入确认短语）。
 - **规则语法**：`allow`/`deny` 列表，条目如 `Bash(git *)`、`Bash(npm run test)`、`File(src/**)`；匹配顺序 deny 优先；命中 allow 免审批。
-- **审批流**：core 发 `ApprovalRequested` 事件 → 前端展示（命令全文/文件 diff/影响说明）→ `ExecApproval` 回填；选项含"本次放行/始终放行（写入规则）/拒绝（附原因回传模型）"。
+- **审批流**：core 发 `ApprovalRequested` 事件 → 前端展示（命令全文/文件 diff/影响说明）→ `ExecApproval` 回填；选项含"本次放行/始终放行（写入会话级精确 allow 规则，后续同形态调用免审批；配置文件持久化待 §17.5 M3）/拒绝（附原因回传模型）"。
 - **session 内状态工具豁免**（P4）：`todo_write` 只改会话内存清单、无外部副作用，各模式免审批直接放行（对齐 deepagents write_todos）；deny 规则判定仍在豁免之前。
 - **OS 级沙箱**（P2，演进路线 §17）：Linux landlock、macOS seatbelt、Windows ACL 受限令牌，与权限模式正交（机制与策略分离）。
 

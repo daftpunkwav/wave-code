@@ -42,14 +42,18 @@ impl RuleScope {
     }
 }
 
-/// 单条权限规则：作用域 + 通配模式（如 `Bash(git *)`、`File(src/**)`）。
+/// 单条权限规则：作用域 + 模式（如 `Bash(git *)`、`File(src/**)`）。
 ///
-/// 通配语义（自实现，零第三方依赖）：`*` 匹配任意字符序列（含 `/` 与空串，
-/// 即不区分 `*` 与 `**`），`?` 匹配单个字符，其余字符字面匹配。
+/// 匹配语义两种：`exact = false`（配置文件规则）走自实现通配——`*`
+/// 匹配任意字符序列（含 `/` 与空串，即不区分 `*` 与 `**`），`?` 匹配
+/// 单个字符，其余字符字面；`exact = true`（"始终放行"派生的会话级
+/// 规则）按字面精确比较——审批放行的命令含 `*` / `?` 时不会退化为
+/// 通配放大放行面。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
     scope: RuleScope,
     pattern: String,
+    exact: bool,
 }
 
 /// 规则解析错误。
@@ -81,7 +85,18 @@ impl Rule {
         Ok(Self {
             scope,
             pattern: pattern.to_owned(),
+            exact: false,
         })
+    }
+
+    /// 精确匹配规则（"始终放行"派生的会话级规则，见
+    /// [`Sandbox::allow_always`]）：按字面比较，不做通配。
+    pub fn exact(scope: RuleScope, pattern: impl Into<String>) -> Self {
+        Self {
+            scope,
+            pattern: pattern.into(),
+            exact: true,
+        }
     }
 
     /// 规则是否命中本次调用：按作用域从输入取候选文本
@@ -94,7 +109,13 @@ impl Rule {
         input
             .get(key)
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|candidate| wildcard_match(&self.pattern, candidate))
+            .is_some_and(|candidate| {
+                if self.exact {
+                    self.pattern == candidate
+                } else {
+                    wildcard_match(&self.pattern, candidate)
+                }
+            })
     }
 }
 
@@ -147,13 +168,15 @@ pub enum Verdict {
 
 /// 会话级权限状态：权限模式 + allow / deny 规则表。
 ///
-/// 模式经 `Arc<Mutex<..>>` 共享（§17.5 M3"sandbox 规则状态同步 Arc 化"的
-/// 首步）：actor 在 turn 进行中也能力经 [`Sandbox::mode_handle`] 切换模式，
-/// 下一次 `decide` 即生效；规则表 P2 为只读快照（"始终放行写规则"待接线）。
+/// 模式与 allow 规则表经 `Arc<Mutex<..>>` 共享（克隆即共享，子代理继承
+/// 同语义）：actor 在 turn 进行中经 [`Sandbox::mode_handle`] 切换模式，
+/// "始终放行"（[`Sandbox::allow_always`]）追加的会话级规则对全部克隆的
+/// 下一次判定生效；allow 规则的配置文件持久化待配置分层（§17.5 M3）
+/// 接线。deny 表为只读快照（构造时解析——显式禁令不可会话内追加）。
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     mode: Arc<Mutex<PermissionMode>>,
-    allow: Vec<Rule>,
+    allow: Arc<Mutex<Vec<Rule>>>,
     deny: Vec<Rule>,
 }
 
@@ -169,7 +192,7 @@ impl Sandbox {
         };
         Ok(Self {
             mode: Arc::new(Mutex::new(mode)),
-            allow: parse_all(allow)?,
+            allow: Arc::new(Mutex::new(parse_all(allow)?)),
             deny: parse_all(deny)?,
         })
     }
@@ -187,6 +210,34 @@ impl Sandbox {
     /// 模式共享句柄：actor 经此在 turn 进行中切换模式（下一次 decide 生效）。
     pub fn mode_handle(&self) -> Arc<Mutex<PermissionMode>> {
         self.mode.clone()
+    }
+
+    /// "始终放行"（`ApprovalDecision::AllowAlways`）：从本次调用派生一条
+    /// **字面精确**的会话级规则追加进 allow 表，返回该规则；输入缺少
+    /// `command` / `path` 文本或为空串时无法派生，返回 `None`（调用方
+    /// 退化为单次放行）。
+    ///
+    /// 语义与边界：
+    /// - 会话级：规则只活在内存中的 `Sandbox` 实例上，进程退出即失效；
+    ///   写入配置文件持久化待配置分层（§17.5 M3）接线；
+    /// - 克隆共享：经 `Arc` 共享，子代理持有的克隆在下一次 `decide` 即
+    ///   看到新规则（与"始终放行"的会话语义一致）；
+    /// - 精确匹配：派生规则 `exact = true`，按字面比较——审批放行的命令
+    ///   含 `*` / `?` 时不会退化为通配放大放行面；
+    /// - deny 优先不受影响：`decide` 先判 deny，会话级 allow 不能豁免
+    ///   显式禁令。
+    pub fn allow_always(&self, tool: &str, input: &serde_json::Value) -> Option<Rule> {
+        let (scope, text) = if tool == "shell" {
+            (RuleScope::Bash, input.get("command")?.as_str()?)
+        } else {
+            (RuleScope::File, input.get("path")?.as_str()?)
+        };
+        if text.is_empty() {
+            return None;
+        }
+        let rule = Rule::exact(scope, text);
+        lock(&self.allow).push(rule.clone());
+        Some(rule)
     }
 
     /// 审批判定：deny 规则优先（任何模式不豁免）→ allow 规则豁免 →
@@ -208,7 +259,7 @@ impl Sandbox {
             };
         }
         // 2. allow 命中：免审批直接放行。
-        if self.allow.iter().any(|r| r.matches(input)) {
+        if lock(&self.allow).iter().any(|r| r.matches(input)) {
             return Verdict::Allow;
         }
         // 2.5 session 内状态工具豁免（P4）：todo_write 只改会话内存清单，
@@ -535,5 +586,104 @@ mod tests {
         };
         assert!(detail.chars().count() <= DETAIL_MAX_CHARS);
         assert!(detail.ends_with('…'));
+    }
+
+    // —— allow_always：会话级精确放行规则 ——
+
+    #[test]
+    fn allow_always_derives_exact_shell_rule() {
+        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let rule = sb
+            .allow_always("shell", &shell_input("cargo test"))
+            .expect("shell 命令可派生规则");
+        assert_eq!(rule.to_string(), "Bash(cargo test)");
+        // 同一条命令：免审批放行
+        assert_eq!(
+            sb.decide("shell", &shell_input("cargo test"), false, false),
+            Verdict::Allow
+        );
+        // 不同命令：仍是 Ask（精确匹配，不放大放行面）
+        assert!(matches!(
+            sb.decide(
+                "shell",
+                &shell_input("cargo test --workspace"),
+                false,
+                false
+            ),
+            Verdict::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn allow_always_treats_wildcard_chars_as_literals() {
+        let sb = Sandbox::without_rules(PermissionMode::Default);
+        sb.allow_always("shell", &shell_input("ls *.rs")).unwrap();
+        // 字面命中放行
+        assert_eq!(
+            sb.decide("shell", &shell_input("ls *.rs"), false, false),
+            Verdict::Allow
+        );
+        // `*` 不做通配：`ls main.rs` 不能搭便车
+        assert!(matches!(
+            sb.decide("shell", &shell_input("ls main.rs"), false, false),
+            Verdict::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn allow_always_derives_file_rule_for_write_tool() {
+        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let rule = sb
+            .allow_always("write_file", &file_input("src/main.rs"))
+            .expect("文件路径可派生规则");
+        assert_eq!(rule.to_string(), "File(src/main.rs)");
+        assert_eq!(
+            sb.decide("write_file", &file_input("src/main.rs"), false, false),
+            Verdict::Allow
+        );
+        assert!(matches!(
+            sb.decide("write_file", &file_input("src/lib.rs"), false, false),
+            Verdict::Ask { .. }
+        ));
+    }
+
+    #[test]
+    fn allow_always_shared_across_clones() {
+        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sub_agent = sb.clone();
+        sb.allow_always("shell", &shell_input("git status"))
+            .unwrap();
+        // 克隆（子代理语义）的下一次判定即看到新规则
+        assert_eq!(
+            sub_agent.decide("shell", &shell_input("git status"), false, false),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn allow_always_does_not_override_deny() {
+        let sb = Sandbox::new(PermissionMode::Default, &[], &["Bash(rm *)".into()]).unwrap();
+        // 即便用户对 `rm -rf build/` 点过"始终放行"，deny 规则仍优先
+        sb.allow_always("shell", &shell_input("rm -rf build/"))
+            .unwrap();
+        assert!(matches!(
+            sb.decide("shell", &shell_input("rm -rf build/"), false, true),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn allow_always_returns_none_without_candidate_text() {
+        let sb = Sandbox::without_rules(PermissionMode::Default);
+        // 缺少 command / path 键
+        assert!(sb.allow_always("shell", &json!({"timeout": 30})).is_none());
+        assert!(sb.allow_always("write_file", &json!({})).is_none());
+        // 空串不派生（避免生成匹配空串的退化规则）
+        assert!(sb.allow_always("shell", &shell_input("")).is_none());
+        // allow 表保持为空
+        assert!(matches!(
+            sb.decide("shell", &shell_input("ls"), false, false),
+            Verdict::Ask { .. }
+        ));
     }
 }

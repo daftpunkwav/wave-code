@@ -340,13 +340,18 @@ impl super::Session {
                         match self.await_approval(&calls[i].0).await {
                             ApprovalWait::Decision(ApprovalDecision::AllowOnce) => {}
                             ApprovalWait::Decision(ApprovalDecision::AllowAlways) => {
-                                // TODO(P2 占位)：allow_always 应把该调用形态写入
-                                // allow 规则；规则持久化待配置分层（§17.5 M3）
-                                // 落地后接线，当前按 allow_once 处理（warn 留痕，
-                                // 不静默吞掉语义差异）。
-                                tracing::warn!(
-                                    "allow_always 的规则写入未接线（P2 占位），按 allow_once 处理"
-                                );
+                                // 始终放行：派生会话级精确 allow 规则，后续
+                                // 同形态调用免审批（见 Sandbox::allow_always
+                                // 语义注释）。输入缺 command/path 无法派生时
+                                // 退化为单次放行，warn 留痕不静默吞掉差异。
+                                match self.cfg.sandbox.allow_always(&calls[i].1, &calls[i].2) {
+                                    Some(rule) => {
+                                        tracing::info!(%rule, "allow_always: 已写入会话级放行规则")
+                                    }
+                                    None => tracing::warn!(
+                                        "allow_always 无法从输入派生规则，按 allow_once 处理"
+                                    ),
+                                }
                             }
                             ApprovalWait::Decision(ApprovalDecision::Deny { reason }) => {
                                 slots[i] = Some(ToolOutput {

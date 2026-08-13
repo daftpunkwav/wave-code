@@ -602,9 +602,8 @@ impl Session {
         self.run_turn_inner(submission_id, text, events, None).await
     }
 
-    /// turn 实现（`allowed_tools`：P7 slash 直调 inline skill 的工具面
-    /// 白名单——turn 级语义：入口统一清零后按需设置；模型经 skill 工具
-    /// 的激活在工具执行内写入同一句柄，见 skills 模块注释）。
+    /// turn 实现：委托 [`TurnRunner`]——把 turn 级状态机与跨轮状态从 Session
+    /// 方法迁入独立执行器（`allowed_tools`：P7 inline skill 工具面白名单）。
     async fn run_turn_inner(
         &mut self,
         submission_id: &str,
@@ -612,484 +611,9 @@ impl Session {
         events: mpsc::Sender<Event>,
         allowed_tools: Option<Vec<String>>,
     ) -> anyhow::Result<StopReason> {
-        // P7：turn 级工具面白名单每 turn 入口清零后按需设置（上一 turn
-        // 的 skill 激活不得泄漏进本轮）。
-        self.cfg
-            .registry
-            .allowlist()
-            .set(allowed_tools.map(|names| names.into_iter().collect()));
-        // 中断标志每 turn 自清：上一 turn 的 interrupt 不影响本轮。
-        self.interrupted.store(false, Ordering::SeqCst);
-        // 审批槽每 turn 自清：上一 turn 的迟到决策不得被本轮误消费。
-        self.approval_gate.clear();
-        // P5：子代理事件汇挂接——SubagentStarted/Completed 以本 turn 的
-        // submission_id 回填，前端可见子代理起止（中间过程不进父事件流）。
-        if let Some(mgr) = &self.subagents {
-            mgr.set_event_sink(events.clone(), submission_id);
-        }
-
-        // 步骤 1：用户消息入历史，发出 TurnStarted。
-        // P7：UserPromptSubmit hook（可阻塞，SPEC §9）：阻塞时输入不进
-        // 历史、不发起采样，stderr 以 Error 事件展示给用户（此处无模型
-        // 可回灌——TurnStarted 未发，补 TurnCompleted 防前端悬挂）。
-        if let Some(engine) = &self.cfg.hooks {
-            let report = engine
-                .run(
-                    wavecode_hooks::HookEventPoint::UserPromptSubmit,
-                    &wavecode_hooks::HookInput {
-                        cwd: &self.cfg.cwd,
-                        tool_name: None,
-                        tool_input: None,
-                        tool_output: None,
-                    },
-                )
-                .await;
-            emit_hook_warnings(&events, submission_id, &report.warnings).await;
-            if let wavecode_hooks::HookVerdict::Block(stderr) = report.verdict {
-                let reason = if stderr.is_empty() {
-                    "(hook 未给出原因)".to_owned()
-                } else {
-                    stderr
-                };
-                emit(
-                    &events,
-                    submission_id,
-                    EventMsg::Error {
-                        message: format!("输入被 UserPromptSubmit hook 拦截: {reason}"),
-                        recoverable: true,
-                    },
-                )
-                .await;
-                emit(
-                    &events,
-                    submission_id,
-                    EventMsg::TurnCompleted {
-                        stop_reason: StopReason::Completed,
-                    },
-                )
-                .await;
-                return Ok(StopReason::Completed);
-            }
-        }
-        let turn_id = uuid::Uuid::new_v4().to_string();
-        self.push_message(Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: text.to_owned(),
-            }],
-        });
-        emit(
-            &events,
-            submission_id,
-            EventMsg::TurnStarted {
-                turn_id: turn_id.clone(),
-            },
-        )
-        .await;
-        tracing::debug!(turn_id = %turn_id, submission_id, "turn 开始");
-
-        // 系统提示词不再在 turn 入口构建一次——P4 起每轮采样前经
-        // `prompt::build_system_prompt` 重建（清单快照在轮间可变），见步骤 2。
-        // deny_env 由装配层注入（cli bootstrap 注入 provider 的 env_key）；
-        // shell 工具层的敏感后缀模式剔除（sanitize_env）在此基础上叠加生效。
-        let tool_ctx = ToolCtx {
-            cwd: self.cfg.cwd.clone(),
-            deny_env: self.cfg.deny_env.clone(),
-        };
-        // 上下文占用估算：末轮 input_tokens + 各轮 output_tokens 累计。
-        // 单轮内可有多个 MessageComplete（中途 message_delta 的 stop_reason 为
-        // 空串），其 output_tokens 为该轮累计值——轮内覆盖取末次，跨轮再累加。
-        // last_input_tokens 每轮采样后必先赋值才 break，故 break 路径 expect 安全。
-        let mut last_input_tokens: Option<u64> = None;
-        let mut total_output_tokens = 0u64;
-        // P3 状态：预算警告 / 自动压缩每 turn 去重；续写与 reactive compact
-        // 为连续计数（成功即清零 / 达上限熔断）。
-        let mut budget_warned = false;
-        let mut budget_compacted = false;
-        let mut continuations = 0u32;
-        let mut reactive_compacts = 0u32;
-        // P4 stop steering：连续提醒计数（模型再次发起 tool_use 即清零）。
-        let mut todo_steerings = 0u32;
-        // P7 Stop hook：连续阻塞计数（上限后放行，同 steering 防死循环纪律）。
-        let mut stop_hook_blocks = 0u32;
-
-        let stop_reason = loop {
-            // 安全点：循环头检查中断。触发场景：步骤 5 串行工具段中断后
-            // 回到循环头——结果消息已完整回灌（配对完整），不再发起多余
-            // 采样请求，直接收尾。
-            if self.interrupted.load(Ordering::SeqCst) {
-                emit(
-                    &events,
-                    submission_id,
-                    EventMsg::TurnCompleted {
-                        stop_reason: StopReason::Interrupted,
-                    },
-                )
-                .await;
-                return Ok(StopReason::Interrupted);
-            }
-
-            // —— P5：后台子代理终态通知注入（SPEC §5.3 <task-notification>）——
-            // 注入点取循环头（与 P4 steering 同 push_message 路径）：此处历史
-            // 尾部必为 user 消息（turn 输入 / 工具结果 / 上轮注入）或无
-            // tool_use 的 assistant 消息（终态分支），tool_use 配对安全。
-            // turn 已结束才到达的通知留在队列，下一 turn 循环头注入。
-            if let Some(mgr) = &self.subagents {
-                for note in mgr.drain_notifications() {
-                    self.push_message(Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text { text: note }],
-                    });
-                }
-            }
-
-            // —— PreTurn 预算检查（P3，SPEC §5.1/§6 三级阈值）——
-            // 有 usage 用 usage（input_tokens 是覆盖完整历史的权威值）；
-            // 首个 turn / 压缩后未再采样时回退字符估算 + 系统开销定额。
-            let used = match last_input_tokens {
-                Some(input) => input + total_output_tokens,
-                None => self.usage_carry.unwrap_or_else(|| {
-                    wavecode_context::estimate_tokens(
-                        &self.messages,
-                        self.cfg.context.estimate_chars_per_token,
-                    ) + wavecode_context::SYSTEM_OVERHEAD_TOKENS
-                }),
-            };
-            if let Err(e) = self
-                .check_budget(
-                    &events,
-                    submission_id,
-                    used,
-                    &mut budget_warned,
-                    &mut budget_compacted,
-                )
-                .await
-            {
-                // 阻塞线压缩失败：无法再安全采样，收尾并上抛。
-                fail_turn(&events, submission_id, format!("{e:#}")).await;
-                return Err(e);
-            }
-
-            // —— 步骤 2：组装请求，发起流式采样 ——
-            // messages 为 O(1) Arc 指针克隆的当轮快照（§17.5 M4：取代逐轮
-            // 深拷贝的 O(n²)）；provider 在 stream() 内即完成序列化。
-            // 系统提示词每轮重建（P4，SPEC §5.4）：任务清单快照在轮间可变，
-            // 注入在 system 尾部；清单不变时整串字节稳定（prompt cache 纪律）。
-            // P6 记忆槽位（WAVECODE.md / 索引）为启动时收集的会话内常量。
-            let (instruction_memory, memory_index) = match &self.cfg.memory {
-                Some(mem) => (mem.instruction_memory.as_str(), mem.memory_index.as_str()),
-                None => ("", ""),
-            };
-            let system = crate::prompt::build_system_prompt(
-                &self.cfg.cwd,
-                instruction_memory,
-                &self.skills_catalog,
-                memory_index,
-                &self.cfg.registry.todos().snapshot(),
-            )
-            .await;
-            let req = ChatRequest {
-                model: self.cfg.model_name.clone(),
-                system,
-                messages: self.messages.clone(),
-                tools: self.cfg.registry.specs(),
-                max_tokens: self.cfg.max_output_tokens,
-            };
-            let mut stream = match self.cfg.model.stream(req).await {
-                Ok(s) => {
-                    reactive_compacts = 0; // 采样成功：连续失败计数清零
-                    s
-                }
-                Err(e) => {
-                    // reactive compact（SPEC §5.2）：prompt_too_long 类错误
-                    // 压缩后以压缩历史重试，连续 3 次熔断并上报。
-                    if is_prompt_too_long(&e) {
-                        reactive_compacts += 1;
-                        if reactive_compacts >= MAX_REACTIVE_COMPACT_RETRIES {
-                            fail_turn(
-                                &events,
-                                submission_id,
-                                format!(
-                                    "prompt_too_long 连续 {reactive_compacts} 次，压缩重试熔断: {e}"
-                                ),
-                            )
-                            .await;
-                            return Err(e.into());
-                        }
-                        tracing::warn!(
-                            attempt = reactive_compacts,
-                            "prompt_too_long，压缩后以压缩历史重试"
-                        );
-                        match self
-                            .compact_with_trigger(&events, submission_id, CompactTrigger::Reactive)
-                            .await
-                        {
-                            // 以压缩历史回到循环头（中断检查 → 预算检查 → 重试）。
-                            Ok(_) => continue,
-                            Err(ce) => {
-                                fail_turn(
-                                    &events,
-                                    submission_id,
-                                    format!("reactive compact 失败: {ce:#}"),
-                                )
-                                .await;
-                                return Err(ce);
-                            }
-                        }
-                    }
-                    // TurnStarted 已发出：发收尾事件防前端悬挂，
-                    // 错误本身仍返回调用方。
-                    fail_turn(&events, submission_id, e.to_string()).await;
-                    return Err(e.into());
-                }
-            };
-
-            // —— 步骤 3：消费流，累计内容块与终态 ——
-            let mut round = RoundBlocks::default();
-            let mut stop_reason = String::new();
-            let mut round_input_tokens = 0u64;
-            let mut round_output_tokens = 0u64;
-            while let Some(item) = stream.next().await {
-                // 安全点：流消费循环内检查中断，历史保留部分结果。
-                if self.interrupted.load(Ordering::SeqCst) {
-                    return Ok(self.finish_interrupted(&events, submission_id, round).await);
-                }
-                let event = match item {
-                    Ok(ev) => ev,
-                    Err(e) => {
-                        // 流中途失败同样收尾；本轮部分产出未入历史
-                        //（assistant 消息在步骤 4 才组装），无配对风险。
-                        fail_turn(&events, submission_id, e.to_string()).await;
-                        return Err(e.into());
-                    }
-                };
-                match event {
-                    StreamEvent::TextDelta { text } => {
-                        emit(
-                            &events,
-                            submission_id,
-                            EventMsg::AgentMessageDelta { text: text.clone() },
-                        )
-                        .await;
-                        round.cur_text.push_str(&text);
-                    }
-                    StreamEvent::ToolUseBegin { id, name } => {
-                        // 防御：畸形流未 BlockEnd 就开新块，先关闭上一个。
-                        round.close_open();
-                        round.cur_tool = Some((id, name, String::new()));
-                    }
-                    StreamEvent::ToolUseInputDelta { partial_json } => {
-                        if let Some((_, _, buf)) = round.cur_tool.as_mut() {
-                            buf.push_str(&partial_json);
-                        }
-                    }
-                    StreamEvent::BlockEnd => round.close_open(),
-                    // 回合终态取最后一个非空 stop_reason（T3 锁定行为）。
-                    StreamEvent::MessageComplete {
-                        stop_reason: sr,
-                        usage,
-                    } => {
-                        if !sr.is_empty() {
-                            stop_reason = sr;
-                        }
-                        round_input_tokens = usage.input_tokens;
-                        round_output_tokens = usage.output_tokens;
-                    }
-                }
-            }
-            last_input_tokens = Some(round_input_tokens);
-            total_output_tokens += round_output_tokens;
-
-            // —— 步骤 4：组装 assistant 消息入历史，发出全量文本 ——
-            let blocks = round.finish();
-            let full_text: String = blocks
-                .iter()
-                .filter_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            let has_tool_use = blocks
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
-            // 空响应（畸形流零内容块）不入历史：Anthropic 拒绝空 content
-            // 数组（400），入历史会污染后续每个 turn；终态收尾照常。
-            if !blocks.is_empty() {
-                self.push_message(Message {
-                    role: Role::Assistant,
-                    content: blocks,
-                });
-            }
-            emit(
-                &events,
-                submission_id,
-                EventMsg::AgentMessageComplete { text: full_text },
-            )
-            .await;
-
-            if !has_tool_use {
-                // max_output_tokens 续写（P3，SPEC §5.2）：截断后以续写提示
-                // 继续，最多 MAX_CONTINUATIONS 次；中断标志由 continue 后的
-                // 循环头安全点捕获。
-                if stop_reason == "max_tokens" && continuations < MAX_CONTINUATIONS {
-                    continuations += 1;
-                    emit(
-                        &events,
-                        submission_id,
-                        EventMsg::Warning {
-                            message: format!(
-                                "output truncated at max_tokens; continuing ({continuations}/{MAX_CONTINUATIONS})"
-                            ),
-                        },
-                    )
-                    .await;
-                    self.push_message(Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text {
-                            text: CONTINUATION_PROMPT.to_owned(),
-                        }],
-                    });
-                    continue;
-                }
-                // P4 stop steering（防提前收工，deepagents planning）：终态
-                // 无 tool_use 且清单仍有 pending/in_progress 项时，注入提醒
-                // 消息继续 turn；连续 MAX_TODO_STEERINGS 次后放行（防死循环——
-                // 模型可能坚持任务已完成但忘了更新清单）。中断标志由
-                // continue 后的循环头安全点捕获。
-                let (pending, in_progress) = self.cfg.registry.todos().unfinished();
-                if pending + in_progress > 0 && todo_steerings < MAX_TODO_STEERINGS {
-                    todo_steerings += 1;
-                    emit(
-                        &events,
-                        submission_id,
-                        EventMsg::Warning {
-                            message: format!(
-                                "todo list has {} unfinished item(s); nudging the model to continue ({todo_steerings}/{MAX_TODO_STEERINGS})",
-                                pending + in_progress
-                            ),
-                        },
-                    )
-                    .await;
-                    let reminder = format!(
-                        "{TODO_STEERING_PROMPT}\nCurrent task list:\n{}",
-                        wavecode_tools::format_todos(&self.cfg.registry.todos().snapshot())
-                    );
-                    self.push_message(Message {
-                        role: Role::User,
-                        content: vec![ContentBlock::Text { text: reminder }],
-                    });
-                    continue;
-                }
-                // P7 Stop hook（SPEC §9，可阻塞）：与 todo steering 的次序
-                // 择一——先 todo steering（上方，清单未完成时模型层面继续），
-                // 都通过后才由 Stop hook 外部门禁最后把关。阻塞时 stderr 作为
-                // user 消息回灌模型继续 turn；连续上限后放行（同 steering
-                // 纪律：hook 配置错误不能锁死会话）。
-                if let Some(engine) = self.cfg.hooks.clone() {
-                    let report = engine
-                        .run(
-                            wavecode_hooks::HookEventPoint::Stop,
-                            &wavecode_hooks::HookInput {
-                                cwd: &self.cfg.cwd,
-                                tool_name: None,
-                                tool_input: None,
-                                tool_output: None,
-                            },
-                        )
-                        .await;
-                    emit_hook_warnings(&events, submission_id, &report.warnings).await;
-                    if let wavecode_hooks::HookVerdict::Block(stderr) = report.verdict
-                        && stop_hook_blocks < MAX_STOP_HOOK_BLOCKS
-                    {
-                        stop_hook_blocks += 1;
-                        emit(
-                            &events,
-                            submission_id,
-                            EventMsg::Warning {
-                                message: format!(
-                                    "Stop hook blocked turn completion ({stop_hook_blocks}/{MAX_STOP_HOOK_BLOCKS})"
-                                ),
-                            },
-                        )
-                        .await;
-                        let reason = if stderr.is_empty() {
-                            "(hook 未给出原因)".to_owned()
-                        } else {
-                            stderr
-                        };
-                        self.push_message(Message {
-                            role: Role::User,
-                            content: vec![ContentBlock::Text {
-                                text: format!("A Stop hook blocked turn completion:\n{reason}"),
-                            }],
-                        });
-                        continue;
-                    }
-                }
-                break stop_reason; // 无工具调用且非续写/steering/Stop 阻塞情形：进入步骤 6 终态
-            }
-            // 模型再次发起 tool_use：steering 连续计数清零。
-            todo_steerings = 0;
-
-            // 安全点：工具执行前检查中断。assistant 消息已入历史，
-            // 为悬空 tool_use 合成 interrupted 结果保持配对。
-            if self.interrupted.load(Ordering::SeqCst) {
-                self.push_pairing_results(round.preset_results, "interrupted by user");
-                emit(
-                    &events,
-                    submission_id,
-                    EventMsg::TurnCompleted {
-                        stop_reason: StopReason::Interrupted,
-                    },
-                )
-                .await;
-                return Ok(StopReason::Interrupted);
-            }
-
-            // —— 步骤 5：工具编排执行，结果作为一个 user 消息回灌，回步骤 2 ——
-            let results = self
-                .execute_tool_calls(&events, submission_id, round.preset_results, &tool_ctx)
-                .await;
-            self.push_message(Message {
-                role: Role::User,
-                content: results,
-            });
-        };
-
-        // —— 步骤 6：终态（end_turn 或无 tool_use 的其他终态）——
-        let last_input_tokens = last_input_tokens.expect("每轮采样后必先赋值才 break");
-        if stop_reason == "max_tokens" {
-            // 续写已达上限仍截断：警告后按 Completed 收尾（历史保留部分产出）。
-            emit(
-                &events,
-                submission_id,
-                EventMsg::Warning {
-                    message: "output truncated: max_tokens reached".into(),
-                },
-            )
-            .await;
-        }
-        // 权威占用跨 turn 结转：下一 turn 首次 PreTurn 检查用。
-        self.usage_carry = Some(last_input_tokens + total_output_tokens);
-        emit(
-            &events,
-            submission_id,
-            EventMsg::TokenCount {
-                used: last_input_tokens + total_output_tokens,
-                window: self.cfg.context_window,
-            },
-        )
-        .await;
-        emit(
-            &events,
-            submission_id,
-            EventMsg::TurnCompleted {
-                stop_reason: StopReason::Completed,
-            },
-        )
-        .await;
-        tracing::debug!(turn_id = %turn_id, %stop_reason, "turn 结束");
-        Ok(StopReason::Completed)
+        TurnRunner::new(self)
+            .run(submission_id, text, events, allowed_tools)
+            .await
     }
 
     /// 取中断标志的共享句柄（T8 驱动模式：驱动 turn 前克隆，`select!`
@@ -1608,6 +1132,495 @@ impl Session {
             });
         }
         results
+    }
+}
+
+/// turn 执行器：收编 turn 级跨轮状态（原 `run_turn_inner` 的局部变量），
+/// 把"采样→工具编排→续写/steering→收尾"状态机从 Session 方法迁入独立类型。
+///
+/// 持有 `&mut Session`，经字段路径访问共享状态（messages/interrupted/
+/// approval_gate/cfg）。`round`（每轮采样缓冲，`finish` 已 take）与
+/// `budget_warned`/`budget_compacted` 为 `run` 方法局部、不入字段——防跨轮
+/// 残留污染（SEC-002 / B-NEW-1）。`events`/`submission_id` 作 `run` 参数，
+/// 避免与 `session` 字段形成跨 await 的 disjoint borrow 冲突。
+struct TurnRunner<'a> {
+    session: &'a mut Session,
+    tool_ctx: ToolCtx,
+    /// 末轮 input_tokens；每轮采样后赋值，break 路径 expect 安全。
+    last_input_tokens: Option<u64>,
+    /// 各轮 output_tokens 累计。
+    total_output_tokens: u64,
+    /// max_tokens 续写连续计数（成功即清零 / 达上限熔断）。
+    continuations: u32,
+    /// reactive compact 连续失败计数（采样成功即清零 / 达上限熔断）。
+    reactive_compacts: u32,
+    /// todo steering 连续提醒计数（模型再次 tool_use 即清零）。
+    todo_steerings: u32,
+    /// Stop hook 连续阻塞计数（上限后放行，防死循环）。
+    stop_hook_blocks: u32,
+}
+
+impl<'a> TurnRunner<'a> {
+    fn new(session: &'a mut Session) -> Self {
+        let tool_ctx = ToolCtx {
+            cwd: session.cfg.cwd.clone(),
+            deny_env: session.cfg.deny_env.clone(),
+        };
+        Self {
+            session,
+            tool_ctx,
+            last_input_tokens: None,
+            total_output_tokens: 0,
+            continuations: 0,
+            reactive_compacts: 0,
+            todo_steerings: 0,
+            stop_hook_blocks: 0,
+        }
+    }
+
+    async fn run(
+        mut self,
+        submission_id: &str,
+        text: &str,
+        events: mpsc::Sender<Event>,
+        allowed_tools: Option<Vec<String>>,
+    ) -> anyhow::Result<StopReason> {
+        // P7：turn 级工具面白名单每 turn 入口清零后按需设置（上一 turn
+        // 的 skill 激活不得泄漏进本轮）。
+        self.session
+            .cfg
+            .registry
+            .allowlist()
+            .set(allowed_tools.map(|names| names.into_iter().collect()));
+        // SEC-002 单点不变量：中断标志 / 审批槽每 turn 自清，仅此一处——
+        // 不得挪入任何可能被多次调用的 helper（用户中断被吞 / 已批准决策丢失）。
+        self.session.interrupted.store(false, Ordering::SeqCst);
+        self.session.approval_gate.clear();
+        // P5：子代理事件汇挂接——SubagentStarted/Completed 以本 turn 的
+        // submission_id 回填。
+        if let Some(mgr) = &self.session.subagents {
+            mgr.set_event_sink(events.clone(), submission_id);
+        }
+
+        // 步骤 1：用户消息入历史，发出 TurnStarted。
+        // P7：UserPromptSubmit hook（可阻塞）：阻塞时输入不进历史、不发起
+        // 采样，stderr 以 Error 事件展示（TurnStarted 未发，补 TurnCompleted
+        // 防前端悬挂）。
+        if let Some(engine) = &self.session.cfg.hooks {
+            let report = engine
+                .run(
+                    wavecode_hooks::HookEventPoint::UserPromptSubmit,
+                    &wavecode_hooks::HookInput {
+                        cwd: &self.session.cfg.cwd,
+                        tool_name: None,
+                        tool_input: None,
+                        tool_output: None,
+                    },
+                )
+                .await;
+            emit_hook_warnings(&events, submission_id, &report.warnings).await;
+            if let wavecode_hooks::HookVerdict::Block(stderr) = report.verdict {
+                let reason = if stderr.is_empty() {
+                    "(hook 未给出原因)".to_owned()
+                } else {
+                    stderr
+                };
+                emit(
+                    &events,
+                    submission_id,
+                    EventMsg::Error {
+                        message: format!("输入被 UserPromptSubmit hook 拦截: {reason}"),
+                        recoverable: true,
+                    },
+                )
+                .await;
+                emit(
+                    &events,
+                    submission_id,
+                    EventMsg::TurnCompleted {
+                        stop_reason: StopReason::Completed,
+                    },
+                )
+                .await;
+                return Ok(StopReason::Completed);
+            }
+        }
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        self.session.push_message(Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }],
+        });
+        emit(
+            &events,
+            submission_id,
+            EventMsg::TurnStarted {
+                turn_id: turn_id.clone(),
+            },
+        )
+        .await;
+        tracing::debug!(turn_id = %turn_id, submission_id, "turn 开始");
+
+        // 上下文占用估算：末轮 input_tokens + 各轮 output_tokens 累计。
+        let mut budget_warned = false;
+        let mut budget_compacted = false;
+
+        let stop_reason = loop {
+            // 安全点①：循环头检查中断。触发场景：步骤 5 串行工具段中断后
+            // 回到循环头——结果消息已完整回灌（配对完整），不再发起多余采样。
+            if self.session.interrupted.load(Ordering::SeqCst) {
+                emit(
+                    &events,
+                    submission_id,
+                    EventMsg::TurnCompleted {
+                        stop_reason: StopReason::Interrupted,
+                    },
+                )
+                .await;
+                return Ok(StopReason::Interrupted);
+            }
+
+            // —— P5：后台子代理终态通知注入（<task-notification>）——
+            if let Some(mgr) = &self.session.subagents {
+                for note in mgr.drain_notifications() {
+                    self.session.push_message(Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text { text: note }],
+                    });
+                }
+            }
+
+            // —— PreTurn 预算检查（P3，三级阈值）——
+            let used = match self.last_input_tokens {
+                Some(input) => input + self.total_output_tokens,
+                None => self.session.usage_carry.unwrap_or_else(|| {
+                    wavecode_context::estimate_tokens(
+                        &self.session.messages,
+                        self.session.cfg.context.estimate_chars_per_token,
+                    ) + wavecode_context::SYSTEM_OVERHEAD_TOKENS
+                }),
+            };
+            if let Err(e) = self
+                .session
+                .check_budget(
+                    &events,
+                    submission_id,
+                    used,
+                    &mut budget_warned,
+                    &mut budget_compacted,
+                )
+                .await
+            {
+                fail_turn(&events, submission_id, format!("{e:#}")).await;
+                return Err(e);
+            }
+
+            // —— 步骤 2：组装请求，发起流式采样 ——
+            let (instruction_memory, memory_index) = match &self.session.cfg.memory {
+                Some(mem) => (mem.instruction_memory.as_str(), mem.memory_index.as_str()),
+                None => ("", ""),
+            };
+            let system = crate::prompt::build_system_prompt(
+                &self.session.cfg.cwd,
+                instruction_memory,
+                &self.session.skills_catalog,
+                memory_index,
+                &self.session.cfg.registry.todos().snapshot(),
+            )
+            .await;
+            let req = ChatRequest {
+                model: self.session.cfg.model_name.clone(),
+                system,
+                messages: self.session.messages.clone(),
+                tools: self.session.cfg.registry.specs(),
+                max_tokens: self.session.cfg.max_output_tokens,
+            };
+            let mut stream = match self.session.cfg.model.stream(req).await {
+                Ok(s) => {
+                    self.reactive_compacts = 0; // 采样成功：连续失败计数清零
+                    s
+                }
+                Err(e) => {
+                    // reactive compact：prompt_too_long 压缩后重试，连续 3 次熔断。
+                    if is_prompt_too_long(&e) {
+                        self.reactive_compacts += 1;
+                        if self.reactive_compacts >= MAX_REACTIVE_COMPACT_RETRIES {
+                            fail_turn(
+                                &events,
+                                submission_id,
+                                format!(
+                                    "prompt_too_long 连续 {} 次，压缩重试熔断: {e}",
+                                    self.reactive_compacts
+                                ),
+                            )
+                            .await;
+                            return Err(e.into());
+                        }
+                        tracing::warn!(
+                            attempt = self.reactive_compacts,
+                            "prompt_too_long，压缩后以压缩历史重试"
+                        );
+                        match self
+                            .session
+                            .compact_with_trigger(&events, submission_id, CompactTrigger::Reactive)
+                            .await
+                        {
+                            Ok(_) => continue,
+                            Err(ce) => {
+                                fail_turn(
+                                    &events,
+                                    submission_id,
+                                    format!("reactive compact 失败: {ce:#}"),
+                                )
+                                .await;
+                                return Err(ce);
+                            }
+                        }
+                    }
+                    fail_turn(&events, submission_id, e.to_string()).await;
+                    return Err(e.into());
+                }
+            };
+
+            // —— 步骤 3：消费流，累计内容块与终态 ——
+            let mut round = RoundBlocks::default();
+            let mut stop_reason = String::new();
+            let mut round_input_tokens = 0u64;
+            let mut round_output_tokens = 0u64;
+            while let Some(item) = stream.next().await {
+                // 安全点②：流消费循环内检查中断，历史保留部分结果。
+                if self.session.interrupted.load(Ordering::SeqCst) {
+                    return Ok(self
+                        .session
+                        .finish_interrupted(&events, submission_id, round)
+                        .await);
+                }
+                let event = match item {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        fail_turn(&events, submission_id, e.to_string()).await;
+                        return Err(e.into());
+                    }
+                };
+                match event {
+                    StreamEvent::TextDelta { text } => {
+                        emit(
+                            &events,
+                            submission_id,
+                            EventMsg::AgentMessageDelta { text: text.clone() },
+                        )
+                        .await;
+                        round.cur_text.push_str(&text);
+                    }
+                    StreamEvent::ToolUseBegin { id, name } => {
+                        round.close_open();
+                        round.cur_tool = Some((id, name, String::new()));
+                    }
+                    StreamEvent::ToolUseInputDelta { partial_json } => {
+                        if let Some((_, _, buf)) = round.cur_tool.as_mut() {
+                            buf.push_str(&partial_json);
+                        }
+                    }
+                    StreamEvent::BlockEnd => round.close_open(),
+                    StreamEvent::MessageComplete {
+                        stop_reason: sr,
+                        usage,
+                    } => {
+                        if !sr.is_empty() {
+                            stop_reason = sr;
+                        }
+                        round_input_tokens = usage.input_tokens;
+                        round_output_tokens = usage.output_tokens;
+                    }
+                }
+            }
+            self.last_input_tokens = Some(round_input_tokens);
+            self.total_output_tokens += round_output_tokens;
+
+            // —— 步骤 4：组装 assistant 消息入历史 ——
+            let blocks = round.finish();
+            let full_text: String = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let has_tool_use = blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+            // 空响应不入历史（Anthropic 拒绝空 content）。
+            if !blocks.is_empty() {
+                self.session.push_message(Message {
+                    role: Role::Assistant,
+                    content: blocks,
+                });
+            }
+            emit(
+                &events,
+                submission_id,
+                EventMsg::AgentMessageComplete { text: full_text },
+            )
+            .await;
+
+            if !has_tool_use {
+                // max_tokens 续写：截断后以续写提示继续，最多 MAX_CONTINUATIONS 次。
+                if stop_reason == "max_tokens" && self.continuations < MAX_CONTINUATIONS {
+                    self.continuations += 1;
+                    emit(
+                        &events,
+                        submission_id,
+                        EventMsg::Warning {
+                            message: format!(
+                                "output truncated at max_tokens; continuing ({}/{MAX_CONTINUATIONS})",
+                                self.continuations
+                            ),
+                        },
+                    )
+                    .await;
+                    self.session.push_message(Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text {
+                            text: CONTINUATION_PROMPT.to_owned(),
+                        }],
+                    });
+                    continue;
+                }
+                // P4 stop steering：终态无 tool_use 且清单仍有未完成项时注入提醒。
+                let (pending, in_progress) = self.session.cfg.registry.todos().unfinished();
+                if pending + in_progress > 0 && self.todo_steerings < MAX_TODO_STEERINGS {
+                    self.todo_steerings += 1;
+                    emit(
+                        &events,
+                        submission_id,
+                        EventMsg::Warning {
+                            message: format!(
+                                "todo list has {} unfinished item(s); nudging the model to continue ({}/{MAX_TODO_STEERINGS})",
+                                pending + in_progress, self.todo_steerings
+                            ),
+                        },
+                    )
+                    .await;
+                    let reminder = format!(
+                        "{TODO_STEERING_PROMPT}\nCurrent task list:\n{}",
+                        wavecode_tools::format_todos(&self.session.cfg.registry.todos().snapshot())
+                    );
+                    self.session.push_message(Message {
+                        role: Role::User,
+                        content: vec![ContentBlock::Text { text: reminder }],
+                    });
+                    continue;
+                }
+                // P7 Stop hook（可阻塞）：与 todo steering 次序择一——都通过后
+                // 由 Stop hook 外部门禁最后把关。阻塞时 stderr 回灌模型继续。
+                if let Some(engine) = self.session.cfg.hooks.clone() {
+                    let report = engine
+                        .run(
+                            wavecode_hooks::HookEventPoint::Stop,
+                            &wavecode_hooks::HookInput {
+                                cwd: &self.session.cfg.cwd,
+                                tool_name: None,
+                                tool_input: None,
+                                tool_output: None,
+                            },
+                        )
+                        .await;
+                    emit_hook_warnings(&events, submission_id, &report.warnings).await;
+                    if let wavecode_hooks::HookVerdict::Block(stderr) = report.verdict
+                        && self.stop_hook_blocks < MAX_STOP_HOOK_BLOCKS
+                    {
+                        self.stop_hook_blocks += 1;
+                        emit(
+                            &events,
+                            submission_id,
+                            EventMsg::Warning {
+                                message: format!(
+                                    "Stop hook blocked turn completion ({}/{MAX_STOP_HOOK_BLOCKS})",
+                                    self.stop_hook_blocks
+                                ),
+                            },
+                        )
+                        .await;
+                        let reason = if stderr.is_empty() {
+                            "(hook 未给出原因)".to_owned()
+                        } else {
+                            stderr
+                        };
+                        self.session.push_message(Message {
+                            role: Role::User,
+                            content: vec![ContentBlock::Text {
+                                text: format!("A Stop hook blocked turn completion:\n{reason}"),
+                            }],
+                        });
+                        continue;
+                    }
+                }
+                break stop_reason;
+            }
+            // 模型再次发起 tool_use：steering 连续计数清零。
+            self.todo_steerings = 0;
+
+            // 安全点③：工具执行前检查中断。为悬空 tool_use 合成 interrupted
+            // 结果保持配对。
+            if self.session.interrupted.load(Ordering::SeqCst) {
+                self.session
+                    .push_pairing_results(round.preset_results, "interrupted by user");
+                emit(
+                    &events,
+                    submission_id,
+                    EventMsg::TurnCompleted {
+                        stop_reason: StopReason::Interrupted,
+                    },
+                )
+                .await;
+                return Ok(StopReason::Interrupted);
+            }
+
+            // —— 步骤 5：工具编排执行，结果作为一个 user 消息回灌 ——
+            let results = self
+                .session
+                .execute_tool_calls(&events, submission_id, round.preset_results, &self.tool_ctx)
+                .await;
+            self.session.push_message(Message {
+                role: Role::User,
+                content: results,
+            });
+        };
+
+        // —— 步骤 6：终态 ——
+        let last_input_tokens = self.last_input_tokens.expect("每轮采样后必先赋值才 break");
+        if stop_reason == "max_tokens" {
+            emit(
+                &events,
+                submission_id,
+                EventMsg::Warning {
+                    message: "output truncated: max_tokens reached".into(),
+                },
+            )
+            .await;
+        }
+        // 权威占用跨 turn 结转。
+        self.session.usage_carry = Some(last_input_tokens + self.total_output_tokens);
+        emit(
+            &events,
+            submission_id,
+            EventMsg::TokenCount {
+                used: last_input_tokens + self.total_output_tokens,
+                window: self.session.cfg.context_window,
+            },
+        )
+        .await;
+        emit(
+            &events,
+            submission_id,
+            EventMsg::TurnCompleted {
+                stop_reason: StopReason::Completed,
+            },
+        )
+        .await;
+        tracing::debug!(turn_id = %turn_id, %stop_reason, "turn 结束");
+        Ok(StopReason::Completed)
     }
 }
 

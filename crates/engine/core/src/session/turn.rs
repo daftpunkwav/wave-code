@@ -5,7 +5,7 @@ use super::*;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use wavecode_llm::{ChatRequest, ContentBlock, Message, Role, StreamEvent};
-use wavecode_protocol::{Event, EventMsg, StopReason};
+use wavecode_protocol::{CompactTrigger, Event, EventMsg, StopReason};
 use wavecode_tools::ToolCtx;
 
 /// turn 执行器：收编 turn 级跨轮状态（原 `run_turn_inner` 的局部变量），
@@ -507,3 +507,74 @@ impl super::Session {
         Arc::make_mut(&mut self.messages).push(msg);
     }
 }
+
+/// 一轮流式采样中累计的内容块产物。
+#[derive(Default)]
+pub(super) struct RoundBlocks {
+    /// 已关闭的内容块（text / tool_use），按模型产出序。
+    pub(super) blocks: Vec<ContentBlock>,
+    /// 当前未关闭文本块的累计内容。
+    pub(super) cur_text: String,
+    /// 当前未关闭 tool_use 块：`(id, name, partial_json 缓冲)`。
+    pub(super) cur_tool: Option<(String, String, String)>,
+    /// tool input JSON 解析失败的预置结果：不实际执行，直接回灌 is_error。
+    pub(super) preset_results: Vec<ContentBlock>,
+}
+
+impl RoundBlocks {
+    /// 关闭当前打开的块（`BlockEnd` 语义；流提前结束时也用作收尾）。
+    fn close_open(&mut self) {
+        if let Some((id, name, raw)) = self.cur_tool.take() {
+            match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(input) => self.blocks.push(ContentBlock::ToolUse { id, name, input }),
+                Err(e) => {
+                    // 解析失败不中断 turn：ToolUse 以空对象入历史保持配对，
+                    // 预置 is_error 结果直接回灌，不实际执行。
+                    let content = format!("invalid tool input json: {raw} ({e})");
+                    self.blocks.push(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name,
+                        input: serde_json::json!({}),
+                    });
+                    self.preset_results.push(ContentBlock::ToolResult {
+                        tool_use_id: id,
+                        content,
+                        is_error: true,
+                    });
+                }
+            }
+        } else if !self.cur_text.is_empty() {
+            self.blocks.push(ContentBlock::Text {
+                text: std::mem::take(&mut self.cur_text),
+            });
+        }
+    }
+
+    /// 流耗尽后收尾：关闭未关闭的块，取出按序内容块。
+    pub(super) fn finish(&mut self) -> Vec<ContentBlock> {
+        self.close_open();
+        std::mem::take(&mut self.blocks)
+    }
+}
+
+/// 从中断处继续，不重复已产出内容。
+pub(super) const CONTINUATION_PROMPT: &str = "Output token limit reached. Continue exactly from where you stopped; \
+     do not repeat content already produced.";
+
+/// 续写次数上限（SPEC §5.2 "最多续 2 次"）。
+pub(super) const MAX_CONTINUATIONS: u32 = 2;
+
+/// 第 3 次连续 prompt_too_long 即熔断，不再压缩重试。
+pub(super) const MAX_REACTIVE_COMPACT_RETRIES: u32 = 3;
+
+/// 无上限会死循环。
+pub(super) const MAX_TODO_STEERINGS: u32 = 3;
+
+/// 完成时先用 todo_write 更新清单再收工。
+pub(super) const TODO_STEERING_PROMPT: &str = "\
+The task list still has unfinished items. If the task is not actually complete, \
+continue working on the remaining items now. If everything is really done, update \
+the list with todo_write (mark items completed) before finishing.";
+
+/// 策略表"Stop hook 阻塞"行的首版上限，同 steering 纪律）。
+pub(super) const MAX_STOP_HOOK_BLOCKS: u32 = 3;

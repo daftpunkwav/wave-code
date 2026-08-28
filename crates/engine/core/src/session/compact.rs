@@ -3,7 +3,7 @@
 
 use super::*;
 use tokio::sync::mpsc;
-use wavecode_context::ModelSummary;
+use wavecode_context::{BudgetLevel, ModelSummary};
 use wavecode_llm::{ContentBlock, Message, Role};
 use wavecode_protocol::{CompactTrigger, Event, EventMsg};
 

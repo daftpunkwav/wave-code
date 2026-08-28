@@ -2,11 +2,18 @@
 //! 只读并行/非只读串行过审批门（SPEC §11.1）；ApprovalGate 是审批反向通道
 //! 共享槽（await_approval 需访问其私有 notify 字段，故同文件）。
 
+use std::collections::HashMap;
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::time::Duration;
+
 use super::*;
-use tokio::sync::mpsc;
-use wavecode_llm::ContentBlock;
-use wavecode_protocol::{ApprovalDecision, Event, EventMsg};
-use wavecode_tools::ToolOutput;
+use super::turn::RoundBlocks;
+use tokio::sync::{Notify, mpsc};
+use wavecode_llm::{ContentBlock, Message, Role};
+use wavecode_protocol::{ApprovalDecision, Event, EventMsg, StopReason};
+use wavecode_sandbox::Verdict;
+use wavecode_tools::{ToolCtx, ToolOutput};
 
 /// 审批反向通道的共享槽（§17.5 M3"复用 interrupt_handle 模式"）。
 ///
@@ -434,3 +441,9 @@ impl super::Session {
         results
     }
 }
+
+/// ToolCallEnd 事件回显工具输出的字符上限（回灌模型的 ToolResult 不截断）。
+const TOOL_OUTPUT_EVENT_MAX_CHARS: usize = 2000;
+
+/// 如单测直接 run_turn）兜底，最坏多等一个间隔。
+const APPROVAL_POLL_INTERVAL: Duration = Duration::from_millis(25);

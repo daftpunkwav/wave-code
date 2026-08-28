@@ -1,0 +1,3240 @@
+//! session 集成测试(外移自 session/mod.rs 的内联测试墙):mock 模型基建 +
+//! P2 审批 / P3 上下文 / P4 规划 / P6 记忆 / P7 skills+hooks / P9 MCP /
+//! P10 rollout 的全链路行为锁定。测试体未做任何改写,仅整体外移。
+
+use super::*;
+use super::turn::CONTINUATION_PROMPT;
+use futures::StreamExt;
+use futures::stream;
+use std::sync::{Arc, Mutex};
+use wavecode_context::ContextConfig;
+use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, LlmError, StreamEvent, Usage};
+use wavecode_protocol::{Event, EventMsg, StopReason};
+use wavecode_sandbox::Sandbox;
+use wavecode_tools::{ToolCtx, ToolOutput};
+
+/// 脚本化 mock：按调用次数返回预排事件序列
+struct MockModel {
+    calls: Mutex<u32>,
+    scripts: Vec<Vec<StreamEvent>>,
+    /// 记录每次请求，供断言 tool_result 回灌
+    seen: Mutex<Vec<ChatRequest>>,
+}
+
+impl MockModel {
+    fn new(scripts: Vec<Vec<StreamEvent>>) -> Self {
+        Self {
+            calls: Mutex::new(0),
+            scripts,
+            seen: Mutex::new(vec![]),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatModel for MockModel {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+    ) -> wavecode_llm::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
+        >,
+    > {
+        self.seen.lock().unwrap().push(req);
+        let mut n = self.calls.lock().unwrap();
+        let idx = (*n as usize).min(self.scripts.len().saturating_sub(1));
+        *n += 1;
+        let events = self.scripts[idx].clone();
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+}
+
+/// 中断测试专用 mock：回放脚本后挂起，直到 `gate` 置位才再产出
+/// 一个 sentinel 事件并结束流——run_turn 流循环的 next() 收到它时
+/// 循环内中断检查点真正触发（覆盖 finish_interrupted）；
+/// sentinel 本身不会被分发处理（检查点在事件分发之前 return）。
+struct GatedModel {
+    script: Vec<StreamEvent>,
+    gate: Arc<AtomicBool>,
+    seen: Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ChatModel for GatedModel {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+    ) -> wavecode_llm::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
+        >,
+    > {
+        self.seen.lock().unwrap().push(req);
+        let script = self.script.clone();
+        let gate = self.gate.clone();
+        let tail = stream::once(async move {
+            while !gate.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            Ok(StreamEvent::TextDelta {
+                text: "tail-sentinel".into(),
+            })
+        });
+        Ok(Box::pin(
+            stream::iter(script.into_iter().map(Ok)).chain(tail),
+        ))
+    }
+}
+
+fn text_then_end(text: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta { text: text.into() },
+        StreamEvent::MessageComplete {
+            stop_reason: "end_turn".into(),
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 3,
+            },
+        },
+    ]
+}
+
+/// 既有编排测试不涉审批：bypassPermissions 全放行，保持 P1 语义；
+/// 审批行为由 P2 专项测试（default / plan 模式）锁定。
+fn bypass_sandbox() -> Sandbox {
+    Sandbox::without_rules(PermissionMode::BypassPermissions)
+}
+
+#[tokio::test]
+async fn turn_executes_tool_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::TextDelta {
+                text: "好的，创建文件。".into(),
+            },
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "write_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"hello.txt","content":"hi"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                },
+            },
+        ],
+        text_then_end("已创建。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "创建 hello.txt", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    assert!(dir.path().join("hello.txt").exists());
+
+    let mut msgs = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        msgs.push(ev.msg);
+    }
+    let kinds: Vec<String> = msgs
+        .iter()
+        .map(|m| {
+            serde_json::to_value(m).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(kinds.first().unwrap(), "turn_started");
+    assert!(kinds.contains(&"tool_call_begin".to_string()));
+    assert!(kinds.contains(&"tool_call_end".to_string()));
+    assert!(kinds.contains(&"token_count".to_string()));
+    assert_eq!(kinds.last().unwrap(), "turn_completed");
+
+    // tool_result 回灌：第二次请求的消息里应含 tool_result 块
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let second = &seen[1];
+    let has_tool_result = second.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, wavecode_llm::ContentBlock::ToolResult { .. }))
+    });
+    assert!(has_tool_result);
+}
+
+#[tokio::test]
+async fn unknown_tool_returns_error_result_not_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t9".into(),
+                name: "no_such_tool".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{}".into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("工具不存在，换个方式。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "试一下", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let mut tool_end_ok = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let EventMsg::ToolCallEnd { ok, .. } = ev.msg {
+            tool_end_ok = Some(ok);
+        }
+    }
+    assert_eq!(tool_end_ok, Some(false));
+    // 第二次请求应含 is_error=true 的 ToolResult 回灌
+    let seen = model.seen.lock().unwrap();
+    let second = &seen[1];
+    let has_err_result = second.messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(
+                b,
+                wavecode_llm::ContentBlock::ToolResult { is_error: true, .. }
+            )
+        })
+    });
+    assert!(has_err_result);
+}
+
+#[tokio::test]
+async fn read_only_tools_run_in_batch_results_ordered() {
+    // 两个只读调用一批发出：结果顺序须与声明序一致
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "A").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "B").unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "read_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"a.txt"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::ToolUseBegin {
+                id: "t2".into(),
+                name: "read_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"b.txt"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("读完了。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    session.run_turn("s-1", "读两个文件", tx).await.unwrap();
+    let seen = model.seen.lock().unwrap();
+    let second = &seen[1];
+    let results: Vec<&str> = second
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            wavecode_llm::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["A", "B"]);
+}
+
+#[tokio::test]
+async fn interrupt_in_stream_keeps_tool_pairing() {
+    // 流给到一半（半个 tool_use）时中断：中断在流消费循环内被捕获
+    //（finish_interrupted 路径），部分结果保留入历史，悬空 tool_use
+    // 必须有配对的 is_error ToolResult。
+    let dir = tempfile::tempdir().unwrap();
+    let gate = Arc::new(AtomicBool::new(false));
+    let model = Arc::new(GatedModel {
+        script: vec![
+            StreamEvent::TextDelta {
+                text: "先创建文件".into(),
+            },
+            // text 块先闭合（真实 SSE 形态），再开 tool_use 块
+            StreamEvent::BlockEnd,
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "write_file".into(),
+            },
+            // 半个 input：之后无 BlockEnd / MessageComplete，流挂起
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"x.txt""#.into(),
+            },
+        ],
+        gate: gate.clone(),
+        seen: Mutex::new(vec![]),
+    });
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let handle = session.interrupt_handle();
+    // join! 同 task 顺序 poll：run_turn 第一轮 poll 即从入口推进到
+    // tail 挂起（脚本事件全部立即就绪、send 均不阻塞），故 signal
+    // 收到 AgentMessageDelta 时 InputDelta 必已入 cur_tool——此时
+    // 置位无竞争。handle 触发 session 中断（T8 驱动模式同款路径），
+    // gate 放行 mock 流尾部产出 sentinel。
+    let signal = async {
+        let mut rx = rx;
+        loop {
+            let ev = rx.recv().await.unwrap();
+            if matches!(&ev.msg, EventMsg::AgentMessageDelta { text } if text == "先创建文件")
+            {
+                break;
+            }
+        }
+        handle.store(true, Ordering::SeqCst);
+        gate.store(true, Ordering::SeqCst);
+        rx
+    };
+    let (reason, mut rx) = tokio::join!(session.run_turn("s-1", "干活", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Interrupted);
+    // 中断于流消费循环内：无第二次采样请求
+    assert_eq!(model.seen.lock().unwrap().len(), 1);
+    // 未实际执行：半个 JSON 不触发 write_file
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+
+    let mut saw_interrupted_complete = false;
+    let mut saw_message_complete = false;
+    while let Ok(ev) = rx.try_recv() {
+        match ev.msg {
+            EventMsg::TurnCompleted { stop_reason } => {
+                saw_interrupted_complete = stop_reason == StopReason::Interrupted;
+            }
+            EventMsg::AgentMessageComplete { .. } => saw_message_complete = true,
+            _ => {}
+        }
+    }
+    assert!(saw_interrupted_complete);
+    // 触发点锁定：流内捕获（finish_interrupted）在步骤 4 之前
+    // return，不会发出 AgentMessageComplete
+    assert!(!saw_message_complete);
+
+    // 历史保留部分结果（同文件测试模块可读私有字段）：
+    // assistant 的悬空 tool_use 与 is_error ToolResult 配对
+    let assistant = session
+        .messages
+        .iter()
+        .find(|m| m.role == wavecode_llm::Role::Assistant)
+        .expect("部分 assistant 消息应入历史");
+    assert!(
+        assistant
+            .content
+            .iter()
+            .any(|b| matches!(b, wavecode_llm::ContentBlock::ToolUse { id, .. } if id == "t1"))
+    );
+    // sentinel 未入历史：流内检查点在事件分发前 return
+    let full_text: String = assistant
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            wavecode_llm::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(full_text, "先创建文件");
+    let last = session.messages.last().unwrap();
+    assert_eq!(last.role, wavecode_llm::Role::User);
+    assert!(last.content.iter().any(
+        |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t1")
+    ));
+}
+
+#[tokio::test]
+async fn invalid_tool_json_returns_error_result_not_execute() {
+    // tool input JSON 解析失败：不实际执行，is_error 结果回灌且配对
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "write_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{not json".into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("参数 JSON 坏了，重来。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "写文件", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    // 未实际执行：tempdir 内不产生任何文件
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    let mut tool_end_ok = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let EventMsg::ToolCallEnd { ok, .. } = ev.msg {
+            tool_end_ok = Some(ok);
+        }
+    }
+    assert_eq!(tool_end_ok, Some(false));
+    // 第二次请求：assistant 的 tool_use 与 is_error ToolResult 配对回灌
+    let seen = model.seen.lock().unwrap();
+    let second = &seen[1];
+    let has_tool_use = second.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|b| matches!(b, wavecode_llm::ContentBlock::ToolUse { id, .. } if id == "t1"))
+    });
+    assert!(has_tool_use);
+    let has_err_pair = second.messages.iter().any(|m| {
+        m.content.iter().any(
+            |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t1"),
+        )
+    });
+    assert!(has_err_pair);
+}
+
+#[tokio::test]
+async fn max_tokens_warns_then_completes() {
+    // max_tokens 终态：先 Warning（message 含 max_tokens）再按 Completed 收尾
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![vec![
+        StreamEvent::TextDelta {
+            text: "写到一半被截断".into(),
+        },
+        StreamEvent::MessageComplete {
+            stop_reason: "max_tokens".into(),
+            usage: Usage {
+                input_tokens: 7,
+                output_tokens: 8192,
+            },
+        },
+    ]];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "写长文", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let mut has_warning = false;
+    let mut completed = None;
+    while let Ok(ev) = rx.try_recv() {
+        match ev.msg {
+            EventMsg::Warning { message } => {
+                assert!(message.contains("max_tokens"));
+                has_warning = true;
+            }
+            EventMsg::TurnCompleted { stop_reason } => completed = Some(stop_reason),
+            _ => {}
+        }
+    }
+    assert!(has_warning);
+    assert_eq!(completed, Some(StopReason::Completed));
+}
+
+#[tokio::test]
+async fn interrupt_in_serial_tools_skips_resample() {
+    // 中断落在串行工具执行段：剩余调用以 interrupted 收尾、结果完整
+    // 回灌后，循环头检查点直接终结 turn——不发起第二次采样请求。
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![vec![
+        StreamEvent::ToolUseBegin {
+            id: "t1".into(),
+            name: "write_file".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: r#"{"path":"a.txt","content":"A"}"#.into(),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::ToolUseBegin {
+            id: "t2".into(),
+            name: "write_file".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: r#"{"path":"b.txt","content":"B"}"#.into(),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage::default(),
+        },
+    ]];
+    let model = Arc::new(MockModel::new(scripts));
+    // 容量 1 channel 形成逐滴同步：begin t2 的 send 必须等 signal
+    // 取走 begin t1 才能完成——保证 signal 在串行段 i=0 检查点前
+    // 完成置位（无 race）。
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(1);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let handle = session.interrupt_handle();
+    // 收到首个 ToolCallBegin 即置位（此时串行执行段尚未开始）；
+    // 之后继续 drain 直到 channel 关闭（run_turn 结束 tx drop），
+    // 否则容量 1 下后续 send 会因无人接收而卡住。
+    let signal = async {
+        let mut rx = rx;
+        let mut stored = false;
+        let mut saw_interrupted_complete = false;
+        while let Some(ev) = rx.recv().await {
+            match ev.msg {
+                EventMsg::ToolCallBegin { .. } if !stored => {
+                    handle.store(true, Ordering::SeqCst);
+                    stored = true;
+                }
+                EventMsg::TurnCompleted { stop_reason } => {
+                    saw_interrupted_complete = stop_reason == StopReason::Interrupted;
+                }
+                _ => {}
+            }
+        }
+        saw_interrupted_complete
+    };
+    let (reason, saw_interrupted_complete) =
+        tokio::join!(session.run_turn("s-1", "写两个文件", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Interrupted);
+    // 循环头检查点：不发起第二次采样请求
+    assert_eq!(model.seen.lock().unwrap().len(), 1);
+    // 串行段检查点命中：两个 write_file 均未实际执行
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    assert!(saw_interrupted_complete);
+
+    // 配对完整：末尾 user 消息按声明序含 t1/t2 两条 is_error ToolResult
+    let last = session.messages.last().unwrap();
+    assert_eq!(last.role, wavecode_llm::Role::User);
+    let results: Vec<&str> = last
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            wavecode_llm::ContentBlock::ToolResult {
+                tool_use_id,
+                is_error: true,
+                ..
+            } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["t1", "t2"]);
+}
+
+/// 异步延迟 mock 工具：execute 内 tokio sleep 让出 executor，
+/// 用于验证只读批 join_all 的真实并行（编排层不再垫 spawn_blocking——
+/// 内置工具已是真 async，并行性由 future 本身的让出语义保证）。
+struct AsyncDelayTool {
+    tool_name: &'static str,
+    delay: std::time::Duration,
+}
+
+#[async_trait::async_trait]
+impl wavecode_tools::Tool for AsyncDelayTool {
+    fn name(&self) -> &str {
+        self.tool_name
+    }
+    fn description(&self) -> &str {
+        "read-only async-delay mock tool"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _ctx: &wavecode_tools::ToolCtx,
+    ) -> wavecode_tools::Result<ToolOutput> {
+        tokio::time::sleep(self.delay).await;
+        Ok(ToolOutput {
+            content: self.tool_name.to_owned(),
+            is_error: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn read_only_tools_run_in_parallel() {
+    // 两个 200ms 延迟工具同批只读：join_all 并发下总耗时 ≈200ms；
+    // 串行 await 则 ≥400ms。阈值 350ms 消除调度抖动。
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "slow_tool".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{}".into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::ToolUseBegin {
+                id: "t2".into(),
+                name: "fast_tool".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{}".into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("并行读完了。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let mut registry = wavecode_tools::Registry::builtin();
+    registry.register(Arc::new(AsyncDelayTool {
+        tool_name: "slow_tool",
+        delay: std::time::Duration::from_millis(200),
+    }));
+    registry.register(Arc::new(AsyncDelayTool {
+        tool_name: "fast_tool",
+        delay: std::time::Duration::from_millis(200),
+    }));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder("mock", model.clone(), registry, dir.path().to_path_buf())
+            .sandbox(bypass_sandbox())
+            .build(),
+    );
+    let start = std::time::Instant::now();
+    let reason = session.run_turn("s-1", "并行读", tx).await.unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(reason, StopReason::Completed);
+    assert!(
+        elapsed < std::time::Duration::from_millis(350),
+        "只读工具未真并行：耗时 {elapsed:?} ≥ 350ms（串行应 ≥400ms）"
+    );
+    // 结果按声明序回灌（配对完整才发起第二轮采样）
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let results: Vec<&str> = seen[1]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            wavecode_llm::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["slow_tool", "fast_tool"]);
+}
+
+/// 探针工具：记录执行时看到的 `ToolCtx.deny_env`，锁定
+/// SessionConfig → ToolCtx 的透传接线。
+struct CtxProbe {
+    seen: Mutex<Option<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl wavecode_tools::Tool for CtxProbe {
+    fn name(&self) -> &str {
+        "ctx_probe"
+    }
+    fn description(&self) -> &str {
+        "records ToolCtx.deny_env"
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn is_read_only(&self) -> bool {
+        true
+    }
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        ctx: &wavecode_tools::ToolCtx,
+    ) -> wavecode_tools::Result<ToolOutput> {
+        *self.seen.lock().unwrap() = Some(ctx.deny_env.clone());
+        Ok(ToolOutput {
+            content: "ok".into(),
+            is_error: false,
+        })
+    }
+}
+
+/// deny_env 接线（批 C）：SessionConfig.deny_env 须原样透传到
+/// 工具执行时的 ToolCtx（shell 的 env 剔除依赖此通道）。
+#[tokio::test]
+async fn deny_env_flows_to_tool_ctx() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "ctx_probe".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{}".into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("探测完毕。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let probe = Arc::new(CtxProbe {
+        seen: Mutex::new(None),
+    });
+    let mut registry = wavecode_tools::Registry::builtin();
+    registry.register(probe.clone());
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder("mock", model, registry, dir.path().to_path_buf())
+            .deny_env(vec!["MINIMAX_KEY".to_owned()])
+            .sandbox(bypass_sandbox())
+            .build(),
+    );
+    let reason = session.run_turn("s-1", "探测", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    assert_eq!(
+        *probe.seen.lock().unwrap(),
+        Some(vec!["MINIMAX_KEY".to_owned()]),
+        "ToolCtx.deny_env 应透传 SessionConfig 的名单"
+    );
+}
+
+#[tokio::test]
+async fn turn_uses_grep_and_glob_via_registry() {
+    // P1 新工具接线验证：模型经 Registry 调 grep + glob（同为只读，
+    // 一个并行批），结果正确回灌；请求侧 ToolSpec 清单含两个新工具。
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(dir.path().join("src/b.txt"), "hello\n").unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "grep".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"pattern":"fn main"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::ToolUseBegin {
+                id: "t2".into(),
+                name: "glob".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"pattern":"src/**/*.rs"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("检索完成。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "找入口函数", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    // 请求侧 specs 含新工具
+    let names: Vec<&str> = seen[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"grep") && names.contains(&"glob"));
+    // 结果按声明序回灌：grep 带行号匹配，glob 列相对路径
+    let results: Vec<&str> = seen[1]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            wavecode_llm::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert!(results[0].contains("src/a.rs:1:fn main() {}"));
+    assert!(results[0].contains("[1 matches in 1 files]"));
+    assert_eq!(results[1], "src/a.rs");
+}
+
+/// P2 测试夹具：单轮 write_file 调用脚本（default 模式下触发审批门）。
+fn write_file_script(path: &str, content: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolUseBegin {
+            id: "t1".into(),
+            name: "write_file".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: format!(r#"{{"path":"{path}","content":"{content}"}}"#),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage::default(),
+        },
+    ]
+}
+
+/// P2 golden：审批放行——ApprovalRequested 事件 → ExecApproval 回填
+/// AllowOnce → 工具实际执行成功，非 is_error 结果回灌模型。
+#[tokio::test]
+async fn approval_allow_executes_tool_golden() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        write_file_script("hello.txt", "hi"),
+        text_then_end("已创建。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .build(),
+    );
+    let gate = session.approval_handle();
+    // 收到 ApprovalRequested 即回填放行决策（模拟前端 / actor 路由）；
+    // 继续 drain 到通道关闭，顺带记录 ToolCallEnd。
+    let signal = async {
+        let mut rx = rx;
+        let mut requested = None;
+        let mut saw_ok_end = false;
+        while let Some(ev) = rx.recv().await {
+            match ev.msg {
+                EventMsg::ApprovalRequested {
+                    call_id,
+                    kind,
+                    detail,
+                } => {
+                    requested = Some((call_id.clone(), kind, detail));
+                    gate.decide(call_id, wavecode_protocol::ApprovalDecision::AllowOnce);
+                }
+                EventMsg::ToolCallEnd { call_id, ok, .. } if call_id == "t1" => {
+                    saw_ok_end = ok;
+                }
+                _ => {}
+            }
+        }
+        (requested, saw_ok_end)
+    };
+    let (reason, (requested, saw_ok_end)) =
+        tokio::join!(session.run_turn("s-1", "创建 hello.txt", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Completed);
+    // 审批事件：call_id 关联、kind=Write、detail 含工具与路径
+    let (call_id, kind, detail) = requested.expect("应发出 ApprovalRequested");
+    assert_eq!(call_id, "t1");
+    assert_eq!(kind, wavecode_protocol::ApprovalKind::Write);
+    assert!(detail.contains("write_file") && detail.contains("hello.txt"));
+    // 放行后实际执行
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+        "hi"
+    );
+    // 第二轮请求：非 is_error 的 ToolResult 回灌（配对 t1）
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let ok_result = seen[1].messages.iter().any(|m| {
+        m.content.iter().any(
+            |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { tool_use_id, is_error: false, .. } if tool_use_id == "t1"),
+        )
+    });
+    assert!(ok_result, "放行结果应回灌: {:?}", seen[1].messages);
+    // 事件流含 ToolCallEnd ok=true
+    assert!(saw_ok_end);
+}
+
+/// P2 golden：审批拒绝——工具不执行，is_error 结果回灌且拒绝原因
+/// 出现在后续请求消息里。
+#[tokio::test]
+async fn approval_deny_skips_execution_and_feeds_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        write_file_script("nope.txt", "x"),
+        text_then_end("明白了，不写。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .build(),
+    );
+    let gate = session.approval_handle();
+    let signal = async {
+        let mut rx = rx;
+        let mut saw_fail_end = false;
+        while let Some(ev) = rx.recv().await {
+            match ev.msg {
+                EventMsg::ApprovalRequested { call_id, .. } => {
+                    gate.decide(
+                        call_id,
+                        wavecode_protocol::ApprovalDecision::Deny {
+                            reason: "目录受保护，不要写".into(),
+                        },
+                    );
+                }
+                EventMsg::ToolCallEnd { ok, .. } => saw_fail_end = !ok,
+                _ => {}
+            }
+        }
+        saw_fail_end
+    };
+    let (reason, saw_fail_end) =
+        tokio::join!(session.run_turn("s-1", "创建 nope.txt", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Completed);
+    // 未实际执行
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    assert!(saw_fail_end, "ToolCallEnd 应 ok=false");
+    // 拒绝原因回灌模型：第二轮请求含 is_error ToolResult 且带原因原文
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let fed = seen[1].messages.iter().any(|m| {
+        m.content.iter().any(
+            |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { tool_use_id, is_error: true, content } if tool_use_id == "t1" && content.contains("目录受保护，不要写")),
+        )
+    });
+    assert!(fed, "拒绝原因应回灌: {:?}", seen[1].messages);
+}
+
+/// P2：plan 模式拦截——写工具被 Deny（不发 ApprovalRequested、不执行），
+/// 拒绝原因回灌模型。
+#[tokio::test]
+async fn plan_mode_denies_write_tool_without_approval_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        write_file_script("plan.txt", "x"),
+        text_then_end("plan 模式下只规划。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(Sandbox::without_rules(PermissionMode::Plan))
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "创建 plan.txt", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    // 不执行、不发审批请求
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    let mut saw_approval_request = false;
+    let mut saw_fail_end = false;
+    while let Ok(ev) = rx.try_recv() {
+        match ev.msg {
+            EventMsg::ApprovalRequested { .. } => saw_approval_request = true,
+            EventMsg::ToolCallEnd { ok, .. } => saw_fail_end = !ok,
+            _ => {}
+        }
+    }
+    assert!(!saw_approval_request, "plan 模式拦截不应发审批请求");
+    assert!(saw_fail_end, "ToolCallEnd 应 ok=false");
+    // 拒绝原因（plan mode）回灌模型
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let fed = seen[1].messages.iter().any(|m| {
+        m.content.iter().any(
+            |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { is_error: true, content, .. } if content.contains("plan mode")),
+        )
+    });
+    assert!(fed, "plan 拦截原因应回灌: {:?}", seen[1].messages);
+}
+
+/// P2：审批等待中中断——park 在 AwaitApproval 时 interrupt 生效，
+/// 悬空 tool_use 以 interrupted 结果配对收尾，不发起第二次采样。
+///（驱动方只置中断标志、不戳审批槽：走 APPROVAL_POLL_INTERVAL 兜底路径。）
+#[tokio::test]
+async fn interrupt_during_approval_wait_completes_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![write_file_script("x.txt", "x")];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .build(),
+    );
+    let interrupt = session.interrupt_handle();
+    let signal = async {
+        let mut rx = rx;
+        let mut saw_interrupted_complete = false;
+        while let Some(ev) = rx.recv().await {
+            match ev.msg {
+                // 审批请求出现即中断（不回填决策：等待中的中断路径）
+                EventMsg::ApprovalRequested { .. } => {
+                    interrupt.store(true, Ordering::SeqCst);
+                }
+                EventMsg::TurnCompleted { stop_reason } => {
+                    saw_interrupted_complete = stop_reason == StopReason::Interrupted;
+                }
+                _ => {}
+            }
+        }
+        saw_interrupted_complete
+    };
+    let (reason, saw_interrupted_complete) =
+        tokio::join!(session.run_turn("s-1", "写文件", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Interrupted);
+    assert!(saw_interrupted_complete);
+    // 不执行、不再采样
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    assert_eq!(model.seen.lock().unwrap().len(), 1);
+    // 配对完整：末尾 user 消息含 t1 的 is_error ToolResult
+    let last = session.messages.last().unwrap();
+    assert_eq!(last.role, wavecode_llm::Role::User);
+    assert!(last.content.iter().any(
+        |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t1")
+    ));
+}
+
+// ------------------------------------------------------------------
+// P3：上下文管线（PreTurn 三级阈值 / reactive compact / 续写 / /compact）
+// ------------------------------------------------------------------
+
+/// P3 测试夹具：识别摘要请求（ModelSummary 不带工具，tools 为空）回放
+/// 摘要脚本；采样请求按 `sampling` 队列逐次回放——`None` 表示该次
+/// 返回 prompt_too_long 类错误（reactive compact 触发条件）。
+struct CompactAwareMock {
+    sampling: Mutex<Vec<Option<Vec<StreamEvent>>>>,
+    summary_script: Vec<StreamEvent>,
+    seen: Mutex<Vec<ChatRequest>>,
+}
+
+#[async_trait::async_trait]
+impl ChatModel for CompactAwareMock {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+    ) -> wavecode_llm::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
+        >,
+    > {
+        self.seen.lock().unwrap().push(req.clone());
+        if req.tools.is_empty() {
+            // 摘要请求：回放五要素摘要脚本
+            return Ok(Box::pin(stream::iter(
+                self.summary_script.clone().into_iter().map(Ok),
+            )));
+        }
+        let mut q = self.sampling.lock().unwrap();
+        let next = if q.len() > 1 {
+            q.remove(0)
+        } else {
+            q[0].clone()
+        };
+        match next {
+            Some(events) => Ok(Box::pin(stream::iter(events.into_iter().map(Ok)))),
+            None => Err(LlmError::PromptTooLong {
+                message: "prompt is too long: 210000 tokens > 200000 maximum".into(),
+            }),
+        }
+    }
+}
+
+/// 五要素摘要脚本（正文逐项含目标/进展/关键决策/文件清单/待办）。
+fn summary_script() -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::TextDelta {
+            text: "## 目标\nT\n## 进展\nP\n## 关键决策\nD\n## 文件清单\nF\n## 待办\nN".into(),
+        },
+        StreamEvent::MessageComplete {
+            stop_reason: "end_turn".into(),
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+            },
+        },
+    ]
+}
+
+fn p3_mock(sampling: Vec<Option<Vec<StreamEvent>>>) -> Arc<CompactAwareMock> {
+    Arc::new(CompactAwareMock {
+        sampling: Mutex::new(sampling),
+        summary_script: summary_script(),
+        seen: Mutex::new(vec![]),
+    })
+}
+
+/// P3 配置：window=100_000，margin 200/100/10 → 三线 99800/99900/99990；
+/// 估算路径（~2k 开销定额）远低于警告线，threshold 测试经 usage_carry
+/// 种子精确控制水位；keep_recent=2 便于断言压缩后形态。
+fn p3_session(model: Arc<CompactAwareMock>) -> Session {
+    Session::new(
+        SessionConfig::builder(
+            "mock",
+            model,
+            wavecode_tools::Registry::builtin(),
+            // tempdir 转持久路径放弃自动删除（与 app-server 测试同例）。
+            tempfile::tempdir().unwrap().keep(),
+        )
+        .context_window(100_000)
+        .sandbox(bypass_sandbox())
+        .context(ContextConfig {
+            thresholds: wavecode_context::Thresholds {
+                warning_margin: 200,
+                auto_compact_margin: 100,
+                blocking_margin: 10,
+            },
+            keep_recent: 2,
+            summary_max_tokens: 500,
+            estimate_chars_per_token: 4,
+        })
+        .build(),
+    )
+}
+
+fn collect_events(rx: &mut mpsc::Receiver<Event>) -> Vec<EventMsg> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev.msg);
+    }
+    out
+}
+
+/// 阈值边界：used=99850 过警告线（99800）未及自动线（99900）——发一次
+/// Warning（"context near limit"），不压缩；两轮循环头检查只发一次。
+#[tokio::test]
+async fn preturn_warning_line_emits_warning_once_no_compact() {
+    let model = p3_mock(vec![
+        Some(vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "read_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"a.txt"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage {
+                    input_tokens: 99850,
+                    output_tokens: 5,
+                },
+            },
+        ]),
+        Some(text_then_end("读完了")),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    // 上一 turn 结转的权威占用：首次 PreTurn 检查即过警告线
+    session.usage_carry = Some(99850);
+    let reason = session.run_turn("s-1", "读文件", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let events = collect_events(&mut rx);
+    let warnings: Vec<&EventMsg> = events
+        .iter()
+        .filter(|m| matches!(m, EventMsg::Warning { .. }))
+        .collect();
+    assert_eq!(warnings.len(), 1, "警告每 turn 至多一次: {events:?}");
+    let EventMsg::Warning { message } = warnings[0] else {
+        unreachable!()
+    };
+    assert!(message.contains("context near limit"));
+    assert!(
+        !events
+            .iter()
+            .any(|m| matches!(m, EventMsg::CompactStarted { .. })),
+        "警告线不得触发压缩"
+    );
+}
+
+/// 自动压缩线：used=99950 过自动线（99900）——PreTurn 触发压缩，
+/// CompactStarted{Auto} → CompactCompleted，随后采样请求的历史
+/// 首条为摘要消息；压缩后配对完整。
+#[tokio::test]
+async fn preturn_auto_line_compacts_before_sampling() {
+    let model = p3_mock(vec![Some(text_then_end("好的"))]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    session.usage_carry = Some(99950);
+    let reason = session.run_turn("s-1", "继续干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    let events = collect_events(&mut rx);
+    let started = events.iter().find_map(|m| match m {
+        EventMsg::CompactStarted { trigger } => Some(*trigger),
+        _ => None,
+    });
+    assert_eq!(
+        started,
+        Some(wavecode_protocol::CompactTrigger::Auto),
+        "应以 Auto 触发压缩: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, EventMsg::CompactCompleted { .. }))
+    );
+
+    // 请求序：摘要（tools 空）→ 采样（历史首条为摘要消息）
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].tools.is_empty(), "首个请求应为摘要调用");
+    let first = &seen[1].messages[0];
+    assert!(
+        matches!(&first.content[0], wavecode_llm::ContentBlock::Text { text } if text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX)),
+        "采样请求历史首条应为摘要消息: {:?}",
+        seen[1].messages
+    );
+    // 摘要消息逐项含五要素（验收锚点：信息保留率）
+    let wavecode_llm::ContentBlock::Text { text } = &first.content[0] else {
+        unreachable!()
+    };
+    for element in ["目标", "进展", "关键决策", "文件清单", "待办"] {
+        assert!(text.contains(element), "摘要缺要素「{element}」");
+    }
+    assert_eq!(
+        wavecode_context::find_pairing_violations(&session.messages),
+        Vec::<String>::new(),
+        "压缩后历史配对须完整"
+    );
+}
+
+/// 阻塞线：used=99995 过阻塞线（99990）——强制先压缩（Blocking 触发）再采样。
+#[tokio::test]
+async fn preturn_blocking_line_forces_compact_with_blocking_trigger() {
+    let model = p3_mock(vec![Some(text_then_end("好的"))]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    session.usage_carry = Some(99995);
+    let reason = session.run_turn("s-1", "继续干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let events = collect_events(&mut rx);
+    let started = events.iter().find_map(|m| match m {
+        EventMsg::CompactStarted { trigger } => Some(*trigger),
+        _ => None,
+    });
+    assert_eq!(
+        started,
+        Some(wavecode_protocol::CompactTrigger::Blocking),
+        "阻塞线应以 Blocking 触发: {events:?}"
+    );
+    // 压缩先于采样完成
+    let seen = model.seen.lock().unwrap();
+    assert!(seen[0].tools.is_empty() && !seen[1].tools.is_empty());
+}
+
+/// reactive compact：首次采样 prompt_too_long → 压缩（Reactive）→
+/// 以压缩历史重试成功，turn 正常完成。
+#[tokio::test]
+async fn reactive_compact_recovers_from_prompt_too_long() {
+    let model = p3_mock(vec![None, Some(text_then_end("压缩后重试成功"))]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    let reason = session.run_turn("s-1", "干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    let events = collect_events(&mut rx);
+    let started = events.iter().find_map(|m| match m {
+        EventMsg::CompactStarted { trigger } => Some(*trigger),
+        _ => None,
+    });
+    assert_eq!(
+        started,
+        Some(wavecode_protocol::CompactTrigger::Reactive),
+        "prompt_too_long 应以 Reactive 触发: {events:?}"
+    );
+
+    // 请求序：采样（失败）→ 摘要 → 采样（压缩历史重试）
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert!(!seen[0].tools.is_empty() && seen[1].tools.is_empty());
+    let retry_first = &seen[2].messages[0];
+    assert!(
+        matches!(&retry_first.content[0], wavecode_llm::ContentBlock::Text { text } if text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX)),
+        "重试应以压缩历史发起"
+    );
+}
+
+/// reactive compact 熔断：连续 3 次 prompt_too_long → 熔断上报
+///（Error + TurnCompleted{Error} + run_turn 返回 Err），期间压缩 2 次。
+#[tokio::test]
+async fn reactive_compact_circuit_breaks_after_three() {
+    let model = p3_mock(vec![None]); // 队列复用末项：永远 prompt_too_long
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    let result = session.run_turn("s-1", "干活", tx).await;
+    assert!(result.is_err(), "熔断后应上抛错误");
+
+    let events = collect_events(&mut rx);
+    let compacts = events
+        .iter()
+        .filter(|m| {
+            matches!(m, EventMsg::CompactStarted { trigger } if *trigger == wavecode_protocol::CompactTrigger::Reactive)
+        })
+        .count();
+    assert_eq!(compacts, 2, "3 次采样失败之间压缩 2 次: {events:?}");
+    let error = events.iter().find_map(|m| match m {
+        EventMsg::Error { message, .. } => Some(message.clone()),
+        _ => None,
+    });
+    assert!(error.unwrap().contains("熔断"), "熔断须上报: {events:?}");
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::TurnCompleted {
+                stop_reason: StopReason::Error
+            }
+        )),
+        "熔断 turn 应以 Error 收尾: {events:?}"
+    );
+    // 采样 3 次 + 摘要 2 次
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 5);
+    assert_eq!(
+        seen.iter().filter(|r| !r.tools.is_empty()).count(),
+        3,
+        "采样恰 3 次（熔断阈值）"
+    );
+}
+
+/// max_output_tokens 续写：max_tokens 截断后以续写提示继续，
+/// 第二次截断再续一次，第三次正常结束——续写请求恰 2 次。
+#[tokio::test]
+async fn max_tokens_continues_up_to_twice() {
+    let truncated = |text: &str| {
+        Some(vec![
+            StreamEvent::TextDelta { text: text.into() },
+            StreamEvent::MessageComplete {
+                stop_reason: "max_tokens".into(),
+                usage: Usage {
+                    input_tokens: 7,
+                    output_tokens: 8192,
+                },
+            },
+        ])
+    };
+    let model = p3_mock(vec![
+        truncated("前半"),
+        truncated("中段"),
+        Some(text_then_end("收尾")),
+    ]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    let reason = session.run_turn("s-1", "写长文", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3, "初始 + 2 次续写");
+    // 续写请求的历史末尾是续写提示（user 文本）
+    for req in &seen[1..] {
+        let last = req.messages.last().unwrap();
+        assert!(
+            matches!(&last.content[0], wavecode_llm::ContentBlock::Text { text } if text == CONTINUATION_PROMPT),
+            "续写请求应以续写提示结尾: {:?}",
+            req.messages
+        );
+    }
+    // 两次续写警告，无"放弃"警告
+    let events = collect_events(&mut rx);
+    let warnings: Vec<String> = events
+        .iter()
+        .filter_map(|m| match m {
+            EventMsg::Warning { message } => Some(message.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(warnings.len(), 2);
+    assert!(warnings.iter().all(|w| w.contains("continuing")));
+}
+
+/// 续写熔断：连续 max_tokens 达上限后放弃——发 "max_tokens reached"
+/// 警告并按 Completed 收尾，采样恰 3 次（初始 + 2 续写）。
+#[tokio::test]
+async fn max_tokens_gives_up_after_two_continuations() {
+    let model = p3_mock(vec![Some(vec![
+        StreamEvent::TextDelta {
+            text: "永远写不完".into(),
+        },
+        StreamEvent::MessageComplete {
+            stop_reason: "max_tokens".into(),
+            usage: Usage {
+                input_tokens: 7,
+                output_tokens: 8192,
+            },
+        },
+    ])]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    let reason = session.run_turn("s-1", "写长文", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    assert_eq!(model.seen.lock().unwrap().len(), 3, "初始 + 2 次续写后放弃");
+    let events = collect_events(&mut rx);
+    let last_warning = events.iter().rev().find_map(|m| match m {
+        EventMsg::Warning { message } => Some(message.clone()),
+        _ => None,
+    });
+    assert!(
+        last_warning.unwrap().contains("max_tokens reached"),
+        "放弃时须警告: {events:?}"
+    );
+}
+
+/// `/compact`（Session::compact）：无论阈值立即压缩，CompactStarted
+/// {Manual} → CompactCompleted{summary_tokens}，历史首条为摘要消息。
+#[tokio::test]
+async fn manual_compact_via_session_method() {
+    let model = p3_mock(vec![Some(text_then_end("unused"))]);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = p3_session(model.clone());
+    let summary_tokens = session.compact("s-manual", tx).await.unwrap();
+    assert!(summary_tokens > 0);
+
+    let events = collect_events(&mut rx);
+    let started = events.iter().find_map(|m| match m {
+        EventMsg::CompactStarted { trigger } => Some(*trigger),
+        _ => None,
+    });
+    assert_eq!(started, Some(wavecode_protocol::CompactTrigger::Manual));
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, EventMsg::CompactCompleted { summary_tokens: t } if *t == summary_tokens))
+    );
+    let first = &session.messages[0];
+    assert!(
+        matches!(&first.content[0], wavecode_llm::ContentBlock::Text { text } if text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX))
+    );
+    assert_eq!(
+        wavecode_context::find_pairing_violations(&session.messages),
+        Vec::<String>::new()
+    );
+}
+
+// —— P4 规划系统（todo_write / 清单注入 / stop steering）——
+
+/// todo_write 调用脚本（一轮：声明 + 输入 + 终态 tool_use）。
+fn todo_write_script(id: &str, todos_json: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolUseBegin {
+            id: id.into(),
+            name: "todo_write".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: todos_json.into(),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage::default(),
+        },
+    ]
+}
+
+/// P4 会话构造：bypass 沙箱（todo_write 本就各模式免审批），返回
+/// session 与清单句柄（测试经句柄断言共享状态迁移）。
+fn p4_session(
+    model: Arc<MockModel>,
+    dir: &std::path::Path,
+) -> (Session, wavecode_tools::TodoStore) {
+    let registry = wavecode_tools::Registry::builtin();
+    let todos = registry.todos();
+    (
+        Session::new(
+            SessionConfig::builder("mock", model, registry, dir.to_path_buf())
+                .sandbox(bypass_sandbox())
+                .build(),
+        ),
+        todos,
+    )
+}
+
+/// P4 验收：mock 长任务 golden——模型先 todo_write 建立清单 → 逐步执行
+/// 并更新状态（事件流可观测状态迁移）→ 全部完成 → 收工（无 steering）。
+#[tokio::test]
+async fn todo_golden_task_lifecycle_observable() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        todo_write_script(
+            "t1",
+            r#"{"todos":[
+                {"content":"设计","status":"in_progress"},
+                {"content":"实现","status":"pending"},
+                {"content":"测试","status":"pending"}]}"#,
+        ),
+        todo_write_script(
+            "t2",
+            r#"{"todos":[
+                {"content":"设计","status":"completed"},
+                {"content":"实现","status":"in_progress"},
+                {"content":"测试","status":"pending"}]}"#,
+        ),
+        todo_write_script(
+            "t3",
+            r#"{"todos":[
+                {"content":"设计","status":"completed"},
+                {"content":"实现","status":"completed"},
+                {"content":"测试","status":"completed"}]}"#,
+        ),
+        text_then_end("全部完成。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let (mut session, todos) = p4_session(model.clone(), dir.path());
+    let reason = session.run_turn("s-1", "完成三步任务", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    // 清单终态：全部 completed（共享句柄断言）。
+    assert_eq!(todos.unfinished(), (0, 0));
+    assert_eq!(todos.snapshot().len(), 3);
+
+    // 事件流可观测状态迁移：3 次 todo_write 的 begin/end。
+    let events = collect_events(&mut rx);
+    let todo_begins = events
+        .iter()
+        .filter(|m| matches!(m, EventMsg::ToolCallBegin { tool, .. } if tool == "todo_write"))
+        .count();
+    assert_eq!(todo_begins, 3, "事件流应含 3 次 todo_write: {events:?}");
+    // 全部完成后收工：无 steering 提醒。
+    assert!(
+        !events
+            .iter()
+            .any(|m| matches!(m, EventMsg::Warning { message } if message.contains("nudging"))),
+        "清单全部完成不得 steering: {events:?}"
+    );
+
+    // 清单注入：第 2/3 轮请求的 system 尾部反映当轮清单快照。
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4);
+    assert!(seen[0].system.contains("(not a git repository)"));
+    assert!(
+        !seen[0].system.contains("<system-reminder>"),
+        "首轮清单为空不注入"
+    );
+    assert!(
+        seen[1].system.contains("1. [in_progress] 设计"),
+        "第 2 轮注入首轮清单: {}",
+        seen[1].system
+    );
+    assert!(
+        seen[2].system.contains("1. [completed] 设计")
+            && seen[2].system.contains("2. [in_progress] 实现"),
+        "第 3 轮注入状态迁移后清单: {}",
+        seen[2].system
+    );
+    // 前缀稳定：静态层恒为前缀。
+    for req in seen.iter() {
+        assert!(req.system.starts_with(crate::prompt::STATIC_LAYER));
+    }
+}
+
+/// P4 验收：stop steering——清单有未完成项时模型想收工 → turn 继续并
+/// 注入提醒；连续 3 次（MAX_TODO_STEERINGS）后放行。
+#[tokio::test]
+async fn steering_continues_turn_until_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        todo_write_script(
+            "t1",
+            r#"{"todos":[{"content":"未完成的活","status":"pending"}]}"#,
+        ),
+        // 之后每轮都想收工：连续 steering 3 次后放行。
+        text_then_end("做完了。"),
+        text_then_end("做完了。"),
+        text_then_end("做完了。"),
+        text_then_end("做完了。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let (mut session, _todos) = p4_session(model.clone(), dir.path());
+    let reason = session.run_turn("s-1", "干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    // 轮次：1（todo）+ 1（首次收工）+ 3（steering）= 5 次采样。
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 5, "采样次数: 1 todo + 1 stop + 3 steering");
+    // 第 5 次请求的历史里累计 3 条 steering 提醒。
+    let nudges = seen[4]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter(|b| matches!(b, wavecode_llm::ContentBlock::Text { text } if text.contains("unfinished items")))
+        .count();
+    assert_eq!(nudges, 3, "steering 提醒累计 3 条");
+    // 事件流：3 次 steering Warning。
+    let events = collect_events(&mut rx);
+    let warnings = events
+        .iter()
+        .filter(|m| matches!(m, EventMsg::Warning { message } if message.contains("nudging")))
+        .count();
+    assert_eq!(warnings, 3, "steering Warning 3 次: {events:?}");
+    // 前缀稳定：清单建立后未再变化，第 2 轮起各轮 system 字节相等。
+    for w in seen[1..].windows(2) {
+        assert_eq!(w[0].system, w[1].system, "清单不变时 system 须字节稳定");
+    }
+}
+
+/// P4 验收：steering 后模型把清单更新为全部 completed → 不再 steering，
+/// 正常收工（连续计数之外的解除路径）。
+#[tokio::test]
+async fn steering_stops_once_list_completed() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        todo_write_script(
+            "t1",
+            r#"{"todos":[{"content":"活","status":"in_progress"}]}"#,
+        ),
+        text_then_end("做完了。"), // 想收工 → steering #1
+        todo_write_script("t2", r#"{"todos":[{"content":"活","status":"completed"}]}"#),
+        text_then_end("全部完成。"), // 清单已清 → 正常收工
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let (mut session, _todos) = p4_session(model.clone(), dir.path());
+    let reason = session.run_turn("s-1", "干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4, "steering 1 次后清单完成即收工");
+    let events = collect_events(&mut rx);
+    let warnings = events
+        .iter()
+        .filter(|m| matches!(m, EventMsg::Warning { message } if message.contains("nudging")))
+        .count();
+    assert_eq!(warnings, 1, "仅 1 次 steering: {events:?}");
+}
+
+// ------------------------------------------------------------------
+// P6：记忆系统（memory_write 工具 / 审批挂接 / 跨会话召回 / 自动提取）
+// ------------------------------------------------------------------
+
+/// P6 测试夹具：memory_write 单轮调用脚本。
+fn memory_write_script(call_id: &str, category: &str, content: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolUseBegin {
+            id: call_id.into(),
+            name: "memory_write".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: format!(r#"{{"category":"{category}","content":"{content}"}}"#),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage::default(),
+        },
+    ]
+}
+
+/// P6 测试夹具：最小记忆配置（无指令记忆 / 索引，仅存储根）。
+fn p6_memory(store_root: &std::path::Path) -> Option<crate::memory::MemorySessionConfig> {
+    Some(crate::memory::MemorySessionConfig {
+        instruction_memory: String::new(),
+        memory_index: String::new(),
+        store_root: store_root.to_path_buf(),
+    })
+}
+
+/// P6 验收：memory_write 审批挂接——default 模式下经 sandbox 非只读
+/// 默认策略给出 Ask（ApprovalRequested → ExecApproval 放行后才写入）。
+#[tokio::test]
+async fn memory_write_asks_in_default_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_root = dir.path().join("memories");
+    let scripts = vec![
+        memory_write_script("t1", "user", "偏好紧凑回复"),
+        text_then_end("已记住。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .memory(p6_memory(&store_root))
+        .build(),
+    );
+    let gate = session.approval_handle();
+    let signal = async {
+        let mut rx = rx;
+        let mut requested = None;
+        while let Some(ev) = rx.recv().await {
+            if let EventMsg::ApprovalRequested {
+                call_id,
+                kind,
+                detail,
+            } = ev.msg
+            {
+                requested = Some((kind, detail));
+                gate.decide(call_id, wavecode_protocol::ApprovalDecision::AllowOnce);
+            }
+        }
+        requested
+    };
+    let (reason, requested) = tokio::join!(session.run_turn("s-1", "记住我的偏好", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Completed);
+    let (kind, detail) = requested.expect("default 模式下 memory_write 应发审批请求");
+    assert_eq!(kind, wavecode_protocol::ApprovalKind::Write);
+    assert!(detail.contains("memory_write"));
+    // 放行后实际写入：类别文件 + 索引。
+    let store = wavecode_memory::MemoryStore::new(store_root);
+    assert_eq!(
+        store
+            .read_category(wavecode_memory::MemoryCategory::User)
+            .unwrap(),
+        "- 偏好紧凑回复\n"
+    );
+    assert!(store.read_index().unwrap().contains("[user] 偏好紧凑回复"));
+}
+
+/// P6 验收：跨会话召回——会话 A 经 memory_write 写入条目；模拟会话 B
+/// 装配（启动时读索引 → 注入系统提示词槽位）：注入含索引条目，且
+/// 条目正文可按需加载。
+#[tokio::test]
+async fn cross_session_memory_recall() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_root = dir.path().join("memories");
+    // —— 会话 A：模型调用 memory_write 写入条目（bypass 免审批）——
+    let scripts = vec![
+        memory_write_script("t1", "project", "仓库用 pnpm 管理，不要引入 yarn"),
+        text_then_end("已记录项目约定。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session_a = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model,
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .memory(p6_memory(&store_root))
+        .build(),
+    );
+    let reason = session_a.run_turn("s-1", "记住项目约定", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    // —— 会话 B 装配：启动时读索引（cli bootstrap 的同款路径）——
+    let store = wavecode_memory::MemoryStore::new(store_root);
+    let index = store.read_index().unwrap();
+    assert!(
+        index.contains("[project] 仓库用 pnpm 管理"),
+        "索引应含条目: {index}"
+    );
+    let system = crate::prompt::build_system_prompt(dir.path(), "", "", &index, &[]).await;
+    assert!(
+        system.contains("# Persistent Memory Index"),
+        "注入应含记忆索引段:\n{system}"
+    );
+    assert!(system.contains("[project] 仓库用 pnpm 管理"));
+    // 条目正文按需加载（模型 read_file 的等价物）。
+    let body = store
+        .read_category(wavecode_memory::MemoryCategory::Project)
+        .unwrap();
+    assert!(body.contains("不要引入 yarn"), "条目正文可加载: {body}");
+}
+
+/// P6：自动提取——会话历史经提取子代理（mock 回放）提炼为带类别
+/// 标签的条目，解析后追加到存储（简化首版：纯追加式）。
+#[tokio::test]
+async fn memory_extraction_appends_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store_root = dir.path().join("memories");
+    let scripts = vec![
+        // 第 1 次采样：会话正文（建立历史）。
+        text_then_end("好的，以后回复保持紧凑。另外这个项目用 pnpm。"),
+        // 第 2 次采样：提取子代理的输出（约定线格式）。
+        text_then_end("[user] 偏好紧凑回复\n[project] 仓库用 pnpm 管理"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model,
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .memory(p6_memory(&store_root))
+        .build(),
+    );
+    session.run_turn("s-1", "随便聊聊", tx).await.unwrap();
+
+    let n = session.extract_memories().await.unwrap();
+    assert_eq!(n, 2, "应提取 2 条");
+    let store = wavecode_memory::MemoryStore::new(store_root);
+    assert_eq!(
+        store
+            .read_category(wavecode_memory::MemoryCategory::User)
+            .unwrap(),
+        "- 偏好紧凑回复\n"
+    );
+    assert_eq!(
+        store
+            .read_category(wavecode_memory::MemoryCategory::Project)
+            .unwrap(),
+        "- 仓库用 pnpm 管理\n"
+    );
+    let index = store.read_index().unwrap();
+    assert!(index.contains("[user]") && index.contains("[project]"));
+}
+
+/// P6：memory_write 参数校验（非法类别 / 空内容 → is_error 回灌，
+/// 不 panic、不写入）。
+#[tokio::test]
+async fn memory_write_validates_input() {
+    use wavecode_tools::Tool as _;
+    let dir = tempfile::tempdir().unwrap();
+    let tool = crate::memory::MemoryWrite::new(dir.path().join("memories"));
+    let ctx = ToolCtx {
+        cwd: dir.path().to_path_buf(),
+        deny_env: Vec::new(),
+    };
+    let out = tool
+        .execute(
+            serde_json::json!({"category": "nope", "content": "x"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(out.is_error && out.content.contains("invalid category"));
+    let out = tool
+        .execute(
+            serde_json::json!({"category": "user", "content": "  "}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    assert!(out.is_error && out.content.contains("'content'"));
+    // 未写入任何文件。
+    let store = wavecode_memory::MemoryStore::new(dir.path().join("memories"));
+    assert_eq!(store.read_index().unwrap(), "");
+}
+
+// —— P7：skills 与 hooks（SPEC §8 / §9 场景验收）——
+
+use wavecode_hooks::{HookDef, HookEngine, HookEventPoint};
+use wavecode_skills::{Skill, SkillContext, SkillMeta, SkillSet, SkillSource};
+
+/// P7 hook 命令构造（与 hooks crate 测试同款平台适配）：cmd 与 sh 都认
+/// `exit N`；stderr 输出分平台写法。stderr 断言用 ASCII（Windows cmd
+/// 按 GBK 输出非 ASCII，UTF-8 有损解码会替换）。
+fn p7_exit_cmd(code: u32, stderr: &str) -> String {
+    if stderr.is_empty() {
+        format!("exit {code}")
+    } else if cfg!(windows) {
+        format!("echo {stderr} 1>&2 & exit {code}")
+    } else {
+        format!("echo {stderr} 1>&2; exit {code}")
+    }
+}
+
+/// 超时测试的"睡眠"命令（cmd 无 sleep，用 ping 占位）。
+fn p7_sleep_cmd() -> String {
+    if cfg!(windows) {
+        "ping -n 10 127.0.0.1 >nul".to_owned()
+    } else {
+        "sleep 10".to_owned()
+    }
+}
+
+fn p7_hook_def(command: &str) -> HookDef {
+    HookDef {
+        matcher: None,
+        command: command.to_owned(),
+        timeout_ms: wavecode_hooks::DEFAULT_TIMEOUT_MS,
+        once: false,
+    }
+}
+
+fn p7_engine(entries: &[(HookEventPoint, HookDef)]) -> Arc<HookEngine> {
+    let mut defs: std::collections::HashMap<HookEventPoint, Vec<HookDef>> =
+        std::collections::HashMap::new();
+    for (point, def) in entries {
+        defs.entry(*point).or_default().push(def.clone());
+    }
+    Arc::new(HookEngine::new(defs))
+}
+
+fn p7_skill(name: &str, context: SkillContext, allowed: &[&str], body: &str) -> Skill {
+    Skill {
+        name: name.to_owned(),
+        // 直接以正斜杠字面量构造（join 在 Windows 用反斜杠，断言文本
+        // 保持正斜杠形态——路径分隔符本身不在本测试语义内）。
+        dir: std::path::PathBuf::from(format!("C:/skills/{name}")),
+        source: SkillSource::Project,
+        meta: SkillMeta {
+            description: format!("{name} 描述"),
+            when_to_use: Some("测试触发条件".to_owned()),
+            allowed_tools: allowed.iter().map(|s| s.to_string()).collect(),
+            context,
+            user_invocable: true,
+            argument_hint: None,
+            paths: vec![],
+        },
+        body: body.to_owned(),
+    }
+}
+
+fn p7_skill_set(skills: Vec<Skill>) -> Option<crate::skills::SkillSessionConfig> {
+    let mut set = SkillSet::default();
+    for skill in skills {
+        set.add(skill);
+    }
+    Some(crate::skills::SkillSessionConfig { set: Arc::new(set) })
+}
+
+/// P7 会话构造：bypass 沙箱 + with_subagents（fork 派生面），可挂
+/// hooks / skills；模型用 CompactAwareMock（seen 记录全部采样请求，
+/// 供"回灌模型"断言）。
+fn p7_session(
+    model: Arc<CompactAwareMock>,
+    dir: &std::path::Path,
+    hooks: Option<Arc<HookEngine>>,
+    skills: Option<crate::skills::SkillSessionConfig>,
+) -> Session {
+    Session::with_subagents(
+        SessionConfig::builder(
+            "mock",
+            model,
+            wavecode_tools::Registry::builtin(),
+            dir.to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .skills(skills)
+        .hooks(hooks)
+        .build(),
+    )
+}
+
+/// 采样请求历史的全文（text + tool_result + tool_use 摘要），
+/// 供"X 回灌模型出现在后续请求"断言。
+fn p7_history_text(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            ContentBlock::ToolUse { name, input, .. } => format!("[tool_use {name} {input}]"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// skill 工具调用脚本。
+fn p7_skill_tool_script(name: &str, args: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolUseBegin {
+            id: "t1".into(),
+            name: "skill".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: format!(r#"{{"name":"{name}","args":"{args}"}}"#),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage::default(),
+        },
+    ]
+}
+
+/// SPEC §8 验收：inline 展开——skill 工具触发展开正文（$ARGUMENTS
+/// 替换）并回灌模型（出现在后续采样请求历史）；清单注入（name +
+/// description + when_to_use）出现在系统提示词。
+#[tokio::test]
+async fn skill_tool_inline_expands_arguments_into_next_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills = p7_skill_set(vec![p7_skill(
+        "fixit",
+        SkillContext::Inline,
+        &[],
+        "修复 $ARGUMENTS（参考 ${WAVECODE_SKILL_DIR}/notes.md）",
+    )]);
+    let model = p3_mock(vec![
+        Some(p7_skill_tool_script("fixit", "崩溃问题")),
+        Some(text_then_end("已修复。")),
+    ]);
+    let (tx, _rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), None, skills);
+    session.run_turn("s-1", "修一下", tx).await.unwrap();
+
+    let seen = model.seen.lock().unwrap();
+    assert!(seen.len() >= 2, "应至少两次采样: {}", seen.len());
+    // 清单注入：name + description + when_to_use（SPEC §8.2 注入形态）。
+    assert!(
+        seen[0]
+            .system
+            .contains("- fixit: fixit 描述 (when: 测试触发条件)"),
+        "清单应注入系统提示词:\n{}",
+        seen[0].system
+    );
+    // inline 展开回灌：$ARGUMENTS 替换 + skill 目录变量替换。
+    let history = p7_history_text(&seen[1]);
+    assert!(
+        history.contains("修复 崩溃问题"),
+        "展开正文应回灌:\n{history}"
+    );
+    assert!(
+        history.contains("C:/skills/fixit/notes.md"),
+        "skill 目录变量应展开:\n{history}"
+    );
+}
+
+/// SPEC §8 验收：fork 派生——skill 工具触发后台子代理（SubagentStarted
+/// 事件可见、ToolResult 回执 task id）；allowed-tools 按 registry 过滤
+/// 子代理工具面（子代理采样请求的 tools 恰为白名单）。
+#[tokio::test]
+async fn skill_tool_fork_spawns_subagent_with_filtered_registry() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills = p7_skill_set(vec![p7_skill(
+        "deepreview",
+        SkillContext::Fork,
+        &["read_file"],
+        "评审 $ARGUMENTS",
+    )]);
+    let model = p3_mock(vec![
+        Some(p7_skill_tool_script("deepreview", "src/")),
+        Some(text_then_end("评审完成。")),
+    ]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), None, skills);
+    session.run_turn("s-1", "评审一下", tx).await.unwrap();
+
+    // 后台子代理与父会话并发：等 SubagentCompleted 再断言（消除
+    // "子代理尚未采样"的竞态），超时兜底防挂死。
+    let mut events = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(ev) = rx.recv().await {
+            let done = matches!(ev.msg, EventMsg::SubagentCompleted { .. });
+            events.push(ev.msg);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("5s 内应见 SubagentCompleted");
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::SubagentStarted { description, .. } if description == "skill: deepreview"
+        )),
+        "应见 skill fork 的 SubagentStarted: {events:?}"
+    );
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::ToolCallEnd { ok: true, output, .. } if output.contains("task-")
+        )),
+        "skill 工具回执应含 task id: {events:?}"
+    );
+    // allowed-tools 过滤：子代理采样请求的 tools 恰为 ["read_file"]
+    //（父会话请求带全量工具，按此特征定位子代理请求，与调度顺序无关）。
+    let seen = model.seen.lock().unwrap();
+    let child_req = seen
+        .iter()
+        .find(|req| {
+            let mut names: Vec<&str> = req.tools.iter().map(|t| t.name.as_str()).collect();
+            names.sort_unstable();
+            names == ["read_file"]
+        })
+        .expect("子代理请求的工具面应被 allowed-tools 过滤");
+    // fork 指令：skill 正文（preamble）拼在子代理输入前部，args 进 prompt。
+    let child_input = p7_history_text(child_req);
+    assert!(child_input.contains("评审 src/"), "{child_input}");
+}
+
+/// SPEC §8 验收：`/name [args]` slash 直调（invoke_skill）——inline
+/// 展开正文作为 turn 输入（历史首条 user 消息含展开文本）。
+#[tokio::test]
+async fn slash_inline_skill_expands_as_turn_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let skills = p7_skill_set(vec![p7_skill(
+        "fixit",
+        SkillContext::Inline,
+        &[],
+        "修复 $ARGUMENTS",
+    )]);
+    let model = p3_mock(vec![Some(text_then_end("done"))]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), None, skills);
+    session
+        .invoke_skill("s-1", "fixit", "崩溃问题", tx)
+        .await
+        .unwrap();
+
+    {
+        let seen = model.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "inline slash 应驱动一轮 turn");
+        assert!(
+            p7_history_text(&seen[0]).contains("修复 崩溃问题"),
+            "展开正文应为 turn 输入"
+        );
+    }
+    let events = collect_events(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, EventMsg::TurnCompleted { .. })),
+        "slash 交互应以 TurnCompleted 收尾: {events:?}"
+    );
+    // 未知 skill：Error + TurnCompleted，不发起采样。
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    session.invoke_skill("s-2", "nope", "", tx).await.unwrap();
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::Error { message, .. } if message.contains("unknown skill: nope")
+        )),
+        "{events:?}"
+    );
+    assert!(model.seen.lock().unwrap().len() == 1, "未知名不得发起采样");
+}
+
+/// SPEC §9 验收：PreToolUse 阻塞——退出码 2，工具不执行，stderr 回灌
+/// 模型（出现在后续采样请求历史）。
+#[tokio::test]
+async fn pre_tool_use_hook_blocks_and_stderr_reaches_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = p7_engine(&[(
+        HookEventPoint::PreToolUse,
+        HookDef {
+            matcher: Some("write_file".to_owned()),
+            ..p7_hook_def(&p7_exit_cmd(2, "no-writes-today"))
+        },
+    )]);
+    let model = p3_mock(vec![
+        Some(write_file_script("blocked.txt", "x")),
+        Some(text_then_end("被拦了。")),
+    ]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), Some(engine), None);
+    session.run_turn("s-1", "写文件", tx).await.unwrap();
+
+    assert!(
+        !dir.path().join("blocked.txt").exists(),
+        "阻塞的工具不得执行"
+    );
+    let events = collect_events(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, EventMsg::ToolCallEnd { ok: false, .. })),
+        "阻塞应产生失败 ToolCallEnd: {events:?}"
+    );
+    let seen = model.seen.lock().unwrap();
+    let history = p7_history_text(&seen[1]);
+    assert!(
+        history.contains("no-writes-today"),
+        "stderr 应回灌模型:\n{history}"
+    );
+}
+
+/// SPEC §9 验收：退出码 1——警告放行（Warning 事件可见，工具照常执行）。
+#[tokio::test]
+async fn pre_tool_use_hook_exit1_warns_and_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = p7_engine(&[(
+        HookEventPoint::PreToolUse,
+        p7_hook_def(&p7_exit_cmd(1, "hook-oops")),
+    )]);
+    let model = p3_mock(vec![
+        Some(write_file_script("ok.txt", "x")),
+        Some(text_then_end("done")),
+    ]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), Some(engine), None);
+    session.run_turn("s-1", "写文件", tx).await.unwrap();
+
+    assert!(dir.path().join("ok.txt").exists(), "警告放行的工具应执行");
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::Warning { message } if message.contains("退出码 1") && message.contains("hook-oops")
+        )),
+        "退出码 1 应转 Warning 事件: {events:?}"
+    );
+}
+
+/// SPEC §9 验收：超时强制 kill 记 warning（工具照常执行；hook 不拖死 turn）。
+#[tokio::test]
+async fn pre_tool_use_hook_timeout_killed_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = p7_engine(&[(
+        HookEventPoint::PreToolUse,
+        HookDef {
+            timeout_ms: 200,
+            ..p7_hook_def(&p7_sleep_cmd())
+        },
+    )]);
+    let model = p3_mock(vec![
+        Some(write_file_script("ok.txt", "x")),
+        Some(text_then_end("done")),
+    ]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), Some(engine), None);
+    session.run_turn("s-1", "写文件", tx).await.unwrap();
+
+    assert!(
+        dir.path().join("ok.txt").exists(),
+        "超时警告放行的工具应执行"
+    );
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::Warning { message } if message.contains("超时")
+        )),
+        "超时 kill 应转 Warning 事件: {events:?}"
+    );
+}
+
+/// SPEC §9 验收：matcher 匹配——matcher 未命中的工具不触发 hook
+///（无警告、正常执行）；命中的工具才触发。
+#[tokio::test]
+async fn pre_tool_use_hook_matcher_filters_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = p7_engine(&[(
+        HookEventPoint::PreToolUse,
+        HookDef {
+            matcher: Some("shell".to_owned()),
+            ..p7_hook_def(&p7_exit_cmd(2, "should-not-fire"))
+        },
+    )]);
+    let model = p3_mock(vec![
+        Some(write_file_script("ok.txt", "x")),
+        Some(text_then_end("done")),
+    ]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), Some(engine), None);
+    session.run_turn("s-1", "写文件", tx).await.unwrap();
+
+    assert!(
+        dir.path().join("ok.txt").exists(),
+        "matcher 未命中时工具应正常执行"
+    );
+    let events = collect_events(&mut rx);
+    assert!(
+        !events.iter().any(|m| matches!(m, EventMsg::Warning { .. })),
+        "matcher 未命中不得产生 hook 警告: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, EventMsg::ToolCallEnd { ok: true, .. })),
+        "{events:?}"
+    );
+}
+
+/// SPEC §9 / §5.2 验收：Stop hook 阻塞——stderr 作为 user 消息回灌模型
+/// 继续 turn；once 语义下第二次收尾放行（次序：先 todo steering 后
+/// Stop hook，本测试清单为空直接到 Stop hook）。
+#[tokio::test]
+async fn stop_hook_blocks_once_then_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = p7_engine(&[(
+        HookEventPoint::Stop,
+        HookDef {
+            once: true,
+            ..p7_hook_def(&p7_exit_cmd(2, "goal-not-met"))
+        },
+    )]);
+    let model = p3_mock(vec![
+        Some(text_then_end("先收工。")),
+        Some(text_then_end("补完了。")),
+    ]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), Some(engine), None);
+    let reason = session.run_turn("s-1", "干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "Stop 阻塞应驱动额外一轮采样");
+    let history = p7_history_text(&seen[1]);
+    assert!(
+        history.contains("goal-not-met"),
+        "Stop hook stderr 应回灌模型:\n{history}"
+    );
+    drop(seen);
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::Warning { message } if message.contains("Stop hook blocked")
+        )),
+        "{events:?}"
+    );
+}
+
+/// UserPromptSubmit hook 阻塞：输入不进历史、不发起采样，stderr 以
+/// Error 事件展示 + TurnCompleted 收尾（前端不悬挂）。
+#[tokio::test]
+async fn user_prompt_submit_hook_blocks_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = p7_engine(&[(
+        HookEventPoint::UserPromptSubmit,
+        p7_hook_def(&p7_exit_cmd(2, "blocked-word")),
+    )]);
+    let model = p3_mock(vec![Some(text_then_end("不应到达"))]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session = p7_session(model.clone(), dir.path(), Some(engine), None);
+    session.run_turn("s-1", "敏感输入", tx).await.unwrap();
+
+    assert!(
+        model.seen.lock().unwrap().is_empty(),
+        "阻塞的输入不得发起采样"
+    );
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::Error { message, .. } if message.contains("blocked-word")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|m| matches!(m, EventMsg::TurnCompleted { .. })),
+        "{events:?}"
+    );
+}
+
+// —— P9：MCP 工具桥接（SPEC §10，真实 transport 未实现，mock client 验证） ——
+
+/// P9 测试夹具：假 MCP client——单工具 `echo`（回显 text 参数），
+/// 记录收到的 `(原始名, 输入)` 供断言。
+struct FakeMcpClient {
+    calls: Mutex<Vec<(String, serde_json::Value)>>,
+}
+
+#[async_trait::async_trait]
+impl crate::mcp::McpClient for FakeMcpClient {
+    async fn list_tools(&self) -> Result<Vec<crate::mcp::McpToolDef>, crate::mcp::McpError> {
+        Ok(vec![crate::mcp::McpToolDef {
+            name: "echo".into(),
+            description: Some("Echo the input text back".into()),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"]
+            }),
+        }])
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> Result<crate::mcp::McpToolOutput, crate::mcp::McpError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), input.clone()));
+        let text = input["text"].as_str().unwrap_or("");
+        Ok(crate::mcp::McpToolOutput {
+            content: format!("echo: {text}"),
+            is_error: false,
+        })
+    }
+}
+
+/// P9 测试夹具：调用 `mcp__fake__echo` 的单轮脚本。
+fn mcp_echo_script(call_id: &str, text: &str) -> Vec<StreamEvent> {
+    vec![
+        StreamEvent::ToolUseBegin {
+            id: call_id.into(),
+            name: "mcp__fake__echo".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: format!(r#"{{"text":"{text}"}}"#),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        },
+    ]
+}
+
+/// P9 测试夹具：mock client 经 McpToolBridge 注册进 Registry
+///（SPEC §10 命名注入点）。
+async fn p9_registry(client: Arc<FakeMcpClient>) -> wavecode_tools::Registry {
+    let bridge = crate::mcp::McpToolBridge::new("fake", client);
+    let mut registry = wavecode_tools::Registry::builtin();
+    for tool in bridge.tools().await.unwrap() {
+        registry.register(tool);
+    }
+    registry
+}
+
+/// P9 验收：mock McpClient 的工具经桥注册进 Registry（`mcp__fake__echo`
+/// 命名注入），经 turn 循环调用成功、结果回灌模型（第二轮采样请求中
+/// 可见 ToolResult），call_tool 收到的是 server 侧原始名。
+#[tokio::test]
+async fn mcp_bridged_tool_callable_in_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = Arc::new(FakeMcpClient {
+        calls: Mutex::new(vec![]),
+    });
+    let scripts = vec![mcp_echo_script("t1", "hi"), text_then_end("完成。")];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            p9_registry(client.clone()).await,
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "调用 echo", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    // client 收到原始名（不含 mcp__ 前缀）与透传输入。
+    assert_eq!(
+        client.calls.lock().unwrap().as_slice(),
+        &[("echo".to_owned(), serde_json::json!({"text": "hi"}))]
+    );
+    // 结果回灌：第二轮采样请求的历史中含 ToolResult "echo: hi"。
+    let seen = model.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    let results: Vec<&str> = seen[1]
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|b| match b {
+            wavecode_llm::ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["echo: hi"], "MCP 结果应回灌模型");
+}
+
+/// P9 验收：桥接工具走 sandbox 同一审批管道（非只读默认）——default
+/// 模式下调用前发 ApprovalRequested（detail 含 `mcp__fake__echo`），
+/// 放行后才实际调用 client。
+#[tokio::test]
+async fn mcp_bridged_tool_asks_in_default_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = Arc::new(FakeMcpClient {
+        calls: Mutex::new(vec![]),
+    });
+    let scripts = vec![mcp_echo_script("t1", "hi"), text_then_end("完成。")];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            p9_registry(client.clone()).await,
+            dir.path().to_path_buf(),
+        )
+        .build(),
+    );
+    let gate = session.approval_handle();
+    let signal = async {
+        let mut rx = rx;
+        let mut requested = None;
+        while let Some(ev) = rx.recv().await {
+            if let EventMsg::ApprovalRequested {
+                call_id,
+                kind,
+                detail,
+            } = ev.msg
+            {
+                requested = Some((kind, detail));
+                gate.decide(call_id, wavecode_protocol::ApprovalDecision::AllowOnce);
+            }
+        }
+        requested
+    };
+    let (reason, requested) = tokio::join!(session.run_turn("s-1", "调用 echo", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Completed);
+    let (kind, detail) = requested.expect("default 模式下 MCP 工具应发审批请求");
+    assert_eq!(kind, wavecode_protocol::ApprovalKind::Write);
+    assert!(detail.contains("mcp__fake__echo"), "{detail}");
+    // 放行后实际调用到达 client。
+    assert_eq!(client.calls.lock().unwrap().len(), 1);
+}
+
+// ------------------------------------------------------------------
+// P10：会话持久化（rollout 写入 / replay 恢复 / 断点续跑 / 崩溃恢复）
+// 与长程硬化（压缩循环压力、泄漏粗检）
+// ------------------------------------------------------------------
+
+/// P10 测试夹具：注入临时根目录的 rollout 配置。
+fn p10_rollout(
+    dir: &std::path::Path,
+    thread_id: &str,
+) -> Option<crate::rollout::RolloutConfig> {
+    Some(crate::rollout::RolloutConfig {
+        root: dir.join("threads"),
+        thread_id: thread_id.to_owned(),
+    })
+}
+
+/// P10 会话构造：bypass 沙箱 + 可挂 rollout（cwd 独立 tempdir，
+/// write_file 落点互不影响）。
+fn p10_session(
+    model: Arc<dyn ChatModel>,
+    rollout: Option<crate::rollout::RolloutConfig>,
+) -> Session {
+    Session::new(
+        SessionConfig::builder(
+            "mock",
+            model,
+            wavecode_tools::Registry::builtin(),
+            tempfile::tempdir().unwrap().keep(),
+        )
+        .sandbox(bypass_sandbox())
+        .rollout(rollout)
+        .build(),
+    )
+}
+
+/// rollout 文件全部记录的序号清单（断言连续递增用）。
+fn p10_seqs(load: &crate::rollout::RolloutLoad) -> Vec<u64> {
+    load.records.iter().map(|r| r.seq()).collect()
+}
+
+/// P10 验收锚点：rollout 写入 → replay 恢复 → 断点续跑。
+#[tokio::test]
+async fn rollout_records_turn_and_resume_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    // —— 会话 A：一轮含工具调用的 turn，全程落 rollout ——
+    let model_a = Arc::new(MockModel::new(vec![
+        write_file_script("hello.txt", "hi"),
+        text_then_end("已创建。"),
+    ]));
+    let (tx, _rx) = mpsc::channel::<Event>(64);
+    let mut session_a = p10_session(model_a, p10_rollout(dir.path(), "thread-1"));
+    let reason = session_a
+        .run_turn("s-1", "创建 hello.txt", tx)
+        .await
+        .unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let history_a = session_a.messages.clone();
+
+    // rollout 文件：4 条消息记录（user / assistant tool_use /
+    // tool_result user / assistant 文本），seq 从 1 连续递增。
+    let path = dir.path().join("threads/thread-1.jsonl");
+    let load = crate::rollout::load_rollout(&path).unwrap();
+    assert!(load.warnings.is_empty(), "{:?}", load.warnings);
+    assert_eq!(load.records.len(), 4);
+    assert_eq!(p10_seqs(&load), vec![1, 2, 3, 4]);
+    assert!(
+        load.records
+            .iter()
+            .all(|r| matches!(r, crate::rollout::RolloutRecord::Message { .. }))
+    );
+    drop(session_a); // 丢弃 Session（模拟进程退出）
+
+    // —— 会话 B：同 rollout 构造即 replay 恢复，历史与 A 一致 ——
+    let model_b = Arc::new(MockModel::new(vec![text_then_end("续跑完成。")]));
+    let (tx, _rx) = mpsc::channel::<Event>(64);
+    let mut session_b = p10_session(model_b.clone(), p10_rollout(dir.path(), "thread-1"));
+    assert_eq!(
+        *session_b.messages, *history_a,
+        "replay 恢复的历史应与退出前一致"
+    );
+    assert_eq!(
+        wavecode_context::find_pairing_violations(&session_b.messages),
+        Vec::<String>::new()
+    );
+
+    // —— 断点续跑：再跑一轮 turn，采样请求的历史 = 恢复历史 + 新输入 ——
+    let reason = session_b.run_turn("s-2", "继续", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let seen = model_b.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].messages.len(), history_a.len() + 1);
+    drop(seen);
+
+    // rollout 续写：seq 接续不重号；第三次 replay 与会话 B 全量一致。
+    let load = crate::rollout::load_rollout(&path).unwrap();
+    assert_eq!(load.records.len(), 6);
+    assert_eq!(p10_seqs(&load), vec![1, 2, 3, 4, 5, 6]);
+    let session_c = p10_session(
+        Arc::new(MockModel::new(vec![])),
+        p10_rollout(dir.path(), "thread-1"),
+    );
+    assert_eq!(*session_c.messages, *session_b.messages);
+}
+
+/// P10 验收锚点：压缩记录落盘（承载压缩时点新历史）→ 压缩后 resume
+/// 恢复——压缩点之后原文 + 摘要即新历史（SPEC §16 / §5.2）。
+#[tokio::test]
+async fn rollout_compaction_record_and_resume_after_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = p3_mock(vec![Some(text_then_end("好的"))]);
+    let (tx, mut rx) = mpsc::channel::<Event>(64);
+    let mut session_a = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model,
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .context_window(100_000)
+        .sandbox(bypass_sandbox())
+        .context(ContextConfig {
+            thresholds: wavecode_context::Thresholds {
+                warning_margin: 200,
+                auto_compact_margin: 100,
+                blocking_margin: 10,
+            },
+            keep_recent: 2,
+            summary_max_tokens: 500,
+            estimate_chars_per_token: 4,
+        })
+        .rollout(p10_rollout(dir.path(), "t-compact"))
+        .build(),
+    );
+    // 上一 turn 结转的权威占用：首次 PreTurn 检查即过自动压缩线。
+    session_a.usage_carry = Some(99_950);
+    let reason = session_a.run_turn("s-1", "继续干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let events = collect_events(&mut rx);
+    assert!(
+        events.iter().any(|m| matches!(
+            m,
+            EventMsg::CompactStarted { trigger } if *trigger == wavecode_protocol::CompactTrigger::Auto
+        )),
+        "应以 Auto 触发压缩: {events:?}"
+    );
+    let history_a = session_a.messages.clone();
+
+    // rollout 记录序：user 输入 → 压缩记录 → assistant 文本。
+    let path = dir.path().join("threads/t-compact.jsonl");
+    let load = crate::rollout::load_rollout(&path).unwrap();
+    assert_eq!(load.records.len(), 3, "{:?}", load.records);
+    let crate::rollout::RolloutRecord::Compaction {
+        trigger,
+        messages: recorded,
+        ..
+    } = &load.records[1]
+    else {
+        panic!("第二条应为压缩记录: {:?}", load.records)
+    };
+    assert_eq!(*trigger, wavecode_protocol::CompactTrigger::Auto);
+    // 压缩记录承载压缩时点的新历史（= 会话当前历史的前缀）。
+    assert_eq!(recorded.as_slice(), &history_a[..recorded.len()]);
+    assert_eq!(p10_seqs(&load), vec![1, 2, 3]);
+
+    // —— 压缩后 resume：replay 恢复 == 会话 A 当前历史；首条为摘要消息 ——
+    let session_b = p10_session(
+        Arc::new(MockModel::new(vec![])),
+        p10_rollout(dir.path(), "t-compact"),
+    );
+    assert_eq!(*session_b.messages, *history_a);
+    assert!(
+        matches!(&session_b.messages[0].content[0], ContentBlock::Text { text } if text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX)),
+        "恢复历史首条应为摘要消息: {:?}",
+        session_b.messages
+    );
+    assert_eq!(
+        wavecode_context::find_pairing_violations(&session_b.messages),
+        Vec::<String>::new()
+    );
+}
+
+/// P10 验收锚点：崩溃恢复——写 rollout → 流中途中断（丢弃 Session 模拟
+/// 崩溃）→ replay 恢复 → 继续 turn，历史一致且配对完整。
+#[tokio::test]
+async fn rollout_crash_recovery_interrupt_then_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    // turn 1：正常完成（write_file + 文本），rollout 落 4 条记录。
+    let model_a = Arc::new(MockModel::new(vec![
+        write_file_script("a.txt", "A"),
+        text_then_end("完成。"),
+    ]));
+    let (tx, _rx) = mpsc::channel::<Event>(64);
+    let mut session_a = p10_session(model_a, p10_rollout(dir.path(), "t-crash"));
+    session_a.run_turn("s-1", "创建 a.txt", tx).await.unwrap();
+    drop(session_a);
+
+    // turn 2：恢复后流中途被中断（半截 tool_use）——中断路径合成配对
+    // 结果落盘；随后直接丢弃 Session（模拟崩溃：无优雅关闭）。
+    let gate = Arc::new(AtomicBool::new(false));
+    let model_b = Arc::new(GatedModel {
+        script: vec![
+            StreamEvent::TextDelta {
+                text: "再写".into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::ToolUseBegin {
+                id: "t9".into(),
+                name: "write_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"b.txt""#.into(),
+            },
+        ],
+        gate: gate.clone(),
+        seen: Mutex::new(vec![]),
+    });
+    let (tx, rx) = mpsc::channel::<Event>(64);
+    let mut session_b = p10_session(model_b, p10_rollout(dir.path(), "t-crash"));
+    let handle = session_b.interrupt_handle();
+    let signal = async {
+        let mut rx = rx;
+        loop {
+            let ev = rx.recv().await.unwrap();
+            if matches!(&ev.msg, EventMsg::AgentMessageDelta { text } if text == "再写") {
+                break;
+            }
+        }
+        handle.store(true, Ordering::SeqCst);
+        gate.store(true, Ordering::SeqCst);
+        rx
+    };
+    let (reason, rx) = tokio::join!(session_b.run_turn("s-2", "再写一个", tx), signal);
+    assert_eq!(reason.unwrap(), StopReason::Interrupted);
+    drop(rx);
+    let history_b = session_b.messages.clone();
+    // 半截 tool_use 已合成 is_error 配对结果（中断路径的既有纪律）。
+    assert_eq!(
+        wavecode_context::find_pairing_violations(&history_b),
+        Vec::<String>::new()
+    );
+    drop(session_b); // 模拟崩溃：无 Shutdown、无提取，直接丢弃
+
+    // —— 崩溃后 resume：replay 恢复历史与被中断时一致 ——
+    let model_c = Arc::new(MockModel::new(vec![text_then_end("恢复后继续。")]));
+    let (tx, _rx) = mpsc::channel::<Event>(64);
+    let mut session_c = p10_session(model_c.clone(), p10_rollout(dir.path(), "t-crash"));
+    assert_eq!(
+        *session_c.messages, *history_b,
+        "崩溃恢复的历史应与被中断时一致"
+    );
+    // 悬空 tool_use t9 的 is_error 配对结果在恢复历史中。
+    let last = session_c.messages.last().unwrap();
+    assert!(last.content.iter().any(
+        |b| matches!(b, ContentBlock::ToolResult { tool_use_id, is_error: true, .. } if tool_use_id == "t9")
+    ));
+
+    // —— 断点续跑：继续 turn 正常完成，采样请求携带恢复历史 ——
+    let reason = session_c.run_turn("s-3", "继续", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let seen = model_c.seen.lock().unwrap();
+    assert_eq!(seen[0].messages.len(), history_b.len() + 1);
+    drop(seen);
+    // rollout 全程 seq 连续（4 + 3 + 2 = 9 条记录）。
+    let load = crate::rollout::load_rollout(&dir.path().join("threads/t-crash.jsonl")).unwrap();
+    assert_eq!(load.records.len(), 9);
+    assert_eq!(p10_seqs(&load), (1..=9).collect::<Vec<u64>>());
+}
+
+// —— P10 长程硬化：压缩循环压力测试（≥50 轮）+ 泄漏粗检 ——
+
+/// P10 泄漏粗检：计数分配器（统计活跃分配字节 = 累计 alloc − dealloc）。
+/// 精度边界（诚实声明）：这是"活跃分配字节"快照而非 RSS——RSS 受分配器
+/// 缓存与碎片影响，且无可移植读法（Windows 无 /proc）；tokio 任务数无
+/// 稳定 API；句柄泄漏无便携探测。故本断言只锁定"活跃内存不随轮次线性
+/// 增长"这一代理指标，RSS / 句柄 / 任务数级泄漏由人工长跑验收覆盖
+///（scripts/acceptance/ecommerce.md）。
+struct CountingAlloc;
+
+static LIVE_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        LIVE_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: 透传系统分配器；layout 有效性由调用方（运行时）保证。
+        unsafe { std::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        LIVE_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+        // SAFETY: 透传系统分配器；ptr/layout 与 alloc 配对由运行时保证。
+        unsafe { std::alloc::GlobalAlloc::dealloc(&std::alloc::System, ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static P10_LEAK_CHECK_ALLOC: CountingAlloc = CountingAlloc;
+
+/// P10 压力 mock：采样恒回 99_950 input_tokens（过自动压缩线，每个
+/// turn 的 PreTurn 触发一次压缩）；摘要"引用前次摘要"——从历史首条的
+/// 上一轮摘要解析迭代号并 +1（模拟真实摘要的信息链传递），解析失败
+/// 产出 CHAIN-BROKEN 标记（断链在最终断言可见）。
+struct StressMock {
+    summary_calls: Mutex<usize>,
+}
+
+/// 从上一轮摘要正文解析"第 N 轮迭代完成"的迭代号。
+fn p10_parse_round(summary: &str) -> Option<usize> {
+    let start = summary.find("第 ")? + "第 ".len();
+    let end = summary[start..].find(" 轮迭代完成")? + start;
+    summary[start..end].parse().ok()
+}
+
+#[async_trait::async_trait]
+impl ChatModel for StressMock {
+    async fn stream(
+        &self,
+        req: ChatRequest,
+    ) -> wavecode_llm::Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
+        >,
+    > {
+        if req.tools.is_empty() {
+            // 摘要请求（ModelSummary 不带工具，与 p3 mock 同判定）。
+            let prev_summary = req.messages.first().and_then(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ContentBlock::Text { text }
+                        if text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX) =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+            });
+            let round = match &prev_summary {
+                None => Some(1usize),
+                Some(text) => p10_parse_round(text).map(|r| r + 1),
+            };
+            *self.summary_calls.lock().unwrap() += 1;
+            let body = match round {
+                Some(round) => format!(
+                    "## 目标\n搭建电商平台（GOAL-ANCHOR）。\n## 进展\n第 {round} 轮迭代完成（引用前次摘要：第 {} 轮）。\n## 关键决策\n首版 SQLite，零运维（DECISION-ANCHOR）。\n## 文件清单\ncrates/shop/src/cart.rs 已创建（FILE-ANCHOR）。\n## 待办\n第 {} 轮迭代（TODO-ANCHOR）。",
+                    round.saturating_sub(1),
+                    round + 1
+                ),
+                None => "CHAIN-BROKEN".to_owned(),
+            };
+            Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::TextDelta { text: body }),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: "end_turn".into(),
+                    usage: Usage {
+                        input_tokens: 100,
+                        output_tokens: 20,
+                    },
+                }),
+            ])))
+        } else {
+            // 采样：纯文本终态 + 过自动线水位（下一 turn PreTurn 压缩）。
+            Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::TextDelta {
+                    text: "本轮完成。".into(),
+                }),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: "end_turn".into(),
+                    usage: Usage {
+                        input_tokens: 99_950,
+                        output_tokens: 5,
+                    },
+                }),
+            ])))
+        }
+    }
+}
+
+/// P10 验收锚点（DEV-PLAN §0 总目标 2 的代理指标）：压缩循环压力
+/// 测试——mock 驱动 50 轮 turn，每轮 PreTurn 自动压缩一次；每轮断言
+/// 配对零违规；50 轮后五要素锚点链（目标/决策/文件清单/待办）在
+/// "摘要引用前次摘要"的传递下完整可追溯，历史条数有界。
+/// 附泄漏粗检：活跃分配字节增量有界（精度边界见 CountingAlloc 注释）。
+#[tokio::test]
+async fn compaction_loop_stress_50_rounds_no_pairing_violations() {
+    const ROUNDS: usize = 50;
+    let dir = tempfile::tempdir().unwrap();
+    let model = Arc::new(StressMock {
+        summary_calls: Mutex::new(0),
+    });
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .context_window(100_000)
+        .sandbox(bypass_sandbox())
+        .context(ContextConfig {
+            thresholds: wavecode_context::Thresholds {
+                warning_margin: 200,
+                auto_compact_margin: 100,
+                blocking_margin: 10,
+            },
+            keep_recent: 2,
+            summary_max_tokens: 500,
+            estimate_chars_per_token: 4,
+        })
+        // 压力测试同时压 rollout 记录面（每轮压缩记录 + 消息记录）。
+        .rollout(p10_rollout(dir.path(), "t-stress"))
+        .build(),
+    );
+    // 种子水位：每个 turn 的首次 PreTurn 检查即触发自动压缩。
+    session.usage_carry = Some(99_950);
+
+    // 泄漏粗检基线：先跑 2 轮热身（惰性初始化 / 一次性分配不计入）。
+    for i in 0..2 {
+        let (tx, _rx) = mpsc::channel::<Event>(64);
+        session
+            .run_turn(&format!("s-{i}"), "继续迭代", tx)
+            .await
+            .unwrap();
+    }
+    let live_before = LIVE_BYTES.load(Ordering::Relaxed);
+
+    for i in 2..ROUNDS {
+        let (tx, _rx) = mpsc::channel::<Event>(64);
+        session
+            .run_turn(&format!("s-{i}"), "继续迭代", tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            wavecode_context::find_pairing_violations(&session.messages),
+            Vec::<String>::new(),
+            "第 {i} 轮压缩后配对违规: {:?}",
+            session.messages
+        );
+    }
+    let live_after = LIVE_BYTES.load(Ordering::Relaxed);
+
+    // 每轮恰一次压缩。
+    assert_eq!(*model.summary_calls.lock().unwrap(), ROUNDS);
+    // 历史有界：压缩稳态下条数不随轮次增长（摘要 + 保留尾 + 本轮收发）。
+    assert!(
+        session.messages.len() <= 6,
+        "历史条数应有界: {}",
+        session.messages.len()
+    );
+    // 无请求快照滞留：turn 结束后历史 Arc 唯一持有（泄漏的常见形态）。
+    assert_eq!(Arc::strong_count(&session.messages), 1);
+
+    // 五要素信息链：50 轮压缩后锚点仍可追溯，迭代号连续未断链。
+    let ContentBlock::Text { text } = &session.messages[0].content[0] else {
+        panic!("首条应为摘要文本消息: {:?}", session.messages)
+    };
+    assert!(
+        text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX),
+        "{text}"
+    );
+    assert!(!text.contains("CHAIN-BROKEN"), "摘要信息链断裂: {text}");
+    for anchor in [
+        "GOAL-ANCHOR",
+        "DECISION-ANCHOR",
+        "FILE-ANCHOR",
+        "TODO-ANCHOR",
+    ] {
+        assert!(
+            text.contains(anchor),
+            "50 轮压缩后缺要素锚点「{anchor}」: {text}"
+        );
+    }
+    assert!(
+        text.contains("第 50 轮迭代完成"),
+        "迭代号应链式传递到第 50 轮: {text}"
+    );
+
+    // rollout 记录面同步受压：50 条压缩记录 + 每轮 2 条消息（首轮另
+    // 有种子输入外的 user 消息……精确计数 = 50 压缩 + 100 消息）。
+    let load =
+        crate::rollout::load_rollout(&dir.path().join("threads/t-stress.jsonl")).unwrap();
+    let compactions = load
+        .records
+        .iter()
+        .filter(|r| matches!(r, crate::rollout::RolloutRecord::Compaction { .. }))
+        .count();
+    assert_eq!(compactions, ROUNDS);
+    assert_eq!(load.records.len(), ROUNDS * 3);
+    let seqs = p10_seqs(&load);
+    assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "seq 全程连续");
+
+    // 泄漏粗检（best-effort，精度边界见 CountingAlloc 注释）：活跃
+    // 分配增量有界——稳态下每轮的分配应在 turn 结束时释放；阈值取
+    // 宽裕常数以吸收并行测试的瞬时分配噪声。
+    let delta = live_after.saturating_sub(live_before);
+    assert!(
+        delta < 16 * 1024 * 1024,
+        "活跃分配增量 {delta} 字节超界（疑似随轮次增长的泄漏）"
+    );
+}
+
+// —— 特征化测试（阶段 1a-0 安全网，SEC-001/002）：锁定 deny/allow 规则在
+// run_turn 编排层的现有行为基线。此前这些路径零集成覆盖（既有 run_turn
+// 测试全用 bypass_sandbox 无规则）。TurnRunner 抽取与 session 拆分须保持。
+
+/// V1（SEC-001）：只读工具（read_file）整体跳过 sandbox.decide()——deny
+/// 规则对只读工具不生效（既存行为）。修复此 deny-on-read 缺口属独立安全
+/// 增强，不混入重构；本测试锁定现状以防重构静默改变。
+#[tokio::test]
+async fn deny_rule_does_not_block_readonly_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+    std::fs::write(dir.path().join("secrets/key.pem"), "TOPSECRET").unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "read_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"secrets/key.pem"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("已读。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(
+            Sandbox::new(
+                PermissionMode::Default,
+                &[],
+                &["File(secrets/**)".to_string()],
+            )
+            .unwrap(),
+        )
+        .build(),
+    );
+    let reason = session
+        .run_turn("s-1", "读 secrets/key.pem", tx)
+        .await
+        .unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let mut tool_ok = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let EventMsg::ToolCallEnd { ok, .. } = ev.msg {
+            tool_ok = Some(ok);
+        }
+    }
+    assert_eq!(
+        tool_ok,
+        Some(true),
+        "只读工具应跳过 decide 直接执行（SEC-001）"
+    );
+}
+
+/// V2：非只读工具（write_file）经 sandbox.decide()，deny 规则生效——
+/// 工具不执行，reason 以 is_error 回灌模型，文件未创建。
+#[tokio::test]
+async fn deny_rule_blocks_nonreadonly_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "write_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"data.secret","content":"x"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("被拒了。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(
+            Sandbox::new(
+                PermissionMode::Default,
+                &[],
+                &["File(*.secret)".to_string()],
+            )
+            .unwrap(),
+        )
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "写 data.secret", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let mut tool_ok = None;
+    while let Ok(ev) = rx.try_recv() {
+        if let EventMsg::ToolCallEnd { ok, .. } = ev.msg {
+            tool_ok = Some(ok);
+        }
+    }
+    assert_eq!(tool_ok, Some(false), "write_file 应被 deny 规则拒绝");
+    assert!(
+        !dir.path().join("data.secret").exists(),
+        "被拒工具不应创建文件"
+    );
+}
+
+/// V3：default 模式下非只读工具命中 allow 规则 → Allow（免审批直接执行），
+/// 不发 ApprovalRequested 事件（default 无规则时非只读会 Ask 卡住）。
+#[tokio::test]
+async fn allow_rule_skips_approval_for_nonreadonly() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![
+        vec![
+            StreamEvent::ToolUseBegin {
+                id: "t1".into(),
+                name: "write_file".into(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"path":"out.txt","content":"hi"}"#.into(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".into(),
+                usage: Usage::default(),
+            },
+        ],
+        text_then_end("已写。"),
+    ];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(Sandbox::new(PermissionMode::Default, &["File(*)".to_string()], &[]).unwrap())
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "写 out.txt", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    let mut saw_approval = false;
+    let mut tool_ok = None;
+    while let Ok(ev) = rx.try_recv() {
+        match ev.msg {
+            EventMsg::ApprovalRequested { .. } => saw_approval = true,
+            EventMsg::ToolCallEnd { ok, .. } => tool_ok = Some(ok),
+            _ => {}
+        }
+    }
+    assert!(
+        !saw_approval,
+        "allow 规则命中应免审批，不发 ApprovalRequested"
+    );
+    assert_eq!(tool_ok, Some(true), "write_file 应直接执行成功");
+    assert!(dir.path().join("out.txt").exists(), "文件应被创建");
+}

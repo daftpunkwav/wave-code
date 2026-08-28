@@ -47,6 +47,10 @@ pub enum Op {
         /// 调用参数（`$ARGUMENTS` 展开来源；可空串）。
         args: String,
     },
+    /// 请求持久记忆索引（`/memory` 读取面的协议化）：core 回以
+    /// `EventMsg::MemoryIndex`。前端不直读记忆文件——Web/Desktop 与
+    /// TUI 能力等价（SPEC §3 规则 2）。
+    MemoryList,
     Shutdown,
 }
 
@@ -195,6 +199,15 @@ pub enum EventMsg {
     Warning {
         message: String,
     },
+    /// `Op::MemoryList` 的回包：持久记忆索引（`/memory` 读取面）。
+    /// `path` 为 `None` 表示会话无记忆装配（能力不可用）；索引文件不存在
+    /// = 正常形态，`content` 为空串。
+    MemoryIndex {
+        /// 索引文件路径（展示用；`None` = 无记忆装配）。
+        path: Option<String>,
+        /// 索引全文（不存在 = 空串）。
+        content: String,
+    },
     Error {
         message: String,
         recoverable: bool,
@@ -280,7 +293,7 @@ mod tests {
     fn wire_type_tags_locked() {
         // 锁死协议线上格式：每个变体的精确 "type" tag（SPEC §4.1）。
         // 新增变体必须在表中登记；改动既有 tag 即破坏线上兼容。
-        let op_cases: [(Op, &str); 7] = [
+        let op_cases: [(Op, &str); 8] = [
             (Op::UserInput { text: "t".into() }, "user_input"),
             (Op::Interrupt, "interrupt"),
             (
@@ -305,6 +318,7 @@ mod tests {
                 "slash_command",
             ),
             (Op::Shutdown, "shutdown"),
+            (Op::MemoryList, "memory_list"),
         ];
         for (op, tag) in op_cases {
             let json = serde_json::to_string(&op).unwrap();
@@ -314,7 +328,7 @@ mod tests {
             );
         }
 
-        let event_cases: [(EventMsg, &str); 14] = [
+        let event_cases: [(EventMsg, &str); 15] = [
             (
                 EventMsg::TurnStarted {
                     turn_id: "t1".into(),
@@ -385,6 +399,13 @@ mod tests {
                     message: "w".into(),
                 },
                 "warning",
+            ),
+            (
+                EventMsg::MemoryIndex {
+                    path: Some("/root/.wavecode/memory/MEMORY.md".into()),
+                    content: "- [note](x.md)".into(),
+                },
+                "memory_index",
             ),
             (
                 EventMsg::Error {

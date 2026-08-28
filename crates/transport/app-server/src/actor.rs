@@ -55,8 +55,9 @@ pub(super) async fn actor_loop(
                                 match maybe_sub {
                                     Some(extra) => match extra.op {
                                         // 可排队 op（UserInput / Compact /
-                                        // SlashCommand）：队列满时显式拒绝。
-                                        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. } => {
+                                        // SlashCommand / MemoryList）：队列满时显式拒绝。
+                                        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. }
+                                        | Op::MemoryList => {
                                             queue_or_reject(&mut pending, extra, &event_tx).await
                                         }
                                         Op::Interrupt => {
@@ -129,6 +130,32 @@ pub(super) async fn actor_loop(
                 // P6：SessionEnd 触发记忆自动提取（后台 detached，不阻塞退出）。
                 session.spawn_memory_extraction();
                 return;
+            }
+            // `/memory` 读取面（Op::MemoryList）：索引内容回包（非 turn
+            // 操作，无 TurnStarted/Completed 包裹）；读取失败发 recoverable
+            // Error；无记忆装配回 path=None（前端展示"能力不可用"）。
+            Op::MemoryList => {
+                let msg = match session.memory_index() {
+                    Some((path, Ok(content))) => EventMsg::MemoryIndex {
+                        path: Some(path.display().to_string()),
+                        content,
+                    },
+                    Some((_, Err(e))) => EventMsg::Error {
+                        message: format!("读取记忆索引失败：{e}"),
+                        recoverable: true,
+                    },
+                    None => EventMsg::MemoryIndex {
+                        path: None,
+                        content: String::new(),
+                    },
+                };
+                // send 失败即前端断开：与 core emit 同策略，继续循环。
+                let _ = event_tx
+                    .send(Event {
+                        id: sub.id.clone(),
+                        msg,
+                    })
+                    .await;
             }
             // P3：无活动 turn 的 /compact——立即压缩（事件以该 submission
             // 的 id 回填）；压缩失败已由 Session::compact 发 Error 事件，
@@ -216,7 +243,8 @@ where
             maybe_sub = submission_rx.recv() => {
                 match maybe_sub {
                     Some(extra) => match extra.op {
-                        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. } => {
+                        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. }
+                        | Op::MemoryList => {
                             queue_or_reject(pending, extra, event_tx).await
                         }
                         Op::Interrupt => interrupt_handle.store(true, Ordering::SeqCst),

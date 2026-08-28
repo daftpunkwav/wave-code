@@ -60,6 +60,17 @@ impl super::Session {
         }
     }
 
+    /// `/memory` 协议读取面（`Op::MemoryList`）：返回（索引文件路径，
+    /// 全文）。索引不存在 = 空串（正常形态，首次使用无记忆）；无记忆
+    /// 装配 = `None`（调用方发"能力不可用"回包）。前端不直读记忆文件
+    /// ——Web/Desktop 与 TUI 能力等价（SPEC §3 规则 2）。
+    pub fn memory_index(&self) -> Option<(std::path::PathBuf, std::io::Result<String>)> {
+        let mem = self.cfg.memory.as_ref()?;
+        let path = mem.store_root.join(wavecode_memory::INDEX_FILE);
+        let content = std::fs::read_to_string(&path);
+        Some((path, content))
+    }
+
     /// 预取记忆自动提取句柄（无记忆配置 / 空历史 → None）。
     /// `run_turn(&mut self)` 借用期间无法经 `&self` 调用——actor 在驱动
     /// turn 前预取，供 in-turn Shutdown 路径使用。

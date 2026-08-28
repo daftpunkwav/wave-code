@@ -167,6 +167,24 @@ impl App {
             M::TokenCount { used, window } => {
                 self.tokens = Some((*used, *window));
             }
+            // `/memory` 回包:索引内容渲染(空索引与缺文件同态);path=None
+            // 表示会话无记忆装配。
+            M::MemoryIndex { path, content } => {
+                match path {
+                    Some(p) if content.trim().is_empty() => {
+                        self.items
+                            .push(Item::plain(format!("（暂无持久记忆；索引文件：{p}）"), dim()));
+                    }
+                    Some(_) => {
+                        let clean = sanitize_terminal(content.trim_end()).into_owned();
+                        self.items.push(Item::plain(clean, Style::default()));
+                    }
+                    None => self.items.push(Item::plain(
+                        "记忆能力不可用（会话未启用记忆装配）".into(),
+                        warn(),
+                    )),
+                }
+            }
             M::CompactStarted { .. } => {
                 self.flush_message();
                 self.items
@@ -574,7 +592,9 @@ impl App {
         match name {
             "quit" | "exit" => self.quit = true,
             "compact" => self.outbox.push(Op::Compact),
-            "memory" => self.show_memory(),
+            // `/memory` 走协议面（Op::MemoryList → EventMsg::MemoryIndex）:
+            // 前端不直读记忆文件,与 Web/Desktop 能力等价（SPEC §3 规则 2）。
+            "memory" => self.outbox.push(Op::MemoryList),
             "mcp" => self.show_mcp(),
             "permissions" => self.cycle_permission_mode(),
             _ => {
@@ -597,39 +617,6 @@ impl App {
                     ));
                 }
             }
-        }
-    }
-
-    /// `/memory`：读取持久记忆索引文件（路径由装配侧注入；文件不存在 =
-    /// 暂无记忆,与行式 REPL 同一读取语义,不作为错误）。
-    fn show_memory(&mut self) {
-        match &self.ctx.memory_index_path {
-            Some(path) => match std::fs::read_to_string(path) {
-                Ok(index) if index.trim().is_empty() => {
-                    self.items.push(Item::plain(
-                        format!("（暂无持久记忆；索引文件：{}）", path.display()),
-                        dim(),
-                    ));
-                }
-                Ok(index) => {
-                    let content = sanitize_terminal(index.trim_end()).into_owned();
-                    self.items.push(Item::plain(content, Style::default()));
-                }
-                // 缺文件与空索引同态(正常形态);其余 io 错误才报错。
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    self.items.push(Item::plain(
-                        format!("（暂无持久记忆；索引文件：{}）", path.display()),
-                        dim(),
-                    ));
-                }
-                Err(e) => self
-                    .items
-                    .push(Item::plain(format!("读取记忆索引失败：{e}"), err())),
-            },
-            None => self.items.push(Item::plain(
-                "记忆能力不可用（启动时无法解析用户主目录）".into(),
-                warn(),
-            )),
         }
     }
 
@@ -677,7 +664,6 @@ mod tests {
             model_name: "m".into(),
             cwd: PathBuf::from("/tmp/x"),
             permission_mode: PermissionMode::Default,
-            memory_index_path: None,
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
         }

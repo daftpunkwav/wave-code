@@ -328,11 +328,6 @@ async fn run_tui(cfg: SessionConfig, mcp_lines: Vec<String>) -> anyhow::Result<E
         model_name: cfg.model_name.clone(),
         cwd: cfg.cwd.clone(),
         permission_mode: cfg.sandbox.mode(),
-        // `/memory` 读取面：与行式 REPL 同路径（store_root/索引文件名）。
-        memory_index_path: cfg
-            .memory
-            .as_ref()
-            .map(|m| m.store_root.join(wavecode_memory::INDEX_FILE)),
         // slash 补全与路由：仅 user-invocable skill 可直调（与 REPL 同判定）。
         skill_names: cfg
             .skills

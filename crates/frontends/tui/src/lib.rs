@@ -148,7 +148,6 @@ mod tests {
             model_name: "claude-sonnet-4-5".into(),
             cwd: std::path::PathBuf::from("D:/proj/wavecode"),
             permission_mode: wavecode_protocol::PermissionMode::Default,
-            memory_index_path: None,
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
         }

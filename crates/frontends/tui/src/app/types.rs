@@ -29,8 +29,6 @@ pub struct TuiContext {
     pub cwd: PathBuf,
     /// 初始权限模式（`/permissions` 在此基础上循环）。
     pub permission_mode: PermissionMode,
-    /// 持久记忆索引文件路径（`/memory` 读取面；无记忆能力时为 None）。
-    pub memory_index_path: Option<PathBuf>,
     /// 可直调 skill 名清单（slash 补全候选与路由判定）。
     pub skill_names: Vec<String>,
     /// 已配置 MCP server 的状态行（P9，`/mcp` 展示面；core 预渲染，

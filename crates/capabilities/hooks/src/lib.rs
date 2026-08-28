@@ -225,6 +225,12 @@ impl HookEngine {
                     ));
                 }
                 ExecOutcome::SpawnFailed(reason) => {
+                    // 进程从未启动 = hook 未实际执行：返还 once 额度，
+                    // 修正配置后本会话内该条目仍可触发（超时视为已执行，
+                    // 额度照常消耗——进程确实跑过）。
+                    if def.once {
+                        lock(&self.fired).remove(&(point, idx));
+                    }
                     report.warnings.push(format!(
                         "[{}] hook `{}` 启动失败（按警告放行）: {reason}",
                         point.as_str(),
@@ -304,14 +310,19 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
     };
     // stdin 写载荷后关闭（hook 读 stdin 的场景能见到 EOF）；写失败
     //（命令不读 stdin 提前退出）不算错误，继续等退出码。
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        let _ = stdin.write_all(payload.to_string().as_bytes()).await;
-        let _ = stdin.shutdown().await;
-    }
+    // 写入与等待整体纳入超时：write_all 在载荷超过管道缓冲而 hook 进程
+    // 不读 stdin 时会无限阻塞，放在 timeout 之外等于超时保护失效（整个
+    // turn 挂死）。超时 drop future 即 drop child，kill_on_drop 发 kill。
     let waited = tokio::time::timeout(
         Duration::from_millis(def.timeout_ms),
-        child.wait_with_output(),
+        async {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(payload.to_string().as_bytes()).await;
+                let _ = stdin.shutdown().await;
+            }
+            child.wait_with_output().await
+        },
     )
     .await;
     match waited {

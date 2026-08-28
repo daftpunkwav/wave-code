@@ -132,7 +132,7 @@ fn expand_at_refs(
     for token in content.split_inclusive(char::is_whitespace) {
         let (body, trail_ws) = split_trailing_whitespace(token);
         match parse_at_ref(body) {
-            Some(reference) => {
+            Some(reference) if at_ref_allowed(reference) => {
                 let path = base_dir.join(reference);
                 let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
                 let expanded = if depth < MAX_INCLUDE_DEPTH && !visited.contains(&key) {
@@ -153,7 +153,8 @@ fn expand_at_refs(
                     None => out.push_str(token),
                 }
             }
-            None => out.push_str(token),
+            // 非引用标记,或被信任边界拒绝的引用:一律按字面保留。
+            _ => out.push_str(token),
         }
     }
     out
@@ -164,6 +165,21 @@ fn expand_at_refs(
 fn split_trailing_whitespace(token: &str) -> (&str, &str) {
     let body = token.trim_end();
     (body, &token[body.len()..])
+}
+
+/// `@ref` 的信任边界：只允许 base_dir 内的相对路径。绝对路径（含
+/// Windows 盘符 / UNC 前缀与根目录形态）与 `..` 组件一律拒绝——不设限
+/// 的引用是一条无沙箱的任意文件读取原语（克隆来的不可信仓库的
+/// WAVECODE.md 可把 cwd 外文件读进模型上下文）。被拒引用与缺失文件
+/// 同策略：按字面保留，诚实呈现。
+fn at_ref_allowed(reference: &str) -> bool {
+    use std::path::Component;
+    let path = Path::new(reference);
+    if path.is_absolute() {
+        return false;
+    }
+    path.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// 解析 `@path` 引用标记：`@` 起始、后跟非空路径；剥离常见尾随标点
@@ -249,6 +265,26 @@ mod tests {
         write(&root.join("WAVECODE.md"), "见 @docs/missing.md 说明");
         let mem = collect(None, &root);
         assert!(mem.combined.contains("@docs/missing.md"));
+    }
+
+    /// 信任边界：绝对路径与 `..` 组件的引用不展开（防把 cwd 外任意文件
+    /// 读进模型上下文），按字面保留；相对白名单形态（`./x`）照常展开。
+    #[test]
+    fn at_ref_outside_base_dir_is_not_expanded() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        write(&root.join("docs/extra.md"), "EXTRA-CONTENT");
+        write(&dir.path().join("secret.md"), "SECRET-CONTENT");
+        write(
+            &root.join("WAVECODE.md"),
+            "绝对 @D:/secret.md 与 ../ @../secret.md 都不展开，但 @./docs/extra.md 展开",
+        );
+
+        let mem = collect(None, &root);
+        assert!(!mem.combined.contains("SECRET-CONTENT"), "{}", mem.combined);
+        assert!(mem.combined.contains("@D:/secret.md"));
+        assert!(mem.combined.contains("@../secret.md"));
+        assert!(mem.combined.contains("EXTRA-CONTENT"), "./ 相对引用应展开");
     }
 
     /// @引用深度上限（P6 验收）：链式引用 f0→f1→…→f7，深度超过 5 的

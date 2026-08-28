@@ -4,14 +4,14 @@
 use std::sync::Arc;
 use wavecode_llm::Message;
 
-/// 记忆自动提取的预捕获句柄（P6）：`run_turn(&mut self)` 借用期间无法
-/// 经 `&Session` 调用提取入口，actor 在驱动 turn 前预取本句柄（Arc 共享
-/// 模型通道与历史快照），Shutdown 路径经 [`MemoryExtractionHandle::spawn`]
-/// 派生 detached 提取任务。
+/// 记忆自动提取句柄（P6）：包住一次提取所需的模型通道、历史快照与存储
+/// 根，[`MemoryExtractionHandle::spawn`] 派生 detached 提取任务。
 ///
-/// 快照语义（诚实声明）：历史为预取时点的 Arc 快照——会话历史的
-/// 写时复制（`Arc::make_mut`）使快照冻结，in-turn Shutdown 时被中断 turn
-/// 的部分内容不进提取（不完整内容本就不是好的提取素材，可接受的近似）。
+/// 获取时点：SessionEnd 挂接点（app-server actor 的 Shutdown / 客户端断开
+/// 路径）经 [`Session::spawn_memory_extraction`] 现取——不在 turn 驱动前
+/// 预取：预取会长期克隆历史 `Arc`，使 turn 内首次 `push_message` 的
+/// `Arc::make_mut` 退化为整历史深克隆（O(1) 快照不变量被破坏）。现取
+/// 语义下快照即会话终态历史（含被中断 turn 的部分结果）。
 pub struct MemoryExtractionHandle {
     mgr: Arc<crate::subagent::SubagentManager>,
     history: Arc<Vec<Message>>,

@@ -76,6 +76,8 @@ pub use types::{SubagentType, TaskResult, TaskState};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::ApprovalGate;
+    use wavecode_protocol::ApprovalDecision;
     use futures::stream;
     use wavecode_llm::{ChatRequest, StreamEvent, Usage};
     use wavecode_protocol::PermissionMode;
@@ -675,28 +677,32 @@ mod tests {
         assert!(p3.contains("status: stopped"), "task_output 终态回灌: {p3}");
     }
 
-    /// 子代理配置必须无人值守（unattended）：审批槽只挂在父会话，子代理
-    /// 的 ApprovalRequested 无人应答。
+    /// 审批冒泡：子代理配置共享父会话审批槽（经 set_approval_gate 注入），
+    /// 子代理的 ApprovalRequested 经父事件流到达前端、决策落同一槽。
     #[test]
-    fn child_config_is_unattended() {
+    fn child_config_shares_parent_approval_gate() {
         let model = Arc::new(MockModel {
             calls: Mutex::new(0),
             scripts: vec![],
         });
         let mgr = SubagentManager::from_config(&parent_config(model));
+        let gate = Arc::new(ApprovalGate::new());
+        mgr.set_approval_gate(gate.clone());
         for t in [SubagentType::GeneralPurpose, SubagentType::Explore] {
+            let cfg = mgr.child_config(&spec("x", t));
             assert!(
-                mgr.child_config(&spec("x", t)).unattended,
-                "{t:?} 子代理应 unattended"
+                cfg.approval_gate.is_some_and(|g| Arc::ptr_eq(&g, &gate)),
+                "{t:?} 子代理应共享父审批槽"
             );
         }
     }
 
-    /// 回归（挂死修复）：default 权限模式下子代理调用非只读工具（shell
-    /// 会得到 Ask 判定）——必须以拒绝结果回灌并正常收尾，而不是 park 在
-    /// 无人应答的审批槽上（修复前本测试 5s 超时失败：同步派生永不返回）。
+    /// 回归（挂死修复）：事件汇未挂接（无旁观方，如直接驱动的测试/无头
+    /// 形态）时，子代理的审批请求无人能应答——必须立即以拒绝落槽收尾，
+    /// 而不是 park 在审批槽上（修复前本测试 5s 超时失败：同步派生永不
+    /// 返回）。事件汇挂接的交互形态走冒泡，由前端应答。
     #[tokio::test]
-    async fn unattended_subagent_rejects_ask_instead_of_hanging() {
+    async fn subagent_asks_fail_fast_without_event_sink() {
         let model = Arc::new(MockModel {
             calls: Mutex::new(0),
             scripts: vec![
@@ -730,5 +736,57 @@ mod tests {
         .expect("子代理应在 5s 内收尾（不得 park 在无人应答的审批槽）");
         assert_eq!(result.status, SubagentStatus::Completed);
         assert!(result.summary.contains("拒绝后收尾"));
+    }
+
+    /// 审批冒泡：事件汇挂接时子代理的 ApprovalRequested 转发到父事件流，
+    /// 经共享槽回填 AllowOnce 后工具照常执行（交互前端的子代理审批链路）。
+    #[tokio::test]
+    async fn subagent_approval_forwards_to_event_sink_and_obeys_decision() {
+        let model = Arc::new(MockModel {
+            calls: Mutex::new(0),
+            scripts: vec![
+                // 子代理 round1：发起 shell 调用（default 模式 → Ask）。
+                {
+                    let mut script = tool_use("s-1", "shell", r#"{"command":"echo hi"}"#);
+                    script.push(StreamEvent::MessageComplete {
+                        stop_reason: "tool_use".into(),
+                        usage: Usage::default(),
+                    });
+                    script
+                },
+                // 子代理 round2：放行后看到执行输出，收尾。
+                text_end("放行后收尾"),
+            ],
+        });
+        // 父会话显式 Default 模式（shell → Ask）。
+        let cwd = tempfile::tempdir().unwrap();
+        let cfg = SessionConfig::builder("mock", model.clone(), Registry::builtin(), cwd.keep())
+            .sandbox(wavecode_sandbox::Sandbox::without_rules(
+                PermissionMode::Default,
+            ))
+            .build();
+        let mgr = SubagentManager::from_config(&cfg);
+        let gate = Arc::new(ApprovalGate::new());
+        mgr.set_approval_gate(gate.clone());
+        // 挂接事件汇（模拟父 turn 入口）；用独立任务应答审批。
+        let (tx, mut rx) = mpsc::channel::<Event>(64);
+        mgr.set_event_sink(tx, "s-1");
+        let answer = tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                if let EventMsg::ApprovalRequested { call_id, .. } = ev.msg {
+                    gate.decide(call_id, ApprovalDecision::AllowOnce);
+                    break;
+                }
+            }
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            mgr.run_sync(spec("需要跑命令", SubagentType::GeneralPurpose)),
+        )
+        .await
+        .expect("子代理应在 5s 内收尾");
+        answer.await.unwrap();
+        assert_eq!(result.status, SubagentStatus::Completed);
+        assert!(result.summary.contains("放行后收尾"), "{}", result.summary);
     }
 }

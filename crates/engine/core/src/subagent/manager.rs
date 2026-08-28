@@ -26,6 +26,10 @@ struct SpawnDeps {
     deny_env: Vec<String>,
     sandbox: wavecode_sandbox::Sandbox,
     context: wavecode_context::ContextConfig,
+    /// 子代理审批槽：默认自建兜底槽（事件汇未挂接的无头形态，审批请求
+    /// 无人能应答，fail-fast 拒绝落此槽）；`set_approval_gate` 注入父会话
+    /// 槽后，审批经父事件流冒泡、由前端经 `Op::ExecApproval` 回填。
+    approval_gate: Mutex<Arc<crate::session::ApprovalGate>>,
 }
 
 /// 子代理管理器：派生 / 跟踪 / 停止子代理，收集后台终态通知。
@@ -59,6 +63,7 @@ impl SubagentManager {
                 deny_env: cfg.deny_env.clone(),
                 sandbox: cfg.sandbox.clone(),
                 context: cfg.context.clone(),
+                approval_gate: Mutex::new(Arc::new(crate::session::ApprovalGate::new())),
             },
             tasks: Mutex::new(HashMap::new()),
             notifications: Mutex::new(Vec::new()),
@@ -71,6 +76,14 @@ impl SubagentManager {
     /// submission_id 回填）。
     pub fn set_event_sink(&self, events: mpsc::Sender<Event>, submission_id: &str) {
         *crate::sync::lock(&self.event_sink) = Some((events, submission_id.to_owned()));
+    }
+
+    /// 注入父会话审批槽（`Session::with_subagents` 在父 Session 构造后
+    /// 调用）：子代理 Session 共享该槽，实现审批冒泡——子代理的
+    /// `ApprovalRequested` 经父事件流到达前端，决策经 `Op::ExecApproval`
+    /// 落到共享槽由子代理取走。
+    pub fn set_approval_gate(&self, gate: Arc<crate::session::ApprovalGate>) {
+        *crate::sync::lock(&self.deps.approval_gate) = gate;
     }
 
     /// 取走全部待注入通知（turn 循环头调用，一次性消费）。
@@ -136,17 +149,23 @@ impl SubagentManager {
         format!("task-{}", self.next_id.fetch_add(1, Ordering::SeqCst) + 1)
     }
 
-    /// 发出子代理事件（事件汇未挂接时静默丢弃——无 turn 期间无旁观方）。
-    async fn emit_event(&self, msg: EventMsg) {
+    /// 发出子代理事件；返回是否真正发出（事件汇未挂接 = `false`——
+    /// 无 turn 期间无旁观方，审批类事件无人能应答须由调用方 fail-fast）。
+    async fn try_emit_event(&self, msg: EventMsg) -> bool {
         let sink = crate::sync::lock(&self.event_sink).clone();
-        if let Some((tx, submission_id)) = sink {
-            let ev = Event {
-                id: submission_id,
-                msg,
-            };
-            if tx.send(ev).await.is_err() {
-                tracing::debug!("父会话事件接收端已断开，子代理事件丢弃");
+        match sink {
+            Some((tx, submission_id)) => {
+                let ev = Event {
+                    id: submission_id,
+                    msg,
+                };
+                if tx.send(ev).await.is_err() {
+                    tracing::debug!("父会话事件接收端已断开，子代理事件丢弃");
+                    return false;
+                }
+                true
             }
+            None => false,
         }
     }
 
@@ -168,7 +187,7 @@ impl SubagentManager {
             Some(names) => base.name_subset(names),
             None => base,
         };
-        SessionConfig::builder(
+        let builder = SessionConfig::builder(
             self.deps.model_name.clone(),
             self.deps.model.clone(),
             registry,
@@ -178,12 +197,9 @@ impl SubagentManager {
         .max_output_tokens(self.deps.max_output_tokens)
         .deny_env(self.deps.deny_env.clone())
         .sandbox(self.deps.sandbox.clone())
-        .context(self.deps.context.clone())
-        // 无人值守：审批槽只挂在父会话（actor 经 approval_handle 回填），
-        // 子代理的 ApprovalRequested 在父侧 drain 中被丢弃、无人 decide——
-        // Ask 必须直接拒绝而不是 park 挂死（权限不放宽，见 SessionConfig）。
-        .unattended(true)
-        .build()
+        .context(self.deps.context.clone());
+        // 审批槽：共享（父槽注入后冒泡；未注入时自建兜底槽承接 fail-fast）。
+        builder.approval_gate(crate::sync::lock(&self.deps.approval_gate).clone()).build()
     }
 
     /// 子代理驱动：建 Session 跑一轮 turn 至终态，产出结构化结果；
@@ -195,12 +211,13 @@ impl SubagentManager {
         spec: TaskSpec,
         slot: Option<Arc<TaskSlot>>,
     ) -> TaskResult {
-        self.emit_event(EventMsg::SubagentStarted {
-            task_id: task_id.clone(),
-            subagent_type: spec.subagent_type.as_str().to_owned(),
-            description: spec.description.clone(),
-        })
-        .await;
+        let _ = self
+            .try_emit_event(EventMsg::SubagentStarted {
+                task_id: task_id.clone(),
+                subagent_type: spec.subagent_type.as_str().to_owned(),
+                description: spec.description.clone(),
+            })
+            .await;
 
         // 子代理经 Session::new 构造：无 task 工具（深度上限 1），无通知
         // 注入路径（subagents 字段为 None）。
@@ -232,11 +249,32 @@ impl SubagentManager {
         let (child_tx, mut child_rx) = mpsc::channel::<Event>(CHILD_EVENT_CHANNEL_CAPACITY);
         let mut last_text = String::new();
         let mut tokens_used: Option<u64> = None;
+        // 审批冒泡（drain 侧）：子代理的 ApprovalRequested 转发到父事件流，
+        // 前端经同一 Op::ExecApproval 回填共享槽（子代理 Session 共享父
+        // gate，call_id 键控父子不冲突）。事件汇未挂接 = 无人能应答——
+        // 直接以拒绝落槽 fail-fast，子代理不 park 挂死（同步形态曾挂死
+        // 整个父会话）。
+        let mgr = self.clone();
+        let gate = crate::sync::lock(&self.deps.approval_gate).clone();
         let drain = async {
             while let Some(ev) = child_rx.recv().await {
                 match ev.msg {
                     EventMsg::AgentMessageComplete { text } => last_text = text,
                     EventMsg::TokenCount { used, .. } => tokens_used = Some(used),
+                    EventMsg::ApprovalRequested { call_id, kind, detail } => {
+                        let forwarded = mgr
+                            .try_emit_event(EventMsg::ApprovalRequested { call_id: call_id.clone(), kind, detail })
+                            .await;
+                        if !forwarded {
+                            gate.decide(
+                                call_id,
+                                wavecode_protocol::ApprovalDecision::Deny {
+                                    reason: "subagent has no event sink attached: approval cannot be answered"
+                                        .to_owned(),
+                                },
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -263,7 +301,7 @@ impl SubagentManager {
         match slot {
             Some(slot) => self.finish_child(task_id, &spec, &slot, result).await,
             None => {
-                self.emit_event(EventMsg::SubagentCompleted {
+                self.try_emit_event(EventMsg::SubagentCompleted {
                     task_id,
                     status: result.status,
                     summary: result.summary.clone(),
@@ -290,7 +328,7 @@ impl SubagentManager {
             &spec.description,
             &result,
         ));
-        self.emit_event(EventMsg::SubagentCompleted {
+        self.try_emit_event(EventMsg::SubagentCompleted {
             task_id,
             status: result.status,
             summary: result.summary.clone(),

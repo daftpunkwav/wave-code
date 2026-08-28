@@ -27,7 +27,8 @@ pub struct ApprovalGate {
 }
 
 impl ApprovalGate {
-    pub(super) fn new() -> Self {
+    /// 测试与 subagent 装配（共享槽注入前的独立槽）也需构造。
+    pub(crate) fn new() -> Self {
         Self {
             decisions: Mutex::new(HashMap::new()),
             notify: Notify::new(),
@@ -334,20 +335,6 @@ impl super::Session {
                         continue;
                     }
                     Verdict::Ask { kind, detail } => {
-                        // 无人值守会话（子代理）：审批请求无人能应答——发
-                        // ApprovalRequested + park 即永久挂死（审批事件在
-                        // 父侧 drain 中被丢弃）。直接拒绝回灌，不发幻影
-                        // 审批事件；模型可改用只读工具或收尾汇报。
-                        if self.cfg.unattended {
-                            slots[i] = Some(ToolOutput {
-                                content: rejection_content(&format!(
-                                    "unattended session (subagent): no human approver is attached, `{}` cannot be approved; use read-only tools or finish with what you have",
-                                    calls[i].1
-                                )),
-                                is_error: true,
-                            });
-                            continue;
-                        }
                         emit(
                             events,
                             submission_id,

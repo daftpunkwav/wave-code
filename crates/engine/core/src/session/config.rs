@@ -54,11 +54,12 @@ pub struct SessionConfig {
     /// 持久化以父会话为单位）。构造时文件已存在且非空即 replay 恢复
     ///（resume 语义：压缩点之后原文 + 摘要即新历史，见 rollout 模块注释）。
     pub rollout: Option<crate::rollout::RolloutConfig>,
-    /// 无人值守语义（子代理会话为 `true`）：sandbox 判定为 `Ask` 时不发
-    /// `ApprovalRequested`、不 park 等待，直接以拒绝回灌——无人能应答，
-    /// 等待即永久挂死。权限不放宽：只是把"等不到的人工审批"显式拒绝，
-    /// 模型可改用只读路径或收尾汇报。
-    pub unattended: bool,
+    /// 共享审批槽（子代理会话注入父会话的 gate）：子代理的
+    /// `ApprovalRequested` 经父事件流冒泡给前端，决策经同一 `Op::ExecApproval`
+    /// 落到共享槽（call_id 键控，父子不冲突）。`None` = 自建独立槽
+    ///（普通会话形态）。子代理事件汇未挂接（无人能应答）时由 manager
+    /// 直接拒绝，不 park 挂死。
+    pub approval_gate: Option<Arc<crate::session::ApprovalGate>>,
 }
 
 impl SessionConfig {
@@ -106,7 +107,7 @@ impl SessionConfigBuilder {
                 skills: None,
                 hooks: None,
                 rollout: None,
-                unattended: false,
+                approval_gate: None,
             },
         }
     }
@@ -165,9 +166,9 @@ impl SessionConfigBuilder {
         self
     }
 
-    /// 无人值守语义（默认 `false`；子代理 `child_config` 置 `true`）。
-    pub fn unattended(mut self, unattended: bool) -> Self {
-        self.cfg.unattended = unattended;
+    /// 共享审批槽（子代理 `child_config` 注入父 gate；默认 `None` 自建）。
+    pub fn approval_gate(mut self, gate: Arc<crate::session::ApprovalGate>) -> Self {
+        self.cfg.approval_gate = Some(gate);
         self
     }
 

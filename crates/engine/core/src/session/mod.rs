@@ -155,11 +155,16 @@ impl Session {
             Some(rollout) => crate::rollout::open_session_rollout(rollout),
             None => (Vec::new(), None),
         };
+        // 审批槽：子代理会话注入父 gate（审批冒泡），普通会话自建。
+        let approval_gate = cfg
+            .approval_gate
+            .clone()
+            .unwrap_or_else(|| Arc::new(ApprovalGate::new()));
         Self {
             cfg,
             messages: Arc::new(messages),
             interrupted: Arc::new(AtomicBool::new(false)),
-            approval_gate: Arc::new(ApprovalGate::new()),
+            approval_gate,
             usage_carry: None,
             subagents: None,
             skills_catalog,
@@ -193,6 +198,9 @@ impl Session {
                 )));
         }
         let mut session = Self::new(cfg);
+        // 审批冒泡：子代理共享父审批槽——子代理的 ApprovalRequested 经
+        // 父事件流冒泡，前端决策落到同一槽（call_id 键控，父子不冲突）。
+        manager.set_approval_gate(session.approval_gate.clone());
         session.subagents = Some(manager);
         session
     }

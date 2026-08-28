@@ -146,6 +146,98 @@
 
 ## 五、遗留声明
 
-- 批次 2 的提取语义变化(快照 → 终态)与批次 1 的子代理审批行为变化
-  (挂死 → 显式拒绝)是**用户可见行为变更**,已在上文如实标注;
-- `.zcode/`、`docs/wavecode-*` 等未跟踪文件非本次工作产物,未纳入提交。
+- 批次 2 的提取语义变化（快照 → 终态）与批次 1 的子代理审批行为变化
+  （挂死 → 显式拒绝）是**用户可见行为变更**，已在上文如实标注；
+- `.zcode/`、`docs/wavecode-*` 等未跟踪文件非本次工作产物，未纳入提交。
+
+---
+
+# 第二轮：遗留待办修复（2026-08-28 同日续）
+
+> 第三节待办逐项处置。全部通过 `cargo test --workspace` 全量回归（0 警告）。
+
+## 六、处置总表
+
+| 待办 | 处置 | commit |
+|---|---|---|
+| 6. 连续同角色 user 消息合并 | ✅ 修复 | 86ae7e3 |
+| 2. /memory 协议化 | ✅ 落地 | ec6ae66 |
+| 1. 装配根收口 + home_dir 单点化 | ✅ 落地 | 76c6ce6 |
+| 3. SessionStart/End hooks 下移 | ✅ 收口 actor | 4bd2089 |
+| 5. 子代理审批冒泡 | ✅ 落地（取代 unattended） | 693bd38 |
+| 4. protocol/config 词汇豁免 | ✅ 决策落 SPEC §3 规则 4 | 5a113b8 |
+| 8. 内联测试墙约定 | ✅ 落 SPEC §18 | 5a113b8 |
+| 7. 双 markdown 渲染器 | ✅ 语义对齐清单落 SPEC §15.6（接受现状） | 5a113b8 |
+| 2. resume 协议化 | ❌ 决策不做（恢复在 actor 之前，无协议面对象；落 SPEC §3 规则 4） | 5a113b8 |
+
+## 七、各项修复说明
+
+### 7.1 连续同角色 user 消息合并（86ae7e3，fix）
+
+`anthropic.rs` 的 `build_request_body` 序列化前合并相邻同角色消息：历史末条
+tool_result（user）+ 追加指令（user）是压缩摘要/上下文采样管线的常态产物，
+强制角色交替的第三方兼容网关对此返回 400。合并 = content 块串联，相邻 Text
+补换行防粘连；官方端点行为不变。
+
+### 7.2 /memory 读取面协议化（ec6ae66，feat）
+
+- protocol 新增 `Op::MemoryList` 与 `EventMsg::MemoryIndex { path, content }`
+  （wire tag 锁定测试同步登记）；
+- core `Session::memory_index()` 现读存储（索引不存在 = 空串，正常形态）；
+- tui 与 cli repl 均改走协议面（tui 删 `TuiContext.memory_index_path` 注入，
+  repl 删直读实现）——Web/Desktop 前端获得等价能力，`/memory` 双实现问题
+  从根上消除（不再是"统一注入形态"而是"只剩协议面一种"）。
+
+### 7.3 装配根收口（76c6ce6，refactor）
+
+- cli `bootstrap.rs` 整体上移为 `core::assemble::load_boot`——装配是引擎
+  职责，第二个前端出现时零复制复用；
+- 装配警告不再直接打 stderr：收集进 `Boot.warnings`，呈现由调用方决定
+  （core 库不侵入输出流）；
+- `home_dir` 单点化至 `config::home_dir()`（memory/cli 重复实现删除）；
+- **cli 内部依赖收敛为 app-server + config + core + protocol + tui**，
+  删除 llm/tools/sandbox/memory/skills 五条直连边——"hooks/mcp 走 core 桥
+  而 memory/skills 直连"的矩阵纪律矛盾以"全部经 core"收口；
+- 新增 home 缺失/提供两组装配测试（cwd/home 参数化后可注入 tempdir）。
+
+### 7.4 SessionStart/SessionEnd hooks 收口 actor（4bd2089，refactor）
+
+- core 新增 `Session::run_lifecycle_hook(point)` 单点执行（返回警告文案）；
+- app-server actor：SessionStart 在循环入口触发，SessionEnd 在全部四个优雅
+  退出路径触发（in-turn Shutdown / idle Shutdown / idle 长操作中 Shutdown /
+  submission 通道关闭）；警告经 Warning 事件进事件流；
+- cli 六处触发调用与 `run_lifecycle_hooks` 函数删除；exec 关闭时排干事件流
+  （5s 上限）保证 SessionEnd 警告可见后才退出；
+- 前端只经协议面交互——新前端零成本获得生命周期 hooks（能力等价达成）。
+
+### 7.5 子代理审批冒泡（693bd38，feat）
+
+- 子代理 Session 共享父会话审批槽（`SubagentManager::set_approval_gate` 注入；
+  `from_config` 自建兜底槽承接无头形态）；call_id 键控，父子不冲突；
+- drain 侧转发 `ApprovalRequested` 到父事件流（`try_emit_event` 返回是否
+  真正发出）；事件汇未挂接（无头/测试形态）时立即以 Deny 落槽 **fail-fast**
+  ——子代理不 park 挂死；
+- `SessionConfig.unattended`（第一轮批次 1 的止血方案）由"共享槽 + 冒泡 +
+  fail-fast"取代并删除；
+- 行为变化：default 模式下交互前端的子代理写操作从**无条件拒绝**变为
+  **正常弹审批**；无头形态保持拒绝。新增冒泡端到端测试（事件汇挂接 +
+  独立任务应答 AllowOnce → 工具执行 → 收尾）。
+
+### 7.6 SPEC 决策备案（5a113b8，docs）
+
+- §3 规则 4：protocol/config 的引擎词汇**明文豁免**（契约层词汇上浮有内在
+  必然，纯类型无行为耦合，不做中性改名）；resume 不做协议化；
+- §15.6：双 markdown 渲染器的语义对齐清单（块级/行内/转义契约；tui 表格
+  退化纯文本为已声明差异）；
+- §18：内联测试墙约定（>500 行外移，触碰渐进执行，首个样本 session/mod.rs）。
+
+## 八、第二轮用户可见行为变更（如实声明）
+
+1. **子代理审批**：default 模式下子代理的写/执行操作现在会向前端弹审批
+   （此前无条件拒绝）；无头形态仍自动拒绝；
+2. **生命周期 hook 警告改走事件流**：SessionStart/End 的 hook 警告从 stderr
+   变为 Warning 事件——TUI 中显示在消息流；`exec --json` 的 JSONL 中会多出
+   Warning 事件（JSONL 消费者需知晓）；
+3. **exec 退出时序**：现排干事件流直到 actor 退出（5s 上限），保证 SessionEnd
+   警告呈现后才退出；
+4. `/memory` 在 tui/repl 中改为异步协议往返（外观行为不变）。

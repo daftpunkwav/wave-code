@@ -2114,12 +2114,7 @@ dependencies = [
  "wavecode-app-server",
  "wavecode-config",
  "wavecode-core",
- "wavecode-llm",
- "wavecode-memory",
  "wavecode-protocol",
- "wavecode-sandbox",
- "wavecode-skills",
- "wavecode-tools",
  "wavecode-tui",
 ]
 

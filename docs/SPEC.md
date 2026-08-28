@@ -98,16 +98,17 @@ WaveCode/
 | mcp | — | MCP client/server |
 | sandbox | protocol（PermissionMode / ApprovalKind 线型） | 权限模式、审批、命令策略 |
 | auth | — | 登录与 keyring 凭据 |
-| core | protocol, config, llm, tools, context, memory, skills, hooks, mcp, sandbox, auth | agent 引擎 |
+| core | protocol, config, llm, tools, context, memory, skills, hooks, mcp, sandbox, auth | agent 引擎 + **装配根**（`assemble::load_boot`：config → SessionConfig 单点装配，2026-08-28 自 cli 收口） |
 | app-server | protocol, core | JSON-RPC 服务与 transport |
 | tui | protocol, app-server | 终端 UI |
-| cli | protocol, config, llm, tools, core, app-server, tui, auth, sandbox（装配 SessionConfig.sandbox）, memory, skills（装配层直装纯数据面，core 不做门面再导出） | 二进制入口 |
+| cli | protocol, config, core, app-server, tui | 二进制入口（参数解析 + 呈现；装配经 `core::assemble`，2026-08-28 收口——不再直连 llm/tools/sandbox/memory/skills） |
 
 边界规则（review 强制；CI 依赖图检查为规划项）：
 
 1. **特性层 crate 互不依赖**（仅两个例外：context→llm 用于 token 计数；tools→llm 用于 ToolSpec schema 桥接，M1 落地）；协作经 core 编排。
 2. **tui 不得依赖 core**：只能经 app-server（进程内 transport）与 protocol 交互——保证 TUI 与 Web/Desktop 能力等价。
 3. 第三方依赖加进 workspace 根 `[workspace.dependencies]` 统一版本；新增依赖需 PR 说明理由，`cargo-deny` 检查 license 与已知漏洞（M2 引入，M1 尚未落地）。
+4. **foundation 词汇豁免（2026-08-28 决策）**：protocol 是"前后端契约唯一事实源"，其类型（subagent / compact / slash / turn / memory 等）镜像系统可见行为，词汇上浮有内在必然；config 类型名（hooks / mcp）来自用户可见的 TOML 段名。两者均为纯类型无行为耦合，**明文豁免"下层不出现上层词汇"的字面约束**，不做中性改名。`wavecode resume` 保持 CLI 启动期功能、不做协议化——恢复发生在 actor 存在之前，无协议面对象。
 
 ## 4. 协议规范
 
@@ -128,6 +129,7 @@ pub enum Op {
     ListThreads, ResumeThread { thread_id: String }, ForkThread { thread_id: String },
     Compact,                                     // 立即压缩（对应 /compact）
     SlashCommand { name: String, args: String }, // 协议层通用 slash
+    MemoryList,                                  // 请求持久记忆索引（/memory 读取面，2026-08-28）
     SetModel { model: String }, SetPermissionMode { mode: PermissionMode },
     Shutdown,
 }
@@ -142,7 +144,9 @@ pub enum EventMsg {
     ApprovalRequested { call_id: String, kind: ApprovalKind, detail: String },
     TokenCount { used: u64, window: u64 },
     CompactStarted, CompactCompleted { summary_tokens: u64 },
+    SubagentStarted { .. }, SubagentCompleted { .. },
     Warning { message: String }, Error { message: String, recoverable: bool },
+    MemoryIndex { path: Option<String>, content: String },  // Op::MemoryList 回包（path=None = 无记忆装配）
     TurnCompleted { stop_reason: StopReason },
 }
 ```
@@ -323,6 +327,7 @@ pub trait Tool: Send + Sync {
 - **权限模式**（`PermissionMode`，会话级，`/permissions` 或 Shift+Tab 切换）：`default`（写/执行/破坏性逐次审批）、`plan`（仅只读工具可用）、`acceptEdits`（文件编辑自动放行，shell 仍审批）、`bypassPermissions`（全放行，进入时需输入确认短语）。
 - **规则语法**：`allow`/`deny` 列表，条目如 `Bash(git *)`、`Bash(npm run test)`、`File(src/**)`；匹配顺序 deny 优先；命中 allow 免审批。
 - **审批流**：core 发 `ApprovalRequested` 事件 → 前端展示（命令全文/文件 diff/影响说明）→ `ExecApproval` 回填；选项含"本次放行/始终放行（写入会话级精确 allow 规则，后续同形态调用免审批；配置文件持久化待 §17.5 M3）/拒绝（附原因回传模型）"。
+- **子代理审批冒泡**（2026-08-28）：子代理 Session 共享父会话审批槽（call_id 键控，父子不冲突），`ApprovalRequested` 经父事件流冒泡给前端，决策经同一 `Op::ExecApproval` 回填。事件汇未挂接（无头/测试形态）时立即拒绝落兜底槽——不 park 挂死。
 - **session 内状态工具豁免**（P4）：`todo_write` 只改会话内存清单、无外部副作用，各模式免审批直接放行（对齐 deepagents write_todos）；deny 规则判定仍在豁免之前。
 - **OS 级沙箱**（P2，演进路线 §17）：Linux landlock、macOS seatbelt、Windows ACL 受限令牌，与权限模式正交（机制与策略分离）。
 
@@ -421,6 +426,21 @@ goal_mode = true
 - 降级：非 TTY 由 anstream 剥离 ANSI 且无动画；`NO_COLOR` 尊重；终端宽度
   取自 terminal_size，不可用回退 80。
 
+### 15.6 双 markdown 渲染器的语义对齐清单（2026-08-28 备案）
+
+cli（`render/markdown`，ANSI 投影）与 tui（`markdown.rs`，ratatui 行投影）
+是"同源不同形"的两份实现（tui 不得依赖 cli，SPEC §3 规则 2）。**语义契约**
+（两侧必须一致，改动须同步）：
+
+- 块级：标题（1-6 级）、段落、有序/无序列表（含嵌套缩进）、代码块（围栏
+  语言标注保留为前缀）、引用块、水平分割线、表格（cli 有 CJK 对齐与超宽
+  压缩；**tui 允许退化为纯文本行**——已声明的差异点，非缺陷）；
+- 行内：粗体/斜体/删除线/行内代码的记号必须渲染掉（输出文本不含 `**` 等
+  记号）；链接保留文本、丢弃 URL；
+- 转义：反斜杠转义的记号字符按字面输出；
+- 上游差异容忍：两侧共用 pulldown-cmark 解析语义，样式（颜色/modifier）
+  各自自由，不参与对齐判定。
+
 ## 16. 会话持久化
 
 - rollout 文件：`~/.wavecode/threads/<thread-id>.jsonl`，每行一条带序号的持久化事件（用户输入、agent 消息、工具调用、压缩记录、状态快照）。
@@ -463,6 +483,11 @@ goal_mode = true
 ## 18. 测试策略
 
 - 单元测试与源码同文件/同目录（`*_tests.rs`）；纯逻辑（协议编解码、配置合并、上下文核算、规则匹配）100% 可单测，不依赖网络。
+- **内联测试墙约定（2026-08-28）**：单文件内联 `#[cfg(test)] mod tests` 超过
+  ~500 行即外移为兄弟测试模块（`session/tests/mod.rs` 形态或
+  `#[path = "xxx_tests.rs"]`），生产源文件保持 ≤300 行软上限的可读形态；
+  首个执行样本为 `session/mod.rs`（3655 → 248 行）。触碰哪个大文件时渐进
+  迁移，不做一次性全量搬移。
 - 集成测试集中在 `crates/engine/core/tests/`（`suite/` 场景文件 + `common/` mock）：以 **mock provider**（录制/回放流式响应）驱动完整 turn；golden 测试锁定协议事件序列。
 - 协议兼容性：`generate-ts` 产物 CI diff 校验；`Op`/`EventMsg` 增删变体的向后兼容测试。
 - UI：TUI 用 insta snapshot；Web 用 Playwright 组件测试（M5 起）。

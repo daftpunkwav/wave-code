@@ -28,17 +28,8 @@ pub(crate) async fn run_repl(
 
     // P7：`/name [args]` slash 直调的查找面（cfg 移入前取出）。
     let skill_set = cfg.skills.as_ref().map(|s| s.set.clone());
-    let hooks = cfg.hooks.clone();
-    let cwd = cfg.cwd.clone();
-    // P7：SessionStart hook（环境初始化；横幅之后、首个 prompt 之前）。
-    if let Some(hooks) = &hooks {
-        run_lifecycle_hooks(
-            hooks,
-            wavecode_core::hooks::HookEventPoint::SessionStart,
-            &cwd,
-        )
-        .await;
-    }
+    // SessionStart/SessionEnd hook 已收口 actor：警告经 Warning 事件进
+    // 事件流，由渲染器呈现。
     let mut client = InProcessClient::spawn(cfg);
     let mut editor = rustyline::DefaultEditor::new()?;
     // 等待动画仅 TTY 开启；anstream 在非 TTY 下自动剥离样式
@@ -177,17 +168,9 @@ pub(crate) async fn run_repl(
         }
     }
 
-    // 优雅关闭：submit 后即可退出，不阻塞等待。
+    // 优雅关闭：submit 后即可退出（SessionEnd hook 与记忆提取由 actor
+    // Shutdown 路径处理，尽力而为）。
     let _ = client.submit(new_submission(Op::Shutdown)).await;
-    // P7：SessionEnd hook（清理；记忆自动提取由 actor Shutdown 路径触发）。
-    if let Some(hooks) = &hooks {
-        run_lifecycle_hooks(
-            hooks,
-            wavecode_core::hooks::HookEventPoint::SessionEnd,
-            &cwd,
-        )
-        .await;
-    }
     Ok(ExitCode::SUCCESS)
 }
 

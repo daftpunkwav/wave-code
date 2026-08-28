@@ -244,5 +244,27 @@ impl Session {
     pub fn permission_mode_handle(&self) -> Arc<Mutex<PermissionMode>> {
         self.cfg.sandbox.mode_handle()
     }
+
+    /// 会话生命周期 hook 触达点（P7，SPEC §9 SessionStart / SessionEnd）：
+    /// 执行该事件点的 command hooks，返回警告文案——呈现方式由驱动方
+    /// 决定（app-server actor 转 Warning 事件；直驱形态可打 stderr）。
+    /// 两个事件点都不可阻塞，Block 语义不适用；无 hooks 装配返回空。
+    pub async fn run_lifecycle_hook(&self, point: wavecode_hooks::HookEventPoint) -> Vec<String> {
+        let Some(engine) = &self.cfg.hooks else {
+            return Vec::new();
+        };
+        let report = engine
+            .run(
+                point,
+                &wavecode_hooks::HookInput {
+                    cwd: &self.cfg.cwd,
+                    tool_name: None,
+                    tool_input: None,
+                    tool_output: None,
+                },
+            )
+            .await;
+        report.warnings
+    }
 }
 

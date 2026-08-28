@@ -3,6 +3,23 @@
 use super::*;
 use std::future::Future;
 
+/// 会话生命周期 hook 执行（SessionStart / SessionEnd，P7 收口 actor）：
+/// 警告经 Warning 事件进事件流，前端可见；id 为合成值（无对应 Submission）。
+async fn run_session_lifecycle(
+    session: &Session,
+    point: wavecode_core::hooks::HookEventPoint,
+    event_tx: &mpsc::Sender<Event>,
+) {
+    for warning in session.run_lifecycle_hook(point).await {
+        let _ = event_tx
+            .send(Event {
+                id: "session-lifecycle".to_owned(),
+                msg: EventMsg::Warning { message: warning },
+            })
+            .await;
+    }
+}
+
 /// Session actor 主循环：串行驱动 turn；turn 期间经 select! 继续监听
 /// submission 通道（响应 Interrupt / Shutdown / ExecApproval /
 /// SetPermissionMode，UserInput / Compact / SlashCommand 本地排队，队列
@@ -17,6 +34,16 @@ pub(super) async fn actor_loop(
     approval_handle: Arc<ApprovalGate>,
     permission_mode_handle: Arc<std::sync::Mutex<PermissionMode>>,
 ) {
+    // P7：SessionStart hook（SPEC §9）——原由各前端在 spawn 前自行触发，
+    // 现收口 actor（与记忆提取同点）：前端只经协议面交互，能力等价。
+    // 警告经 Warning 事件进事件流（合成 id，无对应 Submission）。
+    run_session_lifecycle(
+        &session,
+        wavecode_core::hooks::HookEventPoint::SessionStart,
+        &event_tx,
+    )
+    .await;
+
     // turn 期间到达的 UserInput 本地排队，turn 结束后按序驱动，不丢请求。
     // pending 有界（PENDING_QUEUE_CAPACITY）：溢出显式拒绝而非背压挂起——
     // 背压会把队列头部后面的 Interrupt 也堵在通道里（用户无法中断），
@@ -28,6 +55,16 @@ pub(super) async fn actor_loop(
             None => submission_rx.recv().await,
         };
         let Some(sub) = sub else {
+            // submission 通道关闭（客户端全部析构）：尽力补 SessionEnd 与
+            // 记忆提取（InProcessClient 析构的 abort 兜底可能抢先生效，
+            // 此时跑不到——尽力而为语义，与提取一致）。
+            run_session_lifecycle(
+                &session,
+                wavecode_core::hooks::HookEventPoint::SessionEnd,
+                &event_tx,
+            )
+            .await;
+            session.spawn_memory_extraction();
             return;
         };
         match sub.op {
@@ -105,9 +142,16 @@ pub(super) async fn actor_loop(
                     }
                 };
                 if shutdown {
-                    // P6：SessionEnd 触发记忆自动提取（后台 detached，不阻塞
-                    // 退出）。此刻 turn future 已出借用——提取经
-                    // spawn_memory_extraction 现取句柄，快照即会话终态历史。
+                    // P7：SessionEnd hook + P6：SessionEnd 触发记忆自动提取
+                    //（后台 detached，不阻塞退出）。此刻 turn future 已出
+                    // 借用——提取经 spawn_memory_extraction 现取句柄，快照
+                    // 即会话终态历史。
+                    run_session_lifecycle(
+                        &session,
+                        wavecode_core::hooks::HookEventPoint::SessionEnd,
+                        &event_tx,
+                    )
+                    .await;
                     session.spawn_memory_extraction();
                     return;
                 }
@@ -127,6 +171,12 @@ pub(super) async fn actor_loop(
             }
             // 无活动 turn 的 Shutdown：直接退出。
             Op::Shutdown => {
+                run_session_lifecycle(
+                    &session,
+                    wavecode_core::hooks::HookEventPoint::SessionEnd,
+                    &event_tx,
+                )
+                .await;
                 // P6：SessionEnd 触发记忆自动提取（后台 detached，不阻塞退出）。
                 session.spawn_memory_extraction();
                 return;
@@ -178,6 +228,12 @@ pub(super) async fn actor_loop(
                 )
                 .await
                 {
+                    run_session_lifecycle(
+                        &session,
+                        wavecode_core::hooks::HookEventPoint::SessionEnd,
+                        &event_tx,
+                    )
+                    .await;
                     session.spawn_memory_extraction();
                     return;
                 }
@@ -199,6 +255,12 @@ pub(super) async fn actor_loop(
                 )
                 .await
                 {
+                    run_session_lifecycle(
+                        &session,
+                        wavecode_core::hooks::HookEventPoint::SessionEnd,
+                        &event_tx,
+                    )
+                    .await;
                     session.spawn_memory_extraction();
                     return;
                 }

@@ -206,29 +206,6 @@ fn format_age(modified: std::time::SystemTime) -> String {
     }
 }
 
-/// P7：生命周期 hook（SessionStart / SessionEnd，不可阻塞，SPEC §9）——
-/// 警告走 stderr（exec --json 的人类渲染面也是 stderr，不污染 JSONL）。
-async fn run_lifecycle_hooks(
-    hooks: &std::sync::Arc<wavecode_core::hooks::HookEngine>,
-    point: wavecode_core::hooks::HookEventPoint,
-    cwd: &std::path::Path,
-) {
-    let report = hooks
-        .run(
-            point,
-            &wavecode_core::hooks::HookInput {
-                cwd,
-                tool_name: None,
-                tool_input: None,
-                tool_output: None,
-            },
-        )
-        .await;
-    for warning in &report.warnings {
-        eprintln!("警告：{warning}");
-    }
-}
-
 /// 日志初始化：走 stderr（stdout 留给 JSONL / 渲染输出），默认级别 off
 /// （用户侧错误经事件流呈现），`RUST_LOG` 可开（兼容 T10 的 `RUST_LOG=off`）。
 fn init_tracing() {
@@ -268,17 +245,8 @@ env_key = "ANTHROPIC_API_KEY"
 /// `exec`：非交互单 turn。退出码：Completed=0，其余 stop_reason / 事件流
 /// 意外结束=1。
 async fn run_exec(cfg: SessionConfig, prompt: &str, json: bool) -> anyhow::Result<ExitCode> {
-    // P7：SessionStart hook（环境初始化；警告走 stderr）。
-    if let Some(hooks) = &cfg.hooks {
-        run_lifecycle_hooks(
-            hooks,
-            wavecode_core::hooks::HookEventPoint::SessionStart,
-            &cfg.cwd,
-        )
-        .await;
-    }
-    let hooks = cfg.hooks.clone();
-    let cwd = cfg.cwd.clone();
+    // SessionStart/SessionEnd hook 已收口 actor（InProcessClient 内）：
+    // 警告经 Warning 事件进事件流，--json 下进 JSONL、人类模式下由渲染器呈现。
     let mut client = InProcessClient::spawn(cfg);
     // --json：stdout 只写 JSONL，人类渲染转 stderr。anstream 按 TTY 自动
     // 去色；等待动画仅 human 模式 && TTY 开启。
@@ -300,17 +268,14 @@ async fn run_exec(cfg: SessionConfig, prompt: &str, json: bool) -> anyhow::Resul
     let mut approval = ApprovalHandling::AutoDeny;
     let outcome = consume_turn(&mut client, &mut renderer, json, &mut approval).await?;
 
-    // 通知 actor 优雅关闭（不阻塞等待）；client 析构另有 abort 兜底。
+    // 通知 actor 优雅关闭并排干事件流直到 actor 退出：SessionEnd hook 的
+    // Warning 与 TurnCompleted 后的事件由此呈现（限 5s，防 hook 挂死拖住退出）。
     let _ = client.submit(new_submission(Op::Shutdown)).await;
-
-    // P7：SessionEnd hook（清理；记忆自动提取由 actor Shutdown 路径触发）。
-    if let Some(hooks) = &hooks {
-        run_lifecycle_hooks(
-            hooks,
-            wavecode_core::hooks::HookEventPoint::SessionEnd,
-            &cwd,
-        )
-        .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while let Some(ev) =
+        tokio::time::timeout_at(deadline, client.next_event()).await.ok().flatten()
+    {
+        renderer.handle(&ev)?;
     }
 
     Ok(match outcome {
@@ -327,18 +292,8 @@ async fn run_exec(cfg: SessionConfig, prompt: &str, json: bool) -> anyhow::Resul
 /// 为 [`wavecode_tui::TuiContext`]——tui 不能依赖 core，凡 core 拥有的
 /// 知识都经该结构注入；会话驱动完全走 InProcessClient 协议面。
 async fn run_tui(cfg: SessionConfig, mcp_lines: Vec<String>) -> anyhow::Result<ExitCode> {
-    // P7：SessionStart hook（环境初始化；警告走 stderr——进入交替屏幕前
-    // 打印，不污染 TUI 画面）。
-    if let Some(hooks) = &cfg.hooks {
-        run_lifecycle_hooks(
-            hooks,
-            wavecode_core::hooks::HookEventPoint::SessionStart,
-            &cfg.cwd,
-        )
-        .await;
-    }
-    let hooks = cfg.hooks.clone();
-    let cwd = cfg.cwd.clone();
+    // SessionStart/SessionEnd hook 已收口 actor：警告经 Warning 事件进
+    // 事件流，由 TUI 消息流渲染。
     let ctx = wavecode_tui::TuiContext {
         model_name: cfg.model_name.clone(),
         cwd: cfg.cwd.clone(),
@@ -361,17 +316,6 @@ async fn run_tui(cfg: SessionConfig, mcp_lines: Vec<String>) -> anyhow::Result<E
     };
     let client = InProcessClient::spawn(cfg);
     wavecode_tui::run(client, ctx).await?;
-
-    // P7：SessionEnd hook（清理；记忆自动提取由 tui 退出时的 Shutdown
-    // 路径触发，与 run_repl 同机制）。
-    if let Some(hooks) = &hooks {
-        run_lifecycle_hooks(
-            hooks,
-            wavecode_core::hooks::HookEventPoint::SessionEnd,
-            &cwd,
-        )
-        .await;
-    }
     Ok(ExitCode::SUCCESS)
 }
 

@@ -39,6 +39,16 @@ pub struct Config {
     pub mcp_servers: HashMap<String, McpServerRaw>,
 }
 
+/// 用户主目录：`USERPROFILE`（Windows）优先，兜底 `HOME`；两者皆未
+/// 设置时返回 `None`（调用方显式降级依赖 home 的能力，不猜相对路径）。
+/// 全 workspace 单点定义——memory / core / cli 经本函数取，不再各自
+/// `var_os` 一份。
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
 pub use hooks::{ConfigError, HookRule, HookRuleSet};
 pub use mcp::McpServerRaw;
 pub use provider::{ProviderConfig, ProviderKind};
@@ -49,9 +59,9 @@ impl Config {
     /// home 目录取 `USERPROFILE`（Windows），兜底 `HOME`；两者皆未设置时
     /// 按相对路径查找，实际效果等同于 NotFound。
     pub fn load() -> Result<Self, ConfigError> {
-        let home = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
-            .unwrap_or_default();
+        // home 未设置时取空串 → 相对路径查找，实际效果等同于 NotFound
+        //（与既有行为一致；调用方可先经 [`home_dir`] 显式探测）。
+        let home = home_dir().unwrap_or_default();
         Self::load_from(&Path::new(&home).join(".wavecode").join("config.toml"))
     }
 

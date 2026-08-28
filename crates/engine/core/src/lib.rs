@@ -31,6 +31,7 @@
 //! replay 的 resume 恢复、`list_threads` 列表；SQLite 索引降级与 fork
 //! 占位见模块注释）。
 
+pub mod assemble;
 pub mod hooks;
 pub mod mcp;
 pub mod memory;

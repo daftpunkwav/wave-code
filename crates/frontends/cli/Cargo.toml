@@ -9,18 +9,13 @@ name = "wavecode"
 path = "src/main.rs"
 
 [dependencies]
+# 装配根已收口 core::assemble（SPEC §3 矩阵 cli 行）：cli 不再直连
+# llm / tools / sandbox / memory / skills 等 capabilities/foundation crate，
+# 一切装配知识经 core 的 SessionConfig / Boot 到达。
 wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-config = { path = "../../foundation/config" }
-wavecode-llm = { path = "../../foundation/llm" }
-wavecode-tools = { path = "../../capabilities/tools" }
 wavecode-core = { path = "../../engine/core" }
 wavecode-app-server = { path = "../../transport/app-server" }
-# P2：装配 SessionConfig.sandbox（PermissionMode → Sandbox）
-wavecode-sandbox = { path = "../../capabilities/sandbox" }
-# P6/P7：装配层直装能力 crate 的纯数据面（WAVECODE.md 收集 / 持久记忆
-# 存储 / SKILL.md 发现），core 不再做门面再导出（SPEC §3 矩阵 cli 行）
-wavecode-memory = { path = "../../capabilities/memory" }
-wavecode-skills = { path = "../../capabilities/skills" }
 # P8：TTY 默认路径进入 ratatui TUI（SPEC §3 矩阵允许 cli→tui）
 wavecode-tui = { path = "../../frontends/tui" }
 clap.workspace = true

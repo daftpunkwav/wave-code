@@ -115,15 +115,6 @@ impl MemoryStore {
     }
 }
 
-/// 用户 home 目录：`USERPROFILE`（Windows）优先，兜底 `HOME`。
-/// 与 config crate 的解析同款——memory 无 workspace 内依赖（SPEC §3），
-/// 此处自洽一份，不反向依赖 config。
-pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-}
-
 /// 条目格式化：`- ` 列表项；多行内容的后续行缩进两格，保持在同一
 /// Markdown 列表项内。
 fn format_entry(content: &str) -> String {

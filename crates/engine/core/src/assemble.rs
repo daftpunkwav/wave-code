@@ -1,54 +1,67 @@
-//! 启动装配：配置文件 → [`SessionConfig`]。
+//! 启动装配（2026-08 自 cli bootstrap 收口）：config 文件 → [`SessionConfig`]。
 //!
-//! 链路：`Config::load`（或 `--config` 指定）→ `resolve_provider` →
-//! `AnthropicClient::new` → [`Boot`]（`Registry::builtin()`、
-//! cwd = 当前目录、`--model` 覆盖 config.model）；P6 追加记忆装配：
-//! WAVECODE.md 指令记忆收集 + 持久记忆索引快照（cli→memory 直装，
-//! SPEC §3 矩阵 cli 行已补录）；P9 追加 MCP 装配：`[mcp_servers]`
-//! 原始表经 core 转换为已校验清单（仅解析 + 持有，连接留待真实
-//! transport）。
+//! 装配是引擎职责：provider 解析、记忆/技能/hooks/MCP/rollout 的组装都
+//! 在本模块单点完成——cli 退化为参数解析与呈现，第二个前端（Desktop/Web
+//! 直连 app-server）出现时零复制复用。cli→capabilities 的直连依赖边随之
+//! 移除（SPEC §3 矩阵 cli 行收敛为 app-server + config + core + protocol + tui）。
+//!
+//! 警告不直接打 stderr：收集进 [`Boot::warnings`]，呈现方式由调用方决定
+//! （cli 打 stderr；事件型前端转 Warning 事件）。
 
 use std::path::Path;
 
 use wavecode_config::{Config, ConfigError};
-use wavecode_core::SessionConfig;
 
-/// 启动装配错误：配置问题（退出码 2）与其他运行时问题（退出码 1）须可区分。
+use crate::SessionConfig;
+
+/// 启动装配错误：配置问题（cli 退出码 2）与其他运行时问题（退出码 1）须可区分。
 #[derive(Debug, thiserror::Error)]
 pub enum BootError {
     /// 配置缺失 / 解析失败 / provider 或 api key 未定义。
     #[error(transparent)]
     Config(#[from] ConfigError),
-    /// 无法确定当前工作目录（tools 的 path_guard 约定 cwd 为绝对路径，不兜底相对路径）。
-    #[error("无法确定当前工作目录: {0}")]
-    Cwd(std::io::Error),
 }
 
-/// 装配产物（[`load_session_config`] 返回值）。
+/// 装配产物（[`load_boot`] 返回值）。
 pub struct Boot {
-    /// 会话配置（移入 InProcessClient 驱动）。
+    /// 会话配置（移入驱动方：cli 经 InProcessClient spawn）。
     pub session: SessionConfig,
     /// 已解析的 MCP server 清单（P9，SPEC §10/§13）：首版仅解析 +
     /// 持有——`/mcp` 命令的展示面；连接与工具注册留待真实 transport
     /// 落地（届时在装配层经 `McpToolBridge` 注册进 registry）。
-    pub mcp_servers: Vec<wavecode_core::mcp::NamedMcpServer>,
+    pub mcp_servers: Vec<crate::mcp::NamedMcpServer>,
+    /// 装配期警告（http 明文风险 / 非法 permission_mode / home 缺失 /
+    /// skills 发现 / hooks 配置 / MCP 条目 / rollout 目录创建）：文案不含
+    /// "警告："前缀，由调用方统一包装。
+    pub warnings: Vec<String>,
 }
 
-/// 装配 [`Boot`]（会话配置 + MCP server 清单）。
+/// 装配 [`Boot`]（会话配置 + MCP server 清单 + 警告）。
 ///
 /// - `config_path`：`Some` 走 [`Config::load_from`]，`None` 走用户级
 ///   [`Config::load`]（`~/.wavecode/config.toml`）；
-/// - `model_override`：`--model` 值，优先于 `config.model`。
-pub fn load_session_config(
+/// - `model_override`：`--model` 值，优先于 `config.model`；
+/// - `cwd` / `home`：工作目录（path_guard 约定绝对路径）与用户主目录
+///   （`None` = 记忆 / rollout 能力不可用），由调用方从运行环境解析——
+///   core 不读进程环境。
+pub fn load_boot(
     config_path: Option<&Path>,
     model_override: Option<&str>,
+    cwd: &Path,
+    home: Option<&Path>,
 ) -> Result<Boot, BootError> {
     let config = match config_path {
         Some(path) => Config::load_from(path)?,
         None => Config::load()?,
     };
     let (provider, api_key) = config.resolve_provider()?;
-    warn_if_insecure_http(&provider.base_url);
+    let mut warnings = Vec::new();
+    if is_insecure_http_url(&provider.base_url) {
+        warnings.push(format!(
+            "base_url 使用 http 且目标非本机回环（{}），api key 将明文传输；生产环境请改用 https。",
+            provider.base_url
+        ));
+    }
 
     // M1 仅 AnthropicClient 一种模型实现（provider.kind 的 OpenAiCompatible
     // 分支待后续里程碑的 OpenAI 客户端落地后区分）。
@@ -61,39 +74,37 @@ pub fn load_session_config(
         .as_deref()
         .map(|raw| {
             wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
-                eprintln!(
-                    "警告：无法识别的 permission_mode = {raw:?}，回退 default\
+                warnings.push(format!(
+                    "无法识别的 permission_mode = {raw:?}，回退 default\
                      （合法值：default / plan / acceptEdits / bypassPermissions）"
-                );
+                ));
                 wavecode_protocol::PermissionMode::Default
             })
         })
         .unwrap_or(wavecode_protocol::PermissionMode::Default);
 
-    let cwd = std::env::current_dir().map_err(BootError::Cwd)?;
-    let home = wavecode_memory::home_dir();
     // P6：记忆装配（SPEC §5.4/§7）——指令记忆收集（用户级 → 项目根 → cwd）
     // 与持久记忆索引快照；两者注入系统提示词槽位，store_root 供
     // memory_write 与 SessionEnd 自动提取。home 不可解析时退化为无记忆
     // 能力（显式警告，不静默降级）。
-    let memory = match &home {
+    let memory = match home {
         Some(home) => {
-            let instruction = wavecode_memory::collect(Some(home.as_path()), &cwd);
+            let instruction = wavecode_memory::collect(Some(home), cwd);
             let store_root = wavecode_memory::MemoryStore::default_root(home);
             let memory_index = wavecode_memory::MemoryStore::new(store_root.clone())
                 .read_index()
                 .unwrap_or_else(|e| {
-                    eprintln!("警告：记忆索引读取失败（按无记忆继续）：{e}");
+                    warnings.push(format!("记忆索引读取失败（按无记忆继续）：{e}"));
                     String::new()
                 });
-            Some(wavecode_core::MemorySessionConfig {
+            Some(crate::MemorySessionConfig {
                 instruction_memory: instruction.combined,
                 memory_index,
                 store_root,
             })
         }
         None => {
-            eprintln!("警告：无法解析用户主目录（USERPROFILE/HOME），记忆能力不可用");
+            warnings.push("无法解析用户主目录（USERPROFILE/HOME），记忆能力不可用".to_owned());
             None
         }
     };
@@ -103,56 +114,51 @@ pub fn load_session_config(
     // transport 接线）。单个坏文件警告跳过（发现产物 warnings），不炸
     // 启动；无 skill 时不挂技能面（skill 工具不注册、清单不注入）。
     let skills = {
-        let roots = wavecode_skills::standard_roots(None, home.as_deref(), &cwd);
+        let roots = wavecode_skills::standard_roots(None, home, cwd);
         let discovery = wavecode_skills::discover(&roots);
-        for warning in &discovery.warnings {
-            eprintln!("警告：{warning}");
-        }
+        warnings.extend(discovery.warnings.iter().cloned());
         if discovery.set.is_empty() {
             None
         } else {
-            Some(wavecode_core::SkillSessionConfig {
+            Some(crate::SkillSessionConfig {
                 set: std::sync::Arc::new(discovery.set),
             })
         }
     };
 
     // P7：hooks 装配（SPEC §9）——config `[hooks]` 原始表 → HookEngine
-    //（core 转换；cli 不新增 cli→hooks/config 细节依赖边）。事件点名非法
-    // 显式警告后按无 hooks 继续（不静默——stderr 可见；hooks 是增强面，
-    // 配置错误不应阻塞启动）。
-    let hooks = match wavecode_core::hooks::engine_from_config(&config.hooks) {
+    //（core 内转换）。事件点名非法显式警告后按无 hooks 继续（不静默——
+    // 警告可见；hooks 是增强面，配置错误不应阻塞启动）。
+    let hooks = match crate::hooks::engine_from_config(&config.hooks) {
         Ok(engine) if engine.is_empty() => None,
         Ok(engine) => Some(std::sync::Arc::new(engine)),
         Err(e) => {
-            eprintln!("警告：hooks 配置无效（按无 hooks 继续）：{e}");
+            warnings.push(format!("hooks 配置无效（按无 hooks 继续）：{e}"));
             None
         }
     };
 
     // P9：MCP server 配置装配（SPEC §10/§13）——config `[mcp_servers]`
-    // 原始表经 core 转换为已校验清单（stdio/http 二选一校验）；非法条目
-    // 警告跳过，不阻塞启动。首版仅解析 + 持有（/mcp 展示面），连接与
-    // 工具注册留待真实 transport 落地。
-    let (mcp_servers, mcp_warnings) = wavecode_core::mcp::servers_from_config(&config.mcp_servers);
-    for warning in &mcp_warnings {
-        eprintln!("警告：{warning}");
-    }
+    // 原始表转换为已校验清单（stdio/http 二选一校验）；非法条目警告跳过，
+    // 不阻塞启动。首版仅解析 + 持有（/mcp 展示面），连接与工具注册留待
+    // 真实 transport 落地。
+    let (mcp_servers, mcp_warnings) = crate::mcp::servers_from_config(&config.mcp_servers);
+    warnings.extend(mcp_warnings);
 
     // P10：会话持久化装配（SPEC §16）——rollout 根目录 ~/.wavecode/threads
-    // + 新会话分配 uuid thread id（`wavecode resume <id>` 由 main 在 boot
+    // + 新会话分配 uuid thread id（`wavecode resume <id>` 由 cli 在 boot
     // 后覆盖为指定 id，构造即 replay 恢复）。home 不可解析 / 目录创建失败
-    // 时退化为不持久化（显式警告，与记忆面同纪律；home 警告记忆装配已打印）。
-    let rollout = match &home {
+    // 时退化为不持久化（显式警告，与记忆面同纪律；home 警告记忆装配已收集）。
+    let rollout = match home {
         Some(home) => {
-            let root = wavecode_core::rollout::default_root(home);
+            let root = crate::rollout::default_root(home);
             match std::fs::create_dir_all(&root) {
-                Ok(()) => Some(wavecode_core::rollout::RolloutConfig {
+                Ok(()) => Some(crate::rollout::RolloutConfig {
                     root,
                     thread_id: uuid::Uuid::new_v4().to_string(),
                 }),
                 Err(e) => {
-                    eprintln!("警告：rollout 目录创建失败（会话不持久化）：{e}");
+                    warnings.push(format!("rollout 目录创建失败（会话不持久化）：{e}"));
                     None
                 }
             }
@@ -167,7 +173,7 @@ pub fn load_session_config(
                 .unwrap_or_else(|| config.model.clone()),
             std::sync::Arc::new(model),
             wavecode_tools::Registry::builtin(),
-            cwd,
+            cwd.to_path_buf(),
         )
         .context_window(provider.context_window())
         .max_output_tokens(provider.max_output_tokens())
@@ -193,6 +199,7 @@ pub fn load_session_config(
         .rollout(rollout)
         .build(),
         mcp_servers,
+        warnings,
     })
 }
 
@@ -212,15 +219,6 @@ fn is_insecure_http_url(base_url: &str) -> bool {
         None => authority.split(':').next().unwrap_or_default(),
     };
     !matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
-
-/// http 且非 loopback 的 base_url：stderr 打一行警告（api key 明文传输）。
-fn warn_if_insecure_http(base_url: &str) {
-    if is_insecure_http_url(base_url) {
-        eprintln!(
-            "警告：base_url 使用 http 且目标非本机回环（{base_url}），api key 将明文传输；生产环境请改用 https。"
-        );
-    }
 }
 
 #[cfg(test)]
@@ -257,36 +255,40 @@ api_key = "k-inline"
         path
     }
 
+    fn boot_with(dir: &tempfile::TempDir, content: &str) -> Boot {
+        let path = write_config(dir, content);
+        load_boot(Some(&path), None, dir.path(), None).unwrap()
+    }
+
     /// `--model` 覆盖 config.model；不传则用配置值。
     #[test]
     fn model_override_wins() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_config(&dir, CFG_INLINE_KEY);
-        let cfg = load_session_config(Some(&path), Some("m-override"))
+        let cfg = load_boot(Some(&path), Some("m-override"), dir.path(), None)
             .unwrap()
             .session;
         assert_eq!(cfg.model_name, "m-override");
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
+        let cfg = load_boot(Some(&path), None, dir.path(), None).unwrap().session;
         assert_eq!(cfg.model_name, "m1");
     }
 
-    /// 配置文件缺失 → BootError::Config(NotFound) 分支（main 映射退出码 2）。
+    /// 配置文件缺失 → BootError::Config(NotFound) 分支（cli 映射退出码 2）。
     #[test]
     fn missing_config_is_config_boot_error() {
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope.toml");
         assert!(matches!(
-            load_session_config(Some(&missing), None),
+            load_boot(Some(&missing), None, dir.path(), None),
             Err(BootError::Config(ConfigError::NotFound(_)))
         ));
     }
 
-    /// deny_env 装配（批 C）：config 的 env_key 自定义名注入 SessionConfig。
+    /// deny_env 装配：config 的 env_key 自定义名注入 SessionConfig。
     #[test]
     fn env_key_injected_into_deny_env() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(&dir, CFG_ENV_KEY);
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
+        let cfg = boot_with(&dir, CFG_ENV_KEY).session;
         assert_eq!(cfg.deny_env, vec!["MINIMAX_KEY".to_owned()]);
     }
 
@@ -296,10 +298,9 @@ api_key = "k-inline"
     fn permission_mode_flows_into_sandbox() {
         let dir = tempfile::tempdir().unwrap();
         // 未配置 → default
-        let path = write_config(&dir, CFG_INLINE_KEY);
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
+        let boot = boot_with(&dir, CFG_INLINE_KEY);
         assert_eq!(
-            cfg.sandbox.mode(),
+            boot.session.sandbox.mode(),
             wavecode_protocol::PermissionMode::Default
         );
         // 配置 plan → Plan
@@ -308,20 +309,26 @@ api_key = "k-inline"
             "model = \"m1\"\npermission_mode = \"plan\"",
             1,
         );
-        let path = write_config(&dir, &with_plan);
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
-        assert_eq!(cfg.sandbox.mode(), wavecode_protocol::PermissionMode::Plan);
-        // 非法值 → 回退 default
+        let boot = boot_with(&dir, &with_plan);
+        assert_eq!(
+            boot.session.sandbox.mode(),
+            wavecode_protocol::PermissionMode::Plan
+        );
+        // 非法值 → 回退 default，警告收集（不静默）
         let with_bad = CFG_INLINE_KEY.replacen(
             "model = \"m1\"",
             "model = \"m1\"\npermission_mode = \"yolo\"",
             1,
         );
-        let path = write_config(&dir, &with_bad);
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
+        let boot = boot_with(&dir, &with_bad);
         assert_eq!(
-            cfg.sandbox.mode(),
+            boot.session.sandbox.mode(),
             wavecode_protocol::PermissionMode::Default
+        );
+        assert!(
+            boot.warnings.iter().any(|w| w.contains("permission_mode")),
+            "非法模式应有警告: {:?}",
+            boot.warnings
         );
     }
 
@@ -329,14 +336,15 @@ api_key = "k-inline"
     #[test]
     fn no_env_key_gives_empty_deny_env() {
         let dir = tempfile::tempdir().unwrap();
-        let path = write_config(&dir, CFG_INLINE_KEY);
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
+        let cfg = boot_with(&dir, CFG_INLINE_KEY).session;
         assert!(cfg.deny_env.is_empty());
         let path = write_config(
             &dir,
             &CFG_ENV_KEY.replace("env_key = \"MINIMAX_KEY\"", "env_key = \"\""),
         );
-        let cfg = load_session_config(Some(&path), None).unwrap().session;
+        let cfg = load_boot(Some(&path), None, dir.path(), None)
+            .unwrap()
+            .session;
         assert!(cfg.deny_env.is_empty());
     }
 
@@ -360,16 +368,49 @@ url = "https://y"
 "#
         );
         let path = write_config(&dir, &toml);
-        let boot = load_session_config(Some(&path), None).unwrap();
+        let boot = load_boot(Some(&path), None, dir.path(), None).unwrap();
         assert_eq!(boot.mcp_servers.len(), 2, "非法条目跳过");
         assert_eq!(boot.mcp_servers[0].name, "playwright");
         assert_eq!(boot.mcp_servers[0].config.transport_kind(), "stdio");
         assert_eq!(boot.mcp_servers[1].name, "remote");
         assert_eq!(boot.mcp_servers[1].config.transport_kind(), "http");
+        assert!(
+            boot.warnings.iter().any(|w| w.contains("broken") || w.contains("MCP")),
+            "非法条目应有警告: {:?}",
+            boot.warnings
+        );
         // 未配置 → 空清单。
         let path = write_config(&dir, CFG_INLINE_KEY);
-        let boot = load_session_config(Some(&path), None).unwrap();
+        let boot = load_boot(Some(&path), None, dir.path(), None).unwrap();
         assert!(boot.mcp_servers.is_empty());
+    }
+
+    /// home 缺失 → 记忆 / rollout 能力不可用（警告收集，不静默降级）。
+    #[test]
+    fn missing_home_degrades_memory_and_rollout() {
+        let dir = tempfile::tempdir().unwrap();
+        let boot = boot_with(&dir, CFG_INLINE_KEY);
+        assert!(boot.session.memory.is_none());
+        assert!(boot.session.rollout.is_none());
+        assert!(
+            boot.warnings
+                .iter()
+                .any(|w| w.contains("记忆能力不可用")),
+            "{:?}",
+            boot.warnings
+        );
+    }
+
+    /// home 提供 → 记忆面 / rollout 装配就绪（rollout 目录创建在 tempdir 下）。
+    #[test]
+    fn home_provided_wires_memory_and_rollout() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let path = write_config(&dir, CFG_INLINE_KEY);
+        let boot = load_boot(Some(&path), None, dir.path(), Some(home.path())).unwrap();
+        assert!(boot.session.memory.is_some());
+        let rollout = boot.session.rollout.expect("rollout 应装配");
+        assert!(rollout.root.starts_with(home.path()));
     }
 
     /// http 警告的判定面：仅"http 且非 loopback"为真。

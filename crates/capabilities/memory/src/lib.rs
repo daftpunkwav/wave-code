@@ -23,4 +23,4 @@ pub mod store;
 
 pub use extract::parse_extracted_entries;
 pub use instructions::{InstructionMemory, MAX_INCLUDE_DEPTH, collect, find_project_root};
-pub use store::{INDEX_FILE, MemoryCategory, MemoryStore, home_dir};
+pub use store::{INDEX_FILE, MemoryCategory, MemoryStore};

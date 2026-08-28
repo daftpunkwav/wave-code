@@ -12,7 +12,6 @@
 //!
 //! app-server / mcp / login 等子命令随后续里程碑落地。
 
-mod bootstrap;
 mod markdown;
 mod render;
 mod banner;
@@ -26,7 +25,6 @@ use wavecode_app_server::InProcessClient;
 use wavecode_core::SessionConfig;
 use wavecode_protocol::{ApprovalDecision, EventMsg, Op, StopReason, Submission};
 
-use crate::bootstrap::BootError;
 use crate::render::HumanRenderer;
 
 /// REPL 提示符：亮青波形符（rustyline 对含 ANSI 的 prompt 宽度计算经
@@ -70,15 +68,32 @@ async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     init_tracing();
 
-    let boot = match bootstrap::load_session_config(cli.config.as_deref(), cli.model.as_deref()) {
+    // 装配根在 core（SPEC §3 收口）：cli 只解析运行环境（cwd / home）
+    // 与呈现警告。cwd 无法确定 = 运行时错误（退出码 1）。
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("错误：无法确定当前工作目录: {e}");
+            return Ok(ExitCode::from(1));
+        }
+    };
+    let home = wavecode_config::home_dir();
+    let boot = match wavecode_core::assemble::load_boot(
+        cli.config.as_deref(),
+        cli.model.as_deref(),
+        &cwd,
+        home.as_deref(),
+    ) {
         Ok(boot) => boot,
-        Err(BootError::Config(e)) => {
+        Err(wavecode_core::assemble::BootError::Config(e)) => {
             // 配置缺失 / 加载失败：中文指引 + 退出码 2。
             print_config_error(&e);
             return Ok(ExitCode::from(2));
         }
-        Err(e) => return Err(e.into()),
     };
+    for warning in &boot.warnings {
+        eprintln!("警告：{warning}");
+    }
     // P9：`/mcp` 展示面——server 状态行经 core 渲染（REPL 与 TUI 共用；
     // 首版状态恒为"未连接（transport 未实现）"，诚实展示不伪造在线）。
     let mcp_lines: Vec<String> = boot
@@ -111,7 +126,7 @@ async fn run_resume(
     thread_id: Option<String>,
     force_repl: bool,
 ) -> anyhow::Result<ExitCode> {
-    let Some(home) = wavecode_memory::home_dir() else {
+    let Some(home) = wavecode_config::home_dir() else {
         eprintln!("错误：无法解析用户主目录（USERPROFILE/HOME），会话持久化不可用");
         return Ok(ExitCode::from(2));
     };

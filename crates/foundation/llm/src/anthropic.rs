@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 
-use crate::{ChatModel, ChatRequest, EventStream, LlmError, Result, SseParser, StreamEvent};
+use crate::{ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, SseParser, StreamEvent};
 
 /// Anthropic Messages API 流式客户端。
 pub struct AnthropicClient {
@@ -97,11 +97,45 @@ pub(crate) fn build_request_body(req: &ChatRequest) -> serde_json::Value {
         "system": req.system,
         // Arc<Vec<Message>> 快照解引用序列化（serde 的 rc feature 未开，
         // 无须为单点序列化扩 feature）。
-        "messages": &*req.messages,
+        "messages": merge_adjacent_same_role(&req.messages),
         "tools": req.tools,
         "max_tokens": req.max_tokens,
         "stream": true,
     })
+}
+
+/// 合并相邻同角色消息：官方端点对连续同角色自动合并，但强制角色交替的
+/// 第三方兼容网关会对"历史末条 tool_result（user）+ 追加指令（user）"
+/// 形态（压缩摘要、上下文采样等管线产物）返回 400——客户端侧合并后
+/// 兼容全部端点。合并 = content 块数组串联；相邻 Text 块之间补换行防
+/// 粘连，ToolResult 块按协议并列（多个 tool_result 同属一条 user 合法）。
+fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        if let Some(last) = out.last_mut()
+            && last.role == msg.role
+        {
+            let mut content = std::mem::take(&mut last.content);
+            match (
+                content.last_mut(),
+                msg.content.first(),
+            ) {
+                (
+                    Some(ContentBlock::Text { text: prev }),
+                    Some(ContentBlock::Text { text: next }),
+                ) => {
+                    prev.push('\n');
+                    prev.push_str(next);
+                    content.extend(msg.content.iter().skip(1).cloned());
+                }
+                _ => content.extend(msg.content.iter().cloned()),
+            }
+            last.content = content;
+            continue;
+        }
+        out.push(msg.clone());
+    }
+    out
 }
 
 /// SSE 字节缓冲硬上限（8 MiB）：超出即判定服务端未按 SSE 帧边界发数据，
@@ -282,6 +316,48 @@ mod tests {
         assert_eq!(v["messages"][1]["content"][0]["type"], "tool_use");
         assert_eq!(v["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(v["tools"][0]["name"], "read_file");
+    }
+
+    /// 相邻同角色消息在请求体中合并(第三方强制交替端点兼容):
+    /// 历史 tool_result(user) + 追加指令(user) 是压缩/采样管线的常态产物。
+    #[test]
+    fn request_body_merges_adjacent_same_role_messages() {
+        let req = ChatRequest {
+            model: "m1".into(),
+            system: "sys".into(),
+            messages: std::sync::Arc::new(vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "第一条".into(),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "第二条".into(),
+                    }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "回复".into(),
+                    }],
+                },
+            ]),
+            tools: vec![],
+            max_tokens: 8,
+        };
+        let v = build_request_body(&req);
+        let messages = v["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "相邻 user 应合并为一条");
+        assert_eq!(messages[0]["role"], "user");
+        let text = messages[0]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text, "第一条
+第二条", "相邻 Text 块间补换行防粘连");
+        assert_eq!(messages[1]["role"], "assistant");
+        // 输入不变(合并只发生在序列化侧)。
+        assert_eq!(req.messages.len(), 3);
     }
 
     #[tokio::test]

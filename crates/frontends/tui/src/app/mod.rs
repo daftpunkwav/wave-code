@@ -600,7 +600,8 @@ impl App {
         }
     }
 
-    /// `/memory`：读取持久记忆索引文件（路径由装配侧注入）并展示。
+    /// `/memory`：读取持久记忆索引文件（路径由装配侧注入；文件不存在 =
+    /// 暂无记忆,与行式 REPL 同一读取语义,不作为错误）。
     fn show_memory(&mut self) {
         match &self.ctx.memory_index_path {
             Some(path) => match std::fs::read_to_string(path) {
@@ -613,6 +614,13 @@ impl App {
                 Ok(index) => {
                     let content = sanitize_terminal(index.trim_end()).into_owned();
                     self.items.push(Item::plain(content, Style::default()));
+                }
+                // 缺文件与空索引同态(正常形态);其余 io 错误才报错。
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.items.push(Item::plain(
+                        format!("（暂无持久记忆；索引文件：{}）", path.display()),
+                        dim(),
+                    ));
                 }
                 Err(e) => self
                     .items

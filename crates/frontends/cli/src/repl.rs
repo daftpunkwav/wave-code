@@ -27,7 +27,12 @@ pub(crate) async fn run_repl(
     );
 
     // P6：`/memory` 命令的读取面（存储根在 cfg 移入 client 前取出）。
-    let memory_root = cfg.memory.as_ref().map(|m| m.store_root.clone());
+    // `/memory` 读取面:注入索引文件路径直读(与 TUI 同一装配形态),
+    // 不现场构造 MemoryStore——同一语义只留一种装配形态。
+    let memory_index_path = cfg
+        .memory
+        .as_ref()
+        .map(|m| m.store_root.join(wavecode_memory::INDEX_FILE));
     // P7：`/name [args]` slash 直调的查找面与生命周期 hook（cfg 移入前取出）。
     let skill_set = cfg.skills.as_ref().map(|s| s.set.clone());
     let hooks = cfg.hooks.clone();
@@ -61,20 +66,18 @@ pub(crate) async fn run_repl(
                 // P6：`/memory` 列出持久记忆索引（最简形态：读最新文件，
                 // 会话内 memory_write 的新条目同样可见；条目编辑直接改文件）。
                 if text == "/memory" {
-                    match &memory_root {
-                        Some(root) => {
-                            let store = wavecode_memory::MemoryStore::new(root.clone());
-                            match store.read_index() {
-                                Ok(index) if index.trim().is_empty() => {
-                                    println!(
-                                        "（暂无持久记忆；索引文件：{}）",
-                                        root.join(wavecode_memory::INDEX_FILE).display()
-                                    );
-                                }
-                                Ok(index) => println!("{}", index.trim_end()),
-                                Err(e) => eprintln!("读取记忆索引失败：{e}"),
+                    match &memory_index_path {
+                        Some(path) => match std::fs::read_to_string(path) {
+                            // 索引不存在 = 暂无记忆(正常形态,不是错误)。
+                            Ok(index) if index.trim().is_empty() => {
+                                println!("（暂无持久记忆；索引文件：{}）", path.display());
                             }
-                        }
+                            Ok(index) => println!("{}", index.trim_end()),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                println!("（暂无持久记忆；索引文件：{}）", path.display());
+                            }
+                            Err(e) => eprintln!("读取记忆索引失败：{e}"),
+                        },
                         None => eprintln!("记忆能力不可用（启动时无法解析用户主目录）"),
                     }
                     continue;

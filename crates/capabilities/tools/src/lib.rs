@@ -13,7 +13,7 @@ mod fs;
 mod path_guard;
 mod search;
 mod shell_tool;
-pub mod todo_tool;
+mod todo_tool;
 
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 

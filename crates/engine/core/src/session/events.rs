@@ -60,16 +60,17 @@ pub(super) async fn fail_turn(events: &mpsc::Sender<Event>, submission_id: &str,
     .await;
 }
 
-/// 尽力投递事件：send 失败即 receiver 已关闭（前端断开），记 debug 日志
+/// 尽力投递事件：send 失败即 receiver 已关闭（前端断开），记 warn 日志
 /// 并继续执行——M1 选择"继续"而非安全退出：历史一致性优先，事件流只是
-/// 旁观通道，channel 满时 send 自然挂起形成背压，不会失败。
+/// 旁观通道，channel 满时 send 自然挂起形成背压，不会失败。前端断开是
+/// 异常路径（影响可观测面），warn 级留痕便于排查"为什么没有事件"。
 pub(super) async fn emit(events: &mpsc::Sender<Event>, submission_id: &str, msg: EventMsg) {
     let ev = Event {
         id: submission_id.to_owned(),
         msg,
     };
     if events.send(ev).await.is_err() {
-        tracing::debug!("事件接收端已断开，继续执行 turn（后续事件不再投递）");
+        tracing::warn!("事件接收端已断开，继续执行 turn（后续事件不再投递）");
     }
 }
 

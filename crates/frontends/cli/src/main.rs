@@ -15,7 +15,7 @@
 mod bootstrap;
 mod markdown;
 mod render;
-mod wave;
+mod banner;
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;

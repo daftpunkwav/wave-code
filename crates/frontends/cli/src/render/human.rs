@@ -359,7 +359,7 @@ impl<W: Write> HumanRenderer<W> {
             return Ok(());
         }
         self.phase += 0.35;
-        write!(self.out, "\r{}", crate::wave::frame(14, self.phase))?;
+        write!(self.out, "\r{}", crate::banner::frame(14, self.phase))?;
         self.out.flush()?;
         self.indicator_on = true;
         Ok(())

@@ -1,6 +1,6 @@
 //! 波形动画：正弦采样块字符 + 青→蓝→紫 RGB 渐变。
 //!
-//! 品牌的"波形"动效内核：启动横幅动画、等待模型指示共用 [`frame`]。
+//! 波形动效(正弦块字符 + RGB 渐变):启动横幅与等待指示共用 [`frame`]。
 //! 纯函数、确定性，ANSI 启用/剥离由输出侧 anstream 决定。
 
 use anstyle::{Color, Reset, RgbColor, Style};

@@ -14,10 +14,12 @@
 //! - [`ui`]：布局与弹层绘制（纯投影）；
 //! - [`text`]：终端净化与截断（镜像 cli render.rs 语义）。
 
-pub mod app;
-pub mod markdown;
-pub mod text;
-pub mod ui;
+// 模块不对外公开:cli 只经 [`run`] + [`TuiContext`] 使用本 crate,
+// 内部实现(app 状态机 / markdown / 绘制 / 文本处理)不属于导出面。
+mod app;
+mod markdown;
+mod text;
+mod ui;
 
 use std::time::Duration;
 
@@ -35,7 +37,8 @@ use ratatui::backend::CrosstermBackend;
 use wavecode_app_server::InProcessClient;
 use wavecode_protocol::{Op, Submission};
 
-pub use app::{App, TuiContext};
+use app::App;
+pub use app::TuiContext;
 
 /// TUI 入口：进入交替屏幕并驱动事件循环，返回时终端已恢复原状。
 ///

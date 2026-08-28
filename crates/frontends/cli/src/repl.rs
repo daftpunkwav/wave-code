@@ -16,14 +16,14 @@ pub(crate) async fn run_repl(
         let mut out = anstream::stdout();
         for _ in 0..12 {
             phase += 0.35;
-            write!(out, "\r{}", wave::frame(7, phase))?;
+            write!(out, "\r{}", banner::frame(7, phase))?;
             out.flush()?;
             tokio::time::sleep(std::time::Duration::from_millis(80)).await;
         }
     }
     anstream::print!(
         "{}",
-        wave::banner(&cfg.model_name, &cfg.cwd, version, phase)
+        banner::banner(&cfg.model_name, &cfg.cwd, version, phase)
     );
 
     // P6：`/memory` 命令的读取面（存储根在 cfg 移入 client 前取出）。

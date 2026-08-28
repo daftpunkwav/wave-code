@@ -179,6 +179,10 @@ impl SubagentManager {
         .deny_env(self.deps.deny_env.clone())
         .sandbox(self.deps.sandbox.clone())
         .context(self.deps.context.clone())
+        // 无人值守：审批槽只挂在父会话（actor 经 approval_handle 回填），
+        // 子代理的 ApprovalRequested 在父侧 drain 中被丢弃、无人 decide——
+        // Ask 必须直接拒绝而不是 park 挂死（权限不放宽，见 SessionConfig）。
+        .unattended(true)
         .build()
     }
 

@@ -674,4 +674,61 @@ mod tests {
         let p3 = request_text(parents[3]);
         assert!(p3.contains("status: stopped"), "task_output 终态回灌: {p3}");
     }
+
+    /// 子代理配置必须无人值守（unattended）：审批槽只挂在父会话，子代理
+    /// 的 ApprovalRequested 无人应答。
+    #[test]
+    fn child_config_is_unattended() {
+        let model = Arc::new(MockModel {
+            calls: Mutex::new(0),
+            scripts: vec![],
+        });
+        let mgr = SubagentManager::from_config(&parent_config(model));
+        for t in [SubagentType::GeneralPurpose, SubagentType::Explore] {
+            assert!(
+                mgr.child_config(&spec("x", t)).unattended,
+                "{t:?} 子代理应 unattended"
+            );
+        }
+    }
+
+    /// 回归（挂死修复）：default 权限模式下子代理调用非只读工具（shell
+    /// 会得到 Ask 判定）——必须以拒绝结果回灌并正常收尾，而不是 park 在
+    /// 无人应答的审批槽上（修复前本测试 5s 超时失败：同步派生永不返回）。
+    #[tokio::test]
+    async fn unattended_subagent_rejects_ask_instead_of_hanging() {
+        let model = Arc::new(MockModel {
+            calls: Mutex::new(0),
+            scripts: vec![
+                // 子代理 round1：发起 shell 调用（default 模式 → Ask）。
+                {
+                    let mut script = tool_use("s-1", "shell", r#"{"command":"echo hi"}"#);
+                    script.push(StreamEvent::MessageComplete {
+                        stop_reason: "tool_use".into(),
+                        usage: Usage::default(),
+                    });
+                    script
+                },
+                // 子代理 round2：看到拒绝结果后收尾。
+                text_end("拒绝后收尾"),
+            ],
+        });
+        // 父会话显式用 Default 模式（存量测试夹具是 BypassPermissions，
+        // 全放行走不到审批路径——这正是该 bug 长期未被发现的原因）。
+        let cwd = tempfile::tempdir().unwrap().keep();
+        let cfg = SessionConfig::builder("mock", model.clone(), Registry::builtin(), cwd)
+            .sandbox(wavecode_sandbox::Sandbox::without_rules(
+                PermissionMode::Default,
+            ))
+            .build();
+        let mgr = SubagentManager::from_config(&cfg);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            mgr.run_sync(spec("需要跑命令", SubagentType::GeneralPurpose)),
+        )
+        .await
+        .expect("子代理应在 5s 内收尾（不得 park 在无人应答的审批槽）");
+        assert_eq!(result.status, SubagentStatus::Completed);
+        assert!(result.summary.contains("拒绝后收尾"));
+    }
 }

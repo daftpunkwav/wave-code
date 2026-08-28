@@ -54,6 +54,11 @@ pub struct SessionConfig {
     /// 持久化以父会话为单位）。构造时文件已存在且非空即 replay 恢复
     ///（resume 语义：压缩点之后原文 + 摘要即新历史，见 rollout 模块注释）。
     pub rollout: Option<crate::rollout::RolloutConfig>,
+    /// 无人值守语义（子代理会话为 `true`）：sandbox 判定为 `Ask` 时不发
+    /// `ApprovalRequested`、不 park 等待，直接以拒绝回灌——无人能应答，
+    /// 等待即永久挂死。权限不放宽：只是把"等不到的人工审批"显式拒绝，
+    /// 模型可改用只读路径或收尾汇报。
+    pub unattended: bool,
 }
 
 impl SessionConfig {
@@ -101,6 +106,7 @@ impl SessionConfigBuilder {
                 skills: None,
                 hooks: None,
                 rollout: None,
+                unattended: false,
             },
         }
     }
@@ -156,6 +162,12 @@ impl SessionConfigBuilder {
     /// P10 会话持久化装配（默认 `None`）。
     pub fn rollout(mut self, rollout: Option<crate::rollout::RolloutConfig>) -> Self {
         self.cfg.rollout = rollout;
+        self
+    }
+
+    /// 无人值守语义（默认 `false`；子代理 `child_config` 置 `true`）。
+    pub fn unattended(mut self, unattended: bool) -> Self {
+        self.cfg.unattended = unattended;
         self
     }
 

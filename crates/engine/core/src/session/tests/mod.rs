@@ -3238,3 +3238,66 @@ async fn allow_rule_skips_approval_for_nonreadonly() {
     assert_eq!(tool_ok, Some(true), "write_file 应直接执行成功");
     assert!(dir.path().join("out.txt").exists(), "文件应被创建");
 }
+
+/// 无人值守会话（unattended）：Ask 判定不发 ApprovalRequested、不 park，
+/// 直接以拒绝结果回灌（子代理挂死修复的会话级验证）。
+#[tokio::test]
+async fn unattended_session_rejects_ask_without_approval_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let ask_shell = vec![
+        StreamEvent::ToolUseBegin {
+            id: "s1".into(),
+            name: "shell".into(),
+        },
+        StreamEvent::ToolUseInputDelta {
+            partial_json: r#"{"command":"echo hi"}"#.into(),
+        },
+        StreamEvent::BlockEnd,
+        StreamEvent::MessageComplete {
+            stop_reason: "tool_use".into(),
+            usage: Usage::default(),
+        },
+    ];
+    let scripts = vec![ask_shell, text_then_end("拒绝后收尾。")];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(wavecode_sandbox::Sandbox::without_rules(
+            wavecode_protocol::PermissionMode::Default,
+        ))
+        .unattended(true)
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "跑个命令", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+
+    let mut saw_approval = false;
+    let mut rejection = None;
+    while let Ok(ev) = rx.try_recv() {
+        match ev.msg {
+            EventMsg::ApprovalRequested { .. } => saw_approval = true,
+            EventMsg::ToolCallEnd { output, .. } => rejection = Some(output),
+            _ => {}
+        }
+    }
+    assert!(!saw_approval, "unattended 会话不得发 ApprovalRequested");
+    let rejection = rejection.expect("应见 ToolCallEnd");
+    assert!(
+        rejection.contains("unattended session (subagent)"),
+        "拒绝文案应回灌: {rejection}"
+    );
+    // 第二轮请求：拒绝结果以 is_error ToolResult 配对回灌。
+    let seen = model.seen.lock().unwrap();
+    let paired = seen[1].messages.iter().any(|m| {
+        m.content.iter().any(
+            |b| matches!(b, wavecode_llm::ContentBlock::ToolResult { tool_use_id, is_error: true, content, .. } if tool_use_id == "s1" && content.contains("unattended")),
+        )
+    });
+    assert!(paired, "拒绝结果应配对回灌: {:?}", seen[1].messages);
+}

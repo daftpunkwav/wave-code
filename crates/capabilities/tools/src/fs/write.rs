@@ -56,6 +56,14 @@ impl Tool for WriteFile {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
+        if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
+            // 目录路径返回可自我纠正的业务文案(与 read_file / edit_file
+            // 分流同形态);tokio::fs::write 对目录返回的是实现级 Err。
+            return Ok(err_output(format!(
+                "path is a directory, cannot write: {}",
+                path.display()
+            )));
+        }
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }

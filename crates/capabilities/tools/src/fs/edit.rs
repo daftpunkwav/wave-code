@@ -69,6 +69,14 @@ impl Tool for EditFile {
             }
             Err(e) => return Err(e.into()),
         };
+        if meta.is_dir() {
+            // 与 read_file 同形态的业务分流:目录路径返回可自我纠正的
+            // 错误文案,而不是实现级 Err(读目录的 io 错误非 NotFound)。
+            return Ok(err_output(format!(
+                "path is a directory, cannot edit: {}",
+                path.display()
+            )));
+        }
         if meta.len() > MAX_READ_BYTES {
             return Ok(err_output(format!(
                 "file too large ({} bytes), refusing to edit: {}",

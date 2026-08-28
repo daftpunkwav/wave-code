@@ -53,10 +53,20 @@ impl Tool for TaskStop {
         };
         match self.manager.stop(&task_id).await {
             None => err(format!("unknown task id: {task_id}")),
-            Some(TaskState::Finished(result)) => Ok(ToolOutput {
-                content: format!("{task_id} stopped.\n{}", format_result(&result)),
-                is_error: false,
-            }),
+            Some(TaskState::Finished(result)) => {
+                // 任务已自行到达终态（Completed/Failed）：如实说明"停止
+                // 动作未生效"，统一输出 stopped 会误导模型以为是它调用
+                // 的效果；Stopped 是本次或先前停止请求的结果，照常说。
+                let lead = if result.status == SubagentStatus::Stopped {
+                    format!("{task_id} stopped.")
+                } else {
+                    format!("{task_id} had already finished before the stop; no action taken.")
+                };
+                Ok(ToolOutput {
+                    content: format!("{lead}\n{}", format_result(&result)),
+                    is_error: false,
+                })
+            }
             // 超时兜底：中断已置位但子代理未在时限内到达安全点（如挂起的
             // 工具执行）；如实回报仍在运行，不伪造已停止。
             Some(TaskState::Running) => Ok(ToolOutput {

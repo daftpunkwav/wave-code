@@ -83,9 +83,12 @@ fn validate_pattern(pattern: &str) -> std::result::Result<(), ToolOutput> {
 
 /// 转 glob crate 模式串的目录前缀：glob 模式语法里 `\` 是转义符（Windows 路径
 /// 分隔符会被误吃），统一替换为 `/`——Windows 文件 API 接受正斜杠，匹配按
-/// path component 进行，与分隔符形态无关。
+/// path component 进行，与分隔符形态无关。目录名中的 glob 元字符
+///（`[ ] { } * ?`）按模式语法转义——`D:\proj[1]\app` 这类目录不做转义
+/// 会被当字符集解析，展开恒空（under_cwd 复核再过滤后即"永远无结果"）。
 fn glob_prefix(dir: &Path) -> String {
-    dir.to_string_lossy().replace('\\', "/")
+    let unified = dir.to_string_lossy().replace('\\', "/");
+    ::glob::Pattern::escape(&unified)
 }
 
 /// 命中路径复核：canonicalize 后必须在 cwd 真实路径之下（junction/symlink 指向
@@ -303,6 +306,24 @@ mod tests {
             .strip_suffix("\n[truncated: 5 more paths]")
             .unwrap();
         assert_eq!(body.lines().count(), MAX_PATHS);
+    }
+
+    /// 回归(cwd 元字符转义):目录名含 glob 元字符时,前缀必须按
+    /// 模式语法转义——否则 `[1]` 被当字符集解析,展开恒空。
+    #[tokio::test]
+    async fn glob_works_when_cwd_contains_glob_metachars() {
+        let outer = tempfile::tempdir().unwrap();
+        let dir = outer.path().join("proj[1]_x");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(dir.join("a.rs"), "fn main() {}").await.unwrap();
+        let ctx = ToolCtx {
+            cwd: dir.clone(),
+            deny_env: Vec::new(),
+        };
+        let glob = crate::Registry::builtin().get("glob").unwrap();
+        let out = glob.execute(serde_json::json!({"pattern": "*.rs"}), &ctx).await.unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("a.rs"), "应命中含元字符目录下的文件: {}", out.content);
     }
 
     #[tokio::test]

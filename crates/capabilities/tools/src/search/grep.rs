@@ -146,6 +146,11 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
             lines.push(format!("{rel}:{}:{line}", idx + 1));
             if lines.len() >= MAX_MATCHES {
                 hit_cap = true;
+                // 达上限跳出前当前文件已命中:计入文件数再退出,
+                // 否则统计尾行少算一个文件。
+                if file_had_match {
+                    matched_files += 1;
+                }
                 break 'files;
             }
         }

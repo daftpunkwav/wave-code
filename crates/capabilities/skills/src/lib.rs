@@ -339,17 +339,20 @@ impl SkillSet {
             return String::new();
         }
         let full = self.render(true, None);
-        if full.len() <= max_chars {
+        // 预算按字符口径比较（与 max_chars 的"字符额度"约定一致）：
+        // String::len 是字节数，中文描述每字符 3 字节，按字节比较会
+        // 提前两到三倍地触发降级截断。
+        if full.chars().count() <= max_chars {
             return full;
         }
         let no_when = self.render(false, None);
-        if no_when.len() <= max_chars {
+        if no_when.chars().count() <= max_chars {
             return no_when;
         }
         // 均摊额度：每条目 "- : \n" 约 8 字符开销；下限 16 防过度截断。
         let per_entry = (max_chars / self.skills.len()).saturating_sub(8).max(16);
         let truncated = self.render(false, Some(per_entry));
-        if truncated.len() <= max_chars {
+        if truncated.chars().count() <= max_chars {
             return truncated;
         }
         let mut cut = max_chars.saturating_sub(40);
@@ -674,22 +677,23 @@ paths:
             .collect();
         let set = catalog_set(&refs);
         let full = set.catalog(100_000);
+        // 预算口径是字符(见 catalog 注释):断言与预算构造同口径。
         assert!(
-            full.len() > 600,
+            full.chars().count() > 600,
             "全量清单应足够长以触发降级: {}",
-            full.len()
+            full.chars().count()
         );
         for budget in [600usize, 400, 200] {
             let catalog = set.catalog(budget);
             assert!(
-                catalog.len() <= budget,
+                catalog.chars().count() <= budget,
                 "预算 {budget} 超支: {} > {budget}",
-                catalog.len()
+                catalog.chars().count()
             );
             assert!(!catalog.is_empty());
         }
         // 宽裕预算下先丢 when_to_use 保描述。
-        let no_when_budget = set.render(false, None).len() + 10;
+        let no_when_budget = set.render(false, None).chars().count() + 10;
         let catalog = set.catalog(no_when_budget);
         assert!(!catalog.contains("(when:"));
         assert!(catalog.contains(long_desc));

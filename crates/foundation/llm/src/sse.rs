@@ -149,6 +149,9 @@ enum Delta {
 #[derive(Deserialize)]
 struct MessageDeltaEvent {
     delta: MessageDeltaBody,
+    /// 官方端点总是携带 usage；第三方兼容网关可能省略——缺省按 0 计，
+    /// 不让整条流（含已生成的文本）因统计字段缺失而终止。
+    #[serde(default)]
     usage: MessageDeltaUsage,
 }
 
@@ -159,7 +162,7 @@ struct MessageDeltaBody {
     stop_reason: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct MessageDeltaUsage {
     #[serde(default)]
     output_tokens: u64,

@@ -136,8 +136,14 @@ impl App {
     // ── 协议事件 ────────────────────────────────────────────────
 
     /// 协议事件 → 状态迁移（渲染语义对齐 cli render.rs 的 HumanRenderer）。
+    ///
+    /// 仅"产出可见内容"的事件（条目入消息流 / delta 进缓冲）重置
+    /// [`Self::follow_tail`]：turn 内流式 delta 高频，若 TokenCount 等
+    /// 无内容事件也拽回底部，用户翻历史阅读会被立即拉回（不可用）。
     pub fn handle_event(&mut self, ev: &Event) {
         use wavecode_protocol::EventMsg as M;
+        let items_before = self.items.len();
+        let buf_before = self.msg_buf.len();
         match &ev.msg {
             M::TurnStarted { .. } => {
                 self.in_turn = true;
@@ -269,7 +275,11 @@ impl App {
             // EventMsg 标注 non_exhaustive：未来新增事件不渲染。
             _ => {}
         }
-        self.follow_tail = true;
+        // 有新内容（条目增加 / 缓冲增长）才恢复跟随；清缓冲（TurnStarted）
+        // 不算内容。
+        if self.items.len() != items_before || self.msg_buf.len() > buf_before {
+            self.follow_tail = true;
+        }
     }
 
     /// 渲染缓冲消息（markdown）并清空；空缓冲 no-op。
@@ -474,8 +484,16 @@ impl App {
         }
     }
 
-    /// 粘贴事件：净化后插入（ bracketed paste 防注入）。
+    /// 粘贴事件：净化后插入（bracketed paste 防注入）。审批弹窗打开时与
+    /// [`Self::handle_key`] 同路由——按键全部交给弹窗：reason 录入态粘贴
+    /// 进原因，其余状态忽略（主输入框被弹窗遮挡，静默写入不可见）。
     pub fn paste(&mut self, s: &str) {
+        if let Some(popup) = &mut self.approval {
+            if popup.reason_mode {
+                popup.reason.extend(sanitize_terminal(s).chars());
+            }
+            return;
+        }
         let clean = sanitize_terminal(s);
         let byte = Self::char_to_byte(&self.input, self.cursor);
         self.input.insert_str(byte, &clean);
@@ -774,6 +792,51 @@ mod tests {
             matches!(&ops[..], [Op::ExecApproval { decision: ApprovalDecision::Deny { reason }, .. }] if reason.is_empty()),
             "Esc 应空原因拒绝: {ops:?}"
         );
+    }
+
+    /// follow_tail 语义：仅内容类事件（条目入流 / 缓冲增长）恢复跟随；
+    /// TokenCount、TurnStarted（清缓冲）等无内容事件不拽底——turn 内
+    /// delta 高频，否则用户翻历史阅读会被立即拉回。
+    #[test]
+    fn follow_tail_follows_only_content_events() {
+        let mut app = App::new(ctx());
+        app.handle_key(key(KeyCode::PageUp));
+        assert!(!app.follow_tail, "翻页后应离开跟随");
+        app.handle_event(&ev(EventMsg::TokenCount { used: 1, window: 2 }));
+        assert!(!app.follow_tail, "TokenCount 不应拽回底部");
+        app.handle_event(&ev(EventMsg::TurnStarted {
+            turn_id: "t".into(),
+        }));
+        assert!(!app.follow_tail, "TurnStarted 仅清缓冲,非内容");
+        app.handle_event(&ev(EventMsg::AgentMessageDelta { text: "hi".into() }));
+        assert!(app.follow_tail, "delta 增长缓冲应恢复跟随");
+        app.handle_key(key(KeyCode::PageUp));
+        assert!(!app.follow_tail);
+        app.handle_event(&ev(EventMsg::Warning {
+            message: "w".into(),
+        }));
+        assert!(app.follow_tail, "告警条目应恢复跟随");
+    }
+
+    /// paste 路由：弹窗打开时与按键同路由——reason 录入态粘贴进原因，
+    /// 非 reason 态忽略（主输入框被弹窗遮挡，静默写入不可见）；弹窗
+    /// 关闭时粘贴进主输入框。
+    #[test]
+    fn paste_routes_to_approval_popup_when_open() {
+        let mut app = App::new(ctx());
+        app.paste("主输入");
+        assert_eq!(app.input, "主输入");
+        app.handle_event(&ev(EventMsg::ApprovalRequested {
+            call_id: "c1".into(),
+            kind: ApprovalKind::Exec,
+            detail: "d".into(),
+        }));
+        app.paste("xyz");
+        assert_eq!(app.input, "主输入", "弹窗非 reason 态粘贴应忽略");
+        app.handle_key(key(KeyCode::Char('n')));
+        app.paste("非常危险\n的第二行");
+        let popup = app.approval.as_ref().unwrap();
+        assert_eq!(popup.reason, "非常危险\n的第二行");
     }
 
     /// slash 补全状态迁移：前缀过滤、Up/Down 环绕、Tab 补全、

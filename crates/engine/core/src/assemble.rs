@@ -44,6 +44,9 @@ pub struct Boot {
 /// - `cwd` / `home`：工作目录（path_guard 约定绝对路径）与用户主目录
 ///   （`None` = 记忆 / rollout 能力不可用），由调用方从运行环境解析——
 ///   core 不读进程环境。
+///
+/// 各能力面（权限模式 / 记忆 / skills / hooks / MCP / rollout）的组装
+/// 逻辑分别在 `assemble_*` 子函数中，本函数只做编排与产物组合。
 pub fn load_boot(
     config_path: Option<&Path>,
     model_override: Option<&str>,
@@ -67,104 +70,13 @@ pub fn load_boot(
     // 分支待后续里程碑的 OpenAI 客户端落地后区分）。
     let model = wavecode_llm::AnthropicClient::new(provider.base_url.clone(), api_key);
 
-    // P2：config.permission_mode → 权限模式；未配置回退 default，
-    // 无法识别的值警告后回退（显式、诚实，不做静默放行）。
-    let permission_mode = config
-        .permission_mode
-        .as_deref()
-        .map(|raw| {
-            wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
-                warnings.push(format!(
-                    "无法识别的 permission_mode = {raw:?}，回退 default\
-                     （合法值：default / plan / acceptEdits / bypassPermissions）"
-                ));
-                wavecode_protocol::PermissionMode::Default
-            })
-        })
-        .unwrap_or(wavecode_protocol::PermissionMode::Default);
-
-    // P6：记忆装配（SPEC §5.4/§7）——指令记忆收集（用户级 → 项目根 → cwd）
-    // 与持久记忆索引快照；两者注入系统提示词槽位，store_root 供
-    // memory_write 与 SessionEnd 自动提取。home 不可解析时退化为无记忆
-    // 能力（显式警告，不静默降级）。
-    let memory = match home {
-        Some(home) => {
-            let instruction = wavecode_memory::collect(Some(home), cwd);
-            let store_root = wavecode_memory::MemoryStore::default_root(home);
-            let memory_index = wavecode_memory::MemoryStore::new(store_root.clone())
-                .read_index()
-                .unwrap_or_else(|e| {
-                    warnings.push(format!("记忆索引读取失败（按无记忆继续）：{e}"));
-                    String::new()
-                });
-            Some(crate::MemorySessionConfig {
-                instruction_memory: instruction.combined,
-                memory_index,
-                store_root,
-            })
-        }
-        None => {
-            warnings.push("无法解析用户主目录（USERPROFILE/HOME），记忆能力不可用".to_owned());
-            None
-        }
-    };
-
-    // P7：skills 装配（SPEC §8）——按优先级 builtin < 用户级 < 项目级发现
-    //（builtin 首版无内置技能目录，留 None；MCP 暴露 skill 随真实
-    // transport 接线）。单个坏文件警告跳过（发现产物 warnings），不炸
-    // 启动；无 skill 时不挂技能面（skill 工具不注册、清单不注入）。
-    let skills = {
-        let roots = wavecode_skills::standard_roots(None, home, cwd);
-        let discovery = wavecode_skills::discover(&roots);
-        warnings.extend(discovery.warnings.iter().cloned());
-        if discovery.set.is_empty() {
-            None
-        } else {
-            Some(crate::SkillSessionConfig {
-                set: std::sync::Arc::new(discovery.set),
-            })
-        }
-    };
-
-    // P7：hooks 装配（SPEC §9）——config `[hooks]` 原始表 → HookEngine
-    //（core 内转换）。事件点名非法显式警告后按无 hooks 继续（不静默——
-    // 警告可见；hooks 是增强面，配置错误不应阻塞启动）。
-    let hooks = match crate::hooks::engine_from_config(&config.hooks) {
-        Ok(engine) if engine.is_empty() => None,
-        Ok(engine) => Some(std::sync::Arc::new(engine)),
-        Err(e) => {
-            warnings.push(format!("hooks 配置无效（按无 hooks 继续）：{e}"));
-            None
-        }
-    };
-
-    // P9：MCP server 配置装配（SPEC §10/§13）——config `[mcp_servers]`
-    // 原始表转换为已校验清单（stdio/http 二选一校验）；非法条目警告跳过，
-    // 不阻塞启动。首版仅解析 + 持有（/mcp 展示面），连接与工具注册留待
-    // 真实 transport 落地。
+    let permission_mode = resolve_permission_mode(&config, &mut warnings);
+    let memory = assemble_memory(home, cwd, &mut warnings);
+    let skills = assemble_skills(home, cwd, &mut warnings);
+    let hooks = assemble_hooks(&config, &mut warnings);
     let (mcp_servers, mcp_warnings) = crate::mcp::servers_from_config(&config.mcp_servers);
     warnings.extend(mcp_warnings);
-
-    // P10：会话持久化装配（SPEC §16）——rollout 根目录 ~/.wavecode/threads
-    // + 新会话分配 uuid thread id（`wavecode resume <id>` 由 cli 在 boot
-    // 后覆盖为指定 id，构造即 replay 恢复）。home 不可解析 / 目录创建失败
-    // 时退化为不持久化（显式警告，与记忆面同纪律；home 警告记忆装配已收集）。
-    let rollout = match home {
-        Some(home) => {
-            let root = crate::rollout::default_root(home);
-            match std::fs::create_dir_all(&root) {
-                Ok(()) => Some(crate::rollout::RolloutConfig {
-                    root,
-                    thread_id: uuid::Uuid::new_v4().to_string(),
-                }),
-                Err(e) => {
-                    warnings.push(format!("rollout 目录创建失败（会话不持久化）：{e}"));
-                    None
-                }
-            }
-        }
-        None => None,
-    };
+    let rollout = assemble_rollout(home, &mut warnings);
 
     Ok(Boot {
         session: SessionConfig::builder(
@@ -201,6 +113,116 @@ pub fn load_boot(
         mcp_servers,
         warnings,
     })
+}
+
+/// 权限模式装配（P2）：`config.permission_mode` → 模式；未配置回退
+/// default，无法识别的值警告后回退（显式、诚实，不做静默放行）。
+fn resolve_permission_mode(
+    config: &Config,
+    warnings: &mut Vec<String>,
+) -> wavecode_protocol::PermissionMode {
+    config
+        .permission_mode
+        .as_deref()
+        .map(|raw| {
+            wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "无法识别的 permission_mode = {raw:?}，回退 default\
+                     （合法值：default / plan / acceptEdits / bypassPermissions）"
+                ));
+                wavecode_protocol::PermissionMode::Default
+            })
+        })
+        .unwrap_or(wavecode_protocol::PermissionMode::Default)
+}
+
+/// 记忆装配（P6，SPEC §5.4/§7）：指令记忆收集（用户级 → 项目根 → cwd）
+/// 与持久记忆索引快照；两者注入系统提示词槽位，store_root 供
+/// memory_write 与 SessionEnd 自动提取。home 不可解析时退化为无记忆
+/// 能力（显式警告，不静默降级）。
+fn assemble_memory(
+    home: Option<&Path>,
+    cwd: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<crate::MemorySessionConfig> {
+    let Some(home) = home else {
+        warnings.push("无法解析用户主目录（USERPROFILE/HOME），记忆能力不可用".to_owned());
+        return None;
+    };
+    let instruction = wavecode_memory::collect(Some(home), cwd);
+    let store_root = wavecode_memory::MemoryStore::default_root(home);
+    let memory_index = wavecode_memory::MemoryStore::new(store_root.clone())
+        .read_index()
+        .unwrap_or_else(|e| {
+            warnings.push(format!("记忆索引读取失败（按无记忆继续）：{e}"));
+            String::new()
+        });
+    Some(crate::MemorySessionConfig {
+        instruction_memory: instruction.combined,
+        memory_index,
+        store_root,
+    })
+}
+
+/// skills 装配（P7，SPEC §8）：按优先级 builtin < 用户级 < 项目级发现
+///（builtin 首版无内置技能目录，留 None；MCP 暴露 skill 随真实 transport
+/// 接线）。单个坏文件警告跳过（发现产物 warnings），不炸启动；无 skill
+/// 时不挂技能面（skill 工具不注册、清单不注入）。home 缺失时 roots 中
+/// 用户级为 None（发现面自然缩小），与记忆面不同、不产生警告。
+fn assemble_skills(
+    home: Option<&Path>,
+    cwd: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<crate::SkillSessionConfig> {
+    let roots = wavecode_skills::standard_roots(None, home, cwd);
+    let discovery = wavecode_skills::discover(&roots);
+    warnings.extend(discovery.warnings.iter().cloned());
+    if discovery.set.is_empty() {
+        None
+    } else {
+        Some(crate::SkillSessionConfig {
+            set: std::sync::Arc::new(discovery.set),
+        })
+    }
+}
+
+/// hooks 装配（P7，SPEC §9）：config `[hooks]` 原始表 → HookEngine
+///（core 内转换）。事件点名非法显式警告后按无 hooks 继续（不静默——
+/// 警告可见；hooks 是增强面，配置错误不应阻塞启动）。
+fn assemble_hooks(
+    config: &Config,
+    warnings: &mut Vec<String>,
+) -> Option<std::sync::Arc<wavecode_hooks::HookEngine>> {
+    match crate::hooks::engine_from_config(&config.hooks) {
+        Ok(engine) if engine.is_empty() => None,
+        Ok(engine) => Some(std::sync::Arc::new(engine)),
+        Err(e) => {
+            warnings.push(format!("hooks 配置无效（按无 hooks 继续）：{e}"));
+            None
+        }
+    }
+}
+
+/// rollout 装配（P10，SPEC §16）：rollout 根目录 `~/.wavecode/threads`，
+/// 新会话分配 uuid thread id（`wavecode resume <id>` 由 cli 在 boot
+/// 后覆盖为指定 id，构造即 replay 恢复）。home 不可解析 / 目录创建失败
+/// 时退化为不持久化（显式警告，与记忆面同纪律；home 警告记忆装配已收集）。
+fn assemble_rollout(
+    home: Option<&Path>,
+    warnings: &mut Vec<String>,
+) -> Option<crate::rollout::RolloutConfig> {
+    let home = home?;
+    let root = crate::rollout::default_root(home);
+    match std::fs::create_dir_all(&root) {
+        Ok(()) => Some(crate::rollout::RolloutConfig {
+            root,
+            thread_id: uuid::Uuid::new_v4().to_string(),
+        }),
+        Err(e) => {
+            warnings.push(format!("rollout 目录创建失败（会话不持久化）：{e}"));
+            None
+        }
+    }
 }
 
 /// 判定 base_url 是否为"http 且非 loopback"——该形态下 api key 将明文传输，

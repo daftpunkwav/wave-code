@@ -169,22 +169,22 @@ impl App {
             }
             // `/memory` 回包:索引内容渲染(空索引与缺文件同态);path=None
             // 表示会话无记忆装配。
-            M::MemoryIndex { path, content } => {
-                match path {
-                    Some(p) if content.trim().is_empty() => {
-                        self.items
-                            .push(Item::plain(format!("（暂无持久记忆；索引文件：{p}）"), dim()));
-                    }
-                    Some(_) => {
-                        let clean = sanitize_terminal(content.trim_end()).into_owned();
-                        self.items.push(Item::plain(clean, Style::default()));
-                    }
-                    None => self.items.push(Item::plain(
-                        "记忆能力不可用（会话未启用记忆装配）".into(),
-                        warn(),
-                    )),
+            M::MemoryIndex { path, content } => match path {
+                Some(p) if content.trim().is_empty() => {
+                    self.items.push(Item::plain(
+                        format!("（暂无持久记忆；索引文件：{p}）"),
+                        dim(),
+                    ));
                 }
-            }
+                Some(_) => {
+                    let clean = sanitize_terminal(content.trim_end()).into_owned();
+                    self.items.push(Item::plain(clean, Style::default()));
+                }
+                None => self.items.push(Item::plain(
+                    "记忆能力不可用（会话未启用记忆装配）".into(),
+                    warn(),
+                )),
+            },
             M::CompactStarted { .. } => {
                 self.flush_message();
                 self.items

@@ -315,15 +315,24 @@ mod tests {
         let outer = tempfile::tempdir().unwrap();
         let dir = outer.path().join("proj[1]_x");
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        tokio::fs::write(dir.join("a.rs"), "fn main() {}").await.unwrap();
+        tokio::fs::write(dir.join("a.rs"), "fn main() {}")
+            .await
+            .unwrap();
         let ctx = ToolCtx {
             cwd: dir.clone(),
             deny_env: Vec::new(),
         };
         let glob = crate::Registry::builtin().get("glob").unwrap();
-        let out = glob.execute(serde_json::json!({"pattern": "*.rs"}), &ctx).await.unwrap();
+        let out = glob
+            .execute(serde_json::json!({"pattern": "*.rs"}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error);
-        assert!(out.content.contains("a.rs"), "应命中含元字符目录下的文件: {}", out.content);
+        assert!(
+            out.content.contains("a.rs"),
+            "应命中含元字符目录下的文件: {}",
+            out.content
+        );
     }
 
     #[tokio::test]

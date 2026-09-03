@@ -5,8 +5,8 @@
 
 use tokio::sync::mpsc;
 use wavecode_llm::LlmError;
-use wavecode_tools::ToolOutput;
 use wavecode_protocol::{Event, EventMsg, StopReason};
+use wavecode_tools::ToolOutput;
 
 pub(super) fn output_or_err(out: wavecode_tools::Result<ToolOutput>) -> ToolOutput {
     match out {
@@ -92,4 +92,3 @@ pub(super) async fn emit_hook_warnings(
         .await;
     }
 }
-

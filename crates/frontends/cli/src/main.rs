@@ -12,9 +12,9 @@
 //!
 //! app-server / mcp / login 等子命令随后续里程碑落地。
 
+mod banner;
 mod markdown;
 mod render;
-mod banner;
 
 use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
@@ -272,8 +272,10 @@ async fn run_exec(cfg: SessionConfig, prompt: &str, json: bool) -> anyhow::Resul
     // Warning 与 TurnCompleted 后的事件由此呈现（限 5s，防 hook 挂死拖住退出）。
     let _ = client.submit(new_submission(Op::Shutdown)).await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while let Some(ev) =
-        tokio::time::timeout_at(deadline, client.next_event()).await.ok().flatten()
+    while let Some(ev) = tokio::time::timeout_at(deadline, client.next_event())
+        .await
+        .ok()
+        .flatten()
     {
         renderer.handle(&ev)?;
     }

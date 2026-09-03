@@ -269,7 +269,9 @@ api_key = "k-inline"
             .unwrap()
             .session;
         assert_eq!(cfg.model_name, "m-override");
-        let cfg = load_boot(Some(&path), None, dir.path(), None).unwrap().session;
+        let cfg = load_boot(Some(&path), None, dir.path(), None)
+            .unwrap()
+            .session;
         assert_eq!(cfg.model_name, "m1");
     }
 
@@ -375,7 +377,9 @@ url = "https://y"
         assert_eq!(boot.mcp_servers[1].name, "remote");
         assert_eq!(boot.mcp_servers[1].config.transport_kind(), "http");
         assert!(
-            boot.warnings.iter().any(|w| w.contains("broken") || w.contains("MCP")),
+            boot.warnings
+                .iter()
+                .any(|w| w.contains("broken") || w.contains("MCP")),
             "非法条目应有警告: {:?}",
             boot.warnings
         );
@@ -393,9 +397,7 @@ url = "https://y"
         assert!(boot.session.memory.is_none());
         assert!(boot.session.rollout.is_none());
         assert!(
-            boot.warnings
-                .iter()
-                .any(|w| w.contains("记忆能力不可用")),
+            boot.warnings.iter().any(|w| w.contains("记忆能力不可用")),
             "{:?}",
             boot.warnings
         );

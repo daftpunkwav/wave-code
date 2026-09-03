@@ -54,8 +54,10 @@ pub(crate) async fn run_repl(
                     client.submit(new_submission(Op::MemoryList)).await?;
                     loop {
                         let Some(ev) = client.next_event().await else {
-                            println!("
-会话已终止（agent 引擎意外退出）");
+                            println!(
+                                "
+会话已终止（agent 引擎意外退出）"
+                            );
                             return Ok(ExitCode::FAILURE);
                         };
                         renderer.handle(&ev)?;

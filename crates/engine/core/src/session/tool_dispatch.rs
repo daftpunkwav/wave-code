@@ -3,12 +3,12 @@
 //! 共享槽（await_approval 需访问其私有 notify 字段，故同文件）。
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use super::*;
 use super::turn::RoundBlocks;
+use super::*;
 use tokio::sync::{Notify, mpsc};
 use wavecode_llm::{ContentBlock, Message, Role};
 use wavecode_protocol::{ApprovalDecision, Event, EventMsg, StopReason};

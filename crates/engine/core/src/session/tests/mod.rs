@@ -2,8 +2,8 @@
 //! P2 审批 / P3 上下文 / P4 规划 / P6 记忆 / P7 skills+hooks / P9 MCP /
 //! P10 rollout 的全链路行为锁定。测试体未做任何改写,仅整体外移。
 
-use super::*;
 use super::turn::CONTINUATION_PROMPT;
+use super::*;
 use futures::StreamExt;
 use futures::stream;
 use std::sync::{Arc, Mutex};
@@ -37,9 +37,7 @@ impl ChatModel for MockModel {
         &self,
         req: ChatRequest,
     ) -> wavecode_llm::Result<
-        std::pin::Pin<
-            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
-        >,
+        std::pin::Pin<Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>>,
     > {
         self.seen.lock().unwrap().push(req);
         let mut n = self.calls.lock().unwrap();
@@ -66,9 +64,7 @@ impl ChatModel for GatedModel {
         &self,
         req: ChatRequest,
     ) -> wavecode_llm::Result<
-        std::pin::Pin<
-            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
-        >,
+        std::pin::Pin<Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>>,
     > {
         self.seen.lock().unwrap().push(req);
         let script = self.script.clone();
@@ -977,8 +973,7 @@ async fn approval_deny_skips_execution_and_feeds_reason() {
         }
         saw_fail_end
     };
-    let (reason, saw_fail_end) =
-        tokio::join!(session.run_turn("s-1", "创建 nope.txt", tx), signal);
+    let (reason, saw_fail_end) = tokio::join!(session.run_turn("s-1", "创建 nope.txt", tx), signal);
     assert_eq!(reason.unwrap(), StopReason::Completed);
     // 未实际执行
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
@@ -1111,9 +1106,7 @@ impl ChatModel for CompactAwareMock {
         &self,
         req: ChatRequest,
     ) -> wavecode_llm::Result<
-        std::pin::Pin<
-            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
-        >,
+        std::pin::Pin<Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>>,
     > {
         self.seen.lock().unwrap().push(req.clone());
         if req.tools.is_empty() {
@@ -1493,11 +1486,9 @@ async fn manual_compact_via_session_method() {
         _ => None,
     });
     assert_eq!(started, Some(wavecode_protocol::CompactTrigger::Manual));
-    assert!(
-        events
-            .iter()
-            .any(|m| matches!(m, EventMsg::CompactCompleted { summary_tokens: t } if *t == summary_tokens))
-    );
+    assert!(events.iter().any(
+        |m| matches!(m, EventMsg::CompactCompleted { summary_tokens: t } if *t == summary_tokens)
+    ));
     let first = &session.messages[0];
     assert!(
         matches!(&first.content[0], wavecode_llm::ContentBlock::Text { text } if text.starts_with(wavecode_context::SUMMARY_MESSAGE_PREFIX))
@@ -2573,10 +2564,7 @@ async fn mcp_bridged_tool_asks_in_default_mode() {
 // ------------------------------------------------------------------
 
 /// P10 测试夹具：注入临时根目录的 rollout 配置。
-fn p10_rollout(
-    dir: &std::path::Path,
-    thread_id: &str,
-) -> Option<crate::rollout::RolloutConfig> {
+fn p10_rollout(dir: &std::path::Path, thread_id: &str) -> Option<crate::rollout::RolloutConfig> {
     Some(crate::rollout::RolloutConfig {
         root: dir.join("threads"),
         thread_id: thread_id.to_owned(),
@@ -2884,9 +2872,7 @@ impl ChatModel for StressMock {
         &self,
         req: ChatRequest,
     ) -> wavecode_llm::Result<
-        std::pin::Pin<
-            Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
-        >,
+        std::pin::Pin<Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>>,
     > {
         if req.tools.is_empty() {
             // 摘要请求（ModelSummary 不带工具，与 p3 mock 同判定）。
@@ -3042,8 +3028,7 @@ async fn compaction_loop_stress_50_rounds_no_pairing_violations() {
 
     // rollout 记录面同步受压：50 条压缩记录 + 每轮 2 条消息（首轮另
     // 有种子输入外的 user 消息……精确计数 = 50 压缩 + 100 消息）。
-    let load =
-        crate::rollout::load_rollout(&dir.path().join("threads/t-stress.jsonl")).unwrap();
+    let load = crate::rollout::load_rollout(&dir.path().join("threads/t-stress.jsonl")).unwrap();
     let compactions = load
         .records
         .iter()

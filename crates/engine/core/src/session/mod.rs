@@ -71,9 +71,9 @@ mod skill_invoke;
 mod tool_dispatch;
 mod turn;
 
-use events::*;
 use self::turn::TurnRunner; // run_turn_inner 委托(pub(super) struct)
 pub use config::{SessionConfig, SessionConfigBuilder};
+use events::*;
 pub use memory_extract::MemoryExtractionHandle;
 pub use tool_dispatch::ApprovalGate;
 
@@ -275,4 +275,3 @@ impl Session {
         report.warnings
     }
 }
-

@@ -7,7 +7,10 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 
-use crate::{ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, SseParser, StreamEvent};
+use crate::{
+    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, SseParser,
+    StreamEvent,
+};
 
 /// Anthropic Messages API 流式客户端。
 pub struct AnthropicClient {
@@ -116,10 +119,7 @@ fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
             && last.role == msg.role
         {
             let mut content = std::mem::take(&mut last.content);
-            match (
-                content.last_mut(),
-                msg.content.first(),
-            ) {
+            match (content.last_mut(), msg.content.first()) {
                 (
                     Some(ContentBlock::Text { text: prev }),
                     Some(ContentBlock::Text { text: next }),
@@ -353,8 +353,12 @@ mod tests {
         assert_eq!(messages.len(), 2, "相邻 user 应合并为一条");
         assert_eq!(messages[0]["role"], "user");
         let text = messages[0]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(text, "第一条
-第二条", "相邻 Text 块间补换行防粘连");
+        assert_eq!(
+            text,
+            "第一条
+第二条",
+            "相邻 Text 块间补换行防粘连"
+        );
         assert_eq!(messages[1]["role"], "assistant");
         // 输入不变(合并只发生在序列化侧)。
         assert_eq!(req.messages.len(), 3);

@@ -199,7 +199,9 @@ impl SubagentManager {
         .sandbox(self.deps.sandbox.clone())
         .context(self.deps.context.clone());
         // 审批槽：共享（父槽注入后冒泡；未注入时自建兜底槽承接 fail-fast）。
-        builder.approval_gate(crate::sync::lock(&self.deps.approval_gate).clone()).build()
+        builder
+            .approval_gate(crate::sync::lock(&self.deps.approval_gate).clone())
+            .build()
     }
 
     /// 子代理驱动：建 Session 跑一轮 turn 至终态，产出结构化结果；
@@ -261,9 +263,17 @@ impl SubagentManager {
                 match ev.msg {
                     EventMsg::AgentMessageComplete { text } => last_text = text,
                     EventMsg::TokenCount { used, .. } => tokens_used = Some(used),
-                    EventMsg::ApprovalRequested { call_id, kind, detail } => {
+                    EventMsg::ApprovalRequested {
+                        call_id,
+                        kind,
+                        detail,
+                    } => {
                         let forwarded = mgr
-                            .try_emit_event(EventMsg::ApprovalRequested { call_id: call_id.clone(), kind, detail })
+                            .try_emit_event(EventMsg::ApprovalRequested {
+                                call_id: call_id.clone(),
+                                kind,
+                                detail,
+                            })
                             .await;
                         if !forwarded {
                             gate.decide(

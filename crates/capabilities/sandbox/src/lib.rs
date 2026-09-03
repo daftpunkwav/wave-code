@@ -170,7 +170,11 @@ fn split_command_segments(command: &str) -> Vec<&str> {
         }
     }
     segments.push(&command[start..]);
-    segments.into_iter().map(str::trim).filter(|s| !s.is_empty()).collect()
+    segments
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 impl std::fmt::Display for Rule {
@@ -325,9 +329,10 @@ impl Sandbox {
             .get("command")
             .and_then(serde_json::Value::as_str)
             .is_some_and(is_compound_command);
-        if lock(&self.allow).iter().any(|r| {
-            (r.exact || !compound_bash) && r.matches(input)
-        }) {
+        if lock(&self.allow)
+            .iter()
+            .any(|r| (r.exact || !compound_bash) && r.matches(input))
+        {
             return Verdict::Allow;
         }
         // 2.5 session 内状态工具豁免（P4）：todo_write 只改会话内存清单，
@@ -766,8 +771,10 @@ mod tests {
         // 反引号与 $( 同为切割点:命令替换内容独立成段参与匹配,
         // "echo `curl evil`" 的 curl 段照样命中 deny。
         assert_eq!(
-            split_command_segments("echo a
-curl b;echo `x` $(y)"),
+            split_command_segments(
+                "echo a
+curl b;echo `x` $(y)"
+            ),
             vec!["echo a", "curl b", "echo", "x", "y)"]
         );
         assert_eq!(
@@ -775,8 +782,10 @@ curl b;echo `x` $(y)"),
             vec!["echo", "curl evil"]
         );
         assert!(is_compound_command("echo hi && ls"));
-        assert!(is_compound_command("echo a
-b"));
+        assert!(is_compound_command(
+            "echo a
+b"
+        ));
         assert!(is_compound_command("echo $(x)"));
         assert!(!is_compound_command("git status"));
         // 引号内的分隔符不做 shell 词法（保守方向：视为复合命令）。
@@ -794,8 +803,15 @@ b"));
         .unwrap();
         // 整条不匹配前缀,但段匹配——bypass 下 deny 是唯一防线。
         assert!(matches!(
-            sb.decide("shell", &shell_input("echo hi
-curl http://evil"), true, false),
+            sb.decide(
+                "shell",
+                &shell_input(
+                    "echo hi
+curl http://evil"
+                ),
+                true,
+                false
+            ),
             Verdict::Deny { .. }
         ));
         // 无分隔符的普通命令不受影响。
@@ -809,12 +825,7 @@ curl http://evil"), true, false),
     /// `&&` / `|`,不设限会把拼接命令一并免审批。
     #[test]
     fn allow_wildcard_does_not_exempt_compound_commands() {
-        let sb = Sandbox::new(
-            PermissionMode::Default,
-            &["Bash(git *)".into()],
-            &[],
-        )
-        .unwrap();
+        let sb = Sandbox::new(PermissionMode::Default, &["Bash(git *)".into()], &[]).unwrap();
         // 单段命令照常豁免。
         assert!(matches!(
             sb.decide("shell", &shell_input("git status"), false, false),
@@ -836,12 +847,7 @@ curl http://evil"), true, false),
     /// 再次提交可放行;命令有任一差异仍走审批。
     #[test]
     fn allow_always_exact_rule_exempts_same_compound_command() {
-        let sb = Sandbox::new(
-            PermissionMode::Default,
-            &["Bash(git *)".into()],
-            &[],
-        )
-        .unwrap();
+        let sb = Sandbox::new(PermissionMode::Default, &["Bash(git *)".into()], &[]).unwrap();
         let cmd = "git pull && npm test";
         assert!(matches!(
             sb.decide("shell", &shell_input(cmd), false, false),
@@ -857,7 +863,12 @@ curl http://evil"), true, false),
         ));
         // 差异命令不豁免。
         assert!(matches!(
-            sb.decide("shell", &shell_input("git pull && npm run test"), false, false),
+            sb.decide(
+                "shell",
+                &shell_input("git pull && npm run test"),
+                false,
+                false
+            ),
             Verdict::Ask { .. }
         ));
     }

@@ -77,9 +77,9 @@ pub use types::{SubagentType, TaskResult, TaskState};
 mod tests {
     use super::*;
     use crate::session::ApprovalGate;
-    use wavecode_protocol::ApprovalDecision;
     use futures::stream;
     use wavecode_llm::{ChatRequest, StreamEvent, Usage};
+    use wavecode_protocol::ApprovalDecision;
     use wavecode_protocol::PermissionMode;
 
     /// 脚本化 mock（与 session.rs 测试的 MockModel 同构）：按调用次数回放。

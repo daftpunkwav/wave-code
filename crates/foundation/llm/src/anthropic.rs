@@ -33,7 +33,8 @@ impl AnthropicClient {
 /// 构造 HTTP 客户端。
 ///
 /// - 只设 `connect_timeout`（10s）：防 connect 阶段停滞挂死；**不能**设
-///   `Client::timeout`——那会掐断正常的长 SSE 流。流读停滞检测是 M2 待办。
+///   `Client::timeout`——那会掐断正常的长 SSE 流。流读停滞由 [`stall_guard`]
+///   在流层检测（[`STREAM_IDLE_TIMEOUT`] 内无任何字节即 Err 终止流）。
 /// - 禁用重定向：Messages API 端点无合法重定向语义，重定向即报错；reqwest
 ///   默认跟随重定向会把 `x-api-key` 带到跨源目标（PoC 实测），必须杜绝。
 fn build_http_client() -> reqwest::Client {
@@ -75,7 +76,10 @@ impl ChatModel for AnthropicClient {
         let byte_stream = response
             .bytes_stream()
             .map(|r| r.map_err(|e| LlmError::Http(e.to_string())));
-        Ok(Box::pin(decode_event_stream(byte_stream, MAX_SSE_BUF)))
+        Ok(Box::pin(decode_event_stream(
+            stall_guard(byte_stream, STREAM_IDLE_TIMEOUT),
+            MAX_SSE_BUF,
+        )))
     }
 }
 
@@ -141,6 +145,40 @@ fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
 /// SSE 字节缓冲硬上限（8 MiB）：超出即判定服务端未按 SSE 帧边界发数据，
 /// yield Err 终止流——防恶意/异常服务端用无帧边界数据撑爆内存（OOM）。
 const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
+
+/// 流读停滞超时：相邻字节块间隔超过该值即判定上游停滞（连接挂死），
+/// 以 Err 终止流。只约束"块间空闲"，不限制整流时长——长回复只要持续
+/// 产出字节（Anthropic 的 ping / delta 均算字节）就不受影响；200 级
+/// 体量下 120s 无任何字节基本只剩死连接一种解释。
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// 字节流读停滞守卫：每次 `next()` 包一层空闲超时，超时以
+/// [`LlmError::Http`] 终止流。放在 [`decode_event_stream`] 上游而非其内部，
+/// 使帧解析逻辑保持与超时策略正交（测试可独立驱动）。
+fn stall_guard<S>(
+    byte_stream: S,
+    idle_timeout: Duration,
+) -> impl Stream<Item = Result<bytes::Bytes>> + Send
+where
+    S: Stream<Item = Result<bytes::Bytes>> + Send,
+{
+    let mut byte_stream = Box::pin(byte_stream);
+    async_stream::try_stream! {
+        loop {
+            // 仅在被消费方 poll 时计时：消费方挂起（如等审批）不消耗预算。
+            match tokio::time::timeout(idle_timeout, byte_stream.as_mut().next()).await {
+                // 停滞：上游在超时内未产出任何字节。
+                Err(_) => {
+                    Err::<(), _>(LlmError::Http(format!(
+                        "stream idle timeout: no data for {idle_timeout:?}（上游连接可能已停滞）"
+                    )))?;
+                }
+                Ok(None) => break,
+                Ok(Some(chunk)) => yield chunk?,
+            }
+        }
+    }
+}
 
 /// 字节块流 → 事件流：缓冲字节、按空行切 SSE 帧、提取 data 交给 [`SseParser`]。
 ///
@@ -227,6 +265,43 @@ mod tests {
     use super::*;
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
+
+    /// 流读停滞守卫：首块正常通过，其后上游挂起——空闲超时内以 Err 终止
+    /// 流，且计时真实生效（远小于超时上限返回）。
+    #[tokio::test]
+    async fn stall_guard_errors_after_idle_timeout() {
+        let first = Ok(bytes::Bytes::from_static(b"event: ping\n\n"));
+        let hang: futures::stream::Pending<Result<bytes::Bytes>> = futures::stream::pending();
+        let s = stall_guard(
+            futures::stream::iter(vec![first]).chain(hang),
+            Duration::from_millis(30),
+        );
+        let mut s = Box::pin(s);
+        assert!(s.next().await.is_some(), "首个字节块应正常通过");
+        let started = std::time::Instant::now();
+        let second = s.next().await;
+        let err = second.expect("停滞应产出 Err 项而非流终止").unwrap_err();
+        assert!(err.to_string().contains("idle timeout"), "{err}");
+        assert!(
+            started.elapsed() >= Duration::from_millis(30)
+                && started.elapsed() < Duration::from_secs(5),
+            "超时应真实计时而非立即返回: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 上游正常结束（None）不受守卫影响：守卫透传流终止。
+    #[tokio::test]
+    async fn stall_guard_passes_through_clean_eof() {
+        let chunks = vec![
+            Ok(bytes::Bytes::from_static(b"event: ping\n\n")),
+            Ok(bytes::Bytes::from_static(b"event: message_stop\n\n")),
+        ];
+        let s = stall_guard(futures::stream::iter(chunks), Duration::from_millis(30));
+        let events: Vec<_> = Box::pin(s).collect().await;
+        assert_eq!(events.len(), 2, "干净 EOF 不产生停滞 Err: {events:?}");
+        assert!(events.iter().all(|r| r.is_ok()));
+    }
 
     /// 测试辅助：把字符串块转成字节块流，喂给实现内部的核心解析函数
     /// （与 `stream()` 共用同一解析路径），收集全部 Ok 事件。

@@ -3,6 +3,7 @@
 //! 链式方法，存量构造点（装配层与测试夹具）不受影响。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use wavecode_context::ContextConfig;
 use wavecode_protocol::PermissionMode;
@@ -13,6 +14,10 @@ use wavecode_tools::Registry;
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 /// builder 默认单轮采样输出 token 上限（同上）。
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
+/// builder 默认审批等待超时：无人回填决策时按拒绝收尾，turn 不永久 park。
+const DEFAULT_APPROVAL_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+/// builder 默认单 turn 工具轮数上限：模型持续 tool_use 的失控熔断。
+const DEFAULT_MAX_TOOL_ROUNDS: u32 = 32;
 
 /// Session 配置（`Session::new` 后冻结为快照）。
 pub struct SessionConfig {
@@ -22,6 +27,12 @@ pub struct SessionConfig {
     pub context_window: u64,
     /// 单轮采样输出 token 上限（请求的 `max_tokens`）。
     pub max_output_tokens: u32,
+    /// 审批 Ask 等待决策的超时：前端崩溃 / 弹窗丢失时按拒绝回灌收尾
+    ///（工具不执行），turn 不永久 park；用户可重新发起。
+    pub approval_wait_timeout: Duration,
+    /// 单 turn 工具轮数上限：模型连续 tool_use 达上限后不再采样，turn
+    /// 以 Completed 收尾（上一轮工具结果已回灌，历史配对完整）。
+    pub max_tool_rounds: u32,
     /// 模型通道（流式采样）。
     pub model: Arc<dyn wavecode_llm::ChatModel>,
     /// 工具注册表：每轮请求注入 specs，执行管道按名查找。
@@ -97,6 +108,8 @@ impl SessionConfigBuilder {
                 model_name: model_name.into(),
                 context_window: DEFAULT_CONTEXT_WINDOW,
                 max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+                approval_wait_timeout: DEFAULT_APPROVAL_WAIT_TIMEOUT,
+                max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
                 model,
                 registry,
                 cwd,
@@ -121,6 +134,18 @@ impl SessionConfigBuilder {
     /// 单轮采样输出 token 上限（默认 8192）。
     pub fn max_output_tokens(mut self, max_output_tokens: u32) -> Self {
         self.cfg.max_output_tokens = max_output_tokens;
+        self
+    }
+
+    /// 审批等待超时（默认 300s）。
+    pub fn approval_wait_timeout(mut self, approval_wait_timeout: Duration) -> Self {
+        self.cfg.approval_wait_timeout = approval_wait_timeout;
+        self
+    }
+
+    /// 单 turn 工具轮数上限（默认 32）。
+    pub fn max_tool_rounds(mut self, max_tool_rounds: u32) -> Self {
+        self.cfg.max_tool_rounds = max_tool_rounds;
         self
     }
 

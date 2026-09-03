@@ -1087,6 +1087,130 @@ async fn interrupt_during_approval_wait_completes_interrupted() {
     ));
 }
 
+/// P2：审批等待超时——无人回填决策（前端崩溃 / 弹窗丢失）时按拒绝收尾
+///（is_error 回灌、工具不执行），turn 以 Completed 结束而非永久 park；
+/// Warning 事件对前端可见。
+#[tokio::test]
+async fn approval_wait_timeout_rejects_and_completes() {
+    let dir = tempfile::tempdir().unwrap();
+    let scripts = vec![write_file_script("x.txt", "x"), text_then_end("继续。")];
+    let model = Arc::new(MockModel::new(scripts));
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .approval_wait_timeout(std::time::Duration::from_millis(50))
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "写文件", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    // 工具未执行
+    assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    // 超时后 turn 继续：发生了第二次采样
+    assert_eq!(model.seen.lock().unwrap().len(), 2);
+    // 超时拒绝以 is_error 回灌
+    let fed = model.seen.lock().unwrap()[1].messages.iter().any(|m| {
+        m.content.iter().any(|b| {
+            matches!(b,
+                wavecode_llm::ContentBlock::ToolResult { content, is_error: true, .. }
+                    if content.contains("timed out"))
+        })
+    });
+    assert!(
+        fed,
+        "超时拒绝应回灌: {:?}",
+        model.seen.lock().unwrap()[1].messages
+    );
+    // Warning 事件可见
+    let mut saw_warning = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let EventMsg::Warning { message } = ev.msg
+            && message.contains("timed out")
+        {
+            saw_warning = true;
+        }
+    }
+    assert!(saw_warning);
+}
+
+/// 工具轮数上限（失控熔断）：模型无限 tool_use 时达 `max_tool_rounds`
+/// 即不再采样，turn 以 Completed 收尾；历史配对完整，Warning 可见。
+#[tokio::test]
+async fn tool_round_cap_stops_runaway_tool_loop() {
+    struct LoopModel {
+        calls: Mutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl ChatModel for LoopModel {
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+        ) -> wavecode_llm::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
+            >,
+        > {
+            *self.calls.lock().unwrap() += 1;
+            Ok(Box::pin(stream::iter(vec![
+                Ok(StreamEvent::ToolUseBegin {
+                    id: "t1".into(),
+                    name: "read_file".into(),
+                }),
+                Ok(StreamEvent::ToolUseInputDelta {
+                    partial_json: r#"{"path":"nope.txt"}"#.into(),
+                }),
+                Ok(StreamEvent::BlockEnd),
+                Ok(StreamEvent::MessageComplete {
+                    stop_reason: "tool_use".into(),
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 5,
+                    },
+                }),
+            ])))
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let model = Arc::new(LoopModel {
+        calls: Mutex::new(0),
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Event>(64);
+    let mut session = Session::new(
+        SessionConfig::builder(
+            "mock",
+            model.clone(),
+            wavecode_tools::Registry::builtin(),
+            dir.path().to_path_buf(),
+        )
+        .sandbox(bypass_sandbox())
+        .max_tool_rounds(3)
+        .build(),
+    );
+    let reason = session.run_turn("s-1", "干活", tx).await.unwrap();
+    assert_eq!(reason, StopReason::Completed);
+    assert_eq!(*model.calls.lock().unwrap(), 3, "达上限后不再采样");
+    // 历史配对完整（每轮 tool_use 均有结果回灌）
+    assert_eq!(
+        wavecode_context::find_pairing_violations(&session.messages),
+        Vec::<String>::new()
+    );
+    let mut saw_cap_warning = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let EventMsg::Warning { message } = ev.msg
+            && message.contains("tool round limit")
+        {
+            saw_cap_warning = true;
+        }
+    }
+    assert!(saw_cap_warning);
+}
+
 // ------------------------------------------------------------------
 // P3：上下文管线（PreTurn 三级阈值 / reactive compact / 续写 / /compact）
 // ------------------------------------------------------------------

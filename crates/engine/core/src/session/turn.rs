@@ -31,6 +31,8 @@ pub(super) struct TurnRunner<'a> {
     todo_steerings: u32,
     /// Stop hook 连续阻塞计数（上限后放行，防死循环）。
     stop_hook_blocks: u32,
+    /// 本 turn 已执行的工具轮数（达 `cfg.max_tool_rounds` 熔断）。
+    tool_rounds: u32,
 }
 
 impl<'a> TurnRunner<'a> {
@@ -48,6 +50,7 @@ impl<'a> TurnRunner<'a> {
             reactive_compacts: 0,
             todo_steerings: 0,
             stop_hook_blocks: 0,
+            tool_rounds: 0,
         }
     }
 
@@ -152,6 +155,25 @@ impl<'a> TurnRunner<'a> {
                 )
                 .await;
                 return Ok(StopReason::Interrupted);
+            }
+
+            // 工具轮数上限（失控熔断）：真实长任务以 todo 拆分为多 turn；
+            // 同一 turn 内模型无限 tool_use 大概率是循环重试同一失败调用。
+            // 达上限不再采样——上一轮工具结果已回灌、历史配对完整，turn 以
+            // Completed 收尾（区别于 fail_turn 的 Error：会话仍可继续）。
+            if self.tool_rounds >= self.session.cfg.max_tool_rounds {
+                emit(
+                    &events,
+                    submission_id,
+                    EventMsg::Warning {
+                        message: format!(
+                            "tool round limit reached ({}); stopping this turn",
+                            self.session.cfg.max_tool_rounds
+                        ),
+                    },
+                )
+                .await;
+                break "max_tool_rounds".to_owned();
             }
 
             // —— P5：后台子代理终态通知注入（<task-notification>）——
@@ -459,6 +481,7 @@ impl<'a> TurnRunner<'a> {
                 role: Role::User,
                 content: results,
             });
+            self.tool_rounds += 1;
         };
 
         // —— 步骤 6：终态 ——

@@ -61,12 +61,17 @@ enum ApprovalWait {
     Decision(ApprovalDecision),
     /// 等待期间被中断。
     Interrupted,
+    /// 超过 `cfg.approval_wait_timeout` 仍无决策（前端崩溃 / 弹窗丢失）。
+    Timeout,
 }
 
 impl super::Session {
     /// AwaitApproval（SPEC §5.1）：park 等待驱动方经共享槽回填决策；
-    /// 等待中中断标志同样生效（审批等待也是中断安全点）。
+    /// 等待中中断标志同样生效（审批等待也是中断安全点）。超过
+    /// `cfg.approval_wait_timeout` 仍无决策时返回 [`ApprovalWait::Timeout`]，
+    /// 调用方按拒绝收尾——turn 不永久 park。
     async fn await_approval(&self, call_id: &str) -> ApprovalWait {
+        let deadline = tokio::time::Instant::now() + self.cfg.approval_wait_timeout;
         loop {
             // 先取决策再查中断：决策已到达按决策走（与工具执行前的中断
             // 检查点同序——中断不撤销已就绪的结果）。
@@ -76,13 +81,19 @@ impl super::Session {
             if self.interrupted.load(Ordering::SeqCst) {
                 return ApprovalWait::Interrupted;
             }
-            tokio::select! {
-                // 正常路径：actor 存决策时 notify_one 即时唤醒（permit 留存，
-                // 与 take 无丢失唤醒竞态）。
-                _ = self.approval_gate.notify.notified() => {}
-                // 兜底轮询：裸 interrupt_handle 驱动形态（无人戳 gate，如
-                // 单测直接 run_turn）也能在一个间隔内观察到中断。
-                _ = tokio::time::sleep(APPROVAL_POLL_INTERVAL) => {}
+            let waited = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    // 正常路径：actor 存决策时 notify_one 即时唤醒（permit 留存，
+                    // 与 take 无丢失唤醒竞态）。
+                    _ = self.approval_gate.notify.notified() => {}
+                    // 兜底轮询：裸 interrupt_handle 驱动形态（无人戳 gate，如
+                    // 单测直接 run_turn）也能在一个间隔内观察到中断。
+                    _ = tokio::time::sleep(APPROVAL_POLL_INTERVAL) => {}
+                }
+            })
+            .await;
+            if waited.is_err() {
+                return ApprovalWait::Timeout;
             }
         }
     }
@@ -373,6 +384,35 @@ impl super::Session {
                                 // 结果收尾，后续调用在迭代头检查点同样收尾。
                                 slots[i] = Some(ToolOutput {
                                     content: "interrupted by user".to_owned(),
+                                    is_error: true,
+                                });
+                                continue;
+                            }
+                            ApprovalWait::Timeout => {
+                                // 审批等待超时：按拒绝收尾（工具不执行），
+                                // turn 得以继续而非永久 park；Warning 对前端
+                                // 可见（其审批弹窗仍可操作，迟到决策落空时
+                                // actor 侧 warn 留痕）。
+                                tracing::warn!(
+                                    call_id = %calls[i].0,
+                                    timeout = ?self.cfg.approval_wait_timeout,
+                                    "审批等待超时，按拒绝收尾"
+                                );
+                                emit(
+                                    events,
+                                    submission_id,
+                                    EventMsg::Warning {
+                                        message: format!(
+                                            "approval timed out after {:?}; the tool was not executed",
+                                            self.cfg.approval_wait_timeout
+                                        ),
+                                    },
+                                )
+                                .await;
+                                slots[i] = Some(ToolOutput {
+                                    content: "approval request timed out without a decision; \
+                                              the tool was not executed"
+                                        .to_owned(),
                                     is_error: true,
                                 });
                                 continue;

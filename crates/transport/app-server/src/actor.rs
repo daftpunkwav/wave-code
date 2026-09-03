@@ -20,19 +20,64 @@ async fn run_session_lifecycle(
     }
 }
 
+/// actor 控制面句柄束：事件通道 + 三类共享控制句柄。turn 驱动与空闲期
+/// 操作驱动共用；打包为单值以收敛 op 路由的参数面（原 `drive_idle_operation`
+/// 8 参数触发 clippy::too_many_arguments，且与 in-turn 双份分发）。
+pub(super) struct ControlPlane {
+    pub(super) event_tx: mpsc::Sender<Event>,
+    pub(super) interrupt_handle: Arc<AtomicBool>,
+    pub(super) approval_handle: Arc<ApprovalGate>,
+    pub(super) permission_mode_handle: Arc<std::sync::Mutex<PermissionMode>>,
+}
+
+/// [`route_extra`] 的路由结果：`Handled` 表示已处理、继续 select；
+/// `Shutdown` 表示须等当前操作收尾后退出（drain 等待与 SessionEnd 由
+/// 调用方负责——turn future / idle op 各自 pin 在调用方作用域）。
+enum Routing {
+    Handled,
+    Shutdown,
+}
+
+/// in-turn 与 idle 两态共用的 submission 路由（原双份 match 收口单点）：
+/// 可排队 op（UserInput / Compact / SlashCommand / MemoryList）入 pending
+///（满时经 [`queue_or_reject`] 显式拒绝）；控制类 op 即时生效；Shutdown 置
+/// 中断标志后交调用方收尾。Op 标注 non_exhaustive：未知 op warn 留痕。
+async fn route_extra(
+    extra: Submission,
+    pending: &mut VecDeque<Submission>,
+    cp: &ControlPlane,
+) -> Routing {
+    match extra.op {
+        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. } | Op::MemoryList => {
+            queue_or_reject(pending, extra, &cp.event_tx).await
+        }
+        Op::Interrupt => cp.interrupt_handle.store(true, Ordering::SeqCst),
+        // P2：审批回填路由到 park 在 AwaitApproval 的操作（共享槽按
+        // call_id 键控；无等待者时 permit 留存，decide 先于 wait 也不丢）。
+        Op::ExecApproval { call_id, decision } => cp.approval_handle.decide(call_id, decision),
+        // P2：权限模式切换，下一次 sandbox 判定即生效。
+        Op::SetPermissionMode { mode } => {
+            *lock_mode(&cp.permission_mode_handle) = mode;
+        }
+        Op::Shutdown => {
+            cp.interrupt_handle.store(true, Ordering::SeqCst);
+            return Routing::Shutdown;
+        }
+        // Op 标注 non_exhaustive：未来新增的 op 在 M1 忽略，warn 留痕。
+        _ => tracing::warn!(id = %extra.id, "忽略未知 op（M1 未实现）"),
+    }
+    Routing::Handled
+}
+
 /// Session actor 主循环：串行驱动 turn；turn 期间经 select! 继续监听
-/// submission 通道（响应 Interrupt / Shutdown / ExecApproval /
-/// SetPermissionMode，UserInput / Compact / SlashCommand 本地排队，队列
-/// 有界——溢出经 [`queue_or_reject`] 显式拒绝）。
-/// submission 通道关闭（客户端全部析构）即退出；event 通道随本任务
-/// 持有的 event_tx 析构而关闭，客户端 next_event 收 None。
+/// submission 通道（控制类 op 经 [`route_extra`] 即时生效，可排队 op 本地
+/// 排队，队列有界——溢出显式拒绝）。
+/// submission 通道关闭（客户端全部析构）即退出；event 通道随 [`ControlPlane`]
+/// 析构而关闭，客户端 next_event 收 None。
 pub(super) async fn actor_loop(
     mut session: Session,
     mut submission_rx: mpsc::Receiver<Submission>,
-    event_tx: mpsc::Sender<Event>,
-    interrupt_handle: Arc<AtomicBool>,
-    approval_handle: Arc<ApprovalGate>,
-    permission_mode_handle: Arc<std::sync::Mutex<PermissionMode>>,
+    cp: ControlPlane,
 ) {
     // P7：SessionStart hook（SPEC §9）——原由各前端在 spawn 前自行触发，
     // 现收口 actor（与记忆提取同点）：前端只经协议面交互，能力等价。
@@ -40,7 +85,7 @@ pub(super) async fn actor_loop(
     run_session_lifecycle(
         &session,
         wavecode_core::hooks::HookEventPoint::SessionStart,
-        &event_tx,
+        &cp.event_tx,
     )
     .await;
 
@@ -61,7 +106,7 @@ pub(super) async fn actor_loop(
             run_session_lifecycle(
                 &session,
                 wavecode_core::hooks::HookEventPoint::SessionEnd,
-                &event_tx,
+                &cp.event_tx,
             )
             .await;
             session.spawn_memory_extraction();
@@ -76,7 +121,7 @@ pub(super) async fn actor_loop(
                 let shutdown = {
                     let session = &mut session;
                     // 事件由 run_turn 直接写入 event 通道（id 已在 run_turn 内回填）。
-                    let turn = session.run_turn(&sub.id, &text, event_tx.clone());
+                    let turn = session.run_turn(&sub.id, &text, cp.event_tx.clone());
                     tokio::pin!(turn);
                     loop {
                         tokio::select! {
@@ -89,53 +134,23 @@ pub(super) async fn actor_loop(
                                 break false;
                             }
                             maybe_sub = submission_rx.recv() => {
-                                match maybe_sub {
-                                    Some(extra) => match extra.op {
-                                        // 可排队 op（UserInput / Compact /
-                                        // SlashCommand / MemoryList）：队列满时显式拒绝。
-                                        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. }
-                                        | Op::MemoryList => {
-                                            queue_or_reject(&mut pending, extra, &event_tx).await
-                                        }
-                                        Op::Interrupt => {
-                                            interrupt_handle.store(true, Ordering::SeqCst);
-                                        }
-                                        // P2：审批回填路由到 park 在 AwaitApproval 的
-                                        // turn（共享槽按 call_id 键控；无等待者时
-                                        // permit 留存，decide 先于 wait 也不丢）。
-                                        Op::ExecApproval { call_id, decision } => {
-                                            approval_handle.decide(call_id, decision);
-                                        }
-                                        // P2：turn 进行中切换权限模式，下一次
-                                        // sandbox 判定即生效。
-                                        Op::SetPermissionMode { mode } => {
-                                            *lock_mode(&permission_mode_handle) = mode;
-                                        }
-                                        Op::Shutdown => {
-                                            interrupt_handle.store(true, Ordering::SeqCst);
-                                            // 等 turn 收尾（至多 2s），然后退出。
-                                            let _ = tokio::time::timeout(
-                                                SHUTDOWN_DRAIN_TIMEOUT,
-                                                &mut turn,
-                                            )
-                                            .await;
-                                            break true;
-                                        }
-                                        // Op 标注 non_exhaustive：未来新增的 op 在 M1 忽略，warn 留痕。
-                                        _ => {
-                                            tracing::warn!(id = %extra.id, "忽略未知 op（M1 未实现）");
-                                        }
-                                    },
+                                // 控制/排队 op 路由与空闲态共用单点（route_extra）；
+                                // Shutdown / 通道关闭在此等 turn 收尾（至多 2s）后退出。
+                                let routing = match maybe_sub {
+                                    Some(extra) => route_extra(extra, &mut pending, &cp).await,
                                     None => {
                                         // 客户端全部析构，等价隐式 Shutdown。
-                                        interrupt_handle.store(true, Ordering::SeqCst);
-                                        let _ = tokio::time::timeout(
-                                            SHUTDOWN_DRAIN_TIMEOUT,
-                                            &mut turn,
-                                        )
-                                        .await;
-                                        break true;
+                                        cp.interrupt_handle.store(true, Ordering::SeqCst);
+                                        Routing::Shutdown
                                     }
+                                };
+                                if matches!(routing, Routing::Shutdown) {
+                                    let _ = tokio::time::timeout(
+                                        SHUTDOWN_DRAIN_TIMEOUT,
+                                        &mut turn,
+                                    )
+                                    .await;
+                                    break true;
                                 }
                             }
                         }
@@ -149,7 +164,7 @@ pub(super) async fn actor_loop(
                     run_session_lifecycle(
                         &session,
                         wavecode_core::hooks::HookEventPoint::SessionEnd,
-                        &event_tx,
+                        &cp.event_tx,
                     )
                     .await;
                     session.spawn_memory_extraction();
@@ -167,14 +182,14 @@ pub(super) async fn actor_loop(
             // 无活动 turn 的 SetPermissionMode：直接生效（句柄共享，
             // 下一 turn 的 sandbox 判定即用新模式）。
             Op::SetPermissionMode { mode } => {
-                *lock_mode(&permission_mode_handle) = mode;
+                *lock_mode(&cp.permission_mode_handle) = mode;
             }
             // 无活动 turn 的 Shutdown：直接退出。
             Op::Shutdown => {
                 run_session_lifecycle(
                     &session,
                     wavecode_core::hooks::HookEventPoint::SessionEnd,
-                    &event_tx,
+                    &cp.event_tx,
                 )
                 .await;
                 // P6：SessionEnd 触发记忆自动提取（后台 detached，不阻塞退出）。
@@ -200,7 +215,8 @@ pub(super) async fn actor_loop(
                     },
                 };
                 // send 失败即前端断开：与 core emit 同策略，继续循环。
-                let _ = event_tx
+                let _ = cp
+                    .event_tx
                     .send(Event {
                         id: sub.id.clone(),
                         msg,
@@ -215,23 +231,12 @@ pub(super) async fn actor_loop(
             // 直到操作自然结束（compact 是一次 LLM 调用、slash 直调是一轮
             // 完整 turn），中断盲区即此处。
             Op::Compact => {
-                let op = session.compact(&sub.id, event_tx.clone());
-                if drive_idle_operation(
-                    op,
-                    &sub.id,
-                    &mut submission_rx,
-                    &mut pending,
-                    &event_tx,
-                    &interrupt_handle,
-                    &approval_handle,
-                    &permission_mode_handle,
-                )
-                .await
-                {
+                let op = session.compact(&sub.id, cp.event_tx.clone());
+                if drive_idle_operation(op, &sub.id, &mut submission_rx, &mut pending, &cp).await {
                     run_session_lifecycle(
                         &session,
                         wavecode_core::hooks::HookEventPoint::SessionEnd,
-                        &event_tx,
+                        &cp.event_tx,
                     )
                     .await;
                     session.spawn_memory_extraction();
@@ -242,23 +247,12 @@ pub(super) async fn actor_loop(
             // 一轮 turn，fork 派生后台子代理；错误已由 Session::invoke_skill
             // 发 Error + TurnCompleted，Err 返回即引擎级失败，记日志存活。
             Op::SlashCommand { name, args } => {
-                let op = session.invoke_skill(&sub.id, &name, &args, event_tx.clone());
-                if drive_idle_operation(
-                    op,
-                    &sub.id,
-                    &mut submission_rx,
-                    &mut pending,
-                    &event_tx,
-                    &interrupt_handle,
-                    &approval_handle,
-                    &permission_mode_handle,
-                )
-                .await
-                {
+                let op = session.invoke_skill(&sub.id, &name, &args, cp.event_tx.clone());
+                if drive_idle_operation(op, &sub.id, &mut submission_rx, &mut pending, &cp).await {
                     run_session_lifecycle(
                         &session,
                         wavecode_core::hooks::HookEventPoint::SessionEnd,
-                        &event_tx,
+                        &cp.event_tx,
                     )
                     .await;
                     session.spawn_memory_extraction();
@@ -285,10 +279,7 @@ async fn drive_idle_operation<F, T>(
     id: &str,
     submission_rx: &mut mpsc::Receiver<Submission>,
     pending: &mut VecDeque<Submission>,
-    event_tx: &mpsc::Sender<Event>,
-    interrupt_handle: &Arc<AtomicBool>,
-    approval_handle: &Arc<ApprovalGate>,
-    permission_mode_handle: &Arc<std::sync::Mutex<PermissionMode>>,
+    cp: &ControlPlane,
 ) -> bool
 where
     F: Future<Output = anyhow::Result<T>>,
@@ -303,34 +294,20 @@ where
                 return false;
             }
             maybe_sub = submission_rx.recv() => {
-                match maybe_sub {
-                    Some(extra) => match extra.op {
-                        Op::UserInput { .. } | Op::Compact | Op::SlashCommand { .. }
-                        | Op::MemoryList => {
-                            queue_or_reject(pending, extra, event_tx).await
-                        }
-                        Op::Interrupt => interrupt_handle.store(true, Ordering::SeqCst),
-                        Op::ExecApproval { call_id, decision } => {
-                            approval_handle.decide(call_id, decision);
-                        }
-                        Op::SetPermissionMode { mode } => {
-                            *lock_mode(permission_mode_handle) = mode;
-                        }
-                        Op::Shutdown => {
-                            interrupt_handle.store(true, Ordering::SeqCst);
-                            let _ =
-                                tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut op).await;
-                            return true;
-                        }
-                        // Op 标注 non_exhaustive：未来新增的 op 在 M1 忽略，warn 留痕。
-                        _ => tracing::warn!(id = %extra.id, "忽略未知 op（M1 未实现）"),
-                    },
+                // 控制/排队 op 路由与 in-turn 共用单点（route_extra）；
+                // Shutdown / 通道关闭在此等操作收尾（至多 2s）后退出。
+                let routing = match maybe_sub {
+                    Some(extra) => route_extra(extra, pending, cp).await,
                     None => {
                         // 客户端全部析构，等价隐式 Shutdown。
-                        interrupt_handle.store(true, Ordering::SeqCst);
-                        let _ = tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut op).await;
-                        return true;
+                        cp.interrupt_handle.store(true, Ordering::SeqCst);
+                        Routing::Shutdown
                     }
+                };
+                if matches!(routing, Routing::Shutdown) {
+                    let _ =
+                        tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut op).await;
+                    return true;
                 }
             }
         }

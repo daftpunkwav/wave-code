@@ -1,7 +1,7 @@
 //! 进程内 transport 客户端（阶段 5 拆分自 lib.rs）：spawn actor 循环驱动
 //! Session，经 mpsc 双工通道提交 Submission 与接收 Event。
 
-use super::actor::actor_loop;
+use super::actor::{ControlPlane, actor_loop};
 use super::*;
 
 pub struct InProcessClient {
@@ -32,10 +32,12 @@ impl InProcessClient {
         let actor_handle = tokio::spawn(actor_loop(
             session,
             submission_rx,
-            event_tx,
-            interrupt_handle.clone(),
-            approval_handle,
-            permission_mode_handle,
+            ControlPlane {
+                event_tx,
+                interrupt_handle: interrupt_handle.clone(),
+                approval_handle,
+                permission_mode_handle,
+            },
         ));
         Self {
             submit_tx,

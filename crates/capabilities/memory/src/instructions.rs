@@ -134,8 +134,13 @@ fn expand_at_refs(
         match parse_at_ref(body) {
             Some(reference) if at_ref_allowed(reference) => {
                 let path = base_dir.join(reference);
+                // 符号链接边界：词法检查（at_ref_allowed）防不住软链接——
+                // `@link.md` 可指向 cwd 外文件。规范化后做前缀断言；目标
+                // 不存在（canonicalize 失败）时读也必然失败，按字面保留。
+                let in_bounds = canonicalized_in_bounds(&path, base_dir);
                 let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                let expanded = if depth < MAX_INCLUDE_DEPTH && !visited.contains(&key) {
+                let expanded = if in_bounds && depth < MAX_INCLUDE_DEPTH && !visited.contains(&key)
+                {
                     std::fs::read_to_string(&path).ok().map(|inner| {
                         visited.push(key);
                         let inner_base = path.parent().unwrap_or(base_dir);
@@ -143,7 +148,7 @@ fn expand_at_refs(
                         format!("### {reference}\n\n{}", inner.trim_end())
                     })
                 } else {
-                    None // 超深度 / 已展开（含成环）：按字面保留
+                    None // 越界（含链接穿越）/ 超深度 / 已展开（成环）：按字面保留
                 };
                 match expanded {
                     Some(text) => {
@@ -180,6 +185,17 @@ fn at_ref_allowed(reference: &str) -> bool {
     }
     path.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// 规范化路径的边界断言：`path`（解析 `@ref` 后的候选文件）规范化后必须
+/// 仍位于规范化 `base_dir` 之内。词法检查之上的一层：软链接组件会把
+/// 词法路径解析到 base_dir 外，规范化后才可见。任一侧规范化失败（典型：
+/// 目标不存在）返回 false——读必然失败，与字面保留同态。
+fn canonicalized_in_bounds(path: &Path, base_dir: &Path) -> bool {
+    match (std::fs::canonicalize(path), std::fs::canonicalize(base_dir)) {
+        (Ok(canon), Ok(base)) => canon.starts_with(&base),
+        _ => false,
+    }
 }
 
 /// 解析 `@path` 引用标记：`@` 起始、后跟非空路径；剥离常见尾随标点
@@ -285,6 +301,43 @@ mod tests {
         assert!(mem.combined.contains("@D:/secret.md"));
         assert!(mem.combined.contains("@../secret.md"));
         assert!(mem.combined.contains("EXTRA-CONTENT"), "./ 相对引用应展开");
+    }
+
+    /// 符号链接边界（unix）：词法检查防不住链接组件——`@link.md` 可指向
+    /// base_dir 外文件。规范化前缀断言后，越界链接按字面保留，界内链接
+    /// 照常展开（回归锁定）。
+    #[cfg(unix)]
+    #[test]
+    fn at_ref_symlink_escaping_base_dir_is_not_expanded() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        write(&root.join(".git/HEAD"), "x\n");
+        write(&dir.path().join("secret.md"), "SECRET-CONTENT");
+        write(&root.join("docs/real.md"), "REAL-CONTENT");
+        symlink(&dir.path().join("secret.md"), &root.join("docs/link.md")).unwrap();
+        symlink(&root.join("docs/real.md"), &root.join("docs/in-link.md")).unwrap();
+        write(
+            &root.join("WAVECODE.md"),
+            "出界 @docs/link.md 与界内 @docs/in-link.md",
+        );
+
+        let mem = collect(None, &root);
+        assert!(
+            !mem.combined.contains("SECRET-CONTENT"),
+            "越界链接内容不得进入上下文:\n{}",
+            mem.combined
+        );
+        assert!(
+            mem.combined.contains("@docs/link.md"),
+            "越界链接应按字面保留:\n{}",
+            mem.combined
+        );
+        assert!(
+            mem.combined.contains("REAL-CONTENT"),
+            "界内链接应照常展开:\n{}",
+            mem.combined
+        );
     }
 
     /// @引用深度上限（P6 验收）：链式引用 f0→f1→…→f7，深度超过 5 的

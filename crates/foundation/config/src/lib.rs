@@ -57,11 +57,15 @@ impl Config {
     /// 加载用户级 `~/.wavecode/config.toml`；不存在返回 [`ConfigError::NotFound`]。
     ///
     /// home 目录取 `USERPROFILE`（Windows），兜底 `HOME`；两者皆未设置时
-    /// 按相对路径查找，实际效果等同于 NotFound。
+    /// 显式返回 NotFound（错误路径为相对形态 `.wavecode/config.toml`）——
+    /// 不回退相对路径查找：空 home 会让项目内 `.wavecode/config.toml`
+    /// 被静默当作用户级配置加载（来源混淆，且属静默降级）。
     pub fn load() -> Result<Self, ConfigError> {
-        // home 未设置时取空串 → 相对路径查找，实际效果等同于 NotFound
-        //（与既有行为一致；调用方可先经 [`home_dir`] 显式探测）。
-        let home = home_dir().unwrap_or_default();
+        let Some(home) = home_dir() else {
+            return Err(ConfigError::NotFound(
+                Path::new(".wavecode").join("config.toml"),
+            ));
+        };
         Self::load_from(&Path::new(&home).join(".wavecode").join("config.toml"))
     }
 
@@ -306,6 +310,30 @@ headers = {{ Authorization = "Bearer t" }}
             Config::load_from(&missing),
             Err(ConfigError::NotFound(_))
         ));
+    }
+
+    /// home 环境变量（USERPROFILE / HOME）皆未设置：显式 NotFound，不回退
+    /// 相对路径查找（防止项目内 `.wavecode/config.toml` 被误当用户级配置）。
+    #[test]
+    fn load_without_home_is_not_found_not_relative_lookup() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_user = std::env::var_os("USERPROFILE");
+        let saved_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("HOME");
+        }
+        let result = Config::load();
+        // 无论断言成败都先恢复进程级环境（与 ENV_LOCK 纪律一致）。
+        unsafe {
+            if let Some(v) = saved_user {
+                std::env::set_var("USERPROFILE", v);
+            }
+            if let Some(v) = saved_home {
+                std::env::set_var("HOME", v);
+            }
+        }
+        assert!(matches!(result, Err(ConfigError::NotFound(_))));
     }
 
     #[test]

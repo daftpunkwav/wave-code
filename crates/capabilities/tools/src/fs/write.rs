@@ -67,7 +67,8 @@ impl Tool for WriteFile {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(&path, content).await?;
+        // 原子写：写中途失败不破坏既有文件（temp+rename，见 atomic_write）。
+        super::atomic_write(&path, content).await?;
         Ok(ok_output(format!(
             "wrote {} bytes to {}",
             content.len(),

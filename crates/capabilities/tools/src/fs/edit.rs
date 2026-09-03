@@ -107,7 +107,8 @@ impl Tool for EditFile {
             ))),
             1 => {
                 let updated = text.replacen(old_string, new_string, 1);
-                tokio::fs::write(&path, updated).await?;
+                // 原子写：读成功写失败时原文件保持完整（temp+rename）。
+                super::atomic_write(&path, &updated).await?;
                 Ok(ok_output(format!(
                     "replaced 1 occurrence in {}",
                     path.display()

@@ -67,6 +67,33 @@ fn resolve_path(ctx: &ToolCtx, path: &str) -> Result<std::result::Result<PathBuf
     }
 }
 
+/// 原子覆盖写（write_file / edit_file 共用）：先写同目录临时文件，再
+/// rename 替换目标（同卷 rename 原子；Windows 为 MOVEFILE_REPLACE_EXISTING）。
+/// 直接 `tokio::fs::write` 覆盖既有文件在写中途失败时会把目标截断为半截
+/// 内容且无备份；temp+rename 下目标要么是旧内容要么是新内容。
+///
+/// 临时名带进程 id + 进程内序号：同批并行写同一目录不冲突。rename 失败
+/// 时清理临时文件后传播错误（不留垃圾、不吞错）。
+pub(super) async fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    tokio::fs::write(&tmp, content).await?;
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// 读取文本文件（只读）。
 mod edit;
 mod list;
@@ -108,6 +135,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.content, "hi");
+    }
+
+    /// 原子写：覆盖后内容正确，且同目录不残留 .tmp 临时文件
+    ///（temp+rename 成功路径 rename 即转正，失败路径清理）。
+    #[tokio::test]
+    async fn write_overwrites_without_temp_leftovers() {
+        let (_d, c) = ctx();
+        WriteFile
+            .execute(serde_json::json!({"path":"a.txt","content":"v1"}), &c)
+            .await
+            .unwrap();
+        WriteFile
+            .execute(
+                serde_json::json!({"path":"a.txt","content":"v2-longer"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        EditFile
+            .execute(
+                serde_json::json!({"path":"a.txt","old_string":"v2","new_string":"v3"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        let out = ReadFile
+            .execute(serde_json::json!({"path":"a.txt"}), &c)
+            .await
+            .unwrap();
+        assert_eq!(out.content, "v3-longer");
+        let leftovers: Vec<String> = std::fs::read_dir(c.cwd.join("."))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "不应残留临时文件: {leftovers:?}");
     }
 
     #[tokio::test]

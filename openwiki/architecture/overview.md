@@ -1,7 +1,7 @@
 ---
 type: concept
 title: 架构总览
-description: WaveCode 分层架构、15 个 crate 的依赖矩阵与 M1 里程碑实现状态、演进路线。
+description: WaveCode 分层架构、15 个 crate 的依赖矩阵与实现状态、演进路线。（实现状态表已对齐 2026-09 源码）
 tags: [architecture, rust, workspace]
 ---
 
@@ -10,7 +10,9 @@ tags: [architecture, rust, workspace]
 ## 仓库定位
 
 <!-- openwiki: broken internal link [operations/docs.md] file "operations/docs.md" does not exist. Fix the href or restore the target, then delete this comment. -->
-WaveCode 是一个**多平台 AI coding agent**（CLI / TUI / Web / Desktop 四端同核），Rust workspace（15 crate）+ 3 个 TypeScript 占位包，经统一 JSON-RPC 协议（app-server）接入，对标 Claude Code 与 OpenAI Codex 的能力集。当前为 **M1 里程碑**：7 个 crate 已实现、8 个 crate 仅文档注释占位、3 个 TS 包仅 README + package.json 占位（[文档地图](operations/docs.md) 的 review.md §1.1 确认）。
+> **快照说明**：本页依赖矩阵与边界规则为设计权威；实现状态已于 2026-09-04 对照源码（各 `Cargo.toml` 与 `wc -l`）对齐。里程碑规划原文见 docs/SPEC.md §17.5。
+
+WaveCode 是一个**多平台 AI coding agent**（CLI / TUI / Web / Desktop 四端同核），Rust workspace（15 crate）+ 3 个 TypeScript 占位包，经统一 JSON-RPC 协议（app-server）接入，对标 Claude Code 与 OpenAI Codex 的能力集。当前状态：**14 个 crate 已实现**（含 TUI 与全部特性层），仅 `wavecode-auth` 为空桩；3 个 TS 包仅 README + package.json 占位。stdio / WebSocket wire transport 尚未实现（app-server 仅进程内形态）。
 
 ## 分层架构
 
@@ -19,7 +21,7 @@ WaveCode 是一个**多平台 AI coding agent**（CLI / TUI / Web / Desktop 四�
 flowchart TB
     subgraph 前端层
         CLI[wavecode 二进制<br/>exec / REPL]
-        TUI[wavecode-tui<br/>规划 M2]
+        TUI[wavecode-tui<br/>已实现]
         WEB[@wavecode/web<br/>规划 M4]
         DESK[@wavecode/desktop<br/>规划 M5]
         SDK[@wavecode/sdk<br/>规划 M7]
@@ -33,12 +35,12 @@ flowchart TB
     end
     subgraph 特性层
         TOOLS[wavecode-tools]
-        CTX[wavecode-context<br/>stub]
-        MEM[wavecode-memory<br/>stub]
-        SK[wavecode-skills<br/>stub]
-        HK[wavecode-hooks<br/>stub]
-        MCP[wavecode-mcp<br/>stub]
-        SB[wavecode-sandbox<br/>stub]
+        CTX[wavecode-context<br/>已实现]
+        MEM[wavecode-memory<br/>已实现]
+        SK[wavecode-skills<br/>已实现]
+        HK[wavecode-hooks<br/>已实现]
+        MCP[wavecode-mcp<br/>已实现]
+        SB[wavecode-sandbox<br/>已实现]
     end
     subgraph 基础设施层
         LLM[wavecode-llm]
@@ -55,16 +57,16 @@ flowchart TB
     CORE --> TOOLS
     CORE --> LLM
     CORE --> CFG
-    CORE -.M2+ 引回.-> CTX
-    CORE -.M2+ 引回.-> MEM
-    CORE -.M2+ 引回.-> SK
-    CORE -.M2+ 引回.-> HK
-    CORE -.M2+ 引回.-> MCP
-    CORE -.M2+ 引回.-> SB
+    CORE --> CTX
+    CORE --> MEM
+    CORE --> SK
+    CORE --> HK
+    CORE --> MCP
+    CORE --> SB
     TOOLS --> LLM
 ```
 
-M1 实际依赖链（已实现 crate）：`cli → app-server → core → {protocol, llm, tools}`；`cli → {config, llm, tools}`（bootstrap 装配）；`core → {protocol, llm, tools}`；`tools → llm`（ToolSpec 桥接）。其余特性层 crate 按 SPEC §3 矩阵在 M2+ 引回。
+实际依赖链（与 16 份 Cargo.toml 逐边核对）：`cli → {protocol, config, core, app-server, tui}`（装配已收口 core::assemble，cli 不再直连 llm / tools）；`tui → {protocol, app-server}`；`app-server → {protocol, core}`；`core → {protocol, llm, config, tools, sandbox, context, memory, skills, hooks, mcp}`；`tools → llm`、`context → llm`、`sandbox → protocol`（SPEC §3 声明的三条例外边）。
 
 ## crate 依赖矩阵（SPEC §3）与边界规则
 
@@ -74,19 +76,19 @@ M1 实际依赖链（已实现 crate）：`cli → app-server → core → {prot
 | `wavecode-config` | ✅ 实现 | — | 分层 TOML 解析与合并（M1：用户级单层） |
 | `wavecode-llm` | ✅ 实现 | — | provider 抽象与流式客户端（M1：Anthropic） |
 | `wavecode-tools` | ✅ 实现 | llm | Tool trait、注册表、内置工具 |
-| `wavecode-context` | ⬜ stub | llm | token 预算、压缩管线 |
-| `wavecode-memory` | ⬜ stub | — | WAVECODE.md 与持久记忆 |
-| `wavecode-skills` | ⬜ stub | — | SKILL.md 发现/解析/注入 |
-| `wavecode-hooks` | ⬜ stub | — | 事件点与 hook 执行 |
-| `wavecode-mcp` | ⬜ stub | — | MCP client/server |
-| `wavecode-sandbox` | ⬜ stub | — | 权限模式、审批、命令策略 |
+| `wavecode-context` | ✅ 实现 | llm | token 预算、三级阈值、压缩管线 |
+| `wavecode-memory` | ✅ 实现 | — | WAVECODE.md 与持久记忆 |
+| `wavecode-skills` | ✅ 实现 | — | SKILL.md 发现/解析/注入 |
+| `wavecode-hooks` | ✅ 实现 | — | 事件点与 hook 执行 |
+| `wavecode-mcp` | ✅ 实现（trait 边界；wire transport 未实现） | — | MCP client/server |
+| `wavecode-sandbox` | ✅ 实现 | protocol | 权限模式、审批、命令策略 |
 | `wavecode-auth` | ⬜ stub | — | 登录与 keyring 凭据 |
-| `wavecode-core` | ✅ 实现 | protocol, llm, tools（M2+ 引回其余） | agent 引擎 |
-| `wavecode-app-server` | ✅ 实现 | protocol, core | JSON-RPC 服务与 transport（M1：进程内） |
-| `wavecode-tui` | ⬜ stub | protocol, app-server | 终端 UI |
-| `wavecode-cli` | ✅ 实现 | protocol, config, llm, tools, core, app-server | 二进制入口 |
+| `wavecode-core` | ✅ 实现 | protocol, llm, config + 上表特性层 7 crate | agent 引擎 |
+| `wavecode-app-server` | ✅ 实现 | protocol, core | 协议服务与 transport（进程内；stdio/WS 规划） |
+| `wavecode-tui` | ✅ 实现 | protocol, app-server | 终端 UI |
+| `wavecode-cli` | ✅ 实现 | protocol, config, core, app-server, tui | 二进制入口 |
 
-边界规则（review 强制）：**特性层 crate 互不依赖**（仅 context→llm、tools→llm 两例外）；**tui 不得依赖 core**（只能经 app-server 与 protocol 交互，保证与 Web/Desktop 能力等价）；第三方依赖统一在 workspace 根 `[workspace.dependencies]` 定版本。`Cargo.toml`：`resolver = "3"`、`edition = 2024`；`rustfmt.toml`：`max_width = 100`。
+边界规则（review 强制）：**特性层 crate 互不依赖**（仅 context→llm、tools→llm、sandbox→protocol 三条例外，均经 SPEC §3 矩阵声明）；**tui 不得依赖 core**（只能经 app-server 与 protocol 交互，保证与 Web/Desktop 能力等价）；第三方依赖统一在 workspace 根 `[workspace.dependencies]` 定版本。`Cargo.toml`：`resolver = "3"`、`edition = 2024`；`rustfmt.toml`：`max_width = 100`。
 
 ## 关键设计决策
 
@@ -101,14 +103,14 @@ M1 实际依赖链（已实现 crate）：`cli → app-server → core → {prot
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M1 | protocol/config/llm/tools/core/app-server/cli 七 crate + wire 锁定 + CLI exec/REPL + 渲染契约 | ✅ 完成（commit a656bbb 起，43 commits） |
-| M2 | TUI（tui crate）、stdio/WS transport、llm 加固、MockModel 共享 fixture、fs 工具 tokio::fs | 规划（SPEC §17.5） |
-| M3 | sandbox 与 auth 闭环（审批门最迟时点）、Registry Arc 化、Tool trait 对齐、config 分层 | 规划（review.md §12.2 P0） |
-| M4 | 上下文与记忆（context/memory 落地）、system prompt 分层组装 builder、CI 加固 | 规划 |
+| M2 | TUI（tui crate）、stdio/WS transport、llm 加固、MockModel 共享 fixture、fs 工具 tokio::fs | 部分（TUI ✅、llm 加固 ✅、fs tokio 化 ✅；stdio/WS transport 未实现） |
+| M3 | sandbox 与 auth 闭环（审批门最迟时点）、Registry Arc 化、Tool trait 对齐、config 分层 | 部分（sandbox ✅、config permission_mode ✅；auth 仍为 stub；config 分层未落地） |
+| M4 | 上下文与记忆（context/memory 落地）、system prompt 分层组装 builder、CI 加固 | ✅（context/memory/skills/hooks 落地；cargo-nextest 等 CI 加固为规划） |
 | M5 | Web UI、事件 fan-out、generate-ts、browser_* 工具桥扩展方案 | 规划 |
 | M6/M7 | Desktop（内置浏览器 + CDP）、TS SDK | 规划 |
 
 <!-- openwiki: broken internal link [runtime/cli.md] file "runtime/cli.md" does not exist. Fix the href or restore the target, then delete this comment. -->
-近 20 个 commit 全部集中在 CLI 界面增强（T1-T7：markdown 渲染、波形品牌、渲染状态机）与 M1 审查修复——cli 是当前改动最活跃区域（见 [命令行入口（wavecode-cli）](runtime/cli.md)）。
+近期演进：子代理与后台通知、权限规则引擎、rollout 持久化 / 恢复已落地；引擎侧改动以 core 为最活跃区域（见 [命令行入口（wavecode-cli）](runtime/cli.md)）。
 
 ## 验证入口
 

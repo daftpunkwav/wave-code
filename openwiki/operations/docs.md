@@ -23,19 +23,14 @@ tags: [docs, prd, spec, review]
 - `docs/superpowers/plans/2026-08-03-cli-wave-rendering.md`：CLI 界面增强实现计划（T1 依赖 → T7 冒烟）。
 - `docs/superpowers/specs/2026-08-03-cli-wave-rendering-design.md`：波形品牌与 markdown 渲染的设计稿（[cli](../runtime/cli.md) 的实现蓝本）。
 
-## 仓库根 `skills/` 目录
+## 仓库根 `skills/` 目录（已不在仓库）
 
-两份 **OpenWiki 生成技能**（`<root>/skills/<name>/SKILL.md` 形态，frontmatter 含 `name` / `description`）：
-
-- `mermaid-diagrams`：wiki 页嵌入 Mermaid 图的语法规范与纪律（本 wiki 各页面的 mermaid 图均按其规则撰写）；
-- `write-connector`：新增 OpenWiki 内置 connector 的流程。
-
-属本仓库生成工具链资产；其目录形态与 `docs/SPEC.md` §8.1 规划的 skills crate 发现格式同构，是 [planned/feature-crates.md](../planned/feature-crates.md) 中 skills 条目的格式参照。
+> **状态对齐（2026-09-04）**：本节描述的 `<root>/skills/` 目录（`mermaid-diagrams` / `write-connector` 两份 OpenWiki 生成技能）已不在当前仓库树中，未在 git 历史中复核到——内容以实际仓库为准。skills crate 的发现格式权威见 `docs/SPEC.md` §8.1 与 [planned/feature-crates.md](../planned/feature-crates.md)。
 
 ## 其他非源码资产
 
 - `demo/snake.html`：贪吃蛇网页 demo（单文件，无依赖），agent 网页自动化测试样例。
-- `conversation_history/session_*.md`：717KB 会话日志（开发过程记录），非产品源码，wiki 不纳入。
+- `conversation_history/session_*.md`：~~717KB 会话日志~~（已不在当前仓库树中，2026-09-04 核对）。
 - `.codegraph/codegraph.db`：代码图谱工具数据，wiki 不纳入。
 - `.gitignore` / `rustfmt.toml`（`max_width = 100`）/ `pnpm-workspace.yaml`（`apps/*`、`sdk/*`）：工程配置。
 

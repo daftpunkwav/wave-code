@@ -9,7 +9,7 @@ tags: [navigation, guide]
 
 ## 仓库一句话定位
 
-**WaveCode** 是一个多平台 AI coding agent（CLI / TUI / Web / Desktop 四端同核）：Rust workspace（15 crate）实现单一 agent 核心，经统一 JSON-RPC 协议（app-server）接入各前端。当前为 **M1 里程碑**：7 个 crate 已实现（protocol / config / llm / tools / core / app-server / cli），8 个 crate 为规划占位（auth / context / hooks / mcp / memory / sandbox / skills / tui），3 个 TS 包仅占位（[前端与 SDK 占位包](planned/frontends.md)）。设计权威：[架构总览](architecture/overview.md)、[文档地图](operations/docs.md)（PRD/SPEC/review）。
+**WaveCode** 是一个多平台 AI coding agent（CLI / TUI / Web / Desktop 四端同核）：Rust workspace（15 crate）实现单一 agent 核心，经统一 JSON-RPC 协议（app-server）接入各前端。当前（2026-09 对齐）：**14 个 crate 已实现**（除 auth 外全部，含 TUI 与 context/memory/skills/hooks/mcp/sandbox 特性层），仅 `wavecode-auth` 为空桩；stdio / WebSocket wire transport 尚未实现；3 个 TS 包仅占位（[前端与 SDK 占位包](planned/frontends.md)）。设计权威：[架构总览](architecture/overview.md)、[文档地图](operations/docs.md)（PRD/SPEC/review）。
 
 ## 维基地图
 
@@ -19,7 +19,7 @@ tags: [navigation, guide]
 | `protocol/` | [前后端协议（wavecode-protocol）](protocol/protocol.md) | Submission/Event 类型、线上格式锁定、演进纪律 |
 | `engine/` | [Agent 引擎（wavecode-core）](engine/core.md) | Session 与 turn 状态机、中断语义、工具编排 |
 | `engine/` | [模型抽象层（wavecode-llm）](engine/llm.md) | ChatModel trait、Anthropic SSE 客户端与解析管道 |
-| `engine/` | [工具系统（wavecode-tools）](engine/tools.md) | Tool trait、5 个内置工具、路径护栏与 shell 安全 |
+| `engine/` | [工具系统（wavecode-tools）](engine/tools.md) | Tool trait、8 个内置工具、路径护栏与 shell 安全 |
 | `engine/` | [配置系统（wavecode-config）](engine/config.md) | TOML 加载、provider 解析、凭据脱敏 |
 | `runtime/` | [协议服务（wavecode-app-server）](runtime/app-server.md) | 进程内 transport、Session actor、FIFO 排队 |
 | `runtime/` | [命令行入口（wavecode-cli）](runtime/cli.md) | exec/REPL、装配链、人类渲染与 markdown 终端渲染 |

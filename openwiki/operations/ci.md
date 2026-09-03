@@ -17,7 +17,11 @@ push main / PR 触发，**ubuntu / windows / macos 三 OS 矩阵**（terminal �
 
 工具链：dtolnay/rust-toolchain stable（含 rustfmt、clippy 组件）+ Swatinem/rust-cache。
 
-## OpenWiki 自动更新（`.github/workflows/openwiki-update.yml`）
+## OpenWiki 自动更新（已停用）
+
+> 该 workflow（`.github/workflows/openwiki-update.yml`）已删除（commit ed75512），自动更新流程不再运行；下文为历史配置记录。
+
+<!-- 原配置记录 -->
 
 - 触发：`workflow_dispatch` + 每日 8 点 schedule（cron `0 8 * * *`）。
 - `actions/checkout` 用 **fetch-depth: 0**（完整历史——`openwiki code --update` 需要 diff HEAD 与上次记录 commit 的差异；浅克隆会得到空变更摘要）。

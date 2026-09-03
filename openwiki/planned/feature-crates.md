@@ -1,7 +1,7 @@
 ---
 type: concept
 title: 规划中的特性 crate（stub）
-description: auth/context/hooks/mcp/memory/sandbox/skills/tui 八个占位 crate 的规划职责与依赖位置。
+description: M1 时点 8 个占位 crate 的规划职责与依赖位置（7 个已实现，历史规划快照）。
 tags: [planned, roadmap, architecture]
 ---
 
@@ -9,7 +9,7 @@ tags: [planned, roadmap, architecture]
 
 ## 状态说明
 
-八个 crate（`auth` / `context` / `hooks` / `mcp` / `memory` / `sandbox` / `skills` / `tui`）在 M1 为**仅模块级文档注释占位（零实现）**——stub 显式标注 YAGNI 理由，不假装实现、不留 TODO 噪声（review.md §12.1）。**代理在这些 crate 中找不到实现属预期**；改动这些 crate 的依赖矩阵前对照 [架构总览](../architecture/overview.md) 的 SPEC §3 边界规则（特性层互不依赖，仅 context→llm、tools→llm 例外；tui 不得依赖 core）。
+> **状态对齐（2026-09-04）**：本页为 M1 时点的规划快照。下表 8 个 crate 中 **7 个已实现**（context / memory / skills / hooks / mcp / sandbox / tui，见 [架构总览](../architecture/overview.md) 状态表），仅 `auth` 仍为空桩；下文"规划职责"保留为设计意图记录，**实现现状以源码为准**（代理在这些 crate 中找不到实现不再属于预期）。改动依赖矩阵前对照 [架构总览](../architecture/overview.md) 的 SPEC §3 边界规则（特性层互不依赖，例外边以状态表为准；tui 不得依赖 core）。
 
 ## 逐 crate 规划范围（证据：各 crate `src/lib.rs` 模块文档 + docs/SPEC.md 对应章节）
 

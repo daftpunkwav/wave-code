@@ -1,7 +1,13 @@
 //! 纯数据类型与解析辅助（阶段 6 拆分自 app.rs）：TuiContext / Item /
 //! ApprovalPopup / 样式与 todo 输入解析——App 状态机外的不变数据。
 
-use super::*;
+use std::path::PathBuf;
+
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use wavecode_protocol::{ApprovalKind, PermissionMode};
+
+use crate::markdown::render_markdown;
 
 pub(super) fn accent() -> Style {
     Style::default().fg(Color::LightCyan)

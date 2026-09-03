@@ -8,8 +8,10 @@
 //! - **恢复语义**：replay rollout 重建消息历史——压缩记录承载压缩后的完整
 //!   新历史（摘要 + 最近 N 条原文，与 P3 压缩管线配合），replay 遇压缩记录
 //!   即以其重置历史、其后记录继续追加：压缩点之后原文 + 摘要即新历史。
-//!   崩溃截断容忍：末行半行（进程死在写中途）警告后忽略；replay 产物统一
-//!   经 [`wavecode_context::normalize_history`] 兜底配对完整。
+//!   崩溃截断容忍：末行半行（进程死在写中途）警告后忽略；resume 侧进一步
+//!   把文件截断到最后一个完整记录末尾再追加（[`RolloutLoad::valid_len`]），
+//!   否则残片会与新增记录粘连，其后全部记录在下次恢复时被反复丢弃。
+//!   replay 产物统一经 [`wavecode_context::normalize_history`] 兜底配对完整。
 //! - **SQLite 索引降级**（诚实声明）：SPEC §16 的 `threads.db` 索引（标题 /
 //!   全文检索）首版降级为 [`list_threads`] 的文件 mtime 倒序 + 首条用户
 //!   消息摘要；检索与标题字段留待后续迭代，不阻塞 resume 主路径。
@@ -189,39 +191,70 @@ pub struct RolloutLoad {
     pub next_seq: u64,
     /// 容忍性警告（崩溃半行等；记录本身已跳过）。
     pub warnings: Vec<String>,
+    /// 可安全续写的字节偏移：最后一个以换行结尾的完整记录之后。其后的
+    /// 内容（崩溃半行 / 缺换行的尾行）不包含在内——resume 侧据此截断。
+    pub valid_len: u64,
+    /// 文件存在超出 [`Self::valid_len`] 的尾部内容（崩溃残片）。resume
+    /// 侧必须先截断再追加，否则残片与新增记录粘连，其后全部记录会在
+    /// 下次加载时于同一位置再次被丢弃。
+    pub truncated: bool,
 }
 
 /// 读取 rollout 文件：逐行解析；损坏行（典型：进程死在写中途的半行）
-/// 警告后忽略该行及其后内容（前缀记录仍可用于恢复）。
+/// 警告后忽略该行及其后内容（前缀记录仍可用于恢复），并给出可安全续写
+/// 的字节偏移（[`RolloutLoad::valid_len`]）。
 pub fn load_rollout(path: &Path) -> std::io::Result<RolloutLoad> {
     let file = std::fs::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
+    let file_len = file.metadata()?.len();
+    let mut reader = std::io::BufReader::new(file);
     let mut records = Vec::new();
     let mut warnings = Vec::new();
     let mut next_seq = 1u64;
-    for (idx, line) in reader.lines().enumerate() {
-        let line = line?;
+    let mut valid_len = 0u64;
+    let mut line_no = 0u64;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        line_no += 1;
+        let terminated = buf.ends_with('\n');
+        let line = buf.trim_end_matches(['\n', '\r']);
         if line.trim().is_empty() {
+            valid_len += n as u64;
             continue;
         }
-        match serde_json::from_str::<RolloutRecord>(&line) {
+        match serde_json::from_str::<RolloutRecord>(line) {
             Ok(record) => {
                 next_seq = next_seq.max(record.seq() + 1);
                 records.push(record);
+                if terminated {
+                    valid_len += n as u64;
+                } else {
+                    // 完整 JSON 但进程死在写换行符之前：记录本身可解析，
+                    // 但不含进可续写前缀（直接追加会与后续记录粘连成一行）。
+                    warnings.push(format!(
+                        "rollout 第 {line_no} 行记录完整但缺少行尾换行（可能为崩溃残留），resume 时将丢弃该行"
+                    ));
+                }
             }
             Err(e) => {
                 warnings.push(format!(
-                    "rollout 第 {} 行记录损坏（可能为崩溃半行），已忽略该行及其后内容: {e}",
-                    idx + 1
+                    "rollout 第 {line_no} 行记录损坏（可能为崩溃半行），已忽略该行及其后内容: {e}"
                 ));
                 break;
             }
         }
     }
+    let truncated = valid_len < file_len;
     Ok(RolloutLoad {
         records,
         next_seq,
         warnings,
+        valid_len,
+        truncated,
     })
 }
 
@@ -252,6 +285,10 @@ pub(crate) fn open_session_rollout(cfg: &RolloutConfig) -> (Vec<Message>, Option
     };
     let mut history = Vec::new();
     let mut next_seq = 1;
+    // 残片已截断（或本来就没有）才允许追加写：append 打开不截断，若残片
+    // 仍在，新增记录会粘连其后并在下次恢复时被反复丢弃——截不掉就宁可
+    // 不持久化（fail-closed，warn 可见），也不制造静默丢历史。
+    let mut appendable = true;
     if path.exists() {
         match load_rollout(&path) {
             Ok(load) => {
@@ -267,11 +304,35 @@ pub(crate) fn open_session_rollout(cfg: &RolloutConfig) -> (Vec<Message>, Option
                         "会话已从 rollout 恢复"
                     );
                 }
+                if load.truncated {
+                    let cut = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)
+                        .and_then(|f| f.set_len(load.valid_len));
+                    match cut {
+                        Ok(()) => tracing::info!(
+                            path = %path.display(),
+                            valid_len = load.valid_len,
+                            "rollout 尾部残片已截断，追加写从完整记录末尾继续"
+                        ),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                path = %path.display(),
+                                "rollout 残片截断失败，本次会话不持久化（避免新记录接在残片之后）"
+                            );
+                            appendable = false;
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, path = %path.display(), "rollout 读取失败，按新会话开始")
             }
         }
+    }
+    if !appendable {
+        return (history, None);
     }
     match RolloutRecorder::open(&path, next_seq) {
         Ok(recorder) => (history, Some(recorder)),
@@ -552,6 +613,72 @@ mod tests {
         assert_eq!(load.warnings.len(), 1);
         assert!(load.warnings[0].contains("第 2 行"));
         assert_eq!(replay(&load.records), vec![user_text("完整记录")]);
+        assert!(load.truncated);
+        assert_eq!(load.valid_len, good.len() as u64 + 1);
+    }
+
+    /// 尾行完整但缺换行（进程死在 write 与 '\n' 之间）：记录可解析恢复，
+    /// 但不含进续写前缀，resume 时丢弃该行（有界损失，警告可见）。
+    #[test]
+    fn unterminated_tail_line_is_reported_and_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t-nl.jsonl");
+        let first = serde_json::to_string(&RolloutRecord::Message {
+            seq: 1,
+            message: user_text("一"),
+        })
+        .unwrap();
+        let second = serde_json::to_string(&RolloutRecord::Message {
+            seq: 2,
+            message: user_text("二"),
+        })
+        .unwrap();
+        std::fs::write(&path, format!("{first}\n{second}")).unwrap();
+        let load = load_rollout(&path).unwrap();
+        assert_eq!(load.records.len(), 2, "完整记录仍可解析恢复");
+        assert_eq!(load.warnings.len(), 1);
+        assert!(load.warnings[0].contains("缺少行尾换行"));
+        assert!(load.truncated);
+        assert_eq!(load.valid_len, first.len() as u64 + 1);
+    }
+
+    /// 崩溃残片 + resume 追加（回归）：截断残片后追加的记录必须在下次
+    /// 加载时完整恢复。修复前 append 直接接在残片之后，残片与新记录粘连，
+    /// 崩溃后的全部新历史在每次恢复时被反复丢弃。
+    #[test]
+    fn resume_appends_after_truncating_crash_residue() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = serde_json::to_string(&RolloutRecord::Message {
+            seq: 1,
+            message: user_text("完整记录"),
+        })
+        .unwrap();
+        let path = dir.path().join("threads/t-resume.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("{good}\n{{\"kind\":\"message\",\"seq\":2,\"me"),
+        )
+        .unwrap();
+
+        // resume：open_session_rollout 截断残片并打开追加写。
+        let cfg = RolloutConfig {
+            root: dir.path().join("threads"),
+            thread_id: "t-resume".into(),
+        };
+        let (history, recorder) = open_session_rollout(&cfg);
+        assert_eq!(history, vec![user_text("完整记录")]);
+        let mut recorder = recorder.expect("残片截断成功后应可持久化");
+        recorder.record_message(&user_text("崩溃后的新消息"));
+        drop(recorder);
+
+        // 修复前：加载在同一点 break，仅剩 1 条记录 + 警告。
+        let load = load_rollout(&path).unwrap();
+        assert!(load.warnings.is_empty(), "{:?}", load.warnings);
+        assert_eq!(load.records.len(), 2);
+        let seqs: Vec<u64> = load.records.iter().map(|r| r.seq()).collect();
+        assert_eq!(seqs, vec![1, 2]);
+        assert!(!load.truncated);
     }
 
     /// thread id 白名单：路径逃逸 / 分隔符 / 空串一律拒绝。

@@ -34,6 +34,8 @@ pub(crate) async fn run_repl(
     let mut editor = rustyline::DefaultEditor::new()?;
     // 等待动画仅 TTY 开启；anstream 在非 TTY 下自动剥离样式
     let mut renderer = HumanRenderer::new(anstream::stdout(), is_tty);
+    // /permissions 的本地同步档位（Op 与 TUI 同语义：core 侧下一判定生效）。
+    let mut permission_mode = PermissionMode::Default;
 
     loop {
         // readline 是同步阻塞调用，处于 async 上下文安全：只在无活动 turn
@@ -89,6 +91,23 @@ pub(crate) async fn run_repl(
                     }
                     continue;
                 }
+                // P2：`/permissions` 四档循环切换权限模式——与 TUI 同语义：
+                // Op 同步 core 侧（sandbox 下一次判定即生效），本地提示新档。
+                if text == "/permissions" {
+                    permission_mode = match permission_mode {
+                        PermissionMode::Default => PermissionMode::Plan,
+                        PermissionMode::Plan => PermissionMode::AcceptEdits,
+                        PermissionMode::AcceptEdits => PermissionMode::BypassPermissions,
+                        _ => PermissionMode::Default,
+                    };
+                    client
+                        .submit(new_submission(Op::SetPermissionMode {
+                            mode: permission_mode,
+                        }))
+                        .await?;
+                    println!("权限模式切换为 {permission_mode}（写 / 执行工具的审批策略随之变化）");
+                    continue;
+                }
                 // P3：`/compact` 立即压缩（不经 turn）：提交 Op::Compact 后
                 // 消费事件到 CompactCompleted / Error 为止，渲染由
                 // HumanRenderer 的压缩事件行承担。
@@ -123,7 +142,7 @@ pub(crate) async fn run_repl(
                         .is_some_and(|skill| skill.meta.user_invocable);
                     if !invocable {
                         eprintln!(
-                            "未知命令：/{name}（内置：/compact /memory /mcp /quit /exit；\
+                            "未知命令：/{name}（内置：/compact /memory /mcp /permissions /quit /exit；\
                              其余 / 前缀为 skill 直调，需存在且 user-invocable）"
                         );
                         continue;

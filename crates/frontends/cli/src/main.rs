@@ -23,7 +23,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use wavecode_app_server::InProcessClient;
 use wavecode_core::SessionConfig;
-use wavecode_protocol::{ApprovalDecision, EventMsg, Op, StopReason, Submission};
+use wavecode_protocol::{ApprovalDecision, EventMsg, Op, PermissionMode, StopReason, Submission};
 
 use crate::render::HumanRenderer;
 

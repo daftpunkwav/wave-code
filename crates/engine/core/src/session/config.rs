@@ -8,7 +8,7 @@ use std::time::Duration;
 use wavecode_context::ContextConfig;
 use wavecode_protocol::PermissionMode;
 use wavecode_sandbox::Sandbox;
-use wavecode_tools::Registry;
+use wavecode_tools::{Registry, TodoStore, ToolAllowlist};
 
 /// builder 默认上下文窗口（装配层生产路径以 provider 配置覆盖）。
 const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
@@ -32,11 +32,19 @@ pub struct SessionConfig {
     pub approval_wait_timeout: Duration,
     /// 单 turn 工具轮数上限：模型连续 tool_use 达上限后不再采样，turn
     /// 以 Completed 收尾（上一轮工具结果已回灌，历史配对完整）。
+    /// `0` = 本 turn 不采样即完成（首轮即熔断，不发 TokenCount）。
     pub max_tool_rounds: u32,
     /// 模型通道（流式采样）。
     pub model: Arc<dyn wavecode_llm::ChatModel>,
     /// 工具注册表：每轮请求注入 specs，执行管道按名查找。
+    /// 只含工具索引；planning / skills 会话状态见 [`Self::todos`] /
+    /// [`Self::allowlist`]。
     pub registry: Registry,
+    /// session 级任务清单（P4）：与 registry 中 `todo_write` 共享同一
+    /// [`TodoStore`] 句柄；上下文注入 / stop steering 经此读取。
+    pub todos: TodoStore,
+    /// skill 激活的 turn 级工具面白名单（P7）：执行管道检查、skill 工具写入。
+    pub allowlist: ToolAllowlist,
     /// 工作目录：系统提示词展示与 [`wavecode_tools::ToolCtx::cwd`] 的根。
     pub cwd: std::path::PathBuf,
     /// 敏感环境变量名（装配层注入 provider 的 `env_key` 等显式名单），
@@ -68,7 +76,7 @@ pub struct SessionConfig {
     /// 共享审批槽（子代理会话注入父会话的 gate）：子代理的
     /// `ApprovalRequested` 经父事件流冒泡给前端，决策经同一 `Op::ExecApproval`
     /// 落到共享槽（call_id 键控，父子不冲突）。`None` = 自建独立槽
-    ///（普通会话形态）。子代理事件汇未挂接（无人能应答）时由 manager
+    ///（普通会话形态）。子代理事件汇未挂接（无人能应答）时由 runtime
     /// 直接拒绝，不 park 挂死。
     pub approval_gate: Option<Arc<crate::session::ApprovalGate>>,
 }
@@ -112,6 +120,8 @@ impl SessionConfigBuilder {
                 max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
                 model,
                 registry,
+                todos: TodoStore::default(),
+                allowlist: ToolAllowlist::default(),
                 cwd,
                 deny_env: Vec::new(),
                 sandbox: Sandbox::without_rules(PermissionMode::Default),
@@ -143,7 +153,7 @@ impl SessionConfigBuilder {
         self
     }
 
-    /// 单 turn 工具轮数上限（默认 32）。
+    /// 单 turn 工具轮数上限（默认 32；`0` = 不采样即完成）。
     pub fn max_tool_rounds(mut self, max_tool_rounds: u32) -> Self {
         self.cfg.max_tool_rounds = max_tool_rounds;
         self
@@ -152,6 +162,20 @@ impl SessionConfigBuilder {
     /// 敏感环境变量名（默认空）。
     pub fn deny_env(mut self, deny_env: Vec<String>) -> Self {
         self.cfg.deny_env = deny_env;
+        self
+    }
+
+    /// session 任务清单句柄（须与 registry 内 `todo_write` 同源——来自
+    /// 同一次 `Registry::builtin_with_todos()`；漏配则工具写入与
+    /// steering / 上下文注入读取各一份独立清单，静默失配）。
+    pub fn todos(mut self, todos: TodoStore) -> Self {
+        self.cfg.todos = todos;
+        self
+    }
+
+    /// skill 工具面白名单句柄（默认空限制）。
+    pub fn allowlist(mut self, allowlist: ToolAllowlist) -> Self {
+        self.cfg.allowlist = allowlist;
         self
     }
 

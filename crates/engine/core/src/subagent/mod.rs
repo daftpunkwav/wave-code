@@ -46,9 +46,10 @@ const CHILD_EVENT_CHANNEL_CAPACITY: usize = 256;
 /// 拖死父会话 turn。
 const STOP_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// task_stop 等待终态的轮询间隔（轮询同时重武装中断标志，覆盖
-/// "run_turn 入口清标志"的竞态窗口，见 [`SubagentManager::stop`]）。
-const STOP_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// task_stop 等待终态的重武装 tick 间隔（终态检测走任务槽的 Notify
+/// 即时唤醒，tick 唯一职责是周期重武装中断标志，覆盖"run_turn 入口清
+/// 标志"的竞态窗口，见 [`SubagentRuntime::stop`]）。
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// explore 类型的子代理前言（拼在子代理 turn 输入前部）。
 ///
@@ -59,14 +60,14 @@ You are an explore subagent: investigate the codebase and answer with findings. 
 You only have read-only tools; do not attempt to modify anything.";
 
 mod format;
-mod manager;
+mod runtime;
 mod task_output;
 mod task_spawn;
 mod task_stop;
 mod types;
 
 pub(super) use format::{format_notification, format_result, non_empty_summary, required_str};
-pub use manager::SubagentManager;
+pub use runtime::SubagentRuntime;
 pub(crate) use task_output::TaskOutputTool;
 pub(crate) use task_spawn::TaskSpawn;
 pub(crate) use task_stop::TaskStop;

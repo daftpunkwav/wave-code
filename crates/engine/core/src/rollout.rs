@@ -358,6 +358,64 @@ pub struct ThreadInfo {
     pub first_user_text: Option<String>,
 }
 
+/// 单会话查询错误（[`inspect_thread`]）。
+#[derive(Debug, thiserror::Error)]
+pub enum ThreadLookupError {
+    /// thread id 未通过白名单校验（仅 ASCII 字母数字 / `-` / `_`）。
+    #[error("非法 thread-id {0:?}（仅允许 ASCII 字母数字 / - / _）")]
+    InvalidId(String),
+    /// rollout 文件不存在。
+    #[error("找不到会话 rollout 文件: {0}")]
+    NotFound(PathBuf),
+    /// 读取失败。
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// 单会话恢复面（`wavecode resume <id>` 的校验 / 预览）：校验 id、定位并
+/// 加载 rollout、replay 统计。resume 保持启动期功能、不做协议化（SPEC §3
+/// 词汇豁免：恢复发生在 actor 存在之前），但 rollout 布局与回放知识收口
+/// 在本模块——前端只消费 [`ThreadInfo`]，不自行编排校验/路径/加载/回放。
+pub fn inspect_thread(root: &Path, thread_id: &str) -> Result<ThreadInfo, ThreadLookupError> {
+    let path = match rollout_path(root, thread_id) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => {
+            return Err(ThreadLookupError::InvalidId(thread_id.to_owned()));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !path.exists() {
+        return Err(ThreadLookupError::NotFound(path));
+    }
+    let load = load_rollout(&path)?;
+    let modified = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    Ok(thread_info_from_load(thread_id.to_owned(), modified, load))
+}
+
+/// 由已加载记录构造列表 / 恢复共用的摘要（replay 条数 + 压缩计数 +
+/// 首条用户文本）。
+fn thread_info_from_load(
+    thread_id: String,
+    modified: std::time::SystemTime,
+    load: RolloutLoad,
+) -> ThreadInfo {
+    let history = replay(&load.records);
+    let compaction_count = load
+        .records
+        .iter()
+        .filter(|r| matches!(r, RolloutRecord::Compaction { .. }))
+        .count();
+    ThreadInfo {
+        thread_id,
+        modified,
+        message_count: history.len(),
+        compaction_count,
+        first_user_text: first_user_text(&history),
+    }
+}
+
 /// 列出根目录下的会话（mtime 倒序；SQLite 索引的首版降级形态，见模块
 /// 注释）。根目录不存在返回空清单；单个损坏文件警告跳过，不炸列表。
 pub fn list_threads(root: &Path) -> std::io::Result<Vec<ThreadInfo>> {
@@ -385,19 +443,7 @@ pub fn list_threads(root: &Path) -> std::io::Result<Vec<ThreadInfo>> {
                 continue;
             }
         };
-        let history = replay(&load.records);
-        let compaction_count = load
-            .records
-            .iter()
-            .filter(|r| matches!(r, RolloutRecord::Compaction { .. }))
-            .count();
-        out.push(ThreadInfo {
-            thread_id,
-            modified,
-            message_count: history.len(),
-            compaction_count,
-            first_user_text: first_user_text(&history),
-        });
+        out.push(thread_info_from_load(thread_id, modified, load));
     }
     out.sort_by_key(|t| std::cmp::Reverse(t.modified));
     Ok(out)
@@ -679,6 +725,38 @@ mod tests {
         let seqs: Vec<u64> = load.records.iter().map(|r| r.seq()).collect();
         assert_eq!(seqs, vec![1, 2]);
         assert!(!load.truncated);
+    }
+
+    /// inspect_thread：合法 id 返回摘要（压缩重置后的历史计数）；非法 id /
+    /// 不存在的文件 → 类型化错误（resume 校验面与列表共用摘要逻辑）。
+    #[test]
+    fn inspect_thread_validates_and_summarizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("threads");
+        let mut rec = RolloutRecorder::open(&root.join("t-9.jsonl"), 1).unwrap();
+        rec.record_message(&user_text("第一条"));
+        rec.record_compaction(CompactTrigger::Manual, 3, &[user_text("压缩摘要")]);
+        drop(rec);
+
+        let info = inspect_thread(&root, "t-9").unwrap();
+        assert_eq!(info.thread_id, "t-9");
+        assert_eq!(info.message_count, 1, "压缩重置后历史仅剩摘要一条");
+        assert_eq!(info.compaction_count, 1);
+        assert_eq!(info.first_user_text.as_deref(), Some("压缩摘要"));
+
+        for bad in ["", "../etc", "a/b", "中"] {
+            assert!(
+                matches!(
+                    inspect_thread(&root, bad),
+                    Err(ThreadLookupError::InvalidId(_))
+                ),
+                "{bad:?} 应为 InvalidId"
+            );
+        }
+        assert!(matches!(
+            inspect_thread(&root, "missing"),
+            Err(ThreadLookupError::NotFound(_))
+        ));
     }
 
     /// thread id 白名单：路径逃逸 / 分隔符 / 空串一律拒绝。

@@ -47,7 +47,7 @@ impl App {
             } => {
                 self.flush_message();
                 let summary = truncate_chars(&sanitize_terminal(output), TOOL_OUTPUT_MAX_CHARS);
-                self.items.push(Item::plain(format!("✗ {summary}"), err()));
+                self.push_item(Item::plain(format!("✗ {summary}"), err()));
             }
             M::ToolCallEnd { .. } => {}
             M::TokenCount { used, window } => {
@@ -57,16 +57,16 @@ impl App {
             // 表示会话无记忆装配。
             M::MemoryIndex { path, content } => match path {
                 Some(p) if content.trim().is_empty() => {
-                    self.items.push(Item::plain(
+                    self.push_item(Item::plain(
                         format!("（暂无持久记忆；索引文件：{p}）"),
                         dim(),
                     ));
                 }
                 Some(_) => {
                     let clean = sanitize_terminal(content.trim_end()).into_owned();
-                    self.items.push(Item::plain(clean, Style::default()));
+                    self.push_item(Item::plain(clean, Style::default()));
                 }
-                None => self.items.push(Item::plain(
+                None => self.push_item(Item::plain(
                     "记忆能力不可用（会话未启用记忆装配）".into(),
                     warn(),
                 )),
@@ -78,7 +78,7 @@ impl App {
             }
             M::CompactCompleted { summary_tokens } => {
                 self.flush_message();
-                self.items.push(Item::plain(
+                self.push_item(Item::plain(
                     format!("✓ 上下文已压缩（摘要 {summary_tokens} tokens）"),
                     dim(),
                 ));
@@ -95,7 +95,7 @@ impl App {
                     _ => "写入文件",
                 };
                 let detail = sanitize_terminal(detail).into_owned();
-                self.items.push(Item::plain(
+                self.push_item(Item::plain(
                     format!("⚠ 审批请求（{kind_label}）：{detail}"),
                     warn(),
                 ));
@@ -116,7 +116,7 @@ impl App {
                 self.flush_message();
                 let ty = sanitize_terminal(subagent_type);
                 let desc = sanitize_terminal(description);
-                self.items.push(Item::plain(
+                self.push_item(Item::plain(
                     format!("⏚ 子代理 {task_id} 启动（{ty}）{desc}"),
                     dim(),
                 ));
@@ -132,23 +132,22 @@ impl App {
                     S::Stopped => "已停止",
                     _ => "结束",
                 };
-                self.items
-                    .push(Item::plain(format!("✓ 子代理 {task_id} {label}"), dim()));
+                self.push_item(Item::plain(format!("✓ 子代理 {task_id} {label}"), dim()));
             }
             M::Warning { message } => {
                 self.flush_message();
                 let msg = sanitize_terminal(message).into_owned();
-                self.items.push(Item::plain(msg, warn()));
+                self.push_item(Item::plain(msg, warn()));
             }
             M::Error { message, .. } => {
                 self.flush_message();
                 let msg = sanitize_terminal(message).into_owned();
-                self.items.push(Item::plain(msg, err()));
+                self.push_item(Item::plain(msg, err()));
             }
             M::TurnCompleted { stop_reason } => {
                 self.flush_message(); // 中断路径的残余缓冲
                 if *stop_reason == StopReason::Interrupted {
-                    self.items.push(Item::plain("（已中断）".into(), warn()));
+                    self.push_item(Item::plain("（已中断）".into(), warn()));
                 }
                 self.in_turn = false;
             }
@@ -168,7 +167,7 @@ impl App {
             return;
         }
         let text = std::mem::take(&mut self.msg_buf);
-        self.items.push(Item::assistant(&text));
+        self.push_item(Item::assistant(&text));
     }
 
     /// 工具调用开始条目：todo_write 展示清单状态迁移，task 展示子代理
@@ -198,7 +197,7 @@ impl App {
                 ]));
             }
             self.last_todos = parse_todo_input(input);
-            self.items.push(Item { lines });
+            self.push_item(Item { lines });
         } else if tool == "task" {
             let subagent_type = input
                 .get("subagent_type")
@@ -213,7 +212,7 @@ impl App {
                 .and_then(|b| b.as_bool())
                 .unwrap_or(false);
             let bg_label = if background { "（后台）" } else { "" };
-            self.items.push(Item {
+            self.push_item(Item {
                 lines: vec![Line::from(vec![
                     Span::styled("▸ task", accent()),
                     Span::raw(" "),
@@ -227,7 +226,7 @@ impl App {
         } else {
             let summary =
                 truncate_chars(&sanitize_terminal(&input.to_string()), TOOL_INPUT_MAX_CHARS);
-            self.items.push(Item {
+            self.push_item(Item {
                 lines: vec![Line::from(vec![
                     Span::styled(format!("▸ {tool}"), accent()),
                     Span::styled(format!(" {summary}"), dim()),

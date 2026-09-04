@@ -1,10 +1,9 @@
-//! 终端文本工具：控制字符净化与按字符截断。
+//! 终端文本工具：控制字符净化与按字符截断（双前端单一事实源）。
 //!
-//! 语义镜像 cli 侧同款实现（净化逻辑在 `cli/src/render/sanitize.rs`，
-//! 截断在 `cli/src/render/theme.rs` 的 `truncate_chars`）——tui 不能依赖
-//! cli，SPEC §3 矩阵只允许 cli→tui 单向边；此处为有意的小幅复制，改动
-//! 须两边同步。模型 / 工具来源文本必须过 [`sanitize_terminal`] 才能进
-//! 终端：防 ANSI / OSC 注入擦除痕迹。
+//! cli 经 SPEC §3 矩阵允许的 cli→tui 单向边复用本模块（2026-09 收口；
+//! 此前为两份手工同步的镜像复制，已并入此处删除 cli 侧副本）。模型 /
+//! 工具来源文本必须过 [`sanitize_terminal`] 才能进终端：防 ANSI / OSC
+//! 注入擦除痕迹。
 
 use std::borrow::Cow;
 
@@ -72,7 +71,7 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    /// 与 cli render/sanitize.rs 同款用例，锁定两边语义不漂移。
+    /// 净化语义锁定用例（cli 侧复用同一实现，无需重复用例）。
     #[test]
     fn sanitize_strips_control_sequences() {
         assert_eq!(sanitize_terminal("a\x1b[2Jb"), "ab");

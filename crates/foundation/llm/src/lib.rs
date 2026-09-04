@@ -126,6 +126,11 @@ pub enum LlmError {
     /// SSE 帧解析错误。
     #[error("SSE 解析错误: {0}")]
     Sse(String),
+    /// 流式读停滞超时（stall 看门狗主动判定，非传输层报错）：相邻字节块
+    /// 间隔超过空闲阈值，上游连接可能已停滞。与 [`LlmError::Http`] 分列，
+    /// 供上层区分"连接错误"与"上游停滞"（如未来重试策略的依据）。
+    #[error("流读停滞超时: {0}")]
+    Timeout(String),
     /// JSON 序列化 / 反序列化错误。
     #[error("JSON 错误: {0}")]
     Json(#[from] serde_json::Error),

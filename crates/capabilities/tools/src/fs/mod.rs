@@ -72,8 +72,8 @@ fn resolve_path(ctx: &ToolCtx, path: &str) -> Result<std::result::Result<PathBuf
 /// 直接 `tokio::fs::write` 覆盖既有文件在写中途失败时会把目标截断为半截
 /// 内容且无备份；temp+rename 下目标要么是旧内容要么是新内容。
 ///
-/// 临时名带进程 id + 进程内序号：同批并行写同一目录不冲突。rename 失败
-/// 时清理临时文件后传播错误（不留垃圾、不吞错）。
+/// 临时名带进程 id + 进程内序号：同批并行写同一目录不冲突。写入或
+/// rename 失败时清理临时文件后传播错误（不留垃圾、不吞错）。
 pub(super) async fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -86,7 +86,11 @@ pub(super) async fn atomic_write(path: &std::path::Path, content: &str) -> std::
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    tokio::fs::write(&tmp, content).await?;
+    if let Err(e) = tokio::fs::write(&tmp, content).await {
+        // 磁盘满 / 权限等写失败：半截 .tmp 同样不留垃圾。
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e);
+    }
     if let Err(e) = tokio::fs::rename(&tmp, path).await {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(e);
@@ -234,7 +238,8 @@ mod tests {
     async fn registry_specs_sorted_and_have_schema() {
         let reg = crate::Registry::builtin();
         let specs = reg.specs();
-        assert_eq!(specs.len(), 8);
+        // builtin 不含 todo_write（由会话装配 via with_todo_write 注入）。
+        assert_eq!(specs.len(), 7);
         let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -242,6 +247,11 @@ mod tests {
         assert!(specs.iter().all(|s| s.input_schema["type"] == "object"));
         assert!(reg.get("read_file").unwrap().is_read_only());
         assert!(!reg.get("write_file").unwrap().is_read_only());
+        assert!(reg.get("todo_write").is_none());
+
+        let (full, _todos) = crate::Registry::builtin_with_todos();
+        assert_eq!(full.specs().len(), 8);
+        assert!(full.get("todo_write").is_some());
     }
 
     #[tokio::test]

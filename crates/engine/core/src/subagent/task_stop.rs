@@ -2,13 +2,13 @@ use super::*;
 
 /// `task_stop` 工具：停止后台子代理。
 pub struct TaskStop {
-    manager: Arc<SubagentManager>,
+    runtime: Arc<SubagentRuntime>,
 }
 
 impl TaskStop {
-    /// 以 Manager 共享句柄构造（`Session::with_subagents` 装配）。
-    pub fn new(manager: Arc<SubagentManager>) -> Self {
-        Self { manager }
+    /// 以 Runtime 共享句柄构造（`Session::with_subagents` 装配）。
+    pub fn new(runtime: Arc<SubagentRuntime>) -> Self {
+        Self { runtime }
     }
 }
 
@@ -51,7 +51,7 @@ impl Tool for TaskStop {
             Ok(s) => s.to_owned(),
             Err(e) => return err(e),
         };
-        match self.manager.stop(&task_id).await {
+        match self.runtime.stop(&task_id).await {
             None => err(format!("unknown task id: {task_id}")),
             Some(TaskState::Finished(result)) => {
                 // 任务已自行到达终态（Completed/Failed）：如实说明"停止

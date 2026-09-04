@@ -2,13 +2,13 @@ use super::*;
 
 /// `task_output` 工具：查询后台子代理结果。
 pub struct TaskOutputTool {
-    manager: Arc<SubagentManager>,
+    runtime: Arc<SubagentRuntime>,
 }
 
 impl TaskOutputTool {
-    /// 以 Manager 共享句柄构造（`Session::with_subagents` 装配）。
-    pub fn new(manager: Arc<SubagentManager>) -> Self {
-        Self { manager }
+    /// 以 Runtime 共享句柄构造（`Session::with_subagents` 装配）。
+    pub fn new(runtime: Arc<SubagentRuntime>) -> Self {
+        Self { runtime }
     }
 }
 
@@ -58,7 +58,7 @@ impl Tool for TaskOutputTool {
         // 非阻塞轮询语义（择一注释）：阻塞等待会把父会话 turn 挂在工具执行
         // 内，中断安全点（工具迭代间）无法生效；立即返回状态 + 通知注入已
         // 覆盖结果回注，模型可稍后再次查询。
-        match self.manager.query(&task_id) {
+        match self.runtime.query(&task_id) {
             None => err(format!(
                 "unknown task id: {task_id} (only background tasks spawned in this session can be queried)"
             )),

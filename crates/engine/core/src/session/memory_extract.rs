@@ -13,7 +13,7 @@ use wavecode_llm::Message;
 /// `Arc::make_mut` 退化为整历史深克隆（O(1) 快照不变量被破坏）。现取
 /// 语义下快照即会话终态历史（含被中断 turn 的部分结果）。
 pub struct MemoryExtractionHandle {
-    mgr: Arc<crate::subagent::SubagentManager>,
+    mgr: Arc<crate::subagent::SubagentRuntime>,
     history: Arc<Vec<Message>>,
     store_root: std::path::PathBuf,
 }
@@ -23,7 +23,7 @@ impl MemoryExtractionHandle {
     /// 退出时任务可能未跑完——尽力而为语义（SPEC"不阻塞主会话"）。
     pub fn spawn(self) {
         tokio::spawn(async move {
-            match crate::memory::extract_with_manager(self.mgr, self.history, self.store_root).await
+            match crate::memory::extract_with_runtime(self.mgr, self.history, self.store_root).await
             {
                 Ok(n) => tracing::debug!(entries = n, "记忆自动提取完成"),
                 Err(e) => tracing::warn!(error = %e, "记忆自动提取失败（静默，不阻塞退出）"),
@@ -45,8 +45,8 @@ impl super::Session {
         if self.messages.is_empty() {
             return Ok(0);
         }
-        let mgr = crate::subagent::SubagentManager::from_config(&self.cfg);
-        crate::memory::extract_with_manager(mgr, self.messages.clone(), mem.store_root.clone())
+        let mgr = crate::subagent::SubagentRuntime::from_config(&self.cfg);
+        crate::memory::extract_with_runtime(mgr, self.messages.clone(), mem.store_root.clone())
             .await
     }
 
@@ -80,7 +80,7 @@ impl super::Session {
             return None;
         }
         Some(MemoryExtractionHandle {
-            mgr: crate::subagent::SubagentManager::from_config(&self.cfg),
+            mgr: crate::subagent::SubagentRuntime::from_config(&self.cfg),
             history: self.messages.clone(),
             store_root: mem.store_root.clone(),
         })

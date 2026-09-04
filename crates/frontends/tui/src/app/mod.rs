@@ -11,6 +11,10 @@ use wavecode_protocol::{Op, PermissionMode};
 /// turn 进行中的等待动画帧（状态栏，100ms tick 推进）。
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// 消息流条目上限：条目行集是 TUI 最大的持续分配面，长会话必须内存有界。
+/// 溢出丢弃最旧条目（见 [`App::push_item`]）。
+const MAX_ITEMS: usize = 512;
+
 /// 主题色（与 cli 渲染同一色系）。
 mod types;
 
@@ -21,7 +25,8 @@ mod input;
 mod slash;
 
 pub use self::types::TuiContext;
-use self::types::{ApprovalPopup, Item, dim, err};
+use self::types::{ApprovalPopup, Item, err};
+pub(crate) use self::types::{accent, dim, warn};
 
 /// TUI 应用状态（事件与按键的唯一事实源）。
 pub struct App {
@@ -78,11 +83,22 @@ impl App {
             quit: false,
             last_todos: Vec::new(),
         };
-        app.items.push(Item::plain(
+        app.push_item(Item::plain(
             "WaveCode TUI — Enter 提交 · / 命令补全 · Esc 中断 · Ctrl-C 退出".into(),
             dim(),
         ));
         app
+    }
+
+    /// 条目入列（带上限）：全部消息流条目提交的唯一入口。溢出丢弃最旧
+    /// 条目，滚动偏移按被丢行数收敛，避免非跟随态视图跳变（按原始行数
+    /// 估算，wrap 后视觉行有少量偏差；follow_tail 场景每帧重算不受影响）。
+    pub(super) fn push_item(&mut self, item: Item) {
+        self.items.push(item);
+        if self.items.len() > MAX_ITEMS {
+            let dropped = self.items.remove(0);
+            self.scroll = self.scroll.saturating_sub(dropped.lines.len() + 1);
+        }
     }
 
     pub fn model_name(&self) -> &str {
@@ -116,7 +132,7 @@ impl App {
 
     /// 事件流提前结束（actor 退出）：红色提示并退出。
     pub fn actor_died(&mut self) {
-        self.items.push(Item::plain(
+        self.push_item(Item::plain(
             "会话已终止（agent 引擎意外退出）".into(),
             err(),
         ));
@@ -270,6 +286,31 @@ mod tests {
             message: "w".into(),
         }));
         assert!(app.follow_tail, "告警条目应恢复跟随");
+    }
+
+    /// 条目上限：超限丢弃最旧、长度封顶（长会话内存有界）。横幅与最早
+    /// 的告警被挤出，最后一个被丢弃项与首个存活项、最新项边界精确。
+    #[test]
+    fn items_cap_drops_oldest() {
+        let mut app = App::new(ctx());
+        for i in 0..(MAX_ITEMS * 2) {
+            app.handle_event(&ev(EventMsg::Warning {
+                message: format!("w{i}"),
+            }));
+        }
+        assert_eq!(app.items.len(), MAX_ITEMS);
+        // 首条为横幅 + 1024 条告警，共 1025 条，丢弃 513 条后首个存活项
+        // 恰为 w512（条目文本即消息原文，可精确断言）。
+        let text = |i: usize| -> String {
+            app.items[i]
+                .lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .map(|s| s.content.as_ref())
+                .collect()
+        };
+        assert_eq!(text(0), "w512");
+        assert_eq!(text(MAX_ITEMS - 1), format!("w{}", MAX_ITEMS * 2 - 1));
     }
 
     /// paste 路由：弹窗打开时与按键同路由——reason 录入态粘贴进原因，

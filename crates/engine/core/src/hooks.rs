@@ -7,14 +7,15 @@
 //!   查找 → PreToolUse → 审批 → execute → PostToolUse）；
 //! - UserPromptSubmit / Stop：session.rs turn 入口与终态；
 //! - PreCompact / PostCompact：session.rs 压缩管线；
-//! - SessionStart / SessionEnd：cli bootstrap / 退出路径（core 再导出
-//!   引擎类型，cli 不新增 cli→hooks 依赖边）。
+//! - SessionStart / SessionEnd：app-server actor（spawn / 关闭收尾路径，
+//!   2026-08 自各前端收口；core 再导出引擎类型供 actor 使用，不新增
+//!   前端→hooks 依赖边）。
 
 use std::collections::HashMap;
 
 use wavecode_config::HookRuleSet;
 
-// hooks crate 的公开面经 core 再导出（cli 装配层使用，同 memory/skills 先例）。
+// hooks crate 的公开面经 core 再导出（actor 与装配层使用，同 memory/skills 先例）。
 pub use wavecode_hooks::{
     DEFAULT_TIMEOUT_MS, HookDef, HookEngine, HookEventPoint, HookInput, HookReport, HookVerdict,
 };

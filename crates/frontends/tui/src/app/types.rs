@@ -1,5 +1,7 @@
 //! 纯数据类型与解析辅助（阶段 6 拆分自 app.rs）：TuiContext / Item /
 //! ApprovalPopup / 样式与 todo 输入解析——App 状态机外的不变数据。
+//! 主题色单点定义（经 app 模块 `pub(crate)` 再导出供 ui.rs 复用，勿在
+//! 别处重定义）。
 
 use std::path::PathBuf;
 
@@ -9,19 +11,19 @@ use wavecode_protocol::{ApprovalKind, PermissionMode};
 
 use crate::markdown::render_markdown;
 
-pub(super) fn accent() -> Style {
+pub(crate) fn accent() -> Style {
     Style::default().fg(Color::LightCyan)
 }
 
-pub(super) fn dim() -> Style {
+pub(crate) fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-pub(super) fn warn() -> Style {
+pub(crate) fn warn() -> Style {
     Style::default().fg(Color::Yellow)
 }
 
-pub(super) fn err() -> Style {
+pub(crate) fn err() -> Style {
     Style::default().fg(Color::Red)
 }
 

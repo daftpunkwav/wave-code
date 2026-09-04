@@ -18,10 +18,11 @@ const TOOL_INPUT_MAX_CHARS: usize = 80;
 /// 工具失败输出摘要的字符上限。
 const TOOL_OUTPUT_MAX_CHARS: usize = 200;
 
-/// 是否为需剥离的控制字符：C0（保留 `\n` / `\t`）、DEL、C1（U+0080–U+009F）。
+/// 终端净化与按字符截断：双前端单一事实源在 `wavecode_tui::text`
+///（2026-09 收口，删除 cli 侧镜像副本；cli→tui 边为 SPEC §3 允许方向），
+/// 此处再导出供 human 渲染与测试使用。
 mod human;
 mod jsonl;
-mod sanitize;
 mod theme;
 
 pub use human::HumanRenderer;
@@ -29,11 +30,8 @@ pub use human::HumanRenderer;
 pub(crate) use human::{human_task_begin, human_tool_begin};
 pub use jsonl::render_jsonl;
 #[cfg(test)]
-pub(crate) use sanitize::sanitize_terminal;
-#[cfg(test)]
 use std::borrow::Cow;
-#[cfg(test)]
-pub(crate) use theme::truncate_chars;
+pub(crate) use wavecode_tui::text::{sanitize_terminal, truncate_chars};
 
 #[cfg(test)]
 mod tests {

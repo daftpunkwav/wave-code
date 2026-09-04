@@ -9,7 +9,7 @@
 //!   [`Verdict::Allow`] / [`Verdict::Ask`] / [`Verdict::Deny`]。
 //!
 //! OS 级沙箱（Linux landlock / macOS seatbelt / Windows ACL）与权限模式正交
-//!（机制与策略分离），为后续里程碑，见 docs/SPEC.md §17。
+//!（机制与策略分离），为后续里程碑，见 docs/project/SPEC.md §17。
 
 use std::sync::{Arc, Mutex};
 
@@ -428,6 +428,50 @@ fn ask_detail(tool: &str, input: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // —— 工具名分类锁定 ——
+
+    /// 分类函数按工具名字符串硬编码（capabilities 生产边互不依赖，无法
+    /// 编译期绑定 tools crate）：工具改名 / 新增写工具时审批策略会静默
+    /// 偏离。本测试与 tools 内置集双向对照——分类表含未知工具、或内置
+    /// 工具未进分类表，均失败；修订分类后须同步本表。
+    #[test]
+    fn builtin_tool_names_match_classification_table() {
+        let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
+        // (工具名, is_file_edit, is_session_state, approval_kind)
+        let expected: [(&str, bool, bool, ApprovalKind); 8] = [
+            ("read_file", false, false, ApprovalKind::Write),
+            ("write_file", true, false, ApprovalKind::Write),
+            ("edit_file", true, false, ApprovalKind::Write),
+            ("list_dir", false, false, ApprovalKind::Write),
+            ("grep", false, false, ApprovalKind::Write),
+            ("glob", false, false, ApprovalKind::Write),
+            ("shell", false, false, ApprovalKind::Exec),
+            ("todo_write", false, true, ApprovalKind::Write),
+        ];
+        for (name, file_edit, session_state, kind) in expected {
+            assert!(
+                reg.get(name).is_some(),
+                "sandbox 分类表含工具 {name}，但 tools 内置集已无此名（改名 / 移除？）——同步修订 sandbox 分类"
+            );
+            assert_eq!(is_file_edit(name), file_edit, "{name}: is_file_edit");
+            assert_eq!(
+                is_session_state(name),
+                session_state,
+                "{name}: is_session_state"
+            );
+            assert_eq!(approval_kind(name), kind, "{name}: approval_kind");
+        }
+        for spec in reg.specs() {
+            assert!(
+                expected
+                    .iter()
+                    .any(|(name, _, _, _)| spec.name.as_str() == *name),
+                "tools 内置工具 {} 未进 sandbox 分类表——新增 / 改名工具须同步审批分类",
+                spec.name
+            );
+        }
+    }
 
     // —— 规则解析 ——
 

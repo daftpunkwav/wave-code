@@ -153,7 +153,7 @@ const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 字节流读停滞守卫：每次 `next()` 包一层空闲超时，超时以
-/// [`LlmError::Http`] 终止流。放在 [`decode_event_stream`] 上游而非其内部，
+/// [`LlmError::Timeout`] 终止流。放在 [`decode_event_stream`] 上游而非其内部，
 /// 使帧解析逻辑保持与超时策略正交（测试可独立驱动）。
 fn stall_guard<S>(
     byte_stream: S,
@@ -169,7 +169,7 @@ where
             match tokio::time::timeout(idle_timeout, byte_stream.as_mut().next()).await {
                 // 停滞：上游在超时内未产出任何字节。
                 Err(_) => {
-                    Err::<(), _>(LlmError::Http(format!(
+                    Err::<(), _>(LlmError::Timeout(format!(
                         "stream idle timeout: no data for {idle_timeout:?}（上游连接可能已停滞）"
                     )))?;
                 }

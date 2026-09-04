@@ -61,7 +61,7 @@ impl App {
         self.cursor = 0;
         self.slash_dismissed = false;
         self.slash_selected = 0;
-        self.items.push(Item::user(&text));
+        self.push_item(Item::user(&text));
         match text.strip_prefix('/') {
             None => self.outbox.push(Op::UserInput { text }),
             Some(rest) => self.route_slash(rest),
@@ -90,7 +90,7 @@ impl App {
                         args: args.to_owned(),
                     });
                 } else {
-                    self.items.push(Item::plain(
+                    self.push_item(Item::plain(
                         format!(
                             "未知命令：/{name}（内置：{}；其余 / 前缀为 skill 直调）",
                             BUILTIN_COMMANDS
@@ -110,7 +110,7 @@ impl App {
     /// "未连接（transport 未实现）"——诚实展示，不伪造在线状态）。
     fn show_mcp(&mut self) {
         if self.ctx.mcp_server_lines.is_empty() {
-            self.items.push(Item::plain(
+            self.push_item(Item::plain(
                 "（未配置 MCP server；在 config.toml 添加 [mcp_servers.<name>] 段）".into(),
                 dim(),
             ));
@@ -132,7 +132,7 @@ impl App {
         };
         self.permission_mode = next;
         self.outbox.push(Op::SetPermissionMode { mode: next });
-        self.items.push(Item::plain(
+        self.push_item(Item::plain(
             format!("权限模式切换为 {next}（写 / 执行工具的审批策略随之变化）"),
             dim(),
         ));

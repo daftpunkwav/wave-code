@@ -26,12 +26,12 @@
 //! - stop steering：终态无 tool_use 且清单仍有未完成项时注入提醒继续 turn，
 //!   连续 3 次后放行（防提前收工，上限防死循环）。
 //!
-//! 边界（YAGNI，循环结构留扩展位）：无 hooks；中断经
+//! 中断边界（YAGNI，循环结构留扩展位）：中断经
 //! [`Session::interrupt_handle`] 置标志，在安全点（循环头、流消费循环内、
 //! 工具执行前、串行工具迭代间、审批等待中）检查。
 //!
 //! P5 落地子代理（deepagents subagents，SPEC §5.3 / §11.2）：
-//! [`Session::with_subagents`] 装配 [`crate::subagent::SubagentManager`] 并
+//! [`Session::with_subagents`] 装配 [`crate::subagent::SubagentRuntime`] 并
 //! 注册 task / task_output / task_stop 工具；子代理以独立 Session 运行
 //!（隔离消息历史），后台终态以 `<task-notification>` user 消息在 turn
 //! 循环头注入父会话（注入机制与 P4 steering 同路径：`push_message`）。
@@ -41,14 +41,15 @@
 //!   窗口预算渲染，会话内恒定）；`skill` 工具（inline 展开回灌 / fork
 //!   派生后台子代理）；`/name [args]` slash 直调经 [`Session::invoke_skill`]
 //!   （Op::SlashCommand 路由入口）；`allowed-tools` 为 turn 级工具面
-//!   白名单（registry 共享句柄，执行管道在 hook / 审批前拦截，turn 入口
+//!   白名单（会话配置共享句柄，执行管道在 hook / 审批前拦截，turn 入口
 //!   清零——首版语义见 skills 模块注释）；
 //! - hooks：八个事件点挂接——PreToolUse / PostToolUse 在工具执行管道
 //!   （SPEC §11.1 顺序：查找 → PreToolUse → 审批 → execute → PostToolUse），
 //!   UserPromptSubmit 在 turn 入口，Stop 在终态（次序择一：先 todo
 //!   steering 后 Stop hook，阻塞以 stderr 回灌模型继续 turn，上限 3 防
 //!   死循环），PreCompact / PostCompact 在压缩管线；SessionStart /
-//!   SessionEnd 挂 cli bootstrap / 退出路径。
+//!   SessionEnd 挂 app-server actor（spawn / 关闭收尾路径，2026-08 自
+//!   前端收口）。
 //!
 //! P10 落地会话持久化（SPEC §16）：[`SessionConfig::rollout`] 配置后，
 //! 构造即 replay 已存在的 rollout 文件恢复历史（resume），历史每次追加
@@ -99,11 +100,11 @@ pub struct Session {
     /// 的估算值）：下一 turn 首次 PreTurn 预算检查的输入；本 turn 内则由
     /// 各轮 usage 直接覆盖（provider 的 input_tokens 是权威值，SPEC §6）。
     usage_carry: Option<u64>,
-    /// P5 子代理管理器（仅 [`Session::with_subagents`] 装配）：task 工具
+    /// P5 子代理运行时（仅 [`Session::with_subagents`] 装配）：task 工具
     /// 经此派生 / 查询 / 停止子代理；后台终态通知在 turn 循环头注入。
     /// `None` = 无子代理能力——子代理自身的 Session 即为此形态
     ///（深度上限 1，见 subagent 模块注释）。
-    subagents: Option<Arc<crate::subagent::SubagentManager>>,
+    subagents: Option<Arc<crate::subagent::SubagentRuntime>>,
     /// P7 skills 清单注入文本（启动时按 1% 窗口预算渲染一次，会话内
     /// 恒定——与记忆索引快照同纪律，见 prompt 模块注释）；空串 = 无注入。
     skills_catalog: String,
@@ -117,7 +118,7 @@ impl Session {
     /// 配置了记忆面（`SessionConfig.memory`）时注册 `memory_write` 工具
     ///（审批经 sandbox 非只读默认策略挂接，见 memory 模块注释）；
     /// 配置了技能面（`SessionConfig.skills`）时注册 `skill` 工具并预渲染
-    /// 清单注入文本（P7；`with_subagents` 已注册带子代理管理器的 skill
+    /// 清单注入文本（P7；`with_subagents` 已注册带子代理运行时的 skill
     /// 工具时跳过——Registry 按名覆盖，后注册者优先，此处只补缺）。
     pub fn new(cfg: SessionConfig) -> Self {
         let mut cfg = cfg;
@@ -133,7 +134,7 @@ impl Session {
             cfg.registry
                 .register(Arc::new(crate::skills::SkillTool::new(
                     skills.set.clone(),
-                    cfg.registry.allowlist(),
+                    cfg.allowlist.clone(),
                     None,
                 )));
         }
@@ -173,35 +174,35 @@ impl Session {
     }
 
     /// 新建具备子代理能力的会话（P5）：创建
-    /// [`crate::subagent::SubagentManager`]（父配置快照：Arc 共享模型通道、
+    /// [`crate::subagent::SubagentRuntime`]（父配置快照：Arc 共享模型通道、
     /// 继承 sandbox / cwd）并把 task / task_output / task_stop 注册进
     /// registry。父会话用本构造器；子代理自身经 [`Session::new`] 构造
     ///（registry 不含 task 工具——深度上限 1 由构造保证）。
-    /// P7：技能面存在时注册带子代理管理器的 `skill` 工具（fork 执行面；
-    /// `Session::new` 只补无管理器的缺省注册）。
+    /// P7：技能面存在时注册带子代理运行时的 `skill` 工具（fork 执行面；
+    /// `Session::new` 只补无运行时的缺省注册）。
     pub fn with_subagents(mut cfg: SessionConfig) -> Self {
-        let manager = crate::subagent::SubagentManager::from_config(&cfg);
+        let runtime = crate::subagent::SubagentRuntime::from_config(&cfg);
         cfg.registry
-            .register(Arc::new(crate::subagent::TaskSpawn::new(manager.clone())));
+            .register(Arc::new(crate::subagent::TaskSpawn::new(runtime.clone())));
         cfg.registry
             .register(Arc::new(crate::subagent::TaskOutputTool::new(
-                manager.clone(),
+                runtime.clone(),
             )));
         cfg.registry
-            .register(Arc::new(crate::subagent::TaskStop::new(manager.clone())));
+            .register(Arc::new(crate::subagent::TaskStop::new(runtime.clone())));
         if let Some(skills) = &cfg.skills {
             cfg.registry
                 .register(Arc::new(crate::skills::SkillTool::new(
                     skills.set.clone(),
-                    cfg.registry.allowlist(),
-                    Some(manager.clone()),
+                    cfg.allowlist.clone(),
+                    Some(runtime.clone()),
                 )));
         }
         let mut session = Self::new(cfg);
         // 审批冒泡：子代理共享父审批槽——子代理的 ApprovalRequested 经
         // 父事件流冒泡，前端决策落到同一槽（call_id 键控，父子不冲突）。
-        manager.set_approval_gate(session.approval_gate.clone());
-        session.subagents = Some(manager);
+        runtime.set_approval_gate(session.approval_gate.clone());
+        session.subagents = Some(runtime);
         session
     }
 

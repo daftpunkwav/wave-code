@@ -9,3 +9,8 @@ license.workspace = true
 wavecode-protocol = { path = "../../foundation/protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+# 工具名分类锁定测试对照 tools 内置集（capabilities 生产边互不依赖，无法
+# 编译期绑定工具名——以 dev-dep 测试锁定，工具改名/新增时测试失败）
+wavecode-tools = { path = "../tools" }

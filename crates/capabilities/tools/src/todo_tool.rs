@@ -6,10 +6,10 @@
 //! 调用方不维护 id：对齐 deepagents 无 id 的形态，减少模型负担与 id 漂移；
 //! 清单整体重写时位置即身份。
 //!
-//! 状态共享方案（最小侵入）：清单是 session 级状态，而 [`ToolCtx`] 是纯数据
-//! 快照（每 turn 重建），不适合携带可变句柄——共享状态改由 [`crate::Registry`]
-//! 持有（Registry 本就是 per-session 装配），[`TodoWrite`] 实例与 Session 经
-//! [`crate::Registry::todos`] 拿到同一个 `Arc` 句柄，ToolCtx 保持纯数据不变。
+//! 状态共享方案：清单是 session 级状态，而 [`ToolCtx`] 是纯数据快照
+//! （每 turn 重建），不适合携带可变句柄——[`TodoStore`] 由会话配置持有，
+//! 装配时注入 [`TodoWrite`]；[`crate::Registry`] 只做工具索引，不混装
+//! planning / skills 会话状态。
 
 use std::sync::{Arc, RwLock};
 
@@ -111,7 +111,7 @@ pub struct TodoWrite {
 }
 
 impl TodoWrite {
-    /// 以共享状态句柄构造（Registry 装配时与 Session 共享同一 Arc）。
+    /// 以共享状态句柄构造（与会话配置中的 [`TodoStore`] 同一 Arc）。
     pub fn new(store: TodoStore) -> Self {
         Self { store }
     }

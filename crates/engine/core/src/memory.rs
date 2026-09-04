@@ -32,11 +32,12 @@ use wavecode_llm::{ContentBlock, Message, Role};
 use wavecode_protocol::SubagentStatus;
 use wavecode_tools::{Tool, ToolCtx, ToolOutput};
 
-use crate::subagent::{SubagentManager, SubagentType, TaskSpec};
+use crate::subagent::{SubagentRuntime, SubagentType, TaskSpec};
 
-// memory crate 的纯数据面（WAVECODE.md 收集 / 持久记忆存储）由 cli 装配层
-// 直接依赖（SPEC §3 矩阵 cli 行已补录 memory / skills 边）；core 只
-// import 编排所需的类型，不再做门面再导出。
+// memory crate 的纯数据面（WAVECODE.md 收集 / 持久记忆存储）由装配根
+//（crate::assemble）直接消费并注入 SessionConfig（2026-08 装配收口后
+// cli 不再直连 capabilities）；core 只 import 编排所需的类型，不做门面
+// 再导出。
 use wavecode_memory::{MemoryCategory, MemoryStore, parse_extracted_entries};
 
 /// SPEC §7.2 原设计的整合门控：距上次整合 ≥24h 且期间 ≥5 个新会话才
@@ -227,8 +228,8 @@ pub fn build_history_digest(messages: &[Message]) -> String {
 /// ——只读工具面，提取不需要写工具）读历史摘要、按约定格式输出候选条目，
 /// 解析后追加到存储。返回写入条数；子代理失败以 Err 上抛（调用方决定
 /// 静默策略）。
-pub async fn extract_with_manager(
-    mgr: Arc<SubagentManager>,
+pub async fn extract_with_runtime(
+    mgr: Arc<SubagentRuntime>,
     history: Arc<Vec<Message>>,
     store_root: PathBuf,
 ) -> anyhow::Result<usize> {

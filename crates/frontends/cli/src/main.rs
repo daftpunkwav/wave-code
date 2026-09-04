@@ -118,14 +118,18 @@ async fn main() -> anyhow::Result<ExitCode> {
 
 /// P10：`wavecode resume [thread-id]`（SPEC §16）。无 id 时列出最近会话
 ///（rollout 文件 mtime 倒序 + 首条用户消息摘要；SQLite 索引的首版降级
-/// 形态，见 core::rollout 模块注释）；有 id 时校验并检查 rollout 存在，
-/// 覆盖 boot 分配的 thread id 后进入交互界面（构造即 replay 恢复）。
+/// 形态，见 core::rollout 模块注释）；有 id 时经
+/// [`wavecode_core::rollout::inspect_thread`] 校验并预览，覆盖 boot 分配的
+/// thread id 后进入交互界面（构造即 replay 恢复）。resume 保持 cli 启动期
+/// 功能、不做协议化（SPEC §3:111 豁免：恢复发生在 actor 存在之前）；
+/// rollout 布局与回放知识收口在 core::rollout，cli 只消费意图级 API。
 async fn run_resume(
     mut cfg: SessionConfig,
     mcp_lines: Vec<String>,
     thread_id: Option<String>,
     force_repl: bool,
 ) -> anyhow::Result<ExitCode> {
+    use wavecode_core::rollout::ThreadLookupError;
     let Some(home) = wavecode_config::home_dir() else {
         eprintln!("错误：无法解析用户主目录（USERPROFILE/HOME），会话持久化不可用");
         return Ok(ExitCode::from(2));
@@ -152,30 +156,29 @@ async fn run_resume(
         println!("\n恢复会话：`wavecode resume <thread-id>`");
         return Ok(ExitCode::SUCCESS);
     };
-    if !wavecode_core::rollout::is_valid_thread_id(&id) {
-        eprintln!("错误：非法 thread-id {id:?}（仅允许字母数字 / - / _）");
-        return Ok(ExitCode::from(2));
-    }
-    let path = wavecode_core::rollout::rollout_path(&root, &id)?;
-    if !path.exists() {
-        eprintln!(
-            "错误：找不到会话 {id}（{}）；`wavecode resume` 可列出最近会话",
-            path.display()
-        );
-        return Ok(ExitCode::from(2));
-    }
+    let info = match wavecode_core::rollout::inspect_thread(&root, &id) {
+        Ok(info) => info,
+        Err(ThreadLookupError::InvalidId(id)) => {
+            eprintln!("错误：非法 thread-id {id:?}（仅允许字母数字 / - / _）");
+            return Ok(ExitCode::from(2));
+        }
+        Err(ThreadLookupError::NotFound(path)) => {
+            eprintln!(
+                "错误：找不到会话 {id}（{}）；`wavecode resume` 可列出最近会话",
+                path.display()
+            );
+            return Ok(ExitCode::from(2));
+        }
+        // 解构出内层 io::Error 直接入 anyhow：与改动前 `?` 传播单层错误链
+        // 同构（经 ThreadLookupError 的 transparent 包装会产生重复的
+        // Caused by 段）。
+        Err(ThreadLookupError::Io(e)) => return Err(e.into()),
+    };
     // 恢复信息行（Session 构造会再 replay 一次；rollout 文件为小文件，
     // 双读可接受）。
-    let load = wavecode_core::rollout::load_rollout(&path)?;
-    let restored = wavecode_core::rollout::replay(&load.records);
-    let compactions = load
-        .records
-        .iter()
-        .filter(|r| matches!(r, wavecode_core::rollout::RolloutRecord::Compaction { .. }))
-        .count();
     println!(
-        "已恢复会话 {id}（{} 条消息 / {compactions} 次压缩）",
-        restored.len()
+        "已恢复会话 {id}（{} 条消息 / {} 次压缩）",
+        info.message_count, info.compaction_count
     );
     cfg.rollout = Some(wavecode_core::rollout::RolloutConfig {
         root,

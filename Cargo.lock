@@ -2220,6 +2220,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "wavecode-protocol",
+ "wavecode-tools",
 ]
 
 [[package]]

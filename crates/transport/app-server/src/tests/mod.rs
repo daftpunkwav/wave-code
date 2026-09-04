@@ -116,7 +116,9 @@ fn cfg_with_sandbox(
 ) -> wavecode_core::SessionConfig {
     // tempdir 不能 drop——keep() 转持久路径、放弃自动删除（M1 测试可接受）。
     let cwd = tempfile::tempdir().unwrap().keep();
-    wavecode_core::SessionConfig::builder("mock", model, wavecode_tools::Registry::builtin(), cwd)
+    let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
+    wavecode_core::SessionConfig::builder("mock", model, registry, cwd)
+        .todos(todos)
         .sandbox(sandbox)
         .build()
 }

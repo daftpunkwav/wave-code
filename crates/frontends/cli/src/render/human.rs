@@ -2,10 +2,7 @@
 //! human_* 行渲染（工具/todo/task/事件）。
 
 use super::*;
-use crate::render::sanitize::sanitize_terminal;
-use crate::render::theme::{
-    terminal_width, theme_dim, theme_err, theme_tool, theme_warn, truncate_chars,
-};
+use crate::render::theme::{terminal_width, theme_dim, theme_err, theme_tool, theme_warn};
 
 pub fn human_tool_begin(tool: &str, input: &serde_json::Value) -> String {
     // 工具来源文本同样须 sanitize（防注入擦除痕迹）；`▸ 工具名` 同一色段，

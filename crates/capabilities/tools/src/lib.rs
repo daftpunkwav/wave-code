@@ -110,10 +110,10 @@ pub type Result<T> = std::result::Result<T, ToolsError>;
 /// 工具面白名单的共享句柄（P7 skills `allowed-tools`，SPEC §8.2）：
 /// `Some(set)` 时仅 set 内工具可执行，`None` 不限。
 ///
-/// 与 [`TodoStore`] 同形态——共享状态放 Registry（per-session 装配）而非
-/// ToolCtx（每 turn 重建的纯数据快照）：core 执行管道在 PreToolUse hook /
-/// sandbox 判定前检查；skill 工具激活时写入。语义为 **turn 级**：core 在
-/// 每个 turn 入口清零（首版取舍，见 core::skills 模块注释）。
+/// 与 [`TodoStore`] 同形态——由**会话配置**持有（per-session），而非
+/// [`Registry`]（只做工具索引）或 [`ToolCtx`]（每 turn 重建的纯数据快照）。
+/// core 执行管道在 PreToolUse / sandbox 判定前检查；skill 工具激活时写入。
+/// 语义为 **turn 级**：core 在每个 turn 入口清零（首版取舍，见 core::skills）。
 #[derive(Clone, Default)]
 pub struct ToolAllowlist {
     inner: Arc<Mutex<Option<HashSet<String>>>>,
@@ -134,26 +134,21 @@ impl ToolAllowlist {
 }
 
 /// 工具注册表：按名索引，供执行管道查找与生成请求侧 `ToolSpec` 清单。
+///
+/// **不含** session 级 planning / skills 状态（[`TodoStore`] / [`ToolAllowlist`]）
+/// ——那些由会话配置持有，避免 Registry 成为跨业务变化中心。
 pub struct Registry {
     tools: HashMap<String, Arc<dyn Tool>>,
-    /// session 级任务清单的共享句柄（P4）：builtin 装配时创建并注入
-    /// [`TodoWrite`]，Session 经 [`Registry::todos`] 取同一 Arc 读清单
-    ///（上下文注入 / stop steering）。共享状态放 Registry 而非 ToolCtx：
-    /// Registry 是 per-session 装配，ToolCtx 是每 turn 重建的纯数据快照。
-    todos: TodoStore,
-    /// skill 激活工具面白名单的共享句柄（P7）：Session 执行管道与 skill
-    /// 工具经 [`Registry::allowlist`] 共享同一份状态。
-    allowlist: ToolAllowlist,
 }
 
 impl Registry {
-    /// 注册内置工具（4 个文件工具 + grep/glob + shell + todo_write）。
+    /// 注册内置工具（文件 / 检索 / shell），**不含** `todo_write`。
+    ///
+    /// `todo_write` 须由调用方经 [`Registry::with_todo_write`] 注入，并与
+    /// 会话配置中的 [`TodoStore`] 共享同一句柄。
     pub fn builtin() -> Self {
-        let todos = TodoStore::default();
         let mut reg = Self {
             tools: HashMap::new(),
-            todos: todos.clone(),
-            allowlist: ToolAllowlist::default(),
         };
         reg.register(Arc::new(fs::ReadFile));
         reg.register(Arc::new(fs::WriteFile));
@@ -162,30 +157,28 @@ impl Registry {
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));
-        reg.register(Arc::new(TodoWrite::new(todos)));
         reg
     }
 
-    /// session 任务清单的共享句柄（与内置 `todo_write` 工具同一份状态）。
-    pub fn todos(&self) -> TodoStore {
-        self.todos.clone()
+    /// 注册 `todo_write`，与会话级 [`TodoStore`] 共享状态。
+    pub fn with_todo_write(mut self, todos: TodoStore) -> Self {
+        self.register(Arc::new(TodoWrite::new(todos)));
+        self
     }
 
-    /// skill 激活工具面白名单的共享句柄（P7）：core 执行管道检查、
-    /// skill 工具激活时写入。
-    pub fn allowlist(&self) -> ToolAllowlist {
-        self.allowlist.clone()
+    /// 完整内置集（含 `todo_write`）与配套 [`TodoStore`]——会话装配应
+    /// 把返回的 store 写入会话配置，保证工具与 steering 同源。
+    pub fn builtin_with_todos() -> (Self, TodoStore) {
+        let todos = TodoStore::default();
+        (Self::builtin().with_todo_write(todos.clone()), todos)
     }
 
     /// 派生按名白名单子集注册表（P7 skill fork 的 `allowed-tools` 工具面）：
     /// 仅保留名单内的工具（未知名静默略过——名单来自用户 frontmatter，
     /// 拼错的代价是该工具不可用，影响面局限于该 skill）。
-    /// 清单与白名单句柄为独立新实例（与 [`Registry::read_only_subset`] 同理）。
     pub fn name_subset(&self, names: &[String]) -> Self {
         let mut reg = Self {
             tools: HashMap::new(),
-            todos: TodoStore::default(),
-            allowlist: ToolAllowlist::default(),
         };
         for name in names {
             if let Some(tool) = self.tools.get(name) {
@@ -196,13 +189,10 @@ impl Registry {
     }
 
     /// 派生只读子集注册表（P5 explore 类型子代理的工具面）：仅保留
-    /// `is_read_only()` 的工具。任务清单为独立新实例——子代理清单与父会话
-    /// 隔离（todo_write 本身非只读，本就不在子集内，新实例只为满足字段）。
+    /// `is_read_only()` 的工具（`todo_write` 非只读，不会进入子集）。
     pub fn read_only_subset(&self) -> Self {
         let mut reg = Self {
             tools: HashMap::new(),
-            todos: TodoStore::default(),
-            allowlist: ToolAllowlist::default(),
         };
         for tool in self.tools.values() {
             if tool.is_read_only() {
@@ -256,7 +246,7 @@ mod tests {
     /// P7：name_subset 按名过滤；未知名静默略过；只读/写工具按名单保留。
     #[test]
     fn name_subset_filters_by_name() {
-        let reg = Registry::builtin();
+        let (reg, _todos) = Registry::builtin_with_todos();
         let sub = reg.name_subset(&["read_file".to_owned(), "grep".to_owned(), "nope".to_owned()]);
         assert!(sub.get("read_file").is_some());
         assert!(sub.get("grep").is_some());
@@ -266,5 +256,29 @@ mod tests {
         // specs 输出稳定（按名排序）。
         let names: Vec<String> = sub.specs().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["grep", "read_file"]);
+    }
+
+    /// 会话装配契约：`name_subset`（skill fork 工具面派生）保留同一
+    /// `todo_write` 实例——经子集工具写入的状态必须对会话配置持有的
+    /// [`TodoStore`] 可见（同 Arc 句柄），否则 todo_write 与 steering /
+    /// 上下文注入各写各读、静默失配。
+    #[tokio::test]
+    async fn todo_write_via_name_subset_shares_session_store() {
+        let (reg, todos) = Registry::builtin_with_todos();
+        let sub = reg.name_subset(&["todo_write".to_owned()]);
+        let tool = sub.get("todo_write").expect("名单内 todo_write 应保留");
+        let ctx = ToolCtx {
+            cwd: std::env::temp_dir(),
+            deny_env: Vec::new(),
+        };
+        let out = tool
+            .execute(
+                serde_json::json!({"todos": [{"content": "a", "status": "in_progress"}]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(todos.snapshot().len(), 1, "子集工具与会话 store 须同句柄");
     }
 }

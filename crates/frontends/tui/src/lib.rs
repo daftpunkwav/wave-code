@@ -12,13 +12,15 @@
 //! - [`app`]：应用状态机（协议事件 / 键盘输入 → 状态 + 待发 Op，纯函数可测）；
 //! - [`markdown`]：markdown → ratatui 行（语义对齐 SPEC §15.5）；
 //! - [`ui`]：布局与弹层绘制（纯投影）；
-//! - [`text`]：终端净化与截断（镜像 cli render.rs 语义）。
+//! - [`text`]：终端净化与截断（双前端单一事实源，见下）。
 
-// 模块不对外公开:cli 只经 [`run`] + [`TuiContext`] 使用本 crate,
-// 内部实现(app 状态机 / markdown / 绘制 / 文本处理)不属于导出面。
+// 模块导出面纪律：cli 只经 [`run`] + [`TuiContext`] 使用本 crate 的交互面
+//（app 状态机 / markdown / 绘制内部不属于导出面）。唯一例外是 [`text`]：
+// 终端净化是安全敏感逻辑，双份手工同步已被两轮架构审查点名漂移风险
+//（2026-09 收口），cli 经 SPEC §3 允许的 cli→tui 单向边复用。
 mod app;
 mod markdown;
-mod text;
+pub mod text;
 mod ui;
 
 use std::time::Duration;

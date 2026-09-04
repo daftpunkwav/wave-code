@@ -16,12 +16,12 @@
 //!   ToolResult 回灌——tool_result 本就随下一请求的 user 消息进历史，
 //!   与 SPEC"展开为 user 消息"在模型视角等效（择一注释：不额外再 push
 //!   一条重复正文的 user 消息，避免历史膨胀）；
-//! - fork：以 skill 正文为指令派生后台子代理（SubagentManager，
+//! - fork：以 skill 正文为指令派生后台子代理（SubagentRuntime，
 //!   `allowed-tools` 按 registry 过滤子代理工具面——构造级限定）。
 //!
 //! **allowed-tools 首版语义（诚实声明）**：fork 为构造级过滤（子代理
 //! registry 按名子集，限定整个子代理生命周期）；inline 为 **turn 级**
-//! 白名单（激活写入 registry 共享句柄，执行管道在 PreToolUse / 审批前
+//! 白名单（激活写入会话配置的共享句柄，执行管道在 PreToolUse / 审批前
 //! 拦截名单外工具，turn 入口清零）——"激活期间"取当前 turn 为界，
 //! 跨 turn 的持续限定留待后续（需要激活/去激活的事件边界设计）。
 
@@ -30,11 +30,11 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use wavecode_tools::{Tool, ToolAllowlist, ToolCtx, ToolOutput};
 
-use crate::subagent::{SubagentManager, SubagentType, TaskSpec};
+use crate::subagent::{SubagentRuntime, SubagentType, TaskSpec};
 
-// skills crate 的纯数据面（发现 / 解析 / 清单）由 cli 装配层直接依赖
-//（SPEC §3 矩阵 cli 行已补录 memory / skills 边）；core 只 import 编排
-// 所需的类型，不再做门面再导出。
+// skills crate 的纯数据面（发现 / 解析 / 清单）由装配根（crate::assemble）
+// 直接消费并注入 SessionConfig（2026-08 装配收口后 cli 不再直连
+// capabilities）；core 只 import 编排所需的类型，不做门面再导出。
 use wavecode_skills::{Skill, SkillContext, SkillSet};
 
 /// 装配层注入的技能面（`SessionConfig.skills`；None = 无 skills 能力——
@@ -119,12 +119,12 @@ pub(crate) fn plan_invocation(
 /// `skill` 工具（SPEC §11.2）：模型触发 skill 的入口。
 ///
 /// inline 的 `allowed-tools` 激活为 turn 级白名单（见模块注释）；fork 经
-/// [`SubagentManager`] 派生后台子代理（管理器缺失 = 无子代理能力的会话
+/// [`SubagentRuntime`] 派生后台子代理（runtime 缺失 = 无子代理能力的会话
 /// ——子代理自身 Session，报业务错误回灌）。
 pub struct SkillTool {
     skills: Arc<SkillSet>,
     allowlist: ToolAllowlist,
-    manager: Option<Arc<SubagentManager>>,
+    runtime: Option<Arc<SubagentRuntime>>,
 }
 
 impl SkillTool {
@@ -132,12 +132,12 @@ impl SkillTool {
     pub fn new(
         skills: Arc<SkillSet>,
         allowlist: ToolAllowlist,
-        manager: Option<Arc<SubagentManager>>,
+        runtime: Option<Arc<SubagentRuntime>>,
     ) -> Self {
         Self {
             skills,
             allowlist,
-            manager,
+            runtime,
         }
     }
 
@@ -215,13 +215,13 @@ impl Tool for SkillTool {
                 })
             }
             Ok(SkillInvocation::Fork(spec)) => {
-                let Some(manager) = &self.manager else {
+                let Some(runtime) = &self.runtime else {
                     return err(format!(
                         "skill `{name}` requires subagent capability (context: fork), which is \
                          not available in this session"
                     ));
                 };
-                let task_id = manager.spawn_background(spec);
+                let task_id = runtime.spawn_background(spec);
                 Ok(ToolOutput {
                     content: format!(
                         "Skill `{name}` spawned as background subagent {task_id}; its completion \

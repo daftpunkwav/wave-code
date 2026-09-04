@@ -19,7 +19,9 @@ use wavecode_tools::ToolCtx;
 pub(super) struct TurnRunner<'a> {
     session: &'a mut Session,
     tool_ctx: ToolCtx,
-    /// 末轮 input_tokens；每轮采样后赋值，break 路径 expect 安全。
+    /// 末轮 input_tokens；每轮采样后赋值；`None` = 本 turn 无完成的采样
+    /// 轮（如 `max_tool_rounds(0)` 首轮即熔断），此时 [`Self::settle_usage`]
+    /// 不结转、不发 TokenCount。
     last_input_tokens: Option<u64>,
     /// 各轮 output_tokens 累计。
     total_output_tokens: u64,
@@ -54,6 +56,27 @@ impl<'a> TurnRunner<'a> {
         }
     }
 
+    /// 权威占用跨 turn 结转：完成 / 中断 / 失败的一切采样后出口统一调用
+    /// （被中断 turn 已消耗的真实占用不得丢弃，否则下一 turn 的 PreTurn
+    /// 预算检查用过期 carry 或估算低估占用，预算警告与压缩触发滞后）。
+    /// 无任何完成的采样轮时为 no-op：不覆盖既有 carry、不发 TokenCount。
+    async fn settle_usage(&mut self, events: &mpsc::Sender<Event>, submission_id: &str) {
+        let Some(input) = self.last_input_tokens else {
+            return;
+        };
+        let used = input + self.total_output_tokens;
+        self.session.usage_carry = Some(used);
+        emit(
+            events,
+            submission_id,
+            EventMsg::TokenCount {
+                used,
+                window: self.session.cfg.context_window,
+            },
+        )
+        .await;
+    }
+
     pub(super) async fn run(
         mut self,
         submission_id: &str,
@@ -65,8 +88,7 @@ impl<'a> TurnRunner<'a> {
         // 的 skill 激活不得泄漏进本轮）。
         self.session
             .cfg
-            .registry
-            .allowlist()
+            .allowlist
             .set(allowed_tools.map(|names| names.into_iter().collect()));
         // SEC-002 单点不变量：中断标志 / 审批槽每 turn 自清，仅此一处——
         // 不得挪入任何可能被多次调用的 helper（用户中断被吞 / 已批准决策丢失）。
@@ -146,6 +168,7 @@ impl<'a> TurnRunner<'a> {
             // 安全点①：循环头检查中断。触发场景：步骤 5 串行工具段中断后
             // 回到循环头——结果消息已完整回灌（配对完整），不再发起多余采样。
             if self.session.interrupted.load(Ordering::SeqCst) {
+                self.settle_usage(&events, submission_id).await;
                 emit(
                     &events,
                     submission_id,
@@ -161,6 +184,7 @@ impl<'a> TurnRunner<'a> {
             // 同一 turn 内模型无限 tool_use 大概率是循环重试同一失败调用。
             // 达上限不再采样——上一轮工具结果已回灌、历史配对完整，turn 以
             // Completed 收尾（区别于 fail_turn 的 Error：会话仍可继续）。
+            // 配置 0 = 本 turn 不采样即完成（首轮即触发）。
             if self.tool_rounds >= self.session.cfg.max_tool_rounds {
                 emit(
                     &events,
@@ -207,6 +231,7 @@ impl<'a> TurnRunner<'a> {
                 )
                 .await
             {
+                self.settle_usage(&events, submission_id).await;
                 fail_turn(&events, submission_id, format!("{e:#}")).await;
                 return Err(e);
             }
@@ -221,7 +246,7 @@ impl<'a> TurnRunner<'a> {
                 instruction_memory,
                 &self.session.skills_catalog,
                 memory_index,
-                &self.session.cfg.registry.todos().snapshot(),
+                &self.session.cfg.todos.snapshot(),
             )
             .await;
             let req = ChatRequest {
@@ -241,6 +266,7 @@ impl<'a> TurnRunner<'a> {
                     if is_prompt_too_long(&e) {
                         self.reactive_compacts += 1;
                         if self.reactive_compacts >= MAX_REACTIVE_COMPACT_RETRIES {
+                            self.settle_usage(&events, submission_id).await;
                             fail_turn(
                                 &events,
                                 submission_id,
@@ -263,6 +289,7 @@ impl<'a> TurnRunner<'a> {
                         {
                             Ok(_) => continue,
                             Err(ce) => {
+                                self.settle_usage(&events, submission_id).await;
                                 fail_turn(
                                     &events,
                                     submission_id,
@@ -273,6 +300,9 @@ impl<'a> TurnRunner<'a> {
                             }
                         }
                     }
+                    // 通用采样错误（stall 超时 / overloaded / 鉴权等非
+                    // prompt_too_long 类）：同样结转已消耗占用再收尾。
+                    self.settle_usage(&events, submission_id).await;
                     fail_turn(&events, submission_id, e.to_string()).await;
                     return Err(e.into());
                 }
@@ -286,6 +316,7 @@ impl<'a> TurnRunner<'a> {
             while let Some(item) = stream.next().await {
                 // 安全点②：流消费循环内检查中断，历史保留部分结果。
                 if self.session.interrupted.load(Ordering::SeqCst) {
+                    self.settle_usage(&events, submission_id).await;
                     return Ok(self
                         .session
                         .finish_interrupted(&events, submission_id, round)
@@ -294,6 +325,7 @@ impl<'a> TurnRunner<'a> {
                 let event = match item {
                     Ok(ev) => ev,
                     Err(e) => {
+                        self.settle_usage(&events, submission_id).await;
                         fail_turn(&events, submission_id, e.to_string()).await;
                         return Err(e.into());
                     }
@@ -383,7 +415,7 @@ impl<'a> TurnRunner<'a> {
                     continue;
                 }
                 // P4 stop steering：终态无 tool_use 且清单仍有未完成项时注入提醒。
-                let (pending, in_progress) = self.session.cfg.registry.todos().unfinished();
+                let (pending, in_progress) = self.session.cfg.todos.unfinished();
                 if pending + in_progress > 0 && self.todo_steerings < MAX_TODO_STEERINGS {
                     self.todo_steerings += 1;
                     emit(
@@ -399,7 +431,7 @@ impl<'a> TurnRunner<'a> {
                     .await;
                     let reminder = format!(
                         "{TODO_STEERING_PROMPT}\nCurrent task list:\n{}",
-                        wavecode_tools::format_todos(&self.session.cfg.registry.todos().snapshot())
+                        wavecode_tools::format_todos(&self.session.cfg.todos.snapshot())
                     );
                     self.session.push_message(Message {
                         role: Role::User,
@@ -461,6 +493,7 @@ impl<'a> TurnRunner<'a> {
             if self.session.interrupted.load(Ordering::SeqCst) {
                 self.session
                     .push_pairing_results(round.preset_results, "interrupted by user");
+                self.settle_usage(&events, submission_id).await;
                 emit(
                     &events,
                     submission_id,
@@ -485,7 +518,6 @@ impl<'a> TurnRunner<'a> {
         };
 
         // —— 步骤 6：终态 ——
-        let last_input_tokens = self.last_input_tokens.expect("每轮采样后必先赋值才 break");
         if stop_reason == "max_tokens" {
             emit(
                 &events,
@@ -496,17 +528,10 @@ impl<'a> TurnRunner<'a> {
             )
             .await;
         }
-        // 权威占用跨 turn 结转。
-        self.session.usage_carry = Some(last_input_tokens + self.total_output_tokens);
-        emit(
-            &events,
-            submission_id,
-            EventMsg::TokenCount {
-                used: last_input_tokens + self.total_output_tokens,
-                window: self.session.cfg.context_window,
-            },
-        )
-        .await;
+        // 权威占用跨 turn 结转（无完成的采样轮时 no-op，如
+        // max_tool_rounds(0) 首轮即熔断——此时不发 TokenCount，
+        // 下一 turn 沿用既有 carry / 估算）。
+        self.settle_usage(&events, submission_id).await;
         emit(
             &events,
             submission_id,

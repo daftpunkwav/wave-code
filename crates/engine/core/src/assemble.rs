@@ -2,8 +2,12 @@
 //!
 //! 装配是引擎职责：provider 解析、记忆/技能/hooks/MCP/rollout 的组装都
 //! 在本模块单点完成——cli 退化为参数解析与呈现，第二个前端（Desktop/Web
-//! 直连 app-server）出现时零复制复用。cli→capabilities 的直连依赖边随之
-//! 移除（SPEC §3 矩阵 cli 行收敛为 app-server + config + core + protocol + tui）。
+//! 直连 app-server）出现时零复制复用。已知例外：`wavecode resume` 的列表 /
+//! 校验 / 预览留在 cli 启动期（SPEC §3:111 豁免协议化——恢复发生在 actor
+//! 存在之前），rollout 布局与回放知识收口在 [`crate::rollout`] 的意图级
+//! API（[`crate::rollout::list_threads`] / [`crate::rollout::inspect_thread`]），
+//! cli 不触碰 jsonl 内部。cli→capabilities 的直连依赖边随之移除（SPEC §3
+//! 矩阵 cli 行收敛为 app-server + config + core + protocol + tui）。
 //!
 //! 警告不直接打 stderr：收集进 [`Boot::warnings`]，呈现方式由调用方决定
 //! （cli 打 stderr；事件型前端转 Warning 事件）。
@@ -78,13 +82,16 @@ pub fn load_boot(
     warnings.extend(mcp_warnings);
     let rollout = assemble_rollout(home, &mut warnings);
 
+    let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
+    let allowlist = wavecode_tools::ToolAllowlist::default();
+
     Ok(Boot {
         session: SessionConfig::builder(
             model_override
                 .map(str::to_string)
                 .unwrap_or_else(|| config.model.clone()),
             std::sync::Arc::new(model),
-            wavecode_tools::Registry::builtin(),
+            registry,
             cwd.to_path_buf(),
         )
         .context_window(provider.context_window())
@@ -105,6 +112,8 @@ pub fn load_boot(
         .sandbox(wavecode_sandbox::Sandbox::without_rules(permission_mode))
         // P3：上下文管线（三级阈值 / 压缩）取 builder 默认值；阈值与保留条数
         // 的配置化随 config 分层（§17.5 M3）接线。
+        .todos(todos)
+        .allowlist(allowlist)
         .memory(memory)
         .skills(skills)
         .hooks(hooks)

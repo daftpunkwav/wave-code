@@ -1,6 +1,6 @@
 use super::*;
 
-/// 后台任务的跟踪槽（Manager 任务表的值；id / 描述 / 类型由任务表键与
+/// 后台任务的跟踪槽（任务表的值；id / 描述 / 类型由任务表键与
 /// 驱动闭包持有的 spec 承载，不重复存放）。
 struct TaskSlot {
     /// 停止请求标志：先于中断句柄存在（驱动任务尚未装配）的 stop 也能
@@ -11,7 +11,17 @@ struct TaskSlot {
     interrupt: Mutex<Option<Arc<AtomicBool>>>,
     /// 当前状态。
     state: Mutex<TaskState>,
+    /// 终态到达通知：finish_child 先置状态再 notify_one。`Notify` 的
+    /// permit 留存语义保证"先 notify 后 wait"不丢失唤醒——stop 等待
+    /// 终态无需轮询状态。
+    notify: tokio::sync::Notify,
 }
+
+/// 后台终态通知队列上限：通知在父会话 turn 循环头消费，长时间无 turn
+/// （交互空闲）时后台任务完成会在队列积压。超限丢弃最旧并以 warn 留痕
+/// ——通知是终态的便利回注，权威终态在任务表槽位（task_output 可查），
+/// 丢弃不丢结果。
+const MAX_NOTIFICATIONS: usize = 64;
 
 /// 派生子代理所需的父会话配置快照（Arc 共享模型通道、继承 sandbox / cwd）。
 ///
@@ -32,11 +42,11 @@ struct SpawnDeps {
     approval_gate: Mutex<Arc<crate::session::ApprovalGate>>,
 }
 
-/// 子代理管理器：派生 / 跟踪 / 停止子代理，收集后台终态通知。
+/// 子代理运行时：派生 / 跟踪 / 停止子代理，收集后台终态通知。
 ///
 /// 由 [`Session::with_subagents`] 创建并注册三个工具；父会话 turn 循环头
-/// 经 [`SubagentManager::drain_notifications`] 取走待注入通知。
-pub struct SubagentManager {
+/// 经 [`SubagentRuntime::drain_notifications`] 取走待注入通知。
+pub struct SubagentRuntime {
     deps: SpawnDeps,
     /// 后台任务表（id → 跟踪槽）。
     tasks: Mutex<HashMap<String, Arc<TaskSlot>>>,
@@ -50,7 +60,7 @@ pub struct SubagentManager {
     next_id: AtomicUsize,
 }
 
-impl SubagentManager {
+impl SubagentRuntime {
     /// 从父会话配置快照创建（`Session::with_subagents` 的装配入口）。
     pub fn from_config(cfg: &SessionConfig) -> Arc<Self> {
         Arc::new(Self {
@@ -98,12 +108,36 @@ impl SubagentManager {
             stop_requested: AtomicBool::new(false),
             interrupt: Mutex::new(None),
             state: Mutex::new(TaskState::Running),
+            notify: tokio::sync::Notify::new(),
         });
         crate::sync::lock(&self.tasks).insert(id.clone(), slot.clone());
         let mgr = self.clone();
-        let child_id = id.clone();
+        let driver = self.clone();
+        let driver_id = id.clone();
+        let driver_slot = slot.clone();
+        let fail_id = id.clone();
+        let fail_spec = spec.clone();
+        let fail_slot = slot.clone();
         tokio::spawn(async move {
-            mgr.drive_child(child_id, spec, Some(slot)).await;
+            // 双层 spawn 做 panic 隔离：驱动任务的 panic 由内层
+            // JoinHandle::await 以 JoinError 呈现，不会静默丢失——原实现
+            // handle 直接 drop，panic 后 slot 永久 Running（task_output 恒
+            // running、stop 轮询超时、无任何日志），任务表条目永不回收。
+            let task = tokio::spawn(async move {
+                driver.drive_child(driver_id, spec, Some(driver_slot)).await;
+            });
+            if task.await.is_err() {
+                // 正常路径 drive_child 自行 finish_child；panic 路径由
+                // 外层补齐：slot 置 Failed + 排队 task-notification +
+                // SubagentCompleted 事件，父会话可感知异常终态。
+                let result = TaskResult {
+                    status: SubagentStatus::Failed,
+                    summary: "subagent task panicked (driver task aborted)".to_owned(),
+                    tokens_used: None,
+                };
+                mgr.finish_child(fail_id, &fail_spec, &fail_slot, result)
+                    .await;
+            }
         });
         id
     }
@@ -122,25 +156,41 @@ impl SubagentManager {
         Some(crate::sync::lock(&slot.state).clone())
     }
 
-    /// 停止后台子代理（task_stop）：置停止标志 + 中断句柄，轮询等待终态
-    ///（超时兜底返回当时的 Running 状态）。
+    /// 停止后台子代理（task_stop）：置停止标志 + 中断句柄，等待终态
+    ///（超时兜底返回当时的 Running 状态）。未知 id 返回 None。
     ///
-    /// 轮询中重武装中断标志：`run_turn` 入口会清一次中断标志，stop 恰好
-    /// 落在"句柄已装配、turn 未开始"的窗口时单次置位会被抹掉；重武装
-    /// 保证窗口内置位最终生效。未知 id 返回 None。
+    /// 等待体是 [`TaskSlot::notify`] 与周期 tick 的 select：终态到达经
+    /// notify 即时唤醒（finish_child 先置状态再 notify_one，permit 留存
+    /// 无丢失唤醒），不再依赖轮询检测终态；tick 唯一职责是周期重武装
+    /// 中断标志——`run_turn` 入口会清一次中断标志，stop 恰好落在"句柄
+    /// 已装配、turn 未开始"的窗口时单次置位会被抹掉，重武装保证窗口内
+    /// 置位最终生效。
     pub async fn stop(&self, task_id: &str) -> Option<TaskState> {
         let slot = crate::sync::lock(&self.tasks).get(task_id).cloned()?;
         slot.stop_requested.store(true, Ordering::SeqCst);
         let deadline = tokio::time::Instant::now() + STOP_WAIT_TIMEOUT;
         loop {
-            let state = crate::sync::lock(&slot.state).clone();
-            if matches!(state, TaskState::Finished(_)) || tokio::time::Instant::now() >= deadline {
-                return Some(state);
-            }
             if let Some(handle) = crate::sync::lock(&slot.interrupt).as_ref() {
                 handle.store(true, Ordering::SeqCst);
             }
-            tokio::time::sleep(STOP_POLL_INTERVAL).await;
+            let state = crate::sync::lock(&slot.state).clone();
+            if matches!(state, TaskState::Finished(_)) {
+                return Some(state);
+            }
+            let waited = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    _ = slot.notify.notified() => {}
+                    _ = tokio::time::sleep(STOP_POLL_INTERVAL) => {}
+                }
+            })
+            .await;
+            if waited.is_err() {
+                // 超时兜底：子代理仍卡在不可中断点（如挂起的工具执行），
+                // 返回当时的 Running 状态。
+                return Some(crate::sync::lock(&slot.state).clone());
+            }
+            // 通知唤醒（终态已登记）或 tick 到期（重武装）：回循环头
+            // 复查状态与 deadline。
         }
     }
 
@@ -179,13 +229,27 @@ impl SubagentManager {
     /// 不写 rollout（P10：持久化以父会话为单位，子代理的中间过程本就是
     /// 隔离上下文，恢复父会话时不需要子代理历史）。
     pub(in crate::subagent) fn child_config(&self, spec: &TaskSpec) -> SessionConfig {
-        let base = match spec.subagent_type {
-            SubagentType::GeneralPurpose => Registry::builtin(),
-            SubagentType::Explore => Registry::builtin().read_only_subset(),
-        };
-        let registry = match &spec.allowed_tools {
-            Some(names) => base.name_subset(names),
-            None => base,
+        let (registry, todos) = match spec.subagent_type {
+            SubagentType::GeneralPurpose => {
+                // GP 子代理持全新的独立任务清单（与父会话 todo 隔离）：
+                // 子代理的 planning 不读写父清单；registry 内 todo_write
+                // 与该清单同源（builtin_with_todos 配对返回）。
+                let (base, todos) = Registry::builtin_with_todos();
+                let registry = match &spec.allowed_tools {
+                    Some(names) => base.name_subset(names),
+                    None => base,
+                };
+                (registry, todos)
+            }
+            SubagentType::Explore => {
+                let base = Registry::builtin().read_only_subset();
+                let registry = match &spec.allowed_tools {
+                    Some(names) => base.name_subset(names),
+                    None => base,
+                };
+                // explore 无 todo_write；空清单仅占位，与工具面无关。
+                (registry, wavecode_tools::TodoStore::default())
+            }
         };
         let builder = SessionConfig::builder(
             self.deps.model_name.clone(),
@@ -197,7 +261,9 @@ impl SubagentManager {
         .max_output_tokens(self.deps.max_output_tokens)
         .deny_env(self.deps.deny_env.clone())
         .sandbox(self.deps.sandbox.clone())
-        .context(self.deps.context.clone());
+        .context(self.deps.context.clone())
+        .todos(todos)
+        .allowlist(wavecode_tools::ToolAllowlist::default());
         // 审批槽：共享（父槽注入后冒泡；未注入时自建兜底槽承接 fail-fast）。
         builder
             .approval_gate(crate::sync::lock(&self.deps.approval_gate).clone())
@@ -332,12 +398,11 @@ impl SubagentManager {
         result: TaskResult,
     ) -> TaskResult {
         *crate::sync::lock(&slot.state) = TaskState::Finished(result.clone());
-        crate::sync::lock(&self.notifications).push(format_notification(
-            &task_id,
-            spec.subagent_type,
-            &spec.description,
-            &result,
-        ));
+        slot.notify.notify_one();
+        push_notification(
+            &mut crate::sync::lock(&self.notifications),
+            format_notification(&task_id, spec.subagent_type, &spec.description, &result),
+        );
         self.try_emit_event(EventMsg::SubagentCompleted {
             task_id,
             status: result.status,
@@ -345,5 +410,41 @@ impl SubagentManager {
         })
         .await;
         result
+    }
+}
+
+/// 通知入队（带上限）：超限丢弃最旧并以 warn 留痕（见
+/// [`MAX_NOTIFICATIONS`] 的取舍注释）。
+fn push_notification(queue: &mut Vec<String>, note: String) {
+    queue.push(note);
+    let mut dropped = 0usize;
+    while queue.len() > MAX_NOTIFICATIONS {
+        queue.remove(0);
+        dropped += 1;
+    }
+    if dropped > 0 {
+        tracing::warn!(
+            dropped,
+            cap = MAX_NOTIFICATIONS,
+            "子代理通知队列溢出，丢弃最旧通知（终态仍可经 task_output 查询）"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 通知队列上限：超限丢弃最旧、长度封顶（回归 MAX_NOTIFICATIONS）。
+    #[test]
+    fn notification_queue_is_capped_dropping_oldest() {
+        let mut q = Vec::new();
+        for i in 0..MAX_NOTIFICATIONS + 3 {
+            push_notification(&mut q, format!("n{i}"));
+        }
+        assert_eq!(q.len(), MAX_NOTIFICATIONS);
+        assert_eq!(q.first().map(String::as_str), Some("n3"), "最旧三条被丢弃");
+        let newest = format!("n{}", MAX_NOTIFICATIONS + 2);
+        assert_eq!(q.last().map(String::as_str), Some(newest.as_str()));
     }
 }

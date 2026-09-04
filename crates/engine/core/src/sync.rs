@@ -1,6 +1,6 @@
 //! 锁中毒的统一恢复策略（core 内单点决策）。
 //!
-//! ApprovalGate 的审批槽与 SubagentManager 的任务表 / 状态 / 通知 /
+//! ApprovalGate 的审批槽与 SubagentRuntime 的任务表 / 状态 / 通知 /
 //! 事件汇 / 中断槽等 `std::sync::Mutex` 保护的都是单操作临界区
 //!（一次 insert / take / 赋值 / drain），持锁期间 panic 不会留下半截
 //! 不变量——中毒时取回守卫继续执行（panic 已沿原线程传播），不做

@@ -1,13 +1,7 @@
 //! 终端主题色与宽度工具（阶段 4 拆分自 render.rs）。
-
-pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
-    t.push('…');
-    t
-}
+//!
+//! 按字符截断（`truncate_chars`）已并入双前端单一事实源
+//! `wavecode_tui::text`（render/mod.rs 再导出）。
 
 /// 终端宽度：terminal_size 不可用时回退 80
 pub(super) fn terminal_width() -> usize {

@@ -2,13 +2,13 @@ use super::*;
 
 /// `task` 工具：派生子代理（同步等待或后台运行）。
 pub struct TaskSpawn {
-    manager: Arc<SubagentManager>,
+    runtime: Arc<SubagentRuntime>,
 }
 
 impl TaskSpawn {
-    /// 以 Manager 共享句柄构造（`Session::with_subagents` 装配）。
-    pub fn new(manager: Arc<SubagentManager>) -> Self {
-        Self { manager }
+    /// 以 Runtime 共享句柄构造（`Session::with_subagents` 装配）。
+    pub fn new(runtime: Arc<SubagentRuntime>) -> Self {
+        Self { runtime }
     }
 }
 
@@ -101,7 +101,7 @@ impl Tool for TaskSpawn {
 
         if run_in_background {
             let type_label = spec.subagent_type.as_str();
-            let id = self.manager.spawn_background(spec);
+            let id = self.runtime.spawn_background(spec);
             return Ok(ToolOutput {
                 content: format!(
                     "Spawned background task {id} ({type_label}).\n\
@@ -112,7 +112,7 @@ impl Tool for TaskSpawn {
             });
         }
         // 同步形态：结果直接作为 ToolResult 回灌（不发通知、不进任务表）。
-        let result = self.manager.run_sync(spec).await;
+        let result = self.runtime.run_sync(spec).await;
         Ok(ToolOutput {
             is_error: result.status == SubagentStatus::Failed,
             content: format_result(&result),

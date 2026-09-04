@@ -239,7 +239,7 @@ impl super::Session {
             // 在 hook 与审批之前拦截：名单外工具直接 is_error 回灌，不实际
             // 执行（skill 工具自身也受限：白名单不含 `skill` 时激活后不能
             // 再触发其他 skill，首版语义见 skills 模块注释）。
-            if !self.cfg.registry.allowlist().is_allowed(name) {
+            if !self.cfg.allowlist.is_allowed(name) {
                 slots[i] = Some(ToolOutput {
                     content: format!(
                         "tool `{name}` is not in the active skill's allowed-tools; the call was \

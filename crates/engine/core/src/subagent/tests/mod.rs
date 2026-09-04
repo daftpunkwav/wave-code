@@ -47,7 +47,9 @@ fn text_end(text: &str) -> Vec<StreamEvent> {
 
 fn parent_config(model: Arc<dyn ChatModel>) -> SessionConfig {
     let cwd = tempfile::tempdir().unwrap().keep();
-    SessionConfig::builder("mock", model, Registry::builtin(), cwd)
+    let (registry, todos) = Registry::builtin_with_todos();
+    SessionConfig::builder("mock", model, registry, cwd)
+        .todos(todos)
         .sandbox(wavecode_sandbox::Sandbox::without_rules(
             PermissionMode::BypassPermissions,
         ))
@@ -72,7 +74,7 @@ fn child_registry_has_no_task_tools() {
         calls: Mutex::new(0),
         scripts: vec![],
     });
-    let mgr = SubagentManager::from_config(&parent_config(model));
+    let mgr = SubagentRuntime::from_config(&parent_config(model));
     for t in [SubagentType::GeneralPurpose, SubagentType::Explore] {
         let cfg = mgr.child_config(&spec("x", t));
         for name in ["task", "task_output", "task_stop"] {
@@ -104,7 +106,7 @@ async fn background_task_completes_and_notifies() {
         calls: Mutex::new(0),
         scripts: vec![text_end("调查结论：一切正常")],
     });
-    let mgr = SubagentManager::from_config(&parent_config(model));
+    let mgr = SubagentRuntime::from_config(&parent_config(model));
     let id = mgr.spawn_background(spec("调查一下", SubagentType::Explore));
     assert_eq!(id, "task-1");
     // 等待终态（mock 即时完成，轮询兜底）。
@@ -139,7 +141,7 @@ async fn sync_task_returns_result_directly() {
         calls: Mutex::new(0),
         scripts: vec![text_end("同步结果")],
     });
-    let mgr = SubagentManager::from_config(&parent_config(model));
+    let mgr = SubagentRuntime::from_config(&parent_config(model));
     let result = mgr
         .run_sync(spec("干活", SubagentType::GeneralPurpose))
         .await;
@@ -156,7 +158,7 @@ async fn tools_validate_input_and_unknown_ids() {
         calls: Mutex::new(0),
         scripts: vec![],
     });
-    let mgr = SubagentManager::from_config(&parent_config(model));
+    let mgr = SubagentRuntime::from_config(&parent_config(model));
     let ctx = ToolCtx {
         cwd: std::path::PathBuf::from("."),
         deny_env: Vec::new(),
@@ -606,7 +608,7 @@ fn child_config_shares_parent_approval_gate() {
         calls: Mutex::new(0),
         scripts: vec![],
     });
-    let mgr = SubagentManager::from_config(&parent_config(model));
+    let mgr = SubagentRuntime::from_config(&parent_config(model));
     let gate = Arc::new(ApprovalGate::new());
     mgr.set_approval_gate(gate.clone());
     for t in [SubagentType::GeneralPurpose, SubagentType::Explore] {
@@ -643,12 +645,16 @@ async fn subagent_asks_fail_fast_without_event_sink() {
     // 父会话显式用 Default 模式（存量测试夹具是 BypassPermissions，
     // 全放行走不到审批路径——这正是该 bug 长期未被发现的原因）。
     let cwd = tempfile::tempdir().unwrap().keep();
-    let cfg = SessionConfig::builder("mock", model.clone(), Registry::builtin(), cwd)
-        .sandbox(wavecode_sandbox::Sandbox::without_rules(
-            PermissionMode::Default,
-        ))
-        .build();
-    let mgr = SubagentManager::from_config(&cfg);
+    let cfg = {
+        let (registry, todos) = Registry::builtin_with_todos();
+        SessionConfig::builder("mock", model.clone(), registry, cwd)
+            .todos(todos)
+            .sandbox(wavecode_sandbox::Sandbox::without_rules(
+                PermissionMode::Default,
+            ))
+            .build()
+    };
+    let mgr = SubagentRuntime::from_config(&cfg);
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         mgr.run_sync(spec("需要跑命令", SubagentType::GeneralPurpose)),
@@ -681,12 +687,16 @@ async fn subagent_approval_forwards_to_event_sink_and_obeys_decision() {
     });
     // 父会话显式 Default 模式（shell → Ask）。
     let cwd = tempfile::tempdir().unwrap();
-    let cfg = SessionConfig::builder("mock", model.clone(), Registry::builtin(), cwd.keep())
-        .sandbox(wavecode_sandbox::Sandbox::without_rules(
-            PermissionMode::Default,
-        ))
-        .build();
-    let mgr = SubagentManager::from_config(&cfg);
+    let cfg = {
+        let (registry, todos) = Registry::builtin_with_todos();
+        SessionConfig::builder("mock", model.clone(), registry, cwd.keep())
+            .todos(todos)
+            .sandbox(wavecode_sandbox::Sandbox::without_rules(
+                PermissionMode::Default,
+            ))
+            .build()
+    };
+    let mgr = SubagentRuntime::from_config(&cfg);
     let gate = Arc::new(ApprovalGate::new());
     mgr.set_approval_gate(gate.clone());
     // 挂接事件汇（模拟父 turn 入口）；用独立任务应答审批。
@@ -709,4 +719,46 @@ async fn subagent_approval_forwards_to_event_sink_and_obeys_decision() {
     answer.await.unwrap();
     assert_eq!(result.status, SubagentStatus::Completed);
     assert!(result.summary.contains("放行后收尾"), "{}", result.summary);
+}
+
+/// panic 隔离（回归）：驱动任务 panic 时 slot 必须终态化（Failed）并排队
+/// task-notification——修复前 JoinHandle 直接 drop，panic 后 slot 永久
+/// Running（task_output 恒 running、无通知、条目不回收）。
+#[tokio::test]
+async fn panicked_driver_fails_slot_and_notifies() {
+    // stream 一被 poll 即 panic：异常从 run_turn 穿透 drive_child，
+    // 由 spawn_background 的外层收尾路径兜住。
+    struct PanicModel;
+    #[async_trait::async_trait]
+    impl ChatModel for PanicModel {
+        async fn stream(
+            &self,
+            _req: ChatRequest,
+        ) -> wavecode_llm::Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = wavecode_llm::Result<StreamEvent>> + Send>,
+            >,
+        > {
+            panic!("mock driver panic");
+        }
+    }
+
+    let mgr = SubagentRuntime::from_config(&parent_config(Arc::new(PanicModel)));
+    let id = mgr.spawn_background(spec("触发 panic", SubagentType::GeneralPurpose));
+
+    // panic 传播是异步的：轮询等待终态（上限 5s）。
+    let mut result = None;
+    for _ in 0..500 {
+        if let Some(TaskState::Finished(r)) = mgr.query(&id) {
+            result = Some(r);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let result = result.expect("panic 后 slot 应终态化（修复前永久 Running）");
+    assert_eq!(result.status, SubagentStatus::Failed);
+
+    let notes = mgr.drain_notifications();
+    assert_eq!(notes.len(), 1, "panic 终态应排队 task-notification");
+    assert!(notes[0].contains("panicked"), "{}", notes[0]);
 }

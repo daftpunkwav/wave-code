@@ -6,24 +6,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, SPINNER};
-
-fn accent() -> Style {
-    Style::default().fg(Color::LightCyan)
-}
-
-fn dim() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
-
-fn warn() -> Style {
-    Style::default().fg(Color::Yellow)
-}
+use crate::app::{App, SPINNER, accent, dim, warn};
 
 /// 整帧绘制入口。
 pub fn draw(f: &mut Frame, app: &mut App) {

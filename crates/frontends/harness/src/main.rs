@@ -161,23 +161,20 @@ async fn main() -> anyhow::Result<()> {
 
     let mut stdout_text = String::new();
     let mut stderr_text = String::new();
-    let mut outcome = Outcome::Completed;
     let mut failed = false;
     let mut interrupted = false;
-    loop {
+    let outcome = loop {
         tokio::select! {
             event = handle.client.next_event() => {
                 let Some(event) = event else {
                     // Actor exited without TurnCompleted: treat as failure.
-                    outcome = Outcome::Failed;
-                    break;
+                    break Outcome::Failed;
                 };
                 if let Some(end) = render_event(&event.msg, &mut stdout_text, &mut stderr_text) {
                     if end == Outcome::Failed {
                         failed = true;
                     } else {
-                        outcome = if interrupted { Outcome::Interrupted } else { end };
-                        break;
+                        break if interrupted { Outcome::Interrupted } else { end };
                     }
                 }
             }
@@ -189,14 +186,12 @@ async fn main() -> anyhow::Result<()> {
                 interrupted = true;
             }
         }
-    }
+    };
     print!("{stdout_text}");
     eprint!("{stderr_text}");
     std::io::stdout().flush()?;
     std::io::stderr().flush()?;
-    if failed {
-        outcome = Outcome::Failed;
-    }
+    let outcome = if failed { Outcome::Failed } else { outcome };
     std::process::exit(outcome.exit_code())
 }
 

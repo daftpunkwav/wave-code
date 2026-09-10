@@ -1,0 +1,16 @@
+[package]
+name = "harness-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+operations-bootstrap = { path = "../../operations/bootstrap" }
+operations-wire = { path = "../../operations/wire" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true

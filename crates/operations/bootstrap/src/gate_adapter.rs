@@ -19,6 +19,7 @@ use runtime_runner::{ApprovalResolution, ApprovalSource, AskKind};
 use safety_gate::{ApprovalDecision, ApprovalGate};
 
 /// Approval waits backed by a shared gate with a fixed timeout.
+#[derive(Debug, Clone)]
 pub struct GateApprovalSource {
     gate: Arc<ApprovalGate>,
     timeout: Duration,
@@ -70,6 +71,56 @@ impl ApprovalSource for GateApprovalSource {
     }
 }
 
+/// Approval source selected at assembly time without trait objects.
+///
+/// Parking gates and headless denials share one concrete type so run
+/// loops stay monomorphized; branching lives here, not in generics.
+#[derive(Debug, Clone)]
+pub enum Approvals {
+    /// Park on a shared gate until users decide or the wait expires.
+    Gate(GateApprovalSource),
+    /// Deny openly for non-interactive drivers.
+    Headless(HeadlessDeny),
+}
+
+#[async_trait::async_trait]
+impl ApprovalSource for Approvals {
+    async fn decide(&self, call_id: &str, kind: AskKind, detail: &str) -> ApprovalResolution {
+        match self {
+            Self::Gate(gate) => gate.decide(call_id, kind, detail).await,
+            Self::Headless(deny) => deny.decide(call_id, kind, detail).await,
+        }
+    }
+
+    fn clear_stale(&self) {
+        match self {
+            Self::Gate(gate) => gate.clear_stale(),
+            Self::Headless(deny) => deny.clear_stale(),
+        }
+    }
+}
+
+/// Headless approvals: every request is denied explicitly.
+///
+/// Non-interactive drivers (exec, eval, CI) have nobody to answer the
+/// prompt, so parking would hang forever. Denials carry the reason
+/// openly instead of timing out, and the turn continues with an error
+/// result the model can react to.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HeadlessDeny;
+
+#[async_trait::async_trait]
+impl ApprovalSource for HeadlessDeny {
+    async fn decide(&self, call_id: &str, _kind: AskKind, _detail: &str) -> ApprovalResolution {
+        let _ = call_id;
+        ApprovalResolution::Deny {
+            reason: "non-interactive session: approval required but nobody can answer".to_string(),
+        }
+    }
+
+    fn clear_stale(&self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +150,16 @@ mod tests {
             resolution,
             ApprovalResolution::Deny { reason } if reason.contains("timed out")
         ));
+    }
+
+    #[tokio::test]
+    async fn headless_denies_openly_without_parking() {
+        let outcome = HeadlessDeny.decide("c1", AskKind::Exec, "run ls").await;
+        assert!(matches!(
+            outcome,
+            ApprovalResolution::Deny { reason } if reason.contains("non-interactive")
+        ));
+        HeadlessDeny.clear_stale();
     }
 
     #[tokio::test]

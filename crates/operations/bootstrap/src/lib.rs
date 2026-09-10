@@ -33,11 +33,14 @@ pub mod tool_adapter;
 pub use child_service::TurnChildService;
 pub use compactor::ContextCompactor;
 pub use composite::CompositeExecutor;
-pub use gate_adapter::GateApprovalSource;
+pub use gate_adapter::{Approvals, GateApprovalSource, HeadlessDeny};
 pub use hook_adapter::HookAdapter;
 pub use model_adapter::ModelAdapter;
 pub use native::{NativeExecutor, NativeTool};
 pub use plan_adapter::TodoPlanTracker;
 pub use policy_adapter::PolicyAdapter;
-pub use session::{AssembleOptions, SessionError, SessionHandle, assemble_session};
+pub use session::{
+    APPROVAL_TIMEOUT, AssembleOptions, DEFAULT_IDENTITY, DEFAULT_MAX_TOOL_ROUNDS, SessionError,
+    SessionHandle, assemble_session,
+};
 pub use tool_adapter::ToolAdapter;

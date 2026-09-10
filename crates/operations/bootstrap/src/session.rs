@@ -84,6 +84,9 @@ pub struct AssembleOptions {
     pub home: Option<PathBuf>,
     /// Identity block prepended to the system prompt.
     pub identity: String,
+    /// True for non-interactive drivers: approvals deny openly instead
+    /// of parking on a gate nobody answers.
+    pub headless: bool,
 }
 
 /// Assemble a live session: config to client handle.
@@ -98,6 +101,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         cwd,
         home,
         identity,
+        headless,
     } = options;
     let mut warnings = Vec::new();
 
@@ -165,7 +169,14 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         registry.clone(),
     );
     let approvals = Arc::new(ApprovalGate::new());
-    let gate_source = GateApprovalSource::new(approvals.clone(), APPROVAL_TIMEOUT);
+    let gate_source = if headless {
+        crate::gate_adapter::Approvals::Headless(crate::gate_adapter::HeadlessDeny)
+    } else {
+        crate::gate_adapter::Approvals::Gate(GateApprovalSource::new(
+            approvals.clone(),
+            APPROVAL_TIMEOUT,
+        ))
+    };
     let plans = TodoPlanTracker::new(todos);
     let compactor = ContextCompactor::new(model.clone(), model_name.clone());
 
@@ -405,6 +416,7 @@ api_key = "k-inline"
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
+            headless: true,
         })
         .unwrap();
         // Memory degrades with warnings instead of failing assembly.

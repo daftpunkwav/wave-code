@@ -1149,7 +1149,20 @@ where
     }
 }
 
-/// Forwarding implementation so shared drivers erase to trait objects.
+/// Forwarding implementation so shared sources erase to trait objects.
+#[async_trait::async_trait]
+impl<T> ApprovalSource for std::sync::Arc<T>
+where
+    T: ApprovalSource,
+{
+    async fn decide(&self, call_id: &str, kind: AskKind, detail: &str) -> ApprovalResolution {
+        self.as_ref().decide(call_id, kind, detail).await
+    }
+
+    fn clear_stale(&self) {
+        self.as_ref().clear_stale();
+    }
+}
 ///
 /// Composition roots hold `Arc<dyn TurnDriver>`; this blanket forward
 /// keeps every concrete driver working unchanged behind the pointer.

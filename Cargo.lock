@@ -566,6 +566,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "harness-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "operations-bootstrap",
+ "operations-wire",
+ "tokio",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

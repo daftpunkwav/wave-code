@@ -53,7 +53,7 @@ impl Metrics {
     pub fn record(&mut self, event: &Event) {
         match &event.msg {
             EventMsg::TurnStarted => self.turns_started += 1,
-            EventMsg::TurnCompleted => self.turns_completed += 1,
+            EventMsg::TurnCompleted { .. } => self.turns_completed += 1,
             EventMsg::ToolCallBegin { .. } => self.tool_calls += 1,
             EventMsg::ToolCallEnd { is_error, .. } => {
                 if *is_error {
@@ -68,7 +68,7 @@ impl Metrics {
                 self.tokens_in += input_tokens;
                 self.tokens_out += output_tokens;
             }
-            EventMsg::CompactCompleted => self.compactions += 1,
+            EventMsg::CompactCompleted { .. } => self.compactions += 1,
             EventMsg::Warning { .. } => self.warnings += 1,
             EventMsg::Error { .. } => self.errors += 1,
             // Deltas, partial completions, and compaction starts carry no
@@ -121,6 +121,7 @@ impl SpanTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use operations_wire::ApprovalKind;
 
     fn event(msg: EventMsg) -> Event {
         Event {
@@ -137,9 +138,11 @@ mod tests {
             EventMsg::ToolCallBegin {
                 call_id: "c1".to_string(),
                 name: "shell".to_string(),
+                input: serde_json::Value::Null,
             },
             EventMsg::ApprovalRequested {
                 call_id: "c1".to_string(),
+                kind: ApprovalKind::Exec,
                 detail: "d".to_string(),
             },
             EventMsg::ToolCallEnd {
@@ -150,11 +153,11 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 25,
             },
-            EventMsg::CompactCompleted,
+            EventMsg::CompactCompleted { summary_tokens: 25 },
             EventMsg::Warning {
                 message: "w".to_string(),
             },
-            EventMsg::TurnCompleted,
+            EventMsg::TurnCompleted { interrupted: false },
         ] {
             metrics.record(&event(msg));
         }

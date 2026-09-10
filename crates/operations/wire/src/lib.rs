@@ -47,6 +47,11 @@ pub enum Op {
     },
     /// Request context compaction.
     Compact,
+    /// Switch the session permission mode by wire name.
+    SetPermissionMode {
+        /// Mode wire name, e.g. `plan` or `acceptEdits`.
+        mode: String,
+    },
     /// Shut the session down after draining in-flight work.
     Shutdown,
 }
@@ -64,6 +69,16 @@ pub enum WireDecision {
         /// Human-readable refusal reason.
         reason: String,
     },
+}
+
+/// Approval kind carried with an approval request for display routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalKind {
+    /// Arbitrary command execution.
+    Exec,
+    /// File modification.
+    Write,
 }
 
 /// One outbound event, correlated with a submission by `id`.
@@ -87,14 +102,19 @@ pub enum EventMsg {
         /// New text since the previous delta.
         text: String,
     },
-    /// The assistant message completed.
-    AgentMessageComplete,
+    /// The assistant message completed, carrying its full text.
+    AgentMessageComplete {
+        /// Full assembled assistant text for transcript rendering.
+        text: String,
+    },
     /// A tool call started.
     ToolCallBegin {
         /// Tool call id pairing begin with end.
         call_id: String,
         /// Tool name being invoked.
         name: String,
+        /// Validated input for transcript inspection.
+        input: serde_json::Value,
     },
     /// A tool call finished.
     ToolCallEnd {
@@ -107,6 +127,8 @@ pub enum EventMsg {
     ApprovalRequested {
         /// Tool call id parked in the approval gate.
         call_id: String,
+        /// Display routing kind.
+        kind: ApprovalKind,
         /// Bounded detail string for display.
         detail: String,
     },
@@ -118,9 +140,15 @@ pub enum EventMsg {
         output_tokens: u64,
     },
     /// Compaction started.
-    CompactStarted,
+    CompactStarted {
+        /// Trigger name for display.
+        trigger: String,
+    },
     /// Compaction completed.
-    CompactCompleted,
+    CompactCompleted {
+        /// Token estimate of the summary message.
+        summary_tokens: u64,
+    },
     /// Non-fatal condition worth surfacing.
     Warning {
         /// Human-readable warning text.
@@ -134,7 +162,10 @@ pub enum EventMsg {
         recoverable: bool,
     },
     /// The run terminated; always the last event of a submission.
-    TurnCompleted,
+    TurnCompleted {
+        /// True when the run stopped at an interrupt checkpoint.
+        interrupted: bool,
+    },
 }
 
 #[cfg(test)]
@@ -161,6 +192,12 @@ mod tests {
                 "exec_approval",
             ),
             (Op::Compact, "compact"),
+            (
+                Op::SetPermissionMode {
+                    mode: "plan".to_string(),
+                },
+                "set_permission_mode",
+            ),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, tag) in cases {
@@ -176,11 +213,17 @@ mod tests {
                 },
                 "agent_message_delta",
             ),
-            (EventMsg::AgentMessageComplete, "agent_message_complete"),
+            (
+                EventMsg::AgentMessageComplete {
+                    text: "x".to_string(),
+                },
+                "agent_message_complete",
+            ),
             (
                 EventMsg::ToolCallBegin {
                     call_id: "c".to_string(),
                     name: "shell".to_string(),
+                    input: serde_json::Value::Null,
                 },
                 "tool_call_begin",
             ),
@@ -194,6 +237,7 @@ mod tests {
             (
                 EventMsg::ApprovalRequested {
                     call_id: "c".to_string(),
+                    kind: ApprovalKind::Exec,
                     detail: "d".to_string(),
                 },
                 "approval_requested",
@@ -205,8 +249,16 @@ mod tests {
                 },
                 "token_count",
             ),
-            (EventMsg::CompactStarted, "compact_started"),
-            (EventMsg::CompactCompleted, "compact_completed"),
+            (
+                EventMsg::CompactStarted {
+                    trigger: "auto".to_string(),
+                },
+                "compact_started",
+            ),
+            (
+                EventMsg::CompactCompleted { summary_tokens: 10 },
+                "compact_completed",
+            ),
             (
                 EventMsg::Warning {
                     message: "w".to_string(),
@@ -220,7 +272,10 @@ mod tests {
                 },
                 "error",
             ),
-            (EventMsg::TurnCompleted, "turn_completed"),
+            (
+                EventMsg::TurnCompleted { interrupted: false },
+                "turn_completed",
+            ),
         ];
         for (msg, tag) in events {
             let value = serde_json::to_value(&msg).unwrap();

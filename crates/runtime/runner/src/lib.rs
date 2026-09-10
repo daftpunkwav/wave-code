@@ -20,7 +20,7 @@
 use serde_json::Value;
 
 use infrastructure_base::InterruptHandle;
-use operations_wire::{Event, EventMsg};
+use operations_wire::{ApprovalKind as WireApprovalKind, Event, EventMsg};
 use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
     check_budget, estimate_tokens,
@@ -309,6 +309,14 @@ pub trait ToolExecutor: Send + Sync {
 pub trait PolicyDecider: Send + Sync {
     /// Return allow/ask/deny for the given call.
     async fn decide(&self, call: &ToolCall) -> PolicyVerdict;
+
+    /// Switch the permission mode by wire name; false rejects the name.
+    ///
+    /// Defaults to rejecting: adapters over fixed policies override this
+    /// only when a live mode handle exists behind them.
+    fn set_permission_mode(&self, _mode: &str) -> bool {
+        false
+    }
 }
 
 /// Runs lifecycle hooks at one hook point.
@@ -584,7 +592,7 @@ where
                 message: admission.message,
                 recoverable: true,
             });
-            emit_msg(EventMsg::TurnCompleted);
+            emit_msg(EventMsg::TurnCompleted { interrupted: false });
             return StopReason::Completed;
         }
         if !admission.message.is_empty() {
@@ -609,7 +617,7 @@ where
             // Checkpoint 1: loop head interrupt returns without sampling.
             if self.interrupt.is_triggered() {
                 settle(conv, &last_input, &state, &emit_msg);
-                emit_msg(EventMsg::TurnCompleted);
+                emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
 
@@ -682,7 +690,7 @@ where
                                         message: cause,
                                         recoverable: false,
                                     });
-                                    emit_msg(EventMsg::TurnCompleted);
+                                    emit_msg(EventMsg::TurnCompleted { interrupted: false });
                                     return StopReason::Error(
                                         "blocking compaction failed".to_string(),
                                     );
@@ -721,7 +729,7 @@ where
                                 .to_string(),
                             recoverable: false,
                         });
-                        emit_msg(EventMsg::TurnCompleted);
+                        emit_msg(EventMsg::TurnCompleted { interrupted: false });
                         return StopReason::Error("prompt too long".to_string());
                     }
                     if let Err(cause) = self
@@ -733,7 +741,7 @@ where
                             message: cause,
                             recoverable: false,
                         });
-                        emit_msg(EventMsg::TurnCompleted);
+                        emit_msg(EventMsg::TurnCompleted { interrupted: false });
                         return StopReason::Error("reactive compaction failed".to_string());
                     }
                     continue;
@@ -744,7 +752,7 @@ where
                         message: other.to_string(),
                         recoverable: false,
                     });
-                    emit_msg(EventMsg::TurnCompleted);
+                    emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::Error(other.to_string());
                 }
                 Ok(response) => {
@@ -774,9 +782,9 @@ where
                 }
             }
             if !text.is_empty() {
-                conv.push(Role::Assistant, text);
+                conv.push(Role::Assistant, text.clone());
             }
-            emit_msg(EventMsg::AgentMessageComplete);
+            emit_msg(EventMsg::AgentMessageComplete { text });
 
             if calls.is_empty() {
                 if response.truncated && continuations < MAX_CONTINUATIONS {
@@ -831,7 +839,7 @@ where
                 let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
                 conv.push(Role::User, format_tool_results(&results));
                 settle(conv, &last_input, &state, &emit_msg);
-                emit_msg(EventMsg::TurnCompleted);
+                emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
             let results = self.execute_calls(&calls, &emit_msg).await;
@@ -840,7 +848,7 @@ where
         }
 
         settle(conv, &last_input, &state, &emit_msg);
-        emit_msg(EventMsg::TurnCompleted);
+        emit_msg(EventMsg::TurnCompleted { interrupted: false });
         StopReason::Completed
     }
 
@@ -857,7 +865,9 @@ where
                 message: pre.message,
             });
         }
-        emit(EventMsg::CompactStarted);
+        emit(EventMsg::CompactStarted {
+            trigger: trigger_name(trigger).to_string(),
+        });
         let done = self
             .compactor
             .compact(history_lite(conv), trigger)
@@ -871,7 +881,9 @@ where
             input_tokens: estimate_tokens(&done.summary) + CONTEXT_OVERHEAD_TOKENS,
             output_tokens: 0,
         });
-        emit(EventMsg::CompactCompleted);
+        emit(EventMsg::CompactCompleted {
+            summary_tokens: done.summary_tokens,
+        });
         let post = self.hooks.run(HookPoint::PostCompact, "").await;
         if !post.message.is_empty() {
             emit(EventMsg::Warning {
@@ -926,6 +938,7 @@ where
             emit(EventMsg::ToolCallBegin {
                 call_id: call.call_id.clone(),
                 name: call.name.clone(),
+                input: call.input.clone(),
             });
         }
 
@@ -984,6 +997,10 @@ where
                 PolicyVerdict::Ask { kind, detail } => {
                     emit(EventMsg::ApprovalRequested {
                         call_id: call.call_id.clone(),
+                        kind: match kind {
+                            AskKind::Exec => WireApprovalKind::Exec,
+                            AskKind::Write => WireApprovalKind::Write,
+                        },
                         detail: detail.clone(),
                     });
                     serial.push(SerialCall::Approval { call, kind, detail });
@@ -1119,6 +1136,11 @@ pub trait TurnDriver: Send + Sync {
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> bool;
 
+    /// Switch the permission mode by wire name; false rejects the name.
+    fn set_permission_mode(&self, _mode: &str) -> bool {
+        false
+    }
+
     /// Interrupt handle observed by driven turns, if the driver exposes
     /// one. Composition roots bridge scoped stop signals into it.
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
@@ -1180,6 +1202,10 @@ where
         .await
     }
 
+    fn set_permission_mode(&self, mode: &str) -> bool {
+        self.policy.set_permission_mode(mode)
+    }
+
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
         Some(self.interrupt.clone())
     }
@@ -1236,6 +1262,10 @@ where
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> bool {
         self.as_ref().drive_hook(point, payload, on_event).await
+    }
+
+    fn set_permission_mode(&self, mode: &str) -> bool {
+        self.as_ref().set_permission_mode(mode)
     }
 
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
@@ -1322,6 +1352,16 @@ fn history_lite(conv: &Conversation) -> Vec<LiteMessage> {
             text: entry.text.clone(),
         })
         .collect()
+}
+
+/// Display name of one compaction trigger for event payloads.
+fn trigger_name(trigger: CompactTrigger) -> &'static str {
+    match trigger {
+        CompactTrigger::Auto => "auto",
+        CompactTrigger::Blocking => "blocking",
+        CompactTrigger::Reactive => "reactive",
+        CompactTrigger::Manual => "manual",
+    }
 }
 
 /// Flatten history text for fallback token estimates.

@@ -28,10 +28,10 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
             EventMsg::TurnStarted => {
                 trajectory.push_action(ActionKind::Note, "turn started");
             }
-            EventMsg::AgentMessageComplete => {
+            EventMsg::AgentMessageComplete { .. } => {
                 trajectory.push_action(ActionKind::Sample, "assistant message");
             }
-            EventMsg::ToolCallBegin { call_id, name } => {
+            EventMsg::ToolCallBegin { call_id, name, .. } => {
                 let seq = trajectory.push_action(
                     ActionKind::ToolCall { name: name.clone() },
                     format!("{call_id} started"),
@@ -52,7 +52,7 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
                     }
                 }
             }
-            EventMsg::CompactCompleted => {
+            EventMsg::CompactCompleted { .. } => {
                 trajectory.push_action(
                     ActionKind::Compact {
                         trigger: "replayed".to_string(),
@@ -94,13 +94,16 @@ mod tests {
             event(EventMsg::ToolCallBegin {
                 call_id: "c1".to_string(),
                 name: "shell".to_string(),
+                input: serde_json::Value::Null,
             }),
             event(EventMsg::ToolCallEnd {
                 call_id: "c1".to_string(),
                 is_error: true,
             }),
-            event(EventMsg::AgentMessageComplete),
-            event(EventMsg::TurnCompleted),
+            event(EventMsg::AgentMessageComplete {
+                text: "hi".to_string(),
+            }),
+            event(EventMsg::TurnCompleted { interrupted: false }),
         ]);
         let replay = trajectory.replay();
         assert_eq!(replay.len(), 3);

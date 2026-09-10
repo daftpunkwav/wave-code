@@ -198,6 +198,18 @@ where
                     finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
                     return;
                 }
+                Op::SetPermissionMode { mode } => {
+                    // Live mode switch through the driver seam; unknown
+                    // names warn so typos never silently stick.
+                    if !driver.set_permission_mode(&mode) {
+                        let _ = event_tx.send(Event {
+                            id: sub.id.clone(),
+                            msg: EventMsg::Warning {
+                                message: format!("unknown permission mode: {mode:?}"),
+                            },
+                        });
+                    }
+                }
             }
         }
     }
@@ -280,6 +292,12 @@ fn route_extra(
     match sub.op {
         Op::UserInput { .. } | Op::Compact => queue_or_reject(pending, sub, event_tx),
         Op::Interrupt => interrupt.trigger(),
+        Op::SetPermissionMode { .. } => {
+            // Mode switches apply at the next turn boundary; queue one
+            // marker so ordering with inputs is preserved. Control-class
+            // immediacy is unnecessary: policy reads the mode per call.
+            queue_or_reject(pending, sub, event_tx);
+        }
         Op::ExecApproval { call_id, decision } => {
             let _ = approvals.decide(&call_id, map_decision(decision));
         }
@@ -375,7 +393,7 @@ mod tests {
             }
             on_event(Event {
                 id: ctx.submission_id.clone(),
-                msg: EventMsg::TurnCompleted,
+                msg: EventMsg::TurnCompleted { interrupted: false },
             });
             StopReason::Completed
         }
@@ -388,11 +406,13 @@ mod tests {
         ) -> Result<(), String> {
             on_event(Event {
                 id: String::new(),
-                msg: EventMsg::CompactStarted,
+                msg: EventMsg::CompactStarted {
+                    trigger: "manual".to_string(),
+                },
             });
             on_event(Event {
                 id: String::new(),
-                msg: EventMsg::CompactCompleted,
+                msg: EventMsg::CompactCompleted { summary_tokens: 0 },
             });
             Ok(())
         }
@@ -521,6 +541,28 @@ mod tests {
             .await
             .unwrap();
         assert!(end.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_permission_modes_warn_instead_of_sticking() {
+        let (mut client, _) = spawn_actor(false);
+        client
+            .submit(Submission {
+                id: "s1".to_string(),
+                op: Op::SetPermissionMode {
+                    mode: "yolo".to_string(),
+                },
+            })
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event.msg,
+            EventMsg::Warning { ref message } if message.contains("unknown permission mode")
+        ));
     }
 
     #[tokio::test]

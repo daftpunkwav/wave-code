@@ -90,11 +90,14 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             stdout.push_str(text);
             None
         }
-        EventMsg::AgentMessageComplete => {
+        EventMsg::AgentMessageComplete { text } => {
+            if !text.is_empty() {
+                stdout.push_str(text);
+            }
             stdout.push('\n');
             None
         }
-        EventMsg::ToolCallBegin { call_id, name } => {
+        EventMsg::ToolCallBegin { call_id, name, .. } => {
             stderr.push_str(&format!("[tool] {name} ({call_id})\n"));
             None
         }
@@ -104,9 +107,13 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             }
             None
         }
-        EventMsg::ApprovalRequested { call_id, .. } => {
+        EventMsg::ApprovalRequested { call_id, kind, .. } => {
+            let what = match kind {
+                operations_wire::ApprovalKind::Exec => "execute a command",
+                operations_wire::ApprovalKind::Write => "modify files",
+            };
             stderr.push_str(&format!(
-                "[approval] {call_id} denied: non-interactive session\n"
+                "[approval] {call_id} denied: non-interactive session (wanted to {what})\n"
             ));
             None
         }
@@ -117,12 +124,12 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             stderr.push_str(&format!("[usage] in={input_tokens} out={output_tokens}\n"));
             None
         }
-        EventMsg::CompactStarted => {
-            stderr.push_str("[compact started]\n");
+        EventMsg::CompactStarted { trigger } => {
+            stderr.push_str(&format!("[compact started: {trigger}]\n"));
             None
         }
-        EventMsg::CompactCompleted => {
-            stderr.push_str("[compact completed]\n");
+        EventMsg::CompactCompleted { summary_tokens } => {
+            stderr.push_str(&format!("[compact completed: {summary_tokens} tokens]\n"));
             None
         }
         EventMsg::Warning { message } => {
@@ -140,7 +147,7 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
                 Some(Outcome::Failed)
             }
         }
-        EventMsg::TurnCompleted => Some(Outcome::Completed),
+        EventMsg::TurnCompleted { .. } => Some(Outcome::Completed),
     }
 }
 
@@ -407,7 +414,16 @@ mod tests {
             )
             .is_none()
         );
-        assert!(render_event(&EventMsg::AgentMessageComplete, &mut out, &mut err).is_none());
+        assert!(
+            render_event(
+                &EventMsg::AgentMessageComplete {
+                    text: String::new()
+                },
+                &mut out,
+                &mut err
+            )
+            .is_none()
+        );
         assert_eq!(out, "hi\n");
         assert!(err.is_empty());
     }
@@ -438,7 +454,11 @@ mod tests {
             Some(Outcome::Failed)
         );
         assert_eq!(
-            render_event(&EventMsg::TurnCompleted, &mut out, &mut err),
+            render_event(
+                &EventMsg::TurnCompleted { interrupted: false },
+                &mut out,
+                &mut err
+            ),
             Some(Outcome::Completed)
         );
     }

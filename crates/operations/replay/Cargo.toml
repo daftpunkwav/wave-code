@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 operations-wire = { path = "../wire" }
 state-trajectory = { path = "../../state/trajectory" }
+
+[dev-dependencies]
+serde_json.workspace = true

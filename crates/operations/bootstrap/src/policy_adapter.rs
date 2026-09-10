@@ -39,6 +39,20 @@ impl PolicyAdapter {
 
 #[async_trait::async_trait]
 impl PolicyDecider for PolicyAdapter {
+    /// Switch the live sandbox mode; unknown names reject explicitly.
+    fn set_permission_mode(&self, mode: &str) -> bool {
+        match wavecode_protocol::PermissionMode::parse(mode) {
+            Some(parsed) => {
+                *self
+                    .sandbox
+                    .mode_handle()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = parsed;
+                true
+            }
+            None => false,
+        }
+    }
     async fn decide(&self, call: &ToolCall) -> PolicyVerdict {
         let (read_only, destructive) = match self.registry.get(&call.name) {
             Some(tool) => (tool.is_read_only(), tool.is_destructive()),
@@ -93,6 +107,15 @@ mod tests {
             .decide(&call("read_file", serde_json::json!({"path": "a.txt"})))
             .await;
         assert_eq!(verdict, PolicyVerdict::Allow);
+    }
+
+    #[test]
+    fn permission_modes_switch_live_and_reject_garbage() {
+        let sandbox =
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Default);
+        let adapter = PolicyAdapter::new(sandbox, registry());
+        assert!(adapter.set_permission_mode("plan"));
+        assert!(!adapter.set_permission_mode("yolo"));
     }
 
     #[tokio::test]

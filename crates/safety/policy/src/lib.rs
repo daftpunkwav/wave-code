@@ -60,18 +60,18 @@ impl ToolPolicy {
     /// (Deny over Ask over Allow); unmatched tools default to Ask so a
     /// missing rule can never silently permit execution.
     pub fn evaluate(&self, tool: &str) -> Effect {
-        let mut effect = Effect::Ask;
+        let mut effect: Option<Effect> = None;
         for rule in &self.rules {
             if !rule.matches(tool) {
                 continue;
             }
-            effect = match (effect, rule.effect) {
-                (Effect::Deny, _) | (_, Effect::Deny) => Effect::Deny,
-                (Effect::Ask, _) | (_, Effect::Ask) => Effect::Ask,
-                (Effect::Allow, Effect::Allow) => Effect::Allow,
-            };
+            effect = Some(match (effect, rule.effect) {
+                (Some(Effect::Deny), _) | (_, Effect::Deny) => Effect::Deny,
+                (Some(Effect::Ask), _) | (_, Effect::Ask) => Effect::Ask,
+                _ => Effect::Allow,
+            });
         }
-        effect
+        effect.unwrap_or(Effect::Ask)
     }
 }
 

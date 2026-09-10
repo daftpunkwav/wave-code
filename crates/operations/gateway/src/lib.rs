@@ -187,7 +187,7 @@ mod tests {
             });
             on_event(Event {
                 id: "s1".to_string(),
-                msg: EventMsg::TurnCompleted,
+                msg: EventMsg::TurnCompleted { interrupted: false },
             });
             StopReason::Completed
         }

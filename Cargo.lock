@@ -575,6 +575,7 @@ dependencies = [
  "operations-bootstrap",
  "operations-wire",
  "rustyline",
+ "serde_json",
  "tokio",
 ]
 

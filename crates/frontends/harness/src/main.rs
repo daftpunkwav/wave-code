@@ -50,6 +50,9 @@ enum Command {
     Exec {
         /// Prompt text for the single turn.
         prompt: String,
+        /// Emit JSONL events on stdout, human rendering on stderr.
+        #[arg(long)]
+        json: bool,
     },
     /// Interactive multi-turn session sharing one conversation.
     Repl,
@@ -172,8 +175,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match args.command {
-        Command::Exec { prompt } => {
-            let outcome = run_exec(&mut handle.client, &prompt).await?;
+        Command::Exec { prompt, json } => {
+            let outcome = run_exec(&mut handle.client, &prompt, json).await?;
             std::process::exit(outcome.exit_code())
         }
         Command::Repl => {
@@ -199,6 +202,8 @@ enum Slash {
     Memory,
     /// List configured MCP servers.
     Mcp,
+    /// Cycle the session permission mode.
+    Permissions,
     /// Show help text.
     Help,
     /// Unknown slash command with its name.
@@ -217,6 +222,7 @@ fn parse_slash(line: &str) -> Slash {
             "compact" => Slash::Compact,
             "memory" => Slash::Memory,
             "mcp" => Slash::Mcp,
+            "permissions" => Slash::Permissions,
             "help" => Slash::Help,
             _ => Slash::Unknown(name.to_string()),
         };
@@ -225,10 +231,26 @@ fn parse_slash(line: &str) -> Slash {
 }
 
 /// REPL help text printed for `/help` and unknown commands.
-const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /quit (end session), /help";
+const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /permissions (cycle approval mode), /quit (end session), /help";
+
+/// Permission modes in `/permissions` cycle order (wire names).
+const PERMISSION_CYCLE: &[&str] = &["default", "plan", "acceptEdits", "bypassPermissions"];
+
+/// Next mode in the cycle order, wrapping around.
+fn next_mode(current: &str) -> &'static str {
+    let pos = PERMISSION_CYCLE
+        .iter()
+        .position(|m| *m == current)
+        .unwrap_or(0);
+    PERMISSION_CYCLE[(pos + 1) % PERMISSION_CYCLE.len()]
+}
 
 /// Drive one turn to completion, streaming answer text to stdout.
-async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outcome> {
+///
+/// With `json`, stdout carries one JSON event per line while the human
+/// rendering falls back to stderr (legacy exec contract); otherwise
+/// stdout carries the answer text.
+async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow::Result<Outcome> {
     client
         .submit(Submission {
             id: "exec-1".to_string(),
@@ -241,6 +263,7 @@ async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outc
 
     let mut stdout_text = String::new();
     let mut stderr_text = String::new();
+    let mut json_lines = String::new();
     let mut failed = false;
     let mut interrupted = false;
     let outcome = loop {
@@ -250,6 +273,12 @@ async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outc
                     // Actor exited without TurnCompleted: treat as failure.
                     break Outcome::Failed;
                 };
+                if json {
+                    json_lines.push_str(
+                        &serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()),
+                    );
+                    json_lines.push('\n');
+                }
                 if let Some(end) = render_event(&event.msg, &mut stdout_text, &mut stderr_text) {
                     if end == Outcome::Failed {
                         failed = true;
@@ -266,7 +295,11 @@ async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outc
             }
         }
     };
-    print!("{stdout_text}");
+    if json {
+        print!("{json_lines}");
+    } else {
+        print!("{stdout_text}");
+    }
     eprint!("{stderr_text}");
     std::io::stdout().flush()?;
     std::io::stderr().flush()?;
@@ -287,7 +320,8 @@ async fn run_repl(
 
     let mut editor = rustyline::DefaultEditor::new()?;
     let mut turn: u64 = 0;
-    println!("harness repl: {REPL_HELP}");
+    let mut permission_mode = "default";
+    println!("harness repl (permission: {permission_mode}): {REPL_HELP}");
     loop {
         let line = match editor.readline("> ") {
             Ok(line) => line,
@@ -319,6 +353,20 @@ async fn run_repl(
                         println!("- {server}");
                     }
                 }
+            }
+            Slash::Permissions => {
+                permission_mode = next_mode(permission_mode);
+                turn += 1;
+                client
+                    .submit(Submission {
+                        id: format!("repl-{turn}-mode"),
+                        op: Op::SetPermissionMode {
+                            mode: permission_mode.to_string(),
+                        },
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                println!("(permission mode: {permission_mode})");
             }
             Slash::Compact => {
                 turn += 1;
@@ -385,12 +433,22 @@ mod tests {
     }
 
     #[test]
+    fn permission_modes_cycle_in_wire_order() {
+        assert_eq!(next_mode("default"), "plan");
+        assert_eq!(next_mode("plan"), "acceptEdits");
+        assert_eq!(next_mode("acceptEdits"), "bypassPermissions");
+        assert_eq!(next_mode("bypassPermissions"), "default");
+        assert_eq!(next_mode("garbage"), "plan");
+    }
+
+    #[test]
     fn slash_lines_route_to_commands() {
         assert_eq!(parse_slash("/quit"), Slash::Quit);
         assert_eq!(parse_slash("/exit"), Slash::Quit);
         assert_eq!(parse_slash("  /compact  "), Slash::Compact);
         assert_eq!(parse_slash("/memory"), Slash::Memory);
         assert_eq!(parse_slash("/mcp"), Slash::Mcp);
+        assert_eq!(parse_slash("/permissions"), Slash::Permissions);
         assert_eq!(parse_slash("/help"), Slash::Help);
         assert_eq!(parse_slash("/nope"), Slash::Unknown("nope".to_string()));
         assert_eq!(

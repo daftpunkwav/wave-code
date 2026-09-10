@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "action-kit"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -794,6 +801,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "infrastructure-base"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "instability"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -972,6 +986,59 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "operations-actor"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "infrastructure-base",
+ "operations-wire",
+ "runtime-child",
+ "runtime-runner",
+ "safety-gate",
+ "serde_json",
+ "state-store",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "operations-bootstrap"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "infrastructure-base",
+ "runtime-runner",
+ "safety-gate",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "wavecode-hooks",
+ "wavecode-llm",
+ "wavecode-protocol",
+ "wavecode-sandbox",
+ "wavecode-tools",
+]
+
+[[package]]
+name = "operations-observe"
+version = "0.1.0"
+dependencies = [
+ "operations-wire",
+]
+
+[[package]]
+name = "operations-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "parking_lot"
@@ -1273,6 +1340,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-child"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "infrastructure-base",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "runtime-prompt"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "runtime-runner"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "infrastructure-base",
+ "operations-wire",
+ "serde_json",
+ "state-store",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1372,6 +1470,16 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safety-gate"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "scopeguard"
@@ -1529,6 +1637,13 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "state-store"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "static_assertions"

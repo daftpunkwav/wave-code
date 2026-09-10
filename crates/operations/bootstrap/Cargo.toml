@@ -1,0 +1,24 @@
+[package]
+name = "operations-bootstrap"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+runtime-runner = { path = "../../runtime/runner" }
+infrastructure-base = { path = "../../infrastructure/base" }
+safety-gate = { path = "../../safety/gate" }
+wavecode-tools = { path = "../../capabilities/tools" }
+wavecode-sandbox = { path = "../../capabilities/sandbox" }
+wavecode-hooks = { path = "../../capabilities/hooks" }
+wavecode-llm = { path = "../../foundation/llm" }
+wavecode-protocol = { path = "../../foundation/protocol" }
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true

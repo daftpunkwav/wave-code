@@ -1082,6 +1082,12 @@ pub trait TurnDriver: Send + Sync {
         payload: &str,
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> bool;
+
+    /// Interrupt handle observed by driven turns, if the driver exposes
+    /// one. Composition roots bridge scoped stop signals into it.
+    fn interrupt_handle(&self) -> Option<InterruptHandle> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -1136,6 +1142,10 @@ where
             })
         })
         .await
+    }
+
+    fn interrupt_handle(&self) -> Option<InterruptHandle> {
+        Some(self.interrupt.clone())
     }
 }
 

@@ -18,16 +18,20 @@
 //! concrete legacy crate. Policy stays in the legacy crates; mapping stays
 //! here, so neither side names the other directly.
 
+pub mod child_service;
 pub mod gate_adapter;
 pub mod hook_adapter;
 pub mod model_adapter;
+pub mod native;
 pub mod plan_adapter;
 pub mod policy_adapter;
 pub mod tool_adapter;
 
+pub use child_service::TurnChildService;
 pub use gate_adapter::GateApprovalSource;
 pub use hook_adapter::HookAdapter;
 pub use model_adapter::ModelAdapter;
+pub use native::{NativeExecutor, NativeTool};
 pub use plan_adapter::TodoPlanTracker;
 pub use policy_adapter::PolicyAdapter;
 pub use tool_adapter::ToolAdapter;

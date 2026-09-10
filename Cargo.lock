@@ -10,6 +10,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "action-retrieval"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "action-tasks"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -808,7 +822,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "infrastructure-cache"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "infrastructure-config"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "infrastructure-coord"
 version = "0.1.0"
 dependencies = [
  "thiserror",
@@ -825,6 +853,14 @@ dependencies = [
 name = "infrastructure-routing"
 version = "0.1.0"
 dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "infrastructure-schema"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
  "thiserror",
 ]
 
@@ -1029,12 +1065,16 @@ dependencies = [
 name = "operations-bootstrap"
 version = "0.1.0"
 dependencies = [
+ "action-tasks",
  "async-trait",
  "futures",
  "infrastructure-base",
+ "operations-wire",
+ "runtime-child",
  "runtime-runner",
  "safety-gate",
  "serde_json",
+ "state-store",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1058,6 +1098,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "operations-notify"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "operations-observe"
 version = "0.1.0"
 dependencies = [
@@ -1070,6 +1118,14 @@ version = "0.1.0"
 dependencies = [
  "operations-wire",
  "state-trajectory",
+]
+
+[[package]]
+name = "operations-simulate"
+version = "0.1.0"
+dependencies = [
+ "runtime-runner",
+ "serde_json",
 ]
 
 [[package]]
@@ -1398,6 +1454,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-identity"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "runtime-prompt"
 version = "0.1.0"
 dependencies = [
@@ -1424,6 +1487,13 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "runtime-skills"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
@@ -1737,6 +1807,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "state-persistence"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "state-profile"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "state-store"
 version = "0.1.0"
 dependencies = [
@@ -1747,6 +1833,14 @@ dependencies = [
 name = "state-trajectory"
 version = "0.1.0"
 dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "state-workspace"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
  "thiserror",
 ]
 
@@ -2105,6 +2199,15 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transport-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

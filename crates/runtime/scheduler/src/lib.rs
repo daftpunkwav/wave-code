@@ -224,6 +224,39 @@ pub enum ScheduleError {
     InvalidCron(String),
 }
 
+/// Edge-triggered cron driver: fires once per matching minute.
+///
+/// The driver owns no clock; callers tick it from their own loop with the
+/// current civil time. Repeated ticks inside one minute fire once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronDaemon {
+    spec: CronSpec,
+    last_fired: Option<(u8, u8, u8)>,
+}
+
+impl CronDaemon {
+    /// Watch one cron expression.
+    pub fn new(spec: CronSpec) -> Self {
+        Self {
+            spec,
+            last_fired: None,
+        }
+    }
+
+    /// Tick with the current time; true exactly once per matching minute.
+    pub fn tick(&mut self, time: CivilTime) -> bool {
+        if !self.spec.matches(time) {
+            return false;
+        }
+        let minute_key = (time.day, time.hour, time.minute);
+        if self.last_fired == Some(minute_key) {
+            return false;
+        }
+        self.last_fired = Some(minute_key);
+        true
+    }
+}
+
 /// Concurrency gate: at most `limit` holders proceed at once.
 #[derive(Debug, Clone)]
 pub struct ConcurrencyLimit {
@@ -318,6 +351,28 @@ mod tests {
         assert!(nine.matches(morning));
         assert!(!nine.matches(evening));
         assert!(CronSpec::parse("0 9").is_err());
+    }
+
+    #[test]
+    fn cron_daemon_fires_once_per_matching_minute() {
+        let mut daemon = CronDaemon::new(CronSpec::parse("0 9 * * *").unwrap());
+        let morning = CivilTime {
+            minute: 0,
+            hour: 9,
+            day: 1,
+            month: 1,
+            weekday: 1,
+        };
+        assert!(daemon.tick(morning));
+        assert!(!daemon.tick(morning));
+        let evening = CivilTime {
+            minute: 0,
+            hour: 21,
+            day: 1,
+            month: 1,
+            weekday: 1,
+        };
+        assert!(!daemon.tick(evening));
     }
 
     #[tokio::test]

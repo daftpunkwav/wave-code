@@ -86,6 +86,38 @@ impl Metrics {
     }
 }
 
+/// One timed span with an explicit millisecond clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanTimer {
+    /// Span name for correlation.
+    pub name: String,
+    /// Start time in caller milliseconds.
+    pub start_ms: u64,
+    /// End time once finished.
+    pub end_ms: Option<u64>,
+}
+
+impl SpanTimer {
+    /// Start a span at `now_ms`.
+    pub fn start(name: impl Into<String>, now_ms: u64) -> Self {
+        Self {
+            name: name.into(),
+            start_ms: now_ms,
+            end_ms: None,
+        }
+    }
+
+    /// Finish the span at `now_ms`.
+    pub fn finish(&mut self, now_ms: u64) {
+        self.end_ms = Some(now_ms);
+    }
+
+    /// Elapsed milliseconds, saturating on backwards clocks.
+    pub fn elapsed_ms(&self, now_ms: u64) -> u64 {
+        self.end_ms.unwrap_or(now_ms).saturating_sub(self.start_ms)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +185,15 @@ mod tests {
         }));
         assert_eq!(metrics.errors, 1);
         assert_eq!(metrics.tool_errors, 0);
+    }
+
+    #[test]
+    fn spans_measure_with_explicit_clocks() {
+        let mut span = SpanTimer::start("turn", 100);
+        assert_eq!(span.elapsed_ms(150), 50);
+        span.finish(180);
+        assert_eq!(span.elapsed_ms(999), 80);
+        // Backwards clocks saturate instead of underflowing.
+        assert_eq!(SpanTimer::start("x", 50).elapsed_ms(10), 0);
     }
 }

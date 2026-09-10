@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 runtime-runner = { path = "../../runtime/runner" }
+runtime-child = { path = "../../runtime/child" }
+state-store = { path = "../../state/store" }
+action-tasks = { path = "../../action/tasks" }
 infrastructure-base = { path = "../../infrastructure/base" }
 safety-gate = { path = "../../safety/gate" }
 wavecode-tools = { path = "../../capabilities/tools" }
@@ -22,3 +25,4 @@ futures.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 tempfile.workspace = true
+operations-wire = { path = "../wire" }

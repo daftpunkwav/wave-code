@@ -68,6 +68,12 @@ pub struct SessionHandle {
     pub interrupt: infrastructure_base::InterruptHandle,
     /// Assembled system prompt (also injected into every turn).
     pub system: String,
+    /// Resolved model name for status displays.
+    pub model_name: String,
+    /// Effective permission mode wire name for status displays.
+    pub permission_mode: String,
+    /// Directly invokable skill names for completion sources.
+    pub skill_names: Vec<String>,
     /// Persistent memory index text (empty when memory degraded).
     pub memory_index: String,
     /// Configured MCP servers as one display line each.
@@ -150,11 +156,20 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
             })
         })
         .unwrap_or(wavecode_protocol::PermissionMode::Default);
+    // Effective wire name for status displays (post-fallback, so the UI
+    // never shows a mode the policy rejected).
+    let permission_mode_raw = match permission_mode {
+        wavecode_protocol::PermissionMode::Default => "default".to_string(),
+        wavecode_protocol::PermissionMode::Plan => "plan".to_string(),
+        wavecode_protocol::PermissionMode::AcceptEdits => "acceptEdits".to_string(),
+        wavecode_protocol::PermissionMode::BypassPermissions => "bypassPermissions".to_string(),
+        _ => "default".to_string(),
+    };
     let sandbox = wavecode_sandbox::Sandbox::without_rules(permission_mode);
 
     // 4. Context sources with warn-and-continue degradation.
     let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
-    let skill_catalog = assemble_skills(home.as_deref(), &cwd, &mut warnings);
+    let (skill_catalog, skill_names) = assemble_skills(home.as_deref(), &cwd, &mut warnings);
     let hooks = assemble_hooks(&config, &mut warnings);
     let mcp_servers = describe_mcp_servers(&config);
 
@@ -248,6 +263,9 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         approvals,
         interrupt,
         system,
+        model_name,
+        permission_mode: permission_mode_raw,
+        skill_names,
         memory_index,
         mcp_servers,
         warnings,
@@ -342,12 +360,23 @@ fn assemble_memory(
     (instruction.combined, index)
 }
 
-/// Assemble the skill catalog text with discovery warnings preserved.
-fn assemble_skills(home: Option<&Path>, cwd: &Path, warnings: &mut Vec<String>) -> String {
+/// Assemble the skill catalog text with discovery warnings preserved,
+/// returning catalog text plus directly invokable names for UIs.
+fn assemble_skills(
+    home: Option<&Path>,
+    cwd: &Path,
+    warnings: &mut Vec<String>,
+) -> (String, Vec<String>) {
     let roots = wavecode_skills::standard_roots(None, home, cwd);
     let discovery = wavecode_skills::discover(&roots);
     warnings.extend(discovery.warnings.iter().cloned());
-    discovery.set.catalog(DEFAULT_CATALOG_BUDGET)
+    let names: Vec<String> = discovery
+        .set
+        .iter()
+        .filter(|skill| skill.meta.user_invocable)
+        .map(|skill| skill.name.clone())
+        .collect();
+    (discovery.set.catalog(DEFAULT_CATALOG_BUDGET), names)
 }
 
 /// Convert raw config hooks into an engine, warning past bad entries.

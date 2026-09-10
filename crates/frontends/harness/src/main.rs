@@ -170,7 +170,12 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(outcome.exit_code())
         }
         Command::Repl => {
-            run_repl(&mut handle.client).await?;
+            run_repl(
+                &mut handle.client,
+                &handle.memory_index,
+                &handle.mcp_servers,
+            )
+            .await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
     }
@@ -183,6 +188,10 @@ enum Slash {
     Quit,
     /// Compact now via an idle operation.
     Compact,
+    /// Show the persistent memory index.
+    Memory,
+    /// List configured MCP servers.
+    Mcp,
     /// Show help text.
     Help,
     /// Unknown slash command with its name.
@@ -199,6 +208,8 @@ fn parse_slash(line: &str) -> Slash {
         return match name {
             "quit" | "exit" => Slash::Quit,
             "compact" => Slash::Compact,
+            "memory" => Slash::Memory,
+            "mcp" => Slash::Mcp,
             "help" => Slash::Help,
             _ => Slash::Unknown(name.to_string()),
         };
@@ -207,7 +218,7 @@ fn parse_slash(line: &str) -> Slash {
 }
 
 /// REPL help text printed for `/help` and unknown commands.
-const REPL_HELP: &str = "commands: /compact (compress context now), /quit (end session), /help";
+const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /quit (end session), /help";
 
 /// Drive one turn to completion, streaming answer text to stdout.
 async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outcome> {
@@ -260,7 +271,11 @@ async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outc
 /// Turns accumulate in the actor-side conversation; `/compact` runs an
 /// idle compaction between turns. Ctrl-C at the prompt starts a fresh
 /// line; Ctrl-C mid-turn interrupts the running turn.
-async fn run_repl(client: &mut ActorClient) -> anyhow::Result<()> {
+async fn run_repl(
+    client: &mut ActorClient,
+    memory_index: &str,
+    mcp_servers: &[String],
+) -> anyhow::Result<()> {
     use rustyline::error::ReadlineError;
 
     let mut editor = rustyline::DefaultEditor::new()?;
@@ -282,6 +297,22 @@ async fn run_repl(client: &mut ActorClient) -> anyhow::Result<()> {
             Slash::Quit => break,
             Slash::Help => println!("{REPL_HELP}"),
             Slash::Unknown(name) => println!("unknown command /{name}; {REPL_HELP}"),
+            Slash::Memory => {
+                if memory_index.trim().is_empty() {
+                    println!("(memory unavailable: no index assembled)");
+                } else {
+                    println!("{memory_index}");
+                }
+            }
+            Slash::Mcp => {
+                if mcp_servers.is_empty() {
+                    println!("(no MCP servers configured)");
+                } else {
+                    for server in mcp_servers {
+                        println!("- {server}");
+                    }
+                }
+            }
             Slash::Compact => {
                 turn += 1;
                 client
@@ -351,6 +382,8 @@ mod tests {
         assert_eq!(parse_slash("/quit"), Slash::Quit);
         assert_eq!(parse_slash("/exit"), Slash::Quit);
         assert_eq!(parse_slash("  /compact  "), Slash::Compact);
+        assert_eq!(parse_slash("/memory"), Slash::Memory);
+        assert_eq!(parse_slash("/mcp"), Slash::Mcp);
         assert_eq!(parse_slash("/help"), Slash::Help);
         assert_eq!(parse_slash("/nope"), Slash::Unknown("nope".to_string()));
         assert_eq!(

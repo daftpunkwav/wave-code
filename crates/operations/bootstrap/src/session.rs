@@ -68,6 +68,10 @@ pub struct SessionHandle {
     pub interrupt: infrastructure_base::InterruptHandle,
     /// Assembled system prompt (also injected into every turn).
     pub system: String,
+    /// Persistent memory index text (empty when memory degraded).
+    pub memory_index: String,
+    /// Configured MCP servers as one display line each.
+    pub mcp_servers: Vec<String>,
     /// Startup warnings in assembly order.
     pub warnings: Vec<String>,
 }
@@ -152,6 +156,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
     let skill_catalog = assemble_skills(home.as_deref(), &cwd, &mut warnings);
     let hooks = assemble_hooks(&config, &mut warnings);
+    let mcp_servers = describe_mcp_servers(&config);
 
     // 5. Seam adapters (pure wiring, no policy inside).
     let tools = ToolAdapter::new(
@@ -220,7 +225,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let system = build_system(&PromptSlots {
         identity,
         instructions: instruction_memory,
-        memory_index,
+        memory_index: memory_index.clone(),
         skill_catalog,
         tool_note: format!("Available tools: {}", tool_names.join(", ")),
         summary: String::new(),
@@ -243,6 +248,8 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         approvals,
         interrupt,
         system,
+        memory_index,
+        mcp_servers,
         warnings,
     })
 }
@@ -374,6 +381,28 @@ fn assemble_hooks(
     Arc::new(wavecode_hooks::HookEngine::new(defs))
 }
 
+/// Describe configured MCP servers as one display line each.
+///
+/// stdio entries show their command, HTTP entries their URL; entries
+/// with neither are reported, never silently dropped.
+fn describe_mcp_servers(config: &wavecode_config::Config) -> Vec<String> {
+    let mut lines: Vec<String> = config
+        .mcp_servers
+        .iter()
+        .map(|(name, server)| {
+            if let Some(command) = &server.command {
+                format!("{name} (stdio: {command})")
+            } else if let Some(url) = &server.url {
+                format!("{name} (http: {url})")
+            } else {
+                format!("{name} (unconfigured)")
+            }
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
 /// True for http URLs outside loopback hosts (credentials at risk).
 fn is_insecure_http_url(base_url: &str) -> bool {
     let Some(rest) = base_url.strip_prefix("http://") else {
@@ -428,6 +457,8 @@ api_key = "k-inline"
         );
         assert!(handle.system.contains("WaveCode"));
         assert!(handle.system.contains("Available tools:"));
+        assert!(handle.memory_index.is_empty());
+        assert!(handle.mcp_servers.is_empty());
         // The client submits without network access; shutdown closes cleanly.
         handle
             .client

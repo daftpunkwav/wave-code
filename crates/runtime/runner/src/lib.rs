@@ -334,11 +334,37 @@ pub trait HookGateway: Send + Sync {
     }
 }
 
+/// Incremental model output during one sample.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SampleDelta {
+    /// Assistant text fragment as it arrives.
+    Text(String),
+}
+
 /// Samples the model once; implemented by the provider adapter.
 #[async_trait::async_trait]
 pub trait ModelGateway: Send + Sync {
     /// Sample the model; `PromptTooLong` signals the loop to compact.
     async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError>;
+
+    /// Sample with per-delta callbacks for live frontends.
+    ///
+    /// The default implementation replays the final text as a single
+    /// delta, so adapters without true streaming stay compatible while
+    /// frontends keep working unchanged.
+    async fn sample_streaming(
+        &self,
+        request: SampleRequest,
+        on_delta: &(dyn Fn(SampleDelta) + Send + Sync),
+    ) -> Result<SampleResponse, SampleError> {
+        let response = self.sample(request).await?;
+        for block in &response.blocks {
+            if let SampleBlock::Text(text) = block {
+                on_delta(SampleDelta::Text(text.clone()));
+            }
+        }
+        Ok(response)
+    }
 }
 
 /// Dispatch tool calls with read-only parallelism and serial mutation.
@@ -675,7 +701,17 @@ where
                 messages: history_lite(conv),
                 tools: self.executor.available_tools(),
             };
-            let response = match self.model.sample(request).await {
+            // Live deltas stream to frontends ahead of the assembled
+            // message; ordering (deltas before AgentMessageComplete) is
+            // part of the event contract.
+            let response = match self
+                .model
+                .sample_streaming(request, &|delta| {
+                    let SampleDelta::Text(text) = delta;
+                    emit_msg(EventMsg::AgentMessageDelta { text });
+                })
+                .await
+            {
                 Err(SampleError::PromptTooLong) => {
                     reactive_compacts += 1;
                     if reactive_compacts >= MAX_REACTIVE_COMPACTS {
@@ -1761,6 +1797,17 @@ mod run_loop_tests {
         assert!(kinds.contains(&"token_count".to_string()));
         assert_eq!(kinds.last().unwrap(), "turn_completed");
         assert!(conv.usage_carry().input_tokens > 0);
+        // Deltas stream ahead of the assembled message (default replay
+        // emits the final text as one delta through the loop contract).
+        let delta_pos = kinds
+            .iter()
+            .position(|k| k == "agent_message_delta")
+            .unwrap();
+        let complete_pos = kinds
+            .iter()
+            .position(|k| k == "agent_message_complete")
+            .unwrap();
+        assert!(delta_pos < complete_pos);
     }
 
     #[tokio::test]

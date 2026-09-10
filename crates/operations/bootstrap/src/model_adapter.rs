@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use runtime_runner::{
-    ModelGateway, SampleBlock, SampleError, SampleRequest, SampleResponse, ToolRef,
+    ModelGateway, SampleBlock, SampleDelta, SampleError, SampleRequest, SampleResponse, ToolRef,
 };
 use wavecode_llm::{
     ChatModel, ChatRequest, ContentBlock, LlmError, Message, Role, StreamEvent, ToolSpec,
@@ -99,6 +99,14 @@ fn flush_text(text: &mut String, blocks: &mut Vec<SampleBlock>) {
 #[async_trait::async_trait]
 impl ModelGateway for ModelAdapter {
     async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError> {
+        self.sample_streaming(request, &|_| {}).await
+    }
+
+    async fn sample_streaming(
+        &self,
+        request: SampleRequest,
+        on_delta: &(dyn Fn(SampleDelta) + Send + Sync),
+    ) -> Result<SampleResponse, SampleError> {
         let req = ChatRequest {
             model: self.model_name.clone(),
             system: request.system.clone(),
@@ -116,7 +124,10 @@ impl ModelGateway for ModelAdapter {
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| map_error(&e))?;
             match event {
-                StreamEvent::TextDelta { text: delta } => text.push_str(&delta),
+                StreamEvent::TextDelta { text: delta } => {
+                    text.push_str(&delta);
+                    on_delta(SampleDelta::Text(delta));
+                }
                 StreamEvent::ToolUseBegin { id, name } => {
                     flush_text(&mut text, &mut blocks);
                     pending = Some(PendingTool {
@@ -276,6 +287,38 @@ mod tests {
             }
         );
         assert_eq!(response.output_tokens, Some(2));
+    }
+
+    #[tokio::test]
+    async fn streaming_forwards_deltas_in_order() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        let response = adapter(vec![
+            StreamEvent::TextDelta {
+                text: "a".to_string(),
+            },
+            StreamEvent::TextDelta {
+                text: "b".to_string(),
+            },
+            StreamEvent::MessageComplete {
+                stop_reason: "end_turn".to_string(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                },
+            },
+        ])
+        .sample_streaming(request(), &|delta| {
+            let SampleDelta::Text(text) = delta;
+            seen_clone.lock().unwrap().push(text);
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(response.blocks, vec![SampleBlock::Text("ab".to_string())]);
     }
 
     #[tokio::test]

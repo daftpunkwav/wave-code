@@ -576,6 +576,7 @@ dependencies = [
  "operations-wire",
  "rustyline",
  "serde_json",
+ "state-persistence",
  "tokio",
 ]
 
@@ -1867,9 +1868,11 @@ dependencies = [
 name = "state-persistence"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "wavecode-llm",
 ]
 
 [[package]]

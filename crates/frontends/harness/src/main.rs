@@ -56,6 +56,12 @@ enum Command {
     },
     /// Interactive multi-turn session sharing one conversation.
     Repl,
+    /// Resume a legacy session: no id lists recent threads, an id
+    /// imports its history and continues interactively.
+    Resume {
+        /// Legacy thread id (`resume` without id lists threads).
+        thread_id: Option<String>,
+    },
 }
 
 /// Terminal outcome driving the process exit code.
@@ -165,9 +171,10 @@ async fn main() -> anyhow::Result<()> {
         config_path: args.config,
         model_override: args.model,
         cwd,
-        home,
+        home: home.clone(),
         identity: DEFAULT_IDENTITY.to_string(),
         headless: true,
+        initial_history: Vec::new(),
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
     for warning in &handle.warnings {
@@ -188,7 +195,69 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
+        Command::Resume { thread_id } => {
+            run_resume(thread_id, home).await?;
+            std::process::exit(Outcome::Completed.exit_code())
+        }
     }
+}
+
+/// Resume a legacy session from rollout journals.
+///
+/// Without an id, lists recent threads newest-first. With an id, imports
+/// its history into a fresh assembly and continues in the REPL. History
+/// import is plain text: tool payloads collapse to bracketed lines.
+async fn run_resume(thread_id: Option<String>, home: Option<PathBuf>) -> anyhow::Result<()> {
+    use state_persistence::legacy::{default_root, list_threads, load_history};
+
+    let Some(home) = home else {
+        return Err(anyhow::anyhow!(
+            "home directory unavailable; resume needs ~/.wavecode/threads"
+        ));
+    };
+    let root = default_root(&home);
+    let Some(id) = thread_id else {
+        let threads = list_threads(&root)?;
+        if threads.is_empty() {
+            println!("(no previous sessions; directory: {})", root.display());
+            return Ok(());
+        }
+        println!("recent sessions, newest first:");
+        for thread in &threads {
+            let preview = thread
+                .first_user_text
+                .as_deref()
+                .unwrap_or("(no user messages)");
+            println!(
+                "  {}  {} messages / {} compactions  {}",
+                thread.thread_id, thread.message_count, thread.compaction_count, preview
+            );
+        }
+        println!("\nresume with: `harness resume <thread-id>`");
+        return Ok(());
+    };
+    let history = load_history(&root, &id)?;
+    println!("resumed {id} ({} messages)", history.len());
+    let cwd = std::env::current_dir()?;
+    let mut handle = assemble_session(AssembleOptions {
+        config_path: None,
+        model_override: None,
+        cwd,
+        home: Some(home),
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: true,
+        initial_history: history,
+    })
+    .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
+    for warning in &handle.warnings {
+        eprintln!("[warn] {warning}");
+    }
+    run_repl(
+        &mut handle.client,
+        &handle.memory_index,
+        &handle.mcp_servers,
+    )
+    .await
 }
 
 /// One parsed REPL line.

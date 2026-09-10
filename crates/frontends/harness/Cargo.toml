@@ -12,6 +12,7 @@ path = "src/main.rs"
 operations-actor = { path = "../../operations/actor" }
 operations-bootstrap = { path = "../../operations/bootstrap" }
 operations-wire = { path = "../../operations/wire" }
+state-persistence = { path = "../../state/persistence" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

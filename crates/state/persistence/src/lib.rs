@@ -7,11 +7,16 @@
  * - Reload records in order, skipping corrupt lines explicitly.
  * - Serve the tail for quick resume previews.
  *
- * This module must not depend on: any other workspace crate. History
- * entries travel as plain model/user text pairs owned by the caller.
+ * This module must not depend on: drivers, tools, or sessions. History
+ * entries travel as plain model/user text pairs owned by the caller;
+ * the legacy import submodule additionally reads frozen provider
+ * message shapes.
  */
 
 //! Persistence as dumb bytes: structure lives with the caller.
+
+/// Legacy engine journal import for session resume.
+pub mod legacy;
 
 /// One persisted turn.
 #[derive(Debug, Clone, PartialEq, Eq)]

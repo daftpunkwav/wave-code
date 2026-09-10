@@ -319,6 +319,7 @@ async fn run_tui_new(
             home,
             identity: operations_bootstrap::DEFAULT_IDENTITY.to_string(),
             headless: false,
+            initial_history: Vec::new(),
         }) {
             Ok(handle) => handle,
             Err(operations_bootstrap::SessionError::Config(e)) => {

@@ -97,6 +97,9 @@ pub struct AssembleOptions {
     /// True for non-interactive drivers: approvals deny openly instead
     /// of parking on a gate nobody answers.
     pub headless: bool,
+    /// Seed history as (from_model, text) pairs, e.g. from resume import.
+    /// Empty starts a fresh conversation.
+    pub initial_history: Vec<(bool, String)>,
 }
 
 /// Assemble a live session: config to client handle.
@@ -112,6 +115,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         home,
         identity,
         headless,
+        initial_history,
     } = options;
     let mut warnings = Vec::new();
 
@@ -247,11 +251,23 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     });
 
     // 9. Actor task and client handle, sharing the child runtime with
-    // the task tools so completions re-enter turns.
+    // the task tools so completions re-enter turns. Imported history
+    // seeds the conversation before the first turn snapshot.
     let system_for_actor = system.clone();
+    let mut conv = Conversation::new();
+    for (from_model, text) in &initial_history {
+        conv.push(
+            if *from_model {
+                state_store::Role::Assistant
+            } else {
+                state_store::Role::User
+            },
+            text.clone(),
+        );
+    }
     let client = SessionActor::spawn(
         worker,
-        Conversation::new(),
+        conv,
         children,
         approvals.clone(),
         interrupt.clone(),
@@ -475,6 +491,7 @@ api_key = "k-inline"
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
             headless: true,
+            initial_history: Vec::new(),
         })
         .unwrap();
         // Memory degrades with warnings instead of failing assembly.

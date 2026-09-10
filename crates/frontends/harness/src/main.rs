@@ -1,10 +1,10 @@
 /*!
  * @file HarnessCli
- * @description Non-interactive single-turn CLI over the new harness stack.
+ * @description Headless exec and interactive REPL over the new stack.
  *
  * Responsibilities:
- * - Assemble a headless session from config and arguments.
- * - Stream one turn to stdout with progress on stderr.
+ * - Assemble sessions from config and arguments.
+ * - Stream turns to stdout with progress on stderr.
  * - Map terminal outcomes to process exit codes.
  *
  * This binary is the first frontend on the new stack. Interactive
@@ -22,23 +22,37 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use clap::Parser;
+use operations_actor::ActorClient;
 use operations_bootstrap::{AssembleOptions, DEFAULT_IDENTITY, assemble_session};
 use operations_wire::{EventMsg, Op, Submission};
 
-/// Single-turn headless execution over the new harness.
+/// Single-turn headless execution and interactive REPL over the new stack.
 #[derive(Debug, Parser)]
 #[command(name = "harness", version)]
 struct Args {
     /// Config file path; defaults to the user-level config.
-    #[arg(long)]
+    #[arg(long, global = true)]
     config: Option<PathBuf>,
 
     /// Model override winning over the configured model.
-    #[arg(long)]
+    #[arg(long, global = true)]
     model: Option<String>,
 
-    /// Prompt text for the single turn.
-    prompt: String,
+    /// Subcommand selecting the frontend surface.
+    #[command(subcommand)]
+    command: Command,
+}
+
+/// Frontend surfaces on the new stack.
+#[derive(Debug, Parser)]
+enum Command {
+    /// Run one prompt and exit with the turn outcome as exit code.
+    Exec {
+        /// Prompt text for the single turn.
+        prompt: String,
+    },
+    /// Interactive multi-turn session sharing one conversation.
+    Repl,
 }
 
 /// Terminal outcome driving the process exit code.
@@ -150,11 +164,59 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("[warn] {warning}");
     }
 
-    handle
-        .client
+    match args.command {
+        Command::Exec { prompt } => {
+            let outcome = run_exec(&mut handle.client, &prompt).await?;
+            std::process::exit(outcome.exit_code())
+        }
+        Command::Repl => {
+            run_repl(&mut handle.client).await?;
+            std::process::exit(Outcome::Completed.exit_code())
+        }
+    }
+}
+
+/// One parsed REPL line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Slash {
+    /// End the session.
+    Quit,
+    /// Compact now via an idle operation.
+    Compact,
+    /// Show help text.
+    Help,
+    /// Unknown slash command with its name.
+    Unknown(String),
+    /// Plain user input for the next turn.
+    Text(String),
+}
+
+/// Parse one REPL line into slash commands or plain text.
+fn parse_slash(line: &str) -> Slash {
+    let trimmed = line.trim();
+    if let Some(command) = trimmed.strip_prefix('/') {
+        let name = command.split_whitespace().next().unwrap_or("");
+        return match name {
+            "quit" | "exit" => Slash::Quit,
+            "compact" => Slash::Compact,
+            "help" => Slash::Help,
+            _ => Slash::Unknown(name.to_string()),
+        };
+    }
+    Slash::Text(trimmed.to_string())
+}
+
+/// REPL help text printed for `/help` and unknown commands.
+const REPL_HELP: &str = "commands: /compact (compress context now), /quit (end session), /help";
+
+/// Drive one turn to completion, streaming answer text to stdout.
+async fn run_exec(client: &mut ActorClient, prompt: &str) -> anyhow::Result<Outcome> {
+    client
         .submit(Submission {
             id: "exec-1".to_string(),
-            op: Op::UserInput { text: args.prompt },
+            op: Op::UserInput {
+                text: prompt.to_string(),
+            },
         })
         .await
         .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
@@ -165,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
     let mut interrupted = false;
     let outcome = loop {
         tokio::select! {
-            event = handle.client.next_event() => {
+            event = client.next_event() => {
                 let Some(event) = event else {
                     // Actor exited without TurnCompleted: treat as failure.
                     break Outcome::Failed;
@@ -179,8 +241,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                let _ = handle
-                    .client
+                let _ = client
                     .submit(Submission { id: "exec-interrupt".to_string(), op: Op::Interrupt })
                     .await;
                 interrupted = true;
@@ -191,8 +252,87 @@ async fn main() -> anyhow::Result<()> {
     eprint!("{stderr_text}");
     std::io::stdout().flush()?;
     std::io::stderr().flush()?;
-    let outcome = if failed { Outcome::Failed } else { outcome };
-    std::process::exit(outcome.exit_code())
+    Ok(if failed { Outcome::Failed } else { outcome })
+}
+
+/// Interactive multi-turn session over one shared conversation.
+///
+/// Turns accumulate in the actor-side conversation; `/compact` runs an
+/// idle compaction between turns. Ctrl-C at the prompt starts a fresh
+/// line; Ctrl-C mid-turn interrupts the running turn.
+async fn run_repl(client: &mut ActorClient) -> anyhow::Result<()> {
+    use rustyline::error::ReadlineError;
+
+    let mut editor = rustyline::DefaultEditor::new()?;
+    let mut turn: u64 = 0;
+    println!("harness repl: {REPL_HELP}");
+    loop {
+        let line = match editor.readline("> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(e) => return Err(anyhow::anyhow!("input failed: {e}")),
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let _ = editor.add_history_entry(trimmed);
+        match parse_slash(trimmed) {
+            Slash::Quit => break,
+            Slash::Help => println!("{REPL_HELP}"),
+            Slash::Unknown(name) => println!("unknown command /{name}; {REPL_HELP}"),
+            Slash::Compact => {
+                turn += 1;
+                client
+                    .submit(Submission {
+                        id: format!("repl-{turn}-compact"),
+                        op: Op::Compact,
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                drain_turn(client).await?;
+            }
+            Slash::Text(text) => {
+                turn += 1;
+                client
+                    .submit(Submission {
+                        id: format!("repl-{turn}"),
+                        op: Op::UserInput { text },
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                drain_turn(client).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drain events until the turn ends, rendering as they arrive.
+async fn drain_turn(client: &mut ActorClient) -> anyhow::Result<()> {
+    let mut stdout_text = String::new();
+    let mut stderr_text = String::new();
+    loop {
+        tokio::select! {
+            event = client.next_event() => {
+                let Some(event) = event else { break };
+                if render_event(&event.msg, &mut stdout_text, &mut stderr_text).is_some() {
+                    break;
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                let _ = client
+                    .submit(Submission { id: "repl-interrupt".to_string(), op: Op::Interrupt })
+                    .await;
+            }
+        }
+    }
+    print!("{stdout_text}");
+    eprint!("{stderr_text}");
+    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -204,6 +344,21 @@ mod tests {
         assert_eq!(Outcome::Completed.exit_code(), 0);
         assert_eq!(Outcome::Interrupted.exit_code(), 130);
         assert_eq!(Outcome::Failed.exit_code(), 1);
+    }
+
+    #[test]
+    fn slash_lines_route_to_commands() {
+        assert_eq!(parse_slash("/quit"), Slash::Quit);
+        assert_eq!(parse_slash("/exit"), Slash::Quit);
+        assert_eq!(parse_slash("  /compact  "), Slash::Compact);
+        assert_eq!(parse_slash("/help"), Slash::Help);
+        assert_eq!(parse_slash("/nope"), Slash::Unknown("nope".to_string()));
+        assert_eq!(
+            parse_slash("hello there"),
+            Slash::Text("hello there".to_string())
+        );
+        // A leading slash with no name is unknown, not text.
+        assert_eq!(parse_slash("/"), Slash::Unknown(String::new()));
     }
 
     #[test]

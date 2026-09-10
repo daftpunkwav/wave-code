@@ -1,11 +1,22 @@
+# 构建产物
 /target
 node_modules/
 dist/
 *.log
+
+# 系统文件（macOS / Windows）
 .DS_Store
+Thumbs.db
+desktop.ini
+
 # 项目级 wavecode 配置可能含 API key，只准用用户级 ~/.wavecode/config.toml
 .wavecode/
 
 # CodeGraph 本地索引
 .codegraph/
 
+# ZCode 本地工具状态与会话产物（含历史一次性迁移脚本）
+.zcode/
+
+# 本地文档目录（docs 的本地工作副本）：整体仅本地留存，不入库
+docs-local/

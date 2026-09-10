@@ -1,0 +1,9 @@
+[package]
+name = "runtime-scheduler"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "safety-sandbox"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

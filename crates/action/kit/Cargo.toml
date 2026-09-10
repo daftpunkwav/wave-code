@@ -1,0 +1,8 @@
+[package]
+name = "action-kit"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true

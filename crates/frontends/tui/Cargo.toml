@@ -1,0 +1,22 @@
+[package]
+name = "wavecode-tui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Boundary: the TUI workspace dependencies are exactly operations-wire
+# and operations-actor (in-process transport). It must not reach into
+# capabilities or the composition root — every interaction crosses the
+# Submission/Event surface. tests::dependency_matrix_locked locks this.
+[dependencies]
+operations-wire = { path = "../../operations/wire" }
+operations-actor = { path = "../../operations/actor" }
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+pulldown-cmark.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true
+anyhow.workspace = true

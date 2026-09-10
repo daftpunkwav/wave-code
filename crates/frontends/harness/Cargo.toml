@@ -1,0 +1,19 @@
+[package]
+name = "harness-cli"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "harness"
+path = "src/main.rs"
+
+[dependencies]
+operations-actor = { path = "../../operations/actor" }
+operations-bootstrap = { path = "../../operations/bootstrap" }
+operations-wire = { path = "../../operations/wire" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+rustyline.workspace = true
+serde_json.workspace = true

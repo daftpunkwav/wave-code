@@ -1,0 +1,21 @@
+[package]
+name = "operations-gateway"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+operations-actor = { path = "../actor" }
+operations-wire = { path = "../wire" }
+tokio.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+runtime-runner = { path = "../../runtime/runner" }
+runtime-child = { path = "../../runtime/child" }
+state-store = { path = "../../state/store" }
+safety-gate = { path = "../../safety/gate" }
+infrastructure-base = { path = "../../infrastructure/base" }
+async-trait.workspace = true
+tokio.workspace = true

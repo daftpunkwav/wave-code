@@ -1,0 +1,21 @@
+[package]
+name = "operations-actor"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+runtime-runner = { path = "../../runtime/runner" }
+runtime-child = { path = "../../runtime/child" }
+state-store = { path = "../../state/store" }
+safety-gate = { path = "../../safety/gate" }
+operations-wire = { path = "../../operations/wire" }
+infrastructure-base = { path = "../../infrastructure/base" }
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+serde_json.workspace = true

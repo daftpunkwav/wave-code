@@ -1,0 +1,34 @@
+[package]
+name = "operations-bootstrap"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+runtime-runner = { path = "../../runtime/runner" }
+runtime-child = { path = "../../runtime/child" }
+runtime-prompt = { path = "../../runtime/prompt" }
+state-store = { path = "../../state/store" }
+action-tasks = { path = "../../action/tasks" }
+infrastructure-base = { path = "../../infrastructure/base" }
+safety-gate = { path = "../../safety/gate" }
+operations-actor = { path = "../actor" }
+wavecode-tools = { path = "../../capabilities/tools" }
+wavecode-sandbox = { path = "../../capabilities/sandbox" }
+wavecode-hooks = { path = "../../capabilities/hooks" }
+wavecode-llm = { path = "../../foundation/llm" }
+wavecode-protocol = { path = "../../foundation/protocol" }
+wavecode-config = { path = "../../foundation/config" }
+wavecode-memory = { path = "../../capabilities/memory" }
+wavecode-skills = { path = "../../capabilities/skills" }
+wavecode-context = { path = "../../capabilities/context" }
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile.workspace = true
+operations-wire = { path = "../wire" }

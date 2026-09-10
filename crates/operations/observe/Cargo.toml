@@ -1,0 +1,11 @@
+[package]
+name = "operations-observe"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+operations-wire = { path = "../wire" }
+
+[dev-dependencies]
+serde_json.workspace = true

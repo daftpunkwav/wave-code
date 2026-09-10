@@ -15,6 +15,8 @@ dependencies = [
 name = "action-kit"
 version = "0.1.0"
 dependencies = [
+ "infrastructure-schema",
+ "serde_json",
  "thiserror",
 ]
 

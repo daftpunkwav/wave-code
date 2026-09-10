@@ -55,6 +55,57 @@ pub fn validate(schema: &Schema, value: &Value) -> Vec<String> {
     errors
 }
 
+/// Build a schema from a JSON Schema document subset.
+///
+/// Understands `type` (null/boolean/integer/number/string/array/object),
+/// `properties`, `required`, `enum`, and `items`. Unknown shapes degrade
+/// to [`Schema::Any`] so callers validate what they recognize instead of
+/// rejecting tools whose schemas use richer vocabularies.
+pub fn from_json(document: &Value) -> Schema {
+    if let Some(options) = document.get("enum").and_then(|v| v.as_array()) {
+        let options: Vec<String> = options
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if !options.is_empty() {
+            return Schema::Enum(options);
+        }
+    }
+    match document.get("type").and_then(|v| v.as_str()) {
+        Some("null") => Schema::Null,
+        Some("boolean") => Schema::Bool,
+        Some("integer") => Schema::Int,
+        Some("number") => Schema::Num,
+        Some("string") => Schema::Str,
+        Some("array") => Schema::Arr {
+            items: Box::new(document.get("items").map(from_json).unwrap_or(Schema::Any)),
+        },
+        Some("object") => {
+            let props = document
+                .get("properties")
+                .and_then(|v| v.as_object())
+                .map(|map| {
+                    map.iter()
+                        .map(|(key, prop)| (key.clone(), from_json(prop)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let required = document
+                .get("required")
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Schema::Obj { props, required }
+        }
+        _ => Schema::Any,
+    }
+}
+
 fn check(schema: &Schema, value: &Value, path: &str, errors: &mut Vec<String>) {
     match (schema, value) {
         (Schema::Any, _) => {}
@@ -119,6 +170,29 @@ mod tests {
         assert!(errors.iter().any(|e| e.contains("missing required")));
         assert!(errors.iter().any(|e| e.contains("$.timeout_ms")));
         assert!(errors.iter().any(|e| e.contains("$.mode")));
+    }
+
+    #[test]
+    fn json_documents_convert_and_validate() {
+        let document = serde_json::json!({
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string"},
+                "retries": {"type": "integer"},
+            },
+        });
+        let schema = from_json(&document);
+        assert!(validate(&schema, &serde_json::json!({"command": "ls"})).is_empty());
+        assert_eq!(validate(&schema, &serde_json::json!({})).len(), 1);
+        // Unknown vocabularies degrade to acceptance, not rejection.
+        assert!(
+            validate(
+                &from_json(&serde_json::json!({"type": "unknown-thing"})),
+                &serde_json::json!(1)
+            )
+            .is_empty()
+        );
     }
 
     #[test]

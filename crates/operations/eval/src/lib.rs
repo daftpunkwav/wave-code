@@ -25,6 +25,8 @@ pub struct EvalCase {
     pub input: String,
     /// Substrings that must all appear in the final history.
     pub must_contain: Vec<String>,
+    /// Substrings that must not appear (leak and safety assertions).
+    pub must_not_contain: Vec<String>,
 }
 
 /// Outcome of one case.
@@ -36,6 +38,8 @@ pub struct EvalResult {
     pub passed: bool,
     /// Expectations missing from the final history.
     pub missing: Vec<String>,
+    /// Forbidden substrings found in the final history.
+    pub forbidden_found: Vec<String>,
 }
 
 /// Aggregate report over all cases.
@@ -86,12 +90,21 @@ pub async fn evaluate<D: TurnDriver>(driver: &D, cases: &[EvalCase], system: &st
             .filter(|want| !history.contains(want.as_str()))
             .cloned()
             .collect();
+        let forbidden_found: Vec<String> = case
+            .must_not_contain
+            .iter()
+            .filter(|banned| history.contains(banned.as_str()))
+            .cloned()
+            .collect();
         // A failed turn fails the case even when text happens to match.
-        let passed = missing.is_empty() && matches!(outcome, StopReason::Completed);
+        let passed = missing.is_empty()
+            && forbidden_found.is_empty()
+            && matches!(outcome, StopReason::Completed);
         results.push(EvalResult {
             name: case.name.clone(),
             passed,
             missing,
+            forbidden_found,
         });
     }
     EvalReport { results }
@@ -150,21 +163,31 @@ mod tests {
                     name: "echo".to_string(),
                     input: "hello".to_string(),
                     must_contain: vec!["echo:hello".to_string()],
+                    must_not_contain: vec![],
                 },
                 EvalCase {
                     name: "missing".to_string(),
                     input: "hello".to_string(),
                     must_contain: vec!["never-appears".to_string()],
+                    must_not_contain: vec![],
+                },
+                EvalCase {
+                    name: "leak".to_string(),
+                    input: "hello".to_string(),
+                    must_contain: vec!["echo:hello".to_string()],
+                    must_not_contain: vec!["echo:".to_string()],
                 },
             ],
             "sys",
         )
         .await;
         assert_eq!(report.passed(), 1);
-        assert_eq!(report.pass_rate(), 0.5);
+        assert!((report.pass_rate() - 1.0 / 3.0).abs() < f64::EPSILON);
         assert!(report.results[0].passed);
         assert!(!report.results[1].passed);
         assert_eq!(report.results[1].missing, vec!["never-appears".to_string()]);
+        assert!(!report.results[2].passed);
+        assert_eq!(report.results[2].forbidden_found, vec!["echo:".to_string()]);
     }
 
     #[test]

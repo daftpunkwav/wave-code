@@ -74,6 +74,9 @@ pub struct ToolSpec {
     pub description: String,
     /// Declarative attributes consumed by the policy layer.
     pub attrs: ToolAttrs,
+    /// JSON Schema document constraining inputs; empty object means
+    /// unconstrained.
+    pub input_schema: serde_json::Value,
 }
 
 /// Registry errors.
@@ -82,6 +85,17 @@ pub enum RegistryError {
     /// A tool was registered twice under the same name.
     #[error("duplicate tool registration: {0}")]
     Duplicate(String),
+    /// No tool exists under the name.
+    #[error("unknown tool: {0}")]
+    Unknown(String),
+    /// Input violates the tool schema, listing every violation.
+    #[error("invalid input for {tool}: {violations:?}")]
+    InvalidInput {
+        /// Tool the input targeted.
+        tool: String,
+        /// Every violation found.
+        violations: Vec<String>,
+    },
 }
 
 /// Ordered registry of tool specifications.
@@ -110,6 +124,33 @@ impl Registry {
     /// Look up one tool by name.
     pub fn get(&self, name: &str) -> Option<&ToolSpec> {
         self.specs.get(name)
+    }
+
+    /// Validate one input against the named tool schema.
+    ///
+    /// Unknown tools fail explicitly; schema-less tools accept anything.
+    /// Every violation returns together so callers fix inputs in one pass.
+    pub fn validate_input(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Result<(), RegistryError> {
+        let spec = self
+            .specs
+            .get(name)
+            .ok_or_else(|| RegistryError::Unknown(name.to_string()))?;
+        let violations = infrastructure_schema::validate(
+            &infrastructure_schema::from_json(&spec.input_schema),
+            input,
+        );
+        if violations.is_empty() {
+            Ok(())
+        } else {
+            Err(RegistryError::InvalidInput {
+                tool: name.to_string(),
+                violations,
+            })
+        }
     }
 
     /// All registered specs in registration order.
@@ -144,6 +185,11 @@ mod tests {
                 destructive: false,
                 kind: ToolKind::Read,
             },
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["path"],
+                "properties": {"path": {"type": "string"}},
+            }),
         }
     }
 
@@ -172,5 +218,26 @@ mod tests {
         };
         assert!(ctx.is_env_denied("SECRET_KEY"));
         assert!(!ctx.is_env_denied("SECRET_KEY_EXTRA"));
+    }
+
+    #[test]
+    fn inputs_validate_against_tool_schemas() {
+        let mut registry = Registry::new();
+        registry.register(read_spec("read_file")).unwrap();
+        assert!(
+            registry
+                .validate_input("read_file", &serde_json::json!({"path": "a.txt"}))
+                .is_ok()
+        );
+        let err = registry
+            .validate_input("read_file", &serde_json::json!({}))
+            .unwrap_err();
+        assert!(matches!(err, RegistryError::InvalidInput { .. }));
+        assert_eq!(
+            registry
+                .validate_input("nope", &serde_json::json!({}))
+                .unwrap_err(),
+            RegistryError::Unknown("nope".to_string())
+        );
     }
 }

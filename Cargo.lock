@@ -808,6 +808,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "infrastructure-config"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "infrastructure-ratelimit"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "infrastructure-routing"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "instability"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1025,10 +1046,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "operations-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "operations-wire",
+ "runtime-runner",
+ "state-store",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "operations-observe"
 version = "0.1.0"
 dependencies = [
  "operations-wire",
+]
+
+[[package]]
+name = "operations-replay"
+version = "0.1.0"
+dependencies = [
+ "operations-wire",
+ "state-trajectory",
 ]
 
 [[package]]
@@ -1340,6 +1381,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-capability"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "runtime-child"
 version = "0.1.0"
 dependencies = [
@@ -1366,6 +1414,14 @@ dependencies = [
  "operations-wire",
  "serde_json",
  "state-store",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "runtime-scheduler"
+version = "0.1.0"
+dependencies = [
  "thiserror",
  "tokio",
 ]
@@ -1472,6 +1528,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
+name = "safety-audit"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "safety-gate"
 version = "0.1.0"
 dependencies = [
@@ -1479,6 +1542,27 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "safety-guardrail"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "safety-policy"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "safety-secrets"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
@@ -1639,7 +1723,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "state-artifact"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "state-checkpoint"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "state-store"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "state-trajectory"
 version = "0.1.0"
 dependencies = [
  "thiserror",

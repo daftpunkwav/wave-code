@@ -1,0 +1,16 @@
+[package]
+name = "operations-eval"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+runtime-runner = { path = "../../runtime/runner" }
+state-store = { path = "../../state/store" }
+thiserror.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+operations-wire = { path = "../wire" }

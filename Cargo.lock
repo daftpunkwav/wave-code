@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "action-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "action-kit"
 version = "0.1.0"
 dependencies = [
@@ -1104,6 +1113,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "operations-gateway"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "infrastructure-base",
+ "operations-actor",
+ "operations-wire",
+ "runtime-child",
+ "runtime-runner",
+ "safety-gate",
+ "serde_json",
+ "state-store",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "operations-notify"
 version = "0.1.0"
 dependencies = [
@@ -1632,6 +1658,15 @@ name = "safety-policy"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "safety-sandbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

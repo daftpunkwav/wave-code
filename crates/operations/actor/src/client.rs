@@ -61,6 +61,11 @@ impl ActorClient {
     pub async fn next_event(&mut self) -> Option<Event> {
         self.event_rx.recv().await
     }
+
+    /// Take one buffered event without waiting; `None` when empty.
+    pub fn try_poll(&mut self) -> Option<Event> {
+        self.event_rx.try_recv().ok()
+    }
 }
 
 impl Drop for ActorClient {

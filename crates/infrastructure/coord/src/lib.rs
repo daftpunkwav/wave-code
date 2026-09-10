@@ -101,9 +101,84 @@ impl LeaseStore {
     }
 }
 
+/// Distributed lease backend seam.
+///
+/// The in-process [`LeaseStore`] is the local frontier; etcd, Redis, or
+/// database backends implement this shape over a shared clock later.
+/// Method shapes mirror [`LeaseStore`] so drivers swap without rewrites.
+pub trait LeaseBackend: Send + Sync {
+    /// Acquire a hold or fail when live-held elsewhere.
+    fn acquire(
+        &mut self,
+        resource: String,
+        holder: String,
+        ttl_secs: u64,
+        now_secs: u64,
+    ) -> Result<Lease, LeaseError>;
+
+    /// Extend a live hold; false for stale fencing or lapsed holds.
+    fn renew(&mut self, lease: &Lease, ttl_secs: u64, now_secs: u64) -> bool;
+
+    /// Release a hold; stale fencing releases nothing.
+    fn release(&mut self, lease: &Lease) -> bool;
+}
+
+/// Local backend: the single-process store behind the seam.
+#[derive(Debug, Default)]
+pub struct LocalBackend {
+    store: LeaseStore,
+}
+
+impl LocalBackend {
+    /// Create an empty local backend.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl LeaseBackend for LocalBackend {
+    fn acquire(
+        &mut self,
+        resource: String,
+        holder: String,
+        ttl_secs: u64,
+        now_secs: u64,
+    ) -> Result<Lease, LeaseError> {
+        self.store.acquire(resource, holder, ttl_secs, now_secs)
+    }
+
+    fn renew(&mut self, lease: &Lease, ttl_secs: u64, now_secs: u64) -> bool {
+        self.store.renew(lease, ttl_secs, now_secs)
+    }
+
+    fn release(&mut self, lease: &Lease) -> bool {
+        self.store.release(lease)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_backend_serves_the_seam() {
+        let mut backend = LocalBackend::new();
+        let lease = backend
+            .acquire("gpu".to_string(), "a".to_string(), 10, 0)
+            .unwrap();
+        assert!(
+            backend
+                .acquire("gpu".to_string(), "b".to_string(), 10, 5)
+                .is_err()
+        );
+        assert!(backend.renew(&lease, 10, 5));
+        assert!(backend.release(&lease));
+        assert!(
+            backend
+                .acquire("gpu".to_string(), "b".to_string(), 10, 6)
+                .is_ok()
+        );
+    }
 
     #[test]
     fn live_holders_block_until_expiry_or_release() {

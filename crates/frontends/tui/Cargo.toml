@@ -4,12 +4,13 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-# SPEC §3 边界规则 2：tui 只允许依赖 protocol + app-server（进程内 transport），
-# 不得依赖 core——本表即依赖断言的事实源，crates/frontends/tui/src/lib.rs 的
-# dependency_matrix_locked 测试在测试层锁定（新增 wavecode-* 依赖即红）。
+# Boundary: the TUI workspace dependencies are exactly operations-wire
+# and operations-actor (in-process transport). It must not reach into
+# capabilities or the composition root — every interaction crosses the
+# Submission/Event surface. tests::dependency_matrix_locked locks this.
 [dependencies]
-wavecode-protocol = { path = "../../foundation/protocol" }
-wavecode-app-server = { path = "../../transport/app-server" }
+operations-wire = { path = "../../operations/wire" }
+operations-actor = { path = "../../operations/actor" }
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true

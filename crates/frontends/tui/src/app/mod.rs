@@ -1,63 +1,69 @@
-//! TUI 应用状态机：协议事件与键盘输入 → 界面状态 + 待发 [`Op`]。
+//! TUI application state machine: protocol events and keyboard input
+//! → UI state + outbound [`Op`].
 //!
-//! 全部迁移逻辑为纯函数形态（不进终端、不碰 client），单测直接驱动；
-//! 事件渲染语义复用 SPEC §15.5 / cli render.rs：工具行 `▸`/`✗`、压缩
-//! `⟳`/`✓`、审批 `⚠` 黄、子代理 `⏚`/`✓`、todo 清单 `☐▸✓` 与状态迁移
-//! 标注、中断 `（已中断）`。delta 经 sanitize 入缓冲，complete / 中断时
-//! 经 markdown 一次性渲染（流式期间消息流尾部追加纯文本预览）。
+//! All transition logic stays side-effect free (no terminal, no client)
+//! so tests drive it directly; rendering semantics mirror the legacy
+//! human renderer: tool rows `▸`/`✗`, compaction `⟳`/`✓`, approval `⚠`,
+//! todo lists `☐▸✓` with migration marks, interrupt `(interrupted)`.
+//! Deltas enter the buffer sanitized and render as markdown once on
+//! complete (a plain-text preview trails the stream while flowing).
 
-use wavecode_protocol::{Op, PermissionMode};
+use operations_wire::Op;
 
-/// turn 进行中的等待动画帧（状态栏，100ms tick 推进）。
+/// Spinner frames for in-turn waiting (status bar, advanced per 100ms tick).
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// 消息流条目上限：条目行集是 TUI 最大的持续分配面，长会话必须内存有界。
-/// 溢出丢弃最旧条目（见 [`App::push_item`]）。
+/// Message stream item cap: item line sets are the largest sustained TUI
+/// allocation, so long sessions must stay memory-bounded.
+/// Overflow drops the oldest items (see [`App::push_item`]).
 const MAX_ITEMS: usize = 512;
 
-/// 主题色（与 cli 渲染同一色系）。
+/// Theme colors (same family as CLI rendering).
 mod types;
 
-/// 行为层子模块（阶段拆分）：协议事件 / 键盘粘贴 / slash 命令 / 审批弹窗。
+/// Behavior submodules: protocol events / keyboard paste / slash
+/// commands / approval popup.
 mod approval;
 mod event;
 mod input;
 mod slash;
 
-pub use self::types::TuiContext;
 use self::types::{ApprovalPopup, Item, err};
+pub use self::types::{PermissionMode, TuiContext};
 pub(crate) use self::types::{accent, dim, warn};
 
-/// TUI 应用状态（事件与按键的唯一事实源）。
+/// TUI application state (the single source of truth for events/keys).
 pub struct App {
     ctx: TuiContext,
-    /// 已提交的消息流条目。
+    /// Committed message stream items.
     pub items: Vec<Item>,
-    /// 流式助手消息缓冲（delta 累积，complete / 工具行前提交）。
+    /// Streaming assistant buffer (deltas accumulate, submitted on
+    /// complete / before tool rows).
     msg_buf: String,
-    /// 是否处于 turn 内。
+    /// Whether a turn is running.
     pub in_turn: bool,
-    /// 输入框文本与光标（字符索引）。
+    /// Input box text and cursor (character index).
     pub input: String,
     pub cursor: usize,
-    /// 消息流滚动（行偏移；follow_tail 时由 ui 收敛到底部）。
+    /// Message stream scroll (row offset; converges to bottom in ui
+    /// while following the tail).
     pub scroll: usize,
     pub follow_tail: bool,
-    /// 审批弹窗（Some 时按键全部路由给弹窗）。
+    /// Approval popup (all keys route to it while open).
     pub approval: Option<ApprovalPopup>,
-    /// Esc 手动关闭 slash 弹层（输入再变化时复位）。
+    /// Slash popup manually dismissed via Esc (reset on input change).
     slash_dismissed: bool,
     slash_selected: usize,
-    /// 最近一次 TokenCount（状态栏 used/window）。
+    /// Latest TokenCount (status bar input/output).
     pub tokens: Option<(u64, u64)>,
-    /// 当前权限模式（`/permissions` 循环后本地同步）。
+    /// Current permission mode (synced locally after `/permissions`).
     pub permission_mode: PermissionMode,
-    /// 等待动画相位。
+    /// Spinner phase.
     pub spinner: usize,
-    /// 待投递的协议 Op（run 循环取出后经 client 发送）。
+    /// Queued outbound protocol Ops (run loop sends them via client).
     outbox: Vec<Op>,
     quit: bool,
-    /// 最近一次 todo_write 展示的清单（渲染状态迁移用）。
+    /// Last rendered todo_write list (used to diff status migration).
     last_todos: Vec<(String, String)>,
 }
 
@@ -90,9 +96,11 @@ impl App {
         app
     }
 
-    /// 条目入列（带上限）：全部消息流条目提交的唯一入口。溢出丢弃最旧
-    /// 条目，滚动偏移按被丢行数收敛，避免非跟随态视图跳变（按原始行数
-    /// 估算，wrap 后视觉行有少量偏差；follow_tail 场景每帧重算不受影响）。
+    /// Push one item with a cap: the single entry point for committed
+    /// message stream items. Overflow drops the oldest items and
+    /// converges the scroll offset by the dropped row count, so
+    /// non-following views do not jump (row estimates ignore wrapping;
+    /// follow-tail frames recompute every frame anyway).
     pub(super) fn push_item(&mut self, item: Item) {
         self.items.push(item);
         if self.items.len() > MAX_ITEMS {
@@ -109,7 +117,8 @@ impl App {
         &self.ctx.cwd
     }
 
-    /// 流式缓冲内容（ui 在消息流尾部追加纯文本预览）。
+    /// Streaming buffer content (ui appends a plain-text preview at the
+    /// stream tail).
     pub fn streaming_buffer(&self) -> &str {
         &self.msg_buf
     }
@@ -118,19 +127,19 @@ impl App {
         self.quit
     }
 
-    /// 取出全部待发 Op。
+    /// Drain all queued outbound Ops.
     pub fn take_ops(&mut self) -> Vec<Op> {
         std::mem::take(&mut self.outbox)
     }
 
-    /// 100ms tick：仅 turn 内推进等待动画相位。
+    /// 100ms tick: advance the spinner phase only while in a turn.
     pub fn tick(&mut self) {
         if self.in_turn {
             self.spinner = (self.spinner + 1) % SPINNER.len();
         }
     }
 
-    /// 事件流提前结束（actor 退出）：红色提示并退出。
+    /// Event stream ended early (actor exited): red notice, then quit.
     pub fn actor_died(&mut self) {
         self.push_item(Item::plain(
             "会话已终止（agent 引擎意外退出）".into(),
@@ -144,8 +153,8 @@ impl App {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use operations_wire::{ApprovalKind, Event, EventMsg, WireDecision};
     use std::path::PathBuf;
-    use wavecode_protocol::{ApprovalDecision, ApprovalKind, Event, EventMsg, StopReason};
 
     fn ctx() -> TuiContext {
         TuiContext {
@@ -154,6 +163,7 @@ mod tests {
             permission_mode: PermissionMode::Default,
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
+            memory_index: String::new(),
         }
     }
 
@@ -174,7 +184,8 @@ mod tests {
         }
     }
 
-    /// 输入 → Enter：用户行进消息流、Op::UserInput 出队、输入框清空。
+    /// Typing → Enter: the user line enters the stream, Op::UserInput
+    /// dequeues, and the input box clears.
     #[test]
     fn typing_and_enter_submits_user_input() {
         let mut app = App::new(ctx());
@@ -183,7 +194,7 @@ mod tests {
         let ops = app.take_ops();
         assert!(
             matches!(&ops[..], [Op::UserInput { text }] if text == "你好"),
-            "应产出 UserInput: {ops:?}"
+            "should emit UserInput: {ops:?}"
         );
         assert!(app.input.is_empty() && app.cursor == 0);
         let user = app
@@ -192,37 +203,33 @@ mod tests {
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
             .any(|s| s.content.contains("> 你好"));
-        assert!(user, "用户行应进消息流");
+        assert!(user, "user line should enter the stream");
     }
 
-    /// Esc 优先级：弹层打开先关弹层；否则 turn 内发 Interrupt；空闲无操作。
+    /// Esc priority: open popup closes first; otherwise interrupt
+    /// in-turn; idle does nothing.
     #[test]
     fn esc_priority_slash_then_interrupt() {
         let mut app = App::new(ctx());
-        // turn 内：Esc → Interrupt
-        app.handle_event(&ev(EventMsg::TurnStarted {
-            turn_id: "t".into(),
-        }));
+        // In-turn: Esc → Interrupt
+        app.handle_event(&ev(EventMsg::TurnStarted));
         app.handle_key(key(KeyCode::Esc));
         assert!(matches!(&app.take_ops()[..], [Op::Interrupt]));
-        // 空闲：Esc 无操作
-        app.handle_event(&ev(EventMsg::TurnCompleted {
-            stop_reason: StopReason::Completed,
-        }));
+        // Idle: Esc does nothing
+        app.handle_event(&ev(EventMsg::TurnCompleted { interrupted: false }));
         app.handle_key(key(KeyCode::Esc));
         assert!(app.take_ops().is_empty());
-        // 弹层打开：Esc 只关弹层，不发 Interrupt
-        app.handle_event(&ev(EventMsg::TurnStarted {
-            turn_id: "t2".into(),
-        }));
+        // Popup open: Esc only dismisses, never interrupts
+        app.handle_event(&ev(EventMsg::TurnStarted));
         type_str(&mut app, "/c");
         assert!(app.slash_visible());
         app.handle_key(key(KeyCode::Esc));
-        assert!(!app.slash_visible(), "Esc 应关闭弹层");
-        assert!(app.take_ops().is_empty(), "关弹层不应发 Interrupt");
+        assert!(!app.slash_visible(), "Esc should dismiss the popup");
+        assert!(app.take_ops().is_empty(), "dismissing must not interrupt");
     }
 
-    /// 审批流：事件开弹窗；y → AllowOnce；n → 原因态，录入后 Enter → Deny{原因}。
+    /// Approval flow: event opens the popup; y → AllowOnce; n enters
+    /// reason mode, Enter after typing denies with the reason.
     #[test]
     fn approval_flow_allow_and_deny_with_reason() {
         let mut app = App::new(ctx());
@@ -233,17 +240,17 @@ mod tests {
                 detail: "d".into(),
             })
         };
-        // y 放行
+        // y allows
         app.handle_event(&req("c1"));
         assert!(app.approval.is_some());
         app.handle_key(key(KeyCode::Char('y')));
         let ops = app.take_ops();
         assert!(
-            matches!(&ops[..], [Op::ExecApproval { call_id, decision: ApprovalDecision::AllowOnce }] if call_id == "c1"),
-            "y 应放行: {ops:?}"
+            matches!(&ops[..], [Op::ExecApproval { call_id, decision: WireDecision::AllowOnce }] if call_id == "c1"),
+            "y should allow: {ops:?}"
         );
         assert!(app.approval.is_none());
-        // n → 原因录入 → Enter 拒绝带原因
+        // n → reason mode → Enter denies with the reason
         app.handle_event(&req("c2"));
         app.handle_key(key(KeyCode::Char('n')));
         assert!(app.approval.as_ref().is_some_and(|p| p.reason_mode));
@@ -251,45 +258,51 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         let ops = app.take_ops();
         assert!(
-            matches!(&ops[..], [Op::ExecApproval { call_id, decision: ApprovalDecision::Deny { reason } }] if call_id == "c2" && reason == "危险"),
-            "n+原因 应拒绝: {ops:?}"
+            matches!(&ops[..], [Op::ExecApproval { call_id, decision: WireDecision::Deny { reason } }] if call_id == "c2" && reason == "危险"),
+            "n + reason should deny: {ops:?}"
         );
-        // Esc 直接拒绝（空原因，不留 park 悬挂）
+        // Esc denies directly (empty reason, no parked hang)
         app.handle_event(&req("c3"));
         app.handle_key(key(KeyCode::Esc));
         let ops = app.take_ops();
         assert!(
-            matches!(&ops[..], [Op::ExecApproval { decision: ApprovalDecision::Deny { reason }, .. }] if reason.is_empty()),
-            "Esc 应空原因拒绝: {ops:?}"
+            matches!(&ops[..], [Op::ExecApproval { decision: WireDecision::Deny { reason }, .. }] if reason.is_empty()),
+            "Esc should deny with an empty reason: {ops:?}"
         );
     }
 
-    /// follow_tail 语义：仅内容类事件（条目入流 / 缓冲增长）恢复跟随；
-    /// TokenCount、TurnStarted（清缓冲）等无内容事件不拽底——turn 内
-    /// delta 高频，否则用户翻历史阅读会被立即拉回。
+    /// follow_tail semantics: only content events (new items / grown
+    /// buffers) resume following; content-free events such as TokenCount
+    /// or TurnStarted must not yank the user back — high-frequency
+    /// in-turn deltas would otherwise rip readers out of history.
     #[test]
     fn follow_tail_follows_only_content_events() {
         let mut app = App::new(ctx());
         app.handle_key(key(KeyCode::PageUp));
-        assert!(!app.follow_tail, "翻页后应离开跟随");
-        app.handle_event(&ev(EventMsg::TokenCount { used: 1, window: 2 }));
-        assert!(!app.follow_tail, "TokenCount 不应拽回底部");
-        app.handle_event(&ev(EventMsg::TurnStarted {
-            turn_id: "t".into(),
+        assert!(!app.follow_tail, "paging away should leave follow mode");
+        app.handle_event(&ev(EventMsg::TokenCount {
+            input_tokens: 1,
+            output_tokens: 2,
         }));
-        assert!(!app.follow_tail, "TurnStarted 仅清缓冲,非内容");
+        assert!(!app.follow_tail, "TokenCount must not pull back to bottom");
+        app.handle_event(&ev(EventMsg::TurnStarted));
+        assert!(
+            !app.follow_tail,
+            "TurnStarted only clears the buffer, not content"
+        );
         app.handle_event(&ev(EventMsg::AgentMessageDelta { text: "hi".into() }));
-        assert!(app.follow_tail, "delta 增长缓冲应恢复跟随");
+        assert!(app.follow_tail, "growing delta buffer should resume follow");
         app.handle_key(key(KeyCode::PageUp));
         assert!(!app.follow_tail);
         app.handle_event(&ev(EventMsg::Warning {
             message: "w".into(),
         }));
-        assert!(app.follow_tail, "告警条目应恢复跟随");
+        assert!(app.follow_tail, "warning items should resume follow");
     }
 
-    /// 条目上限：超限丢弃最旧、长度封顶（长会话内存有界）。横幅与最早
-    /// 的告警被挤出，最后一个被丢弃项与首个存活项、最新项边界精确。
+    /// Item cap: oldest items drop, length stays bounded (long sessions
+    /// stay in memory). The banner and earliest warnings squeeze out;
+    /// first-survivor, last-dropped, and newest boundaries are exact.
     #[test]
     fn items_cap_drops_oldest() {
         let mut app = App::new(ctx());
@@ -299,8 +312,9 @@ mod tests {
             }));
         }
         assert_eq!(app.items.len(), MAX_ITEMS);
-        // 首条为横幅 + 1024 条告警，共 1025 条，丢弃 513 条后首个存活项
-        // 恰为 w512（条目文本即消息原文，可精确断言）。
+        // Banner + 1024 warnings total 1025 items; after dropping 513
+        // the first survivor is exactly w512 (item text is the raw
+        // message, so boundaries assert precisely).
         let text = |i: usize| -> String {
             app.items[i]
                 .lines
@@ -313,9 +327,10 @@ mod tests {
         assert_eq!(text(MAX_ITEMS - 1), format!("w{}", MAX_ITEMS * 2 - 1));
     }
 
-    /// paste 路由：弹窗打开时与按键同路由——reason 录入态粘贴进原因，
-    /// 非 reason 态忽略（主输入框被弹窗遮挡，静默写入不可见）；弹窗
-    /// 关闭时粘贴进主输入框。
+    /// Paste routing: same routing as keys while a popup is open — pastes
+    /// into the reason in reason mode, ignored otherwise (the main input
+    /// sits hidden behind the popup, so silent writes would be invisible);
+    /// pastes into the main input once the popup closes.
     #[test]
     fn paste_routes_to_approval_popup_when_open() {
         let mut app = App::new(ctx());
@@ -327,15 +342,19 @@ mod tests {
             detail: "d".into(),
         }));
         app.paste("xyz");
-        assert_eq!(app.input, "主输入", "弹窗非 reason 态粘贴应忽略");
+        assert_eq!(
+            app.input, "主输入",
+            "pastes must be ignored outside reason mode"
+        );
         app.handle_key(key(KeyCode::Char('n')));
         app.paste("非常危险\n的第二行");
         let popup = app.approval.as_ref().unwrap();
         assert_eq!(popup.reason, "非常危险\n的第二行");
     }
 
-    /// slash 补全状态迁移：前缀过滤、Up/Down 环绕、Tab 补全、
-    /// Enter 在输入≠候选时先补全、等于候选时提交。
+    /// Slash completion state machine: prefix filtering, Up/Down
+    /// wraparound, Tab completion, Enter completing first when the input
+    /// differs from the candidate and submitting when it matches.
     #[test]
     fn slash_completion_state_machine() {
         let mut app = App::new(ctx());
@@ -344,63 +363,67 @@ mod tests {
             app.slash_candidates(),
             vec!["/compact".to_string(), "/commit".to_string()]
         );
-        // Down 移动选中并环绕
+        // Down moves the selection with wraparound
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.slash_selected(), 1);
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.slash_selected(), 0);
         app.handle_key(key(KeyCode::Up));
         assert_eq!(app.slash_selected(), 1);
-        // Tab 补全选中项
+        // Tab completes the selected item
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.input, "/commit");
-        // 输入恰为候选：Enter 提交（skill 直调）
+        // Input exactly matches a candidate: Enter submits (skills have no
+        // execution backend yet: warning row, no Op)
         app.handle_key(key(KeyCode::Enter));
         let ops = app.take_ops();
         assert!(
-            matches!(&ops[..], [Op::SlashCommand { name, args }] if name == "commit" && args.is_empty()),
-            "应直调 skill: {ops:?}"
+            ops.is_empty(),
+            "skills have no execution backend yet: {ops:?}"
         );
+        let has_warn = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("/commit"));
+        assert!(has_warn, "should note the skill state");
     }
 
-    /// Enter 在弹层打开且输入为前缀时先补全不提交。
+    /// Enter with the popup open and a prefix input completes first
+    /// instead of submitting.
     #[test]
     fn enter_with_popup_completes_before_submit() {
         let mut app = App::new(ctx());
         type_str(&mut app, "/c");
         app.handle_key(key(KeyCode::Enter));
-        assert!(app.take_ops().is_empty(), "应先补全不提交");
+        assert!(app.take_ops().is_empty(), "should complete, not submit");
         assert_eq!(app.input, "/compact");
         app.handle_key(key(KeyCode::Enter));
         assert!(
             matches!(&app.take_ops()[..], [Op::Compact]),
-            "补全后 Enter 才提交"
+            "second Enter submits after completion"
         );
     }
 
-    /// /permissions：四档循环，Op 与本地状态同步。
+    /// /permissions: four-mode cycle with Op and local state in sync.
     #[test]
     fn permissions_cycles_four_modes() {
         let mut app = App::new(ctx());
-        let expect = [
-            PermissionMode::Plan,
-            PermissionMode::AcceptEdits,
-            PermissionMode::BypassPermissions,
-            PermissionMode::Default,
-        ];
+        let expect = ["plan", "acceptEdits", "bypassPermissions", "default"];
         for want in expect {
             type_str(&mut app, "/permissions");
             app.handle_key(key(KeyCode::Enter));
             let ops = app.take_ops();
             assert!(
-                matches!(&ops[..], [Op::SetPermissionMode { mode }] if *mode == want),
-                "循环档位: {ops:?}"
+                matches!(&ops[..], [Op::SetPermissionMode { mode }] if mode == want),
+                "cycle step: {ops:?}"
             );
-            assert_eq!(app.permission_mode, want);
+            assert_eq!(app.permission_mode.as_str(), want);
         }
     }
 
-    /// 未知 slash：黄色提示行进消息流，不产生 Op。
+    /// Unknown slash: yellow notice row enters the stream, no Op.
     #[test]
     fn unknown_slash_warns_without_op() {
         let mut app = App::new(ctx());
@@ -416,7 +439,7 @@ mod tests {
         assert!(has_warn);
     }
 
-    /// /quit：置退出标志（run 循环据此外层收尾 Shutdown）。
+    /// /quit: set the quit flag (the run loop finalizes Shutdown outside).
     #[test]
     fn quit_command_sets_flag() {
         let mut app = App::new(ctx());
@@ -425,7 +448,7 @@ mod tests {
         assert!(app.is_quit());
     }
 
-    /// /mcp（P9）：本地展示 server 状态行（不产生 Op）；未配置时给指引。
+    /// /mcp: locally render server status rows (no Op); hint when empty.
     #[test]
     fn mcp_lists_configured_servers_locally() {
         let mut app = App::new(TuiContext {
@@ -445,7 +468,7 @@ mod tests {
             .flat_map(|l| &l.spans)
             .any(|s| s.content.contains("playwright") && s.content.contains("未连接"));
         assert!(has_line);
-        // 未配置：指引行。
+        // Unconfigured: hint row.
         let mut app = App::new(ctx());
         type_str(&mut app, "/mcp");
         app.handle_key(key(KeyCode::Enter));
@@ -458,27 +481,24 @@ mod tests {
         assert!(has_hint);
     }
 
-    /// 事件流：delta 缓冲 → complete 经 markdown 渲染；中断残余照常
-    /// 渲染并附（已中断）；TokenCount 进状态栏。
+    /// Event flow: buffered deltas render as markdown on complete;
+    /// interrupt leftovers still render with the interrupted marker;
+    /// TokenCount feeds the status bar.
     #[test]
     fn event_flow_markdown_and_interrupt() {
         let mut app = App::new(ctx());
-        use wavecode_protocol::EventMsg as M;
-        app.handle_event(&ev(M::TurnStarted {
-            turn_id: "t".into(),
-        }));
+        use operations_wire::EventMsg as M;
+        app.handle_event(&ev(M::TurnStarted));
         assert!(app.in_turn);
         app.handle_event(&ev(M::AgentMessageDelta {
             text: "**好**".into(),
         }));
-        assert!(app.items.len() == 1, "delta 不直接进条目");
+        assert!(app.items.len() == 1, "deltas must not enter items directly");
         app.handle_event(&ev(M::TokenCount {
-            used: 5,
-            window: 100,
+            input_tokens: 5,
+            output_tokens: 100,
         }));
-        app.handle_event(&ev(M::TurnCompleted {
-            stop_reason: StopReason::Interrupted,
-        }));
+        app.handle_event(&ev(M::TurnCompleted { interrupted: true }));
         assert!(!app.in_turn);
         assert_eq!(app.tokens, Some((5, 100)));
         let text: String = app
@@ -488,19 +508,20 @@ mod tests {
             .flat_map(|l| &l.spans)
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("好"), "中断残余应渲染: {text}");
-        assert!(!text.contains("**"), "markdown 记号应被渲染掉: {text}");
-        assert!(text.contains("（已中断）"), "中断标记: {text}");
+        assert!(text.contains("好"), "interrupted leftovers render: {text}");
+        assert!(!text.contains("**"), "markdown markers render away: {text}");
+        assert!(text.contains("（已中断）"), "interrupt marker: {text}");
     }
 
-    /// todo_write 条目：状态符号与迁移标注（与 cli 同语义）。
+    /// todo_write rows: status symbols with migration marks (legacy CLI
+    /// semantics).
     #[test]
     fn todo_write_renders_status_migration() {
         let mut app = App::new(ctx());
         let todo = |content: &str, status: &str| {
             ev(EventMsg::ToolCallBegin {
                 call_id: "c".into(),
-                tool: "todo_write".into(),
+                name: "todo_write".into(),
                 input: serde_json::json!({"todos": [{"content": content, "status": status}]}),
             })
         };
@@ -513,14 +534,14 @@ mod tests {
             .flat_map(|l| &l.spans)
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("✓ 设计"), "完成符号: {text}");
+        assert!(text.contains("✓ 设计"), "completion mark: {text}");
         assert!(
             text.contains("（in_progress → completed）"),
-            "迁移标注: {text}"
+            "migration mark: {text}"
         );
     }
 
-    /// 光标编辑：多字节字符插入 / 删除 / 左右移动不切断 UTF-8。
+    /// Cursor editing: multibyte insert / delete / moves never split UTF-8.
     #[test]
     fn cursor_editing_multibyte_safe() {
         let mut app = App::new(ctx());

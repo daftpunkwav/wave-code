@@ -9,14 +9,15 @@ name = "wavecode"
 path = "src/main.rs"
 
 [dependencies]
-# 装配根已收口 core::assemble（SPEC §3 矩阵 cli 行）：cli 不再直连
-# llm / tools / sandbox / memory / skills 等 capabilities/foundation crate，
-# 一切装配知识经 core 的 SessionConfig / Boot 到达。
+# Assembly is split during migration: the interactive TUI path assembles
+# through operations-bootstrap (new harness engine); exec, REPL, and
+# resume still use the legacy core assembly until their ports land.
+operations-bootstrap = { path = "../../operations/bootstrap" }
 wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-config = { path = "../../foundation/config" }
 wavecode-core = { path = "../../engine/core" }
 wavecode-app-server = { path = "../../transport/app-server" }
-# P8：TTY 默认路径进入 ratatui TUI（SPEC §3 矩阵允许 cli→tui）
+# TTY default path enters the ratatui TUI (cli→tui edge).
 wavecode-tui = { path = "../../frontends/tui" }
 clap.workspace = true
 tokio.workspace = true

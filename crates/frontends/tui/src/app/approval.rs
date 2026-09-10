@@ -1,13 +1,13 @@
-//! 审批弹窗按键路由（自 app/mod.rs 拆分）：弹窗打开时全部按键在此处置。
+//! Approval popup key routing: every key goes here while open.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use wavecode_protocol::{ApprovalDecision, Op};
+use operations_wire::{Op, WireDecision};
 
 use super::App;
 
 impl App {
-    /// 审批弹窗按键：y 放行；n 进入原因录入态（Enter 确认拒绝）；
-    /// Esc 直接拒绝（不留 park 悬挂）。
+    /// Approval popup keys: y allows; n enters reason mode (Enter
+    /// confirms the denial); Esc denies at once (no parked hang).
     pub(super) fn handle_approval_key(&mut self, key: KeyEvent) {
         let Some(popup) = &mut self.approval else {
             return;
@@ -15,19 +15,19 @@ impl App {
         if popup.reason_mode {
             match key.code {
                 KeyCode::Enter => {
-                    let popup = self.approval.take().expect("上面已判定 Some");
+                    let popup = self.approval.take().expect("checked Some above");
                     self.outbox.push(Op::ExecApproval {
                         call_id: popup.call_id,
-                        decision: ApprovalDecision::Deny {
+                        decision: WireDecision::Deny {
                             reason: popup.reason,
                         },
                     });
                 }
                 KeyCode::Esc => {
-                    let popup = self.approval.take().expect("上面已判定 Some");
+                    let popup = self.approval.take().expect("checked Some above");
                     self.outbox.push(Op::ExecApproval {
                         call_id: popup.call_id,
-                        decision: ApprovalDecision::Deny {
+                        decision: WireDecision::Deny {
                             reason: String::new(),
                         },
                     });
@@ -42,20 +42,20 @@ impl App {
         }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let popup = self.approval.take().expect("上面已判定 Some");
+                let popup = self.approval.take().expect("checked Some above");
                 self.outbox.push(Op::ExecApproval {
                     call_id: popup.call_id,
-                    decision: ApprovalDecision::AllowOnce,
+                    decision: WireDecision::AllowOnce,
                 });
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 popup.reason_mode = true;
             }
             KeyCode::Esc => {
-                let popup = self.approval.take().expect("上面已判定 Some");
+                let popup = self.approval.take().expect("checked Some above");
                 self.outbox.push(Op::ExecApproval {
                     call_id: popup.call_id,
-                    decision: ApprovalDecision::Deny {
+                    decision: WireDecision::Deny {
                         reason: String::new(),
                     },
                 });

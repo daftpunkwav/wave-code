@@ -1,16 +1,19 @@
-//! slash 命令面（自 app/mod.rs 拆分）：候选补全、路由与内置命令本地处置。
+//! Slash command surface: candidate completion, routing, and local
+//! handling of builtin commands.
 
-use wavecode_protocol::{Op, PermissionMode};
+use operations_wire::Op;
 
 use super::App;
 use super::types::{Item, dim, warn};
 use crate::text::sanitize_terminal;
 
-/// 内置 slash 命令（补全候选与路由共用；skill 名由装配侧注入）。
+/// Builtin slash commands (completion and routing share this list;
+/// skill names arrive injected from the assembly side).
 const BUILTIN_COMMANDS: &[&str] = &["compact", "memory", "mcp", "permissions", "quit", "exit"];
 
 impl App {
-    /// 当前输入派生的 slash 候选（内置命令 + 可直调 skill，按前缀过滤）。
+    /// Slash candidates from the current input (builtins plus known
+    /// skills, prefix-filtered).
     pub fn slash_candidates(&self) -> Vec<String> {
         let Some(prefix) = self.input.strip_prefix('/') else {
             return Vec::new();
@@ -32,7 +35,8 @@ impl App {
             .collect()
     }
 
-    /// slash 弹层是否可见：`/` 起始、无参数空白、未被 Esc 关闭、有候选。
+    /// Whether the slash popup shows: `/` prefix, no argument blanks,
+    /// not dismissed, and non-empty candidates.
     pub fn slash_visible(&self) -> bool {
         !self.slash_dismissed && !self.slash_candidates().is_empty()
     }
@@ -41,7 +45,7 @@ impl App {
         self.slash_selected
     }
 
-    /// 将选中候选填入输入框。
+    /// Fill the input box with the selected candidate.
     pub(super) fn complete_slash(&mut self) {
         let candidates = self.slash_candidates();
         let idx = self.slash_selected.min(candidates.len().saturating_sub(1));
@@ -51,7 +55,8 @@ impl App {
         }
     }
 
-    /// Enter 提交：入消息流（`> ` 前缀）并按 slash 路由产生 Op。
+    /// Enter submits: the line enters the stream (`> ` prefix) and
+    /// routes to an Op by slash rules.
     pub(super) fn submit_input(&mut self) {
         let text = self.input.trim().to_string();
         if text.is_empty() {
@@ -69,7 +74,8 @@ impl App {
         self.follow_tail = true;
     }
 
-    /// slash 路由：内置命令本地处置；其余按 skill 名查找后直调。
+    /// Slash routing: builtins handled locally or by op; skill names
+    /// warn until execution lands behind a wire operation.
     fn route_slash(&mut self, rest: &str) {
         let (name, args) = match rest.split_once(char::is_whitespace) {
             Some((n, a)) => (n, a.trim()),
@@ -78,21 +84,21 @@ impl App {
         match name {
             "quit" | "exit" => self.quit = true,
             "compact" => self.outbox.push(Op::Compact),
-            // `/memory` 走协议面（Op::MemoryList → EventMsg::MemoryIndex）:
-            // 前端不直读记忆文件,与 Web/Desktop 能力等价（SPEC §3 规则 2）。
-            "memory" => self.outbox.push(Op::MemoryList),
+            // `/memory` renders locally from the injected index: the wire
+            // carries turns, not inspection reads.
+            "memory" => self.show_memory(),
             "mcp" => self.show_mcp(),
             "permissions" => self.cycle_permission_mode(),
             _ => {
                 if self.ctx.skill_names.iter().any(|n| n == name) {
-                    self.outbox.push(Op::SlashCommand {
-                        name: name.to_owned(),
-                        args: args.to_owned(),
-                    });
+                    self.push_item(Item::plain(
+                        format!("/{name} 已发现但 skill 执行尚未接入（参数：{args}）"),
+                        warn(),
+                    ));
                 } else {
                     self.push_item(Item::plain(
                         format!(
-                            "未知命令：/{name}（内置：{}；其余 / 前缀为 skill 直调）",
+                            "未知命令：/{name}（内置：{}；其余 / 前缀为 skill 名）",
                             BUILTIN_COMMANDS
                                 .iter()
                                 .map(|c| format!("/{c}"))
@@ -106,8 +112,23 @@ impl App {
         }
     }
 
-    /// `/mcp`：展示已配置 server 状态行（core 预渲染，P9；首版状态恒为
-    /// "未连接（transport 未实现）"——诚实展示，不伪造在线状态）。
+    /// `/memory`: render the injected index, or state its absence.
+    fn show_memory(&mut self) {
+        if self.ctx.memory_index.trim().is_empty() {
+            self.push_item(Item::plain(
+                "记忆能力不可用（会话未启用记忆装配）".into(),
+                warn(),
+            ));
+        } else {
+            self.push_item(Item::plain(
+                sanitize_terminal(self.ctx.memory_index.trim_end()).into_owned(),
+                dim(),
+            ));
+        }
+    }
+
+    /// `/mcp`: show configured server status lines (pre-rendered by the
+    /// assembly side; honestly labeled, never faked online).
     fn show_mcp(&mut self) {
         if self.ctx.mcp_server_lines.is_empty() {
             self.push_item(Item::plain(
@@ -122,16 +143,14 @@ impl App {
         }
     }
 
-    /// `/permissions`：四档循环切换，Op 同步 core 侧、本地立即生效。
+    /// `/permissions`: cycle four modes, syncing the driver side over
+    /// the wire while applying the new mode locally at once.
     fn cycle_permission_mode(&mut self) {
-        let next = match self.permission_mode {
-            PermissionMode::Default => PermissionMode::Plan,
-            PermissionMode::Plan => PermissionMode::AcceptEdits,
-            PermissionMode::AcceptEdits => PermissionMode::BypassPermissions,
-            _ => PermissionMode::Default,
-        };
+        let next = self.permission_mode.cycle();
         self.permission_mode = next;
-        self.outbox.push(Op::SetPermissionMode { mode: next });
+        self.outbox.push(Op::SetPermissionMode {
+            mode: next.as_str().to_string(),
+        });
         self.push_item(Item::plain(
             format!("权限模式切换为 {next}（写 / 执行工具的审批策略随之变化）"),
             dim(),

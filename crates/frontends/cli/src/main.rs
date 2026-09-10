@@ -78,6 +78,12 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
     };
     let home = wavecode_config::home_dir();
+    // New-stack TUI path branches before the legacy assembly: interactive
+    // fullscreen sessions run on the harness engine; exec, REPL, and
+    // resume still use the legacy assembly during the transition.
+    if cli.command.is_none() && !cli.repl && std::io::stdout().is_terminal() {
+        return run_tui_new(cli.config, cli.model, cwd, home).await;
+    }
     let boot = match wavecode_core::assemble::load_boot(
         cli.config.as_deref(),
         cli.model.as_deref(),
@@ -109,10 +115,9 @@ async fn main() -> anyhow::Result<ExitCode> {
         Some(Command::Resume { thread_id }) => {
             run_resume(cfg, mcp_lines, thread_id, cli.repl).await
         }
-        // P8：TTY 下默认进入 ratatui TUI；非 TTY（管道/重定向）或 --repl
-        // 回退行式 REPL（降级路径，渲染语义不变）。
-        None if cli.repl || !std::io::stdout().is_terminal() => run_repl(cfg, mcp_lines).await,
-        None => run_tui(cfg, mcp_lines).await,
+        // P8 TTY 路径已在上游提前进入新栈 TUI；此处 None 仅剩行式 REPL
+        //（--repl 或非 TTY 降级路径，渲染语义不变）。
+        None => run_repl(cfg, mcp_lines).await,
     }
 }
 
@@ -184,11 +189,15 @@ async fn run_resume(
         root,
         thread_id: id,
     });
-    // 与默认命令同纪律：TTY 进 TUI，非 TTY 或 --repl 回退行式 REPL。
+    // 与默认命令同纪律：TTY 进新栈 TUI，非 TTY 或 --repl 回退行式 REPL。
+    // rollout 回放尚未移植到新栈：恢复会话从新会话启动并明确提示，
+    // 历史重放随后补上（旧 replay 语义不变，仅延迟）。
     if force_repl || !std::io::stdout().is_terminal() {
         run_repl(cfg, mcp_lines).await
     } else {
-        run_tui(cfg, mcp_lines).await
+        eprintln!("警告：会话恢复的历史回放尚未移植，新会话启动（恢复信息见上）");
+        let cwd = std::env::current_dir()?;
+        run_tui_new(None, None, cwd, wavecode_config::home_dir()).await
     }
 }
 
@@ -292,35 +301,48 @@ async fn run_exec(cfg: SessionConfig, prompt: &str, json: bool) -> anyhow::Resul
     })
 }
 
-/// P8：ratatui TUI 入口（TTY 默认路径）。装配知识（模型名 / cwd / 初始
-/// 权限模式 / 记忆索引路径 / 可直调 skill 清单）在此从 SessionConfig 提取
-/// 为 [`wavecode_tui::TuiContext`]——tui 不能依赖 core，凡 core 拥有的
-/// 知识都经该结构注入；会话驱动完全走 InProcessClient 协议面。
-async fn run_tui(cfg: SessionConfig, mcp_lines: Vec<String>) -> anyhow::Result<ExitCode> {
-    // SessionStart/SessionEnd hook 已收口 actor：警告经 Warning 事件进
-    // 事件流，由 TUI 消息流渲染。
+/// New-stack ratatui TUI entry: assembles a live harness session and
+/// maps it onto the ported [`wavecode_tui::TuiContext`]. Interactive
+/// approval parking works here (headless stays false); config failures
+/// keep the legacy exit-code contract (2 with guidance).
+async fn run_tui_new(
+    config: Option<PathBuf>,
+    model: Option<String>,
+    cwd: PathBuf,
+    home: Option<PathBuf>,
+) -> anyhow::Result<ExitCode> {
+    let handle =
+        match operations_bootstrap::assemble_session(operations_bootstrap::AssembleOptions {
+            config_path: config,
+            model_override: model,
+            cwd: cwd.clone(),
+            home,
+            identity: operations_bootstrap::DEFAULT_IDENTITY.to_string(),
+            headless: false,
+        }) {
+            Ok(handle) => handle,
+            Err(operations_bootstrap::SessionError::Config(e)) => {
+                print_config_error(&e);
+                return Ok(ExitCode::from(2));
+            }
+        };
+    for warning in &handle.warnings {
+        eprintln!("警告：{warning}");
+    }
     let ctx = wavecode_tui::TuiContext {
-        model_name: cfg.model_name.clone(),
-        cwd: cfg.cwd.clone(),
-        permission_mode: cfg.sandbox.mode(),
-        // slash 补全与路由：仅 user-invocable skill 可直调（与 REPL 同判定）。
-        skill_names: cfg
-            .skills
-            .as_ref()
-            .map(|s| {
-                s.set
-                    .iter()
-                    .filter(|skill| skill.meta.user_invocable)
-                    .map(|skill| skill.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        // P9：`/mcp` 展示面（core 预渲染的状态行；tui 不依赖 core，
-        // 经本字段注入，同 memory_index_path 纪律）。
-        mcp_server_lines: mcp_lines,
+        model_name: handle.model_name,
+        cwd,
+        permission_mode: match handle.permission_mode.as_str() {
+            "plan" => wavecode_tui::PermissionMode::Plan,
+            "acceptEdits" => wavecode_tui::PermissionMode::AcceptEdits,
+            "bypassPermissions" => wavecode_tui::PermissionMode::BypassPermissions,
+            _ => wavecode_tui::PermissionMode::Default,
+        },
+        skill_names: handle.skill_names,
+        mcp_server_lines: handle.mcp_servers,
+        memory_index: handle.memory_index,
     };
-    let client = InProcessClient::spawn(cfg);
-    wavecode_tui::run(client, ctx).await?;
+    wavecode_tui::run(handle.client, ctx).await?;
     Ok(ExitCode::SUCCESS)
 }
 

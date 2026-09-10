@@ -1,14 +1,15 @@
-//! 键盘与粘贴输入（自 app/mod.rs 拆分）：按键 → 状态迁移；审批弹窗打开
-//! 时按键路由见 [`super::approval`]。
+//! Keyboard and paste input: keys → state transitions; while the
+//! approval popup is open every key routes to it (see [`super::approval`]).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use wavecode_protocol::Op;
+use operations_wire::Op;
 
 use super::App;
 use crate::text::sanitize_terminal;
 
 impl App {
-    /// 按键 → 状态迁移（审批弹窗打开时按键全部路由给弹窗）。
+    /// Keys → state transitions (every key routes to the popup while
+    /// the approval popup is open).
     pub fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -20,7 +21,8 @@ impl App {
         }
         match key.code {
             KeyCode::Enter => {
-                // 弹层打开且输入不等于选中候选：先补全；否则提交。
+                // Popup open and input differs from the selection:
+                // complete first; otherwise submit.
                 if self.slash_visible()
                     && self
                         .slash_candidates()
@@ -91,9 +93,11 @@ impl App {
         }
     }
 
-    /// 粘贴事件：净化后插入（bracketed paste 防注入）。审批弹窗打开时与
-    /// [`App::handle_key`] 同路由——按键全部交给弹窗：reason 录入态粘贴
-    /// 进原因，其余状态忽略（主输入框被弹窗遮挡，静默写入不可见）。
+    /// Paste events: insert sanitized (bracketed paste guards against
+    /// injection). Routing matches [`App::handle_key`] while the approval
+    /// popup is open — every key goes to the popup: pastes enter the
+    /// reason in reason mode and are ignored otherwise (the main input
+    /// hides behind the popup, so silent writes would be invisible).
     pub fn paste(&mut self, s: &str) {
         if let Some(popup) = &mut self.approval {
             if popup.reason_mode {
@@ -108,14 +112,15 @@ impl App {
         self.on_input_changed();
     }
 
-    /// 鼠标滚轮：滚动消息流。
+    /// Mouse wheel: scroll the message stream.
     pub fn scroll_by(&mut self, delta: isize) {
         if delta < 0 {
             self.follow_tail = false;
             self.scroll = self.scroll.saturating_sub(delta.unsigned_abs());
         } else {
             self.scroll = self.scroll.saturating_add(delta as usize);
-            // 到达底部由 ui 绘制时判定并恢复 follow_tail（需要可视高度）。
+            // Bottom recovery is decided at draw time in ui (needs the
+            // visible height).
         }
     }
 
@@ -124,7 +129,8 @@ impl App {
         self.slash_selected = 0;
     }
 
-    /// 字符索引 → 字节索引（cursor 按字符计，防切断 UTF-8）。
+    /// Character index → byte index (the cursor counts characters, so
+    /// UTF-8 is never split).
     pub(super) fn char_to_byte(s: &str, char_idx: usize) -> usize {
         s.char_indices()
             .nth(char_idx)

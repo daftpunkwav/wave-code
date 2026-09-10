@@ -1,13 +1,14 @@
-//! 纯数据类型与解析辅助（阶段 6 拆分自 app.rs）：TuiContext / Item /
-//! ApprovalPopup / 样式与 todo 输入解析——App 状态机外的不变数据。
-//! 主题色单点定义（经 app 模块 `pub(crate)` 再导出供 ui.rs 复用，勿在
-//! 别处重定义）。
+//! Pure data types and parsing helpers: TuiContext / Item /
+//! ApprovalPopup / style and todo input parsing — invariant data outside
+//! the App state machine. Theme colors are defined once here and
+//! re-exported through the app module for ui.rs; do not redefine them
+//! elsewhere.
 
 use std::path::PathBuf;
 
+use operations_wire::ApprovalKind;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use wavecode_protocol::{ApprovalKind, PermissionMode};
 
 use crate::markdown::render_markdown;
 
@@ -27,24 +28,72 @@ pub(crate) fn err() -> Style {
     Style::default().fg(Color::Red)
 }
 
-/// TUI 启动上下文（装配侧 cli 从 SessionConfig 提取后传入——tui 不能
-/// 依赖 core，凡 core 拥有的知识（记忆索引路径、skill 清单、初始权限
-/// 模式）都经本结构注入）。
-pub struct TuiContext {
-    /// 模型名（状态栏）。
-    pub model_name: String,
-    /// 会话工作目录（状态栏）。
-    pub cwd: PathBuf,
-    /// 初始权限模式（`/permissions` 在此基础上循环）。
-    pub permission_mode: PermissionMode,
-    /// 可直调 skill 名清单（slash 补全候选与路由判定）。
-    pub skill_names: Vec<String>,
-    /// 已配置 MCP server 的状态行（P9，`/mcp` 展示面；core 预渲染，
-    /// 首版状态恒为"未连接（transport 未实现）"）。空 = 未配置。
-    pub mcp_server_lines: Vec<String>,
+/// Session permission mode (local display copy).
+///
+/// Wire names stay frozen (`default`/`plan`/`acceptEdits`/
+/// `bypassPermissions`) so the actor-side policy parses them back.
+/// The TUI cycles locally and submits each step; unknown names are
+/// rejected downstream with a warning, never applied silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode {
+    /// Ask for anything sensitive; the default.
+    Default,
+    /// Propose plans without executing them.
+    Plan,
+    /// Auto-approve edits, ask for command execution.
+    AcceptEdits,
+    /// Bypass all approval prompts (explicit operator opt-in only).
+    BypassPermissions,
 }
 
-/// 消息流中的一个条目（已提交、不可变；行集含样式）。
+impl PermissionMode {
+    /// Canonical wire string of the mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Plan => "plan",
+            Self::AcceptEdits => "acceptEdits",
+            Self::BypassPermissions => "bypassPermissions",
+        }
+    }
+
+    /// Next mode in the `/permissions` cycle order.
+    pub fn cycle(&self) -> Self {
+        match self {
+            Self::Default => Self::Plan,
+            Self::Plan => Self::AcceptEdits,
+            Self::AcceptEdits => Self::BypassPermissions,
+            Self::BypassPermissions => Self::Default,
+        }
+    }
+}
+
+impl std::fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// TUI launch context (the assembly side injects everything the TUI
+/// needs: the TUI must not depend on core, so model identity, paths,
+/// skill lists, memory text, and the initial mode all arrive here).
+pub struct TuiContext {
+    /// Model name (status bar).
+    pub model_name: String,
+    /// Session working directory (status bar).
+    pub cwd: PathBuf,
+    /// Initial permission mode (`/permissions` cycles from here).
+    pub permission_mode: PermissionMode,
+    /// Directly invokable skill names (slash completion candidates).
+    pub skill_names: Vec<String>,
+    /// Pre-rendered MCP server status lines. Empty means unconfigured.
+    pub mcp_server_lines: Vec<String>,
+    /// Persistent memory index text for local `/memory` rendering.
+    /// Empty means memory is unavailable.
+    pub memory_index: String,
+}
+
+/// One message stream entry (committed, immutable; owns styled rows).
 pub struct Item {
     pub lines: Vec<Line<'static>>,
 }
@@ -78,7 +127,7 @@ impl Item {
     }
 }
 
-/// todo 状态符号（与 cli 一致：✓ 完成、▸ 进行中、☐ 待办）。
+/// todo status glyphs (legacy CLI parity: ✓ done, ▸ active, ☐ queued).
 pub(super) fn todo_symbol(status: &str) -> &'static str {
     match status {
         "completed" => "✓",
@@ -87,7 +136,8 @@ pub(super) fn todo_symbol(status: &str) -> &'static str {
     }
 }
 
-/// 从 todo_write 输入提取清单状态（content, status），供下次渲染比对。
+/// Extract list states (content, status) from a todo_write input for
+/// render-time migration diffing.
 pub(super) fn parse_todo_input(input: &serde_json::Value) -> Vec<(String, String)> {
     input
         .get("todos")
@@ -112,12 +162,12 @@ pub(super) fn parse_todo_input(input: &serde_json::Value) -> Vec<(String, String
         .unwrap_or_default()
 }
 
-/// 审批内联弹窗状态。
+/// Inline approval popup state.
 pub struct ApprovalPopup {
     pub call_id: String,
     pub kind: ApprovalKind,
     pub detail: String,
-    /// false：y/n 选择态；true：拒绝原因录入态。
+    /// false: y/n selection; true: denial reason entry.
     pub reason_mode: bool,
     pub reason: String,
 }

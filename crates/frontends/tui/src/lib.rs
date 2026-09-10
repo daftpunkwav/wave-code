@@ -1,23 +1,28 @@
-//! wavecode-tui — ratatui 终端用户界面（P8）。
+//! wavecode-tui — ratatui terminal UI over the new harness stack.
 //!
-//! 作为 [`wavecode_app_server`] 的进程内客户端实现全部终端交互：
-//! 流式消息渲染、slash 指令补全与执行、审批内联弹窗、Esc 中断与状态栏。
+//! Implements all terminal interaction as an in-process client of the
+//! session actor: streaming message rendering, slash completion and
+//! commands, inline approval popups, Esc interrupts, and a status bar.
 //!
-//! **crate 边界（SPEC §3 规则 2）**：tui 只允许依赖 protocol + app-server，
-//! 不得依赖 core——保证 TUI 与 Web/Desktop 等远端前端能力等价（全部交互
-//! 都走 Submission/Event 协议面）。本 crate Cargo.toml 即事实源，
-//! `tests::dependency_matrix_locked` 在测试层锁定。
+//! **Crate boundary**: the TUI may only depend on operations-wire and
+//! operations-actor (in-process transport), never on capabilities or
+//! the composition root — every interaction crosses the Submission/Event
+//! surface, keeping remote frontends equivalent. This Cargo.toml is the
+//! source of truth; `tests::dependency_matrix_locked` locks it in tests.
 //!
-//! 模块划分：
-//! - [`app`]：应用状态机（协议事件 / 键盘输入 → 状态 + 待发 Op，纯函数可测）；
-//! - [`markdown`]：markdown → ratatui 行（语义对齐 SPEC §15.5）；
-//! - [`ui`]：布局与弹层绘制（纯投影）；
-//! - [`text`]：终端净化与截断（双前端单一事实源，见下）。
+//! Modules:
+//! - [`app`]: application state machine (protocol events / keyboard
+//!   input → state + outbound Ops, side-effect free and testable);
+//! - [`markdown`]: markdown → ratatui rows;
+//! - [`ui`]: layout and popup drawing (pure projection);
+//! - [`text`]: terminal sanitizing and truncation (shared with the
+//!   harness CLI through the allowed frontends dependency edge).
 
-// 模块导出面纪律：cli 只经 [`run`] + [`TuiContext`] 使用本 crate 的交互面
-//（app 状态机 / markdown / 绘制内部不属于导出面）。唯一例外是 [`text`]：
-// 终端净化是安全敏感逻辑，双份手工同步已被两轮架构审查点名漂移风险
-//（2026-09 收口），cli 经 SPEC §3 允许的 cli→tui 单向边复用。
+// Export surface discipline: the CLI uses only [`run`] + [`TuiContext`]
+// for interaction (app state machine / markdown / drawing internals are
+// not exported). The single exception is [`text`]: terminal sanitizing
+// is security-sensitive logic shared with the harness CLI through the
+// allowed frontends edge instead of being synced by hand.
 mod app;
 mod markdown;
 pub mod text;
@@ -34,24 +39,26 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures::StreamExt;
+use operations_actor::ActorClient;
+use operations_wire::{Op, Submission};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use wavecode_app_server::InProcessClient;
-use wavecode_protocol::{Op, Submission};
 
 use app::App;
-pub use app::TuiContext;
+pub use app::{PermissionMode, TuiContext};
 
-/// TUI 入口：进入交替屏幕并驱动事件循环，返回时终端已恢复原状。
+/// TUI entry: enter the alternate screen and drive the event loop,
+/// restoring the terminal on return.
 ///
-/// `client` 由装配侧（cli）以 [`InProcessClient::spawn`] 创建后传入
-///（tui 不能依赖 core，故不接触 SessionConfig）；返回前发送
-/// `Op::Shutdown` 优雅收尾（client 析构另有 abort 兜底，与 cli 同策略）。
-pub async fn run(mut client: InProcessClient, ctx: TuiContext) -> anyhow::Result<()> {
+/// `client` arrives built from the assembly side (the TUI never touches
+/// configuration); a graceful `Op::Shutdown` goes out before returning
+/// (client drop aborts as backup, same policy as the harness CLI).
+pub async fn run(mut client: ActorClient, ctx: TuiContext) -> anyhow::Result<()> {
     let mut guard = TerminalGuard::enter()?;
     let mut app = App::new(ctx);
     let mut events = EventStream::new();
-    // 100ms tick 驱动等待动画；事件密集时丢弃积压 tick，不补帧。
+    // 100ms tick drives the spinner; dense event bursts drop queued
+    // ticks instead of catching up frame by frame.
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -59,7 +66,7 @@ pub async fn run(mut client: InProcessClient, ctx: TuiContext) -> anyhow::Result
         guard.terminal.draw(|f| ui::draw(f, &mut app))?;
         tokio::select! {
             maybe = events.next() => match maybe {
-                // Windows 的 crossterm 会同时发 Press/Release，只处理 Press。
+                // Windows crossterm emits Press+Release together; Press only.
                 Some(Ok(CrosstermEvent::Key(key))) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
                 }
@@ -79,20 +86,24 @@ pub async fn run(mut client: InProcessClient, ctx: TuiContext) -> anyhow::Result
             _ = ticker.tick() => app.tick(),
         }
         for op in app.take_ops() {
-            client.submit(new_submission(op)).await?;
+            client
+                .submit(new_submission(op))
+                .await
+                .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
         }
         if app.is_quit() {
             break;
         }
     }
 
-    // 优雅关闭：submit 后即可退出，不阻塞等待（actor Shutdown 路径会
-    // 触发 SessionEnd 记忆提取；client 析构的 abort 兜底防任务泄漏）。
+    // Graceful shutdown: exit right after submitting, never blocking
+    // (the actor Shutdown path triggers SessionEnd memory extraction;
+    // client-drop abort guards against task leaks).
     let _ = client.submit(new_submission(Op::Shutdown)).await;
     Ok(())
 }
 
-/// 生成一次 Submission（uuid 关联其后续全部事件）。
+/// Build one Submission (uuid correlates all its later events).
 fn new_submission(op: Op) -> Submission {
     Submission {
         id: uuid::Uuid::new_v4().to_string(),
@@ -100,8 +111,9 @@ fn new_submission(op: Op) -> Submission {
     }
 }
 
-/// 终端状态守卫：raw mode + 交替屏幕 + 鼠标捕获 + bracketed paste；
-/// Drop 恢复（含 panic 路径），不让用户终端烂在半接管状态。
+/// Terminal state guard: raw mode + alternate screen + mouse capture +
+/// bracketed paste; Drop restores everything (panic paths included) so
+/// the user terminal never stays half-taken.
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
 }
@@ -137,21 +149,22 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
-    //! 关键帧快照测试：选用 ratatui TestBackend 缓冲断言而非 insta——
-    //! 快照内容为布局文本（符号级），样式（颜色 / modifier）由 app /
-    //! markdown 层单测锁定；避免 insta 快照文件随 ratatui 版本升级
-    //! 产生大面积 churn。
+    //! Keyframe snapshot tests: ratatui TestBackend buffer assertions
+    //! instead of insta — snapshots hold layout text (glyph level) while
+    //! styles (colors / modifiers) lock in app / markdown unit tests, so
+    //! ratatui upgrades never churn snapshot files.
     use super::*;
+    use operations_wire::{Event, EventMsg};
     use ratatui::backend::TestBackend;
-    use wavecode_protocol::{Event, EventMsg};
 
     fn ctx() -> TuiContext {
         TuiContext {
             model_name: "claude-sonnet-4-5".into(),
             cwd: std::path::PathBuf::from("D:/proj/wavecode"),
-            permission_mode: wavecode_protocol::PermissionMode::Default,
+            permission_mode: PermissionMode::Default,
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
+            memory_index: String::new(),
         }
     }
 
@@ -162,9 +175,11 @@ mod tests {
         }
     }
 
-    /// 提取缓冲文本（逐行符号拼接，去行尾空白）：样式不参与断言。
-    /// 宽字符（CJK 等）占两格，后续格为占位符——按字符宽度跳格拼接，
-    /// 还原真实文本（否则 "命令" 会拼成 "命 令"）。
+    /// Extract buffer text (symbols joined per row, trailing space
+    /// trimmed): styles stay out of the assertions. Wide characters
+    /// (CJK etc.) occupy two cells with the second as placeholder —
+    /// advance by character width to restore the true text (otherwise
+    /// multi-cell glyphs would split apart).
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         use unicode_width::UnicodeWidthStr;
         let buf = terminal.backend().buffer();
@@ -190,25 +205,28 @@ mod tests {
         buffer_text(&terminal)
     }
 
-    /// 启动布局：欢迎行在消息流顶部；输入框带边框与标题；状态栏含
-    /// 模型名 / 权限模式 / tokens 占位 / cwd。
+    /// Startup layout: welcome row atop the stream; bordered input box
+    /// with title; status bar with model / permission / tokens slot / cwd.
     #[test]
     fn snapshot_startup_layout() {
         let mut app = App::new(ctx());
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("WaveCode TUI"), "欢迎行: {text}");
-        assert!(text.contains("∿ 输入"), "输入框标题: {text}");
-        assert!(text.contains("claude-sonnet-4-5"), "模型名: {text}");
-        assert!(text.contains("default"), "权限模式: {text}");
-        assert!(text.contains("tokens —"), "tokens 占位: {text}");
+        assert!(text.contains("WaveCode TUI"), "welcome row: {text}");
+        assert!(text.contains("∿ 输入"), "input title: {text}");
+        assert!(text.contains("claude-sonnet-4-5"), "model name: {text}");
+        assert!(text.contains("default"), "permission mode: {text}");
+        assert!(text.contains("tokens —"), "tokens slot: {text}");
         assert!(text.contains("D:/proj/wavecode"), "cwd: {text}");
-        // 三段布局：状态栏在最后一行。
+        // Three-part layout: status bar on the last row.
         let last = text.lines().last().unwrap();
-        assert!(last.contains("claude-sonnet-4-5"), "状态栏应在底部: {text}");
+        assert!(
+            last.contains("claude-sonnet-4-5"),
+            "status bar at bottom: {text}"
+        );
     }
 
-    /// 消息流 + 状态栏：用户行 / markdown 助手消息 / 工具行符号 /
-    /// 失败 ✗ / TokenCount 进状态栏。
+    /// Message flow + status bar: user row / markdown assistant message /
+    /// tool row symbols / failure ✗ / TokenCount in the status bar.
     #[test]
     fn snapshot_message_flow_and_status() {
         let mut app = App::new(ctx());
@@ -220,10 +238,8 @@ mod tests {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ));
-        use wavecode_protocol::EventMsg as M;
-        app.handle_event(&ev(M::TurnStarted {
-            turn_id: "t".into(),
-        }));
+        use operations_wire::EventMsg as M;
+        app.handle_event(&ev(M::TurnStarted));
         app.handle_event(&ev(M::AgentMessageDelta {
             text: "**好的**\n".into(),
         }));
@@ -232,57 +248,60 @@ mod tests {
         }));
         app.handle_event(&ev(M::ToolCallBegin {
             call_id: "c1".into(),
-            tool: "read_file".into(),
+            name: "read_file".into(),
             input: serde_json::json!({"path": "a.txt"}),
         }));
         app.handle_event(&ev(M::ToolCallEnd {
             call_id: "c1".into(),
-            ok: false,
-            output: "boom".into(),
+            is_error: true,
         }));
         app.handle_event(&ev(M::TokenCount {
-            used: 120,
-            window: 200_000,
+            input_tokens: 120,
+            output_tokens: 200_000,
         }));
-        app.handle_event(&ev(M::TurnCompleted {
-            stop_reason: wavecode_protocol::StopReason::Completed,
-        }));
+        app.handle_event(&ev(M::TurnCompleted { interrupted: false }));
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("> 你"), "用户行: {text}");
-        assert!(text.contains("好的"), "助手消息: {text}");
-        assert!(!text.contains("**"), "markdown 记号应被渲染掉: {text}");
-        assert!(text.contains("▸ read_file"), "工具行: {text}");
-        assert!(text.contains("✗ boom"), "失败行: {text}");
-        assert!(text.contains("tokens 120/200000"), "状态栏 tokens: {text}");
+        assert!(text.contains("> 你"), "user row: {text}");
+        assert!(text.contains("好的"), "assistant message: {text}");
+        assert!(!text.contains("**"), "markdown markers render away: {text}");
+        assert!(text.contains("▸ read_file"), "tool row: {text}");
+        assert!(text.contains("✗ c1"), "failure row: {text}");
+        assert!(
+            text.contains("tokens 120/200000"),
+            "status bar tokens: {text}"
+        );
     }
 
-    /// 审批弹窗：⚠ 提示行进消息流；弹窗含类型 / detail / y-n-Esc 提示；
-    /// n 进入原因录入态后弹窗切换提示。
+    /// Approval popup: ⚠ notice row enters the stream; the popup shows
+    /// kind / detail / y-n-Esc hints; pressing n switches to reason mode.
     #[test]
     fn snapshot_approval_popup() {
         let mut app = App::new(ctx());
         app.handle_event(&ev(EventMsg::ApprovalRequested {
             call_id: "c1".into(),
-            kind: wavecode_protocol::ApprovalKind::Exec,
+            kind: operations_wire::ApprovalKind::Exec,
             detail: "shell: rm -rf build/".into(),
         }));
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("⚠ 审批请求"), "提示行/弹窗标题: {text}");
-        assert!(text.contains("执行命令"), "类型: {text}");
+        assert!(
+            text.contains("⚠ 审批请求"),
+            "notice row/popup title: {text}"
+        );
+        assert!(text.contains("执行命令"), "kind: {text}");
         assert!(text.contains("shell: rm -rf build/"), "detail: {text}");
-        assert!(text.contains("y 放行"), "选择态提示: {text}");
-        // n → 原因录入态。
+        assert!(text.contains("y 放行"), "selection hints: {text}");
+        // n → reason mode.
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('n'),
             crossterm::event::KeyModifiers::NONE,
         ));
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("拒绝原因"), "原因录入态: {text}");
-        assert!(text.contains("Enter 确认拒绝"), "原因态提示: {text}");
+        assert!(text.contains("拒绝原因"), "reason mode: {text}");
+        assert!(text.contains("Enter 确认拒绝"), "reason hints: {text}");
     }
 
-    /// slash 补全弹层：`/c` 过滤出 /compact 与 /commit（skill），
-    /// 选中项带 ▸ 前缀。
+    /// Slash completion popup: `/c` filters to /compact and /commit
+    /// (skill), the selected item carries the ▸ prefix.
     #[test]
     fn snapshot_slash_popup() {
         let mut app = App::new(ctx());
@@ -293,31 +312,35 @@ mod tests {
             ));
         }
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("命令"), "弹层标题: {text}");
-        assert!(text.contains("▸ /compact"), "选中项: {text}");
-        assert!(text.contains("/commit"), "skill 候选: {text}");
-        assert!(!text.contains("/memory"), "前缀过滤: {text}");
+        assert!(text.contains("命令"), "popup title: {text}");
+        assert!(text.contains("▸ /compact"), "selected item: {text}");
+        assert!(text.contains("/commit"), "skill candidate: {text}");
+        assert!(!text.contains("/memory"), "prefix filter: {text}");
     }
 
-    /// crate 边界锁定（SPEC §3 规则 2）：tui 的 workspace 内依赖只有
-    /// protocol + app-server，不得引入 core 等其他 wavecode-* crate。
+    /// Crate boundary: the TUI workspace dependencies are exactly
+    /// operations-wire and operations-actor. Nothing else internal.
     #[test]
     fn dependency_matrix_locked() {
         let manifest = include_str!("../Cargo.toml");
         assert!(
             !manifest.contains("wavecode-core"),
-            "tui 不得依赖 core（SPEC §3 规则 2）"
+            "tui must not depend on core"
         );
         for line in manifest.lines() {
             let Some(name) = line.split('=').next().map(str::trim) else {
                 continue;
             };
-            if name.starts_with("wavecode-") {
+            if name.starts_with("operations-") {
                 assert!(
-                    matches!(name, "wavecode-protocol" | "wavecode-app-server"),
-                    "tui 新增 workspace 内依赖须先改 SPEC §3 矩阵: {name}"
+                    matches!(name, "operations-wire" | "operations-actor"),
+                    "tui new internal deps need a matrix update: {name}"
                 );
             }
+            assert!(
+                !name.starts_with("wavecode-"),
+                "tui must not depend on legacy crates: {name}"
+            );
         }
     }
 }

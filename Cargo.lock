@@ -2479,6 +2479,7 @@ dependencies = [
  "anstyle",
  "anyhow",
  "clap",
+ "operations-bootstrap",
  "pulldown-cmark",
  "rustyline",
  "serde_json",
@@ -2633,14 +2634,14 @@ dependencies = [
  "anyhow",
  "crossterm",
  "futures",
+ "operations-actor",
+ "operations-wire",
  "pulldown-cmark",
  "ratatui",
  "serde_json",
  "tokio",
  "unicode-width 0.2.0",
  "uuid",
- "wavecode-app-server",
- "wavecode-protocol",
 ]
 
 [[package]]

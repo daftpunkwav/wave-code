@@ -55,6 +55,11 @@ impl NativeExecutor {
     pub fn register(&mut self, tool: NativeTool) {
         self.tools.insert(tool.name.clone(), tool);
     }
+
+    /// True when a native tool shadows the name.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
 }
 
 #[async_trait::async_trait]

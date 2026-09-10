@@ -1149,6 +1149,51 @@ where
     }
 }
 
+/// Forwarding implementation so shared drivers erase to trait objects.
+///
+/// Composition roots hold `Arc<dyn TurnDriver>`; this blanket forward
+/// keeps every concrete driver working unchanged behind the pointer.
+#[async_trait::async_trait]
+impl<T> TurnDriver for std::sync::Arc<T>
+where
+    T: TurnDriver,
+{
+    async fn drive_turn(
+        &self,
+        ctx: &RunContext,
+        conv: &mut Conversation,
+        input: &str,
+        system: &str,
+        on_event: &(dyn Fn(Event) + Send + Sync),
+    ) -> StopReason {
+        self.as_ref()
+            .drive_turn(ctx, conv, input, system, on_event)
+            .await
+    }
+
+    async fn drive_compact(
+        &self,
+        conv: &mut Conversation,
+        trigger: CompactTrigger,
+        on_event: &(dyn Fn(Event) + Send + Sync),
+    ) -> Result<(), String> {
+        self.as_ref().drive_compact(conv, trigger, on_event).await
+    }
+
+    async fn drive_hook(
+        &self,
+        point: HookPoint,
+        payload: &str,
+        on_event: &(dyn Fn(Event) + Send + Sync),
+    ) -> bool {
+        self.as_ref().drive_hook(point, payload, on_event).await
+    }
+
+    fn interrupt_handle(&self) -> Option<InterruptHandle> {
+        self.as_ref().interrupt_handle()
+    }
+}
+
 /// Serial dispatch item: direct execution or parked approval.
 enum SerialCall<'a> {
     /// Policy allowed; execute after the interrupt check.

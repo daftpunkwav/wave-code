@@ -42,7 +42,7 @@ const LIFECYCLE_ID: &str = "session-lifecycle";
 pub struct SessionActor<D> {
     driver: D,
     conv: Conversation,
-    children: ChildRuntime,
+    children: Arc<ChildRuntime>,
     approvals: Arc<ApprovalGate>,
     interrupt: InterruptHandle,
     system: String,
@@ -62,7 +62,7 @@ where
     pub fn spawn(
         driver: D,
         conv: Conversation,
-        children: ChildRuntime,
+        children: Arc<ChildRuntime>,
         approvals: Arc<ApprovalGate>,
         interrupt: InterruptHandle,
         system: String,
@@ -417,7 +417,7 @@ mod tests {
         let client = SessionActor::spawn(
             driver,
             Conversation::new(),
-            ChildRuntime::new(),
+            Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
             InterruptHandle::new(),
             "sys".to_string(),
@@ -534,7 +534,7 @@ mod tests {
         let client = SessionActor::spawn(
             driver,
             Conversation::new(),
-            ChildRuntime::new(),
+            Arc::new(ChildRuntime::new()),
             gate.clone(),
             InterruptHandle::new(),
             "sys".to_string(),

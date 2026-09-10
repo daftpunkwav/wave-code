@@ -19,19 +19,25 @@
 //! here, so neither side names the other directly.
 
 pub mod child_service;
+pub mod compactor;
+pub mod composite;
 pub mod gate_adapter;
 pub mod hook_adapter;
 pub mod model_adapter;
 pub mod native;
 pub mod plan_adapter;
 pub mod policy_adapter;
+pub mod session;
 pub mod tool_adapter;
 
 pub use child_service::TurnChildService;
+pub use compactor::ContextCompactor;
+pub use composite::CompositeExecutor;
 pub use gate_adapter::GateApprovalSource;
 pub use hook_adapter::HookAdapter;
 pub use model_adapter::ModelAdapter;
 pub use native::{NativeExecutor, NativeTool};
 pub use plan_adapter::TodoPlanTracker;
 pub use policy_adapter::PolicyAdapter;
+pub use session::{AssembleOptions, SessionError, SessionHandle, assemble_session};
 pub use tool_adapter::ToolAdapter;

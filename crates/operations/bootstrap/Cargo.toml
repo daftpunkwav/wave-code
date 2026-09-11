@@ -10,6 +10,7 @@ runtime-child = { path = "../../runtime/child" }
 runtime-prompt = { path = "../../runtime/prompt" }
 state-store = { path = "../../state/store" }
 action-tasks = { path = "../../action/tasks" }
+action-jobs = { path = "../../action/jobs" }
 infrastructure-base = { path = "../../infrastructure/base" }
 safety-gate = { path = "../../safety/gate" }
 operations-actor = { path = "../actor" }

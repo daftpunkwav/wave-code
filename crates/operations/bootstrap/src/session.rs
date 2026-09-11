@@ -359,6 +359,16 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     )));
     registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
     registry.register(Arc::new(TaskStopTool::new(task_service)));
+    // Background shell jobs for long work that must not block the turn.
+    // They file completion notices on the same child runtime the actor
+    // drains, so results re-enter turns exactly like child tasks.
+    // `job_spawn` writes, `job_wait`/`job_output` only observe, and
+    // `job_cancel` is destructive (approval-gated).
+    let jobs = Arc::new(action_jobs::JobService::new(children.clone()));
+    registry.register(Arc::new(crate::job_tools::JobSpawnTool::new(jobs.clone())));
+    registry.register(Arc::new(crate::job_tools::JobWaitTool::new(jobs.clone())));
+    registry.register(Arc::new(crate::job_tools::JobCancelTool::new(jobs.clone())));
+    registry.register(Arc::new(crate::job_tools::JobOutputTool::new(jobs)));
     // File-content snapshots ride the same late handle: the store root
     // derives from the session memory root (`<home>/.wavecode/memories`
     // -> `<home>/.wavecode/snapshots`) so injected roots stay hermetic.

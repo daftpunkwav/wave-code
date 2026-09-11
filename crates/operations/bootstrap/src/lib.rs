@@ -23,6 +23,7 @@ pub mod compactor;
 pub mod composite;
 pub mod gate_adapter;
 pub mod hook_adapter;
+pub mod job_tools;
 pub mod mcp_bridge;
 pub mod mcp_serve;
 pub mod memory_finish;

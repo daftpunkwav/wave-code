@@ -28,6 +28,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "action-jobs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "runtime-child",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "action-tasks"
 version = "0.1.0"
 dependencies = [
@@ -1101,6 +1111,7 @@ dependencies = [
 name = "operations-bootstrap"
 version = "0.1.0"
 dependencies = [
+ "action-jobs",
  "action-tasks",
  "async-trait",
  "futures",

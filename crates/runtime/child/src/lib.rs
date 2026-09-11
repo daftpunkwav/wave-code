@@ -164,11 +164,16 @@ impl CompletionSink {
 
     /// File one completion, dropping the oldest entry on overflow.
     fn push(&self, task_id: &str) {
+        self.push_text(&format!("{task_id} finished"));
+    }
+
+    /// File one preformatted notice, dropping the oldest entry on overflow.
+    fn push_text(&self, text: &str) {
         let mut queue = self.lock();
         if queue.len() >= MAX_NOTIFICATIONS {
             queue.pop_front();
         }
-        queue.push_back(format!("{task_id} finished"));
+        queue.push_back(text.to_string());
         self.changed.notify_one();
     }
 }
@@ -327,6 +332,15 @@ impl ChildRuntime {
     /// Borrow the live stop handle of one task, if tracked.
     pub fn stop_handle(&self, task_id: &str) -> Option<InterruptHandle> {
         self.lock_tasks().get(task_id).map(|slot| slot.stop.clone())
+    }
+
+    /// File an external completion notice on the shared channel.
+    ///
+    /// Background jobs finish outside any child task, but the parent loop
+    /// drains one queue: pushing here reuses that exact sink instead of a
+    /// second channel. Drops the oldest entry on overflow, like task pushes.
+    pub fn notify_completion(&self, message: String) {
+        self.sink.push_text(&message);
     }
 
     /// Take all buffered completion notifications (parent loop consumes).

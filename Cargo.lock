@@ -843,9 +843,6 @@ dependencies = [
 [[package]]
 name = "infrastructure-base"
 version = "0.1.0"
-dependencies = [
- "thiserror",
-]
 
 [[package]]
 name = "infrastructure-cache"

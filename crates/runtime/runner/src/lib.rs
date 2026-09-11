@@ -17,6 +17,9 @@
 //! the traits defined here by the composition root (bootstrap). This crate
 //! only carries data transfer objects so the dependency graph stays acyclic.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+
 use serde_json::Value;
 
 use infrastructure_base::InterruptHandle;
@@ -508,6 +511,41 @@ pub trait Compactor: Send + Sync {
 }
 
 /// The turn state machine, generic over all seams for testability.
+/// Per-run tool allowlist for turns sharing one driver.
+///
+/// Child turns run on the session driver, so a fork-scoped `allowed-tools`
+/// set cannot ride a per-driver registry. The child service registers one
+/// entry per task id; runs without an entry keep the full tool surface.
+#[derive(Clone, Default, Debug)]
+pub struct RunAllowlist {
+    inner: Arc<Mutex<HashMap<String, HashSet<String>>>>,
+}
+
+impl RunAllowlist {
+    /// Restrict one run to the named tools.
+    pub fn restrict(&self, run_id: &str, tools: HashSet<String>) {
+        self.lock().insert(run_id.to_string(), tools);
+    }
+
+    /// True when the run may execute the tool (no entry means unrestricted).
+    pub fn is_allowed(&self, run_id: &str, tool: &str) -> bool {
+        self.lock()
+            .get(run_id)
+            .is_none_or(|set| set.contains(tool))
+    }
+
+    /// Drop one run's restriction (child teardown).
+    pub fn release(&self, run_id: &str) {
+        self.lock().remove(run_id);
+    }
+
+    /// Recover the lock after a poison; inserts are single map writes with
+    /// no half-written invariant.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, HashSet<String>>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
 pub struct RunLoop<E, P, H, M, A, T, C> {
     executor: E,
     policy: P,
@@ -518,6 +556,7 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     compactor: C,
     cfg: RunConfig,
     interrupt: InterruptHandle,
+    run_allowlist: RunAllowlist,
 }
 
 impl<E, P, H, M, A, T, C> RunLoop<E, P, H, M, A, T, C>
@@ -553,7 +592,13 @@ where
             compactor,
             cfg,
             interrupt,
+            run_allowlist: RunAllowlist::default(),
         }
+    }
+
+    /// Handle to this loop's per-run tool allowlist for child services.
+    pub fn run_allowlist(&self) -> RunAllowlist {
+        self.run_allowlist.clone()
     }
 
     /// Run one turn to a terminal [`StopReason`].
@@ -704,7 +749,14 @@ where
             let request = SampleRequest {
                 system: system.to_string(),
                 messages: history_lite(conv),
-                tools: self.executor.available_tools(),
+                // Restricted runs never see denied tools: the model plans
+                // within its surface instead of hitting refusals.
+                tools: self
+                    .executor
+                    .available_tools()
+                    .into_iter()
+                    .filter(|tool| self.run_allowlist.is_allowed(&ctx.run_id, &tool.name))
+                    .collect(),
             };
             // Live deltas stream to frontends ahead of the assembled
             // message; ordering (deltas before AgentMessageComplete) is
@@ -845,7 +897,9 @@ where
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
-            let results = self.execute_calls(&calls, &emit_msg).await;
+            let results = self
+                .execute_calls(&ctx.run_id, &calls, &emit_msg)
+                .await;
             conv.push(Role::User, format_tool_results(&results));
             state.bump_tool_round();
         }
@@ -938,11 +992,10 @@ where
     /// otherwise consume one slot twice and panic on the second lookup.
     async fn execute_calls(
         &self,
+        run_id: &str,
         calls: &[ToolCall],
         emit: &(dyn Fn(EventMsg) + Send + Sync),
     ) -> Vec<ToolResult> {
-        use std::collections::{HashMap, HashSet};
-
         for call in calls {
             emit(EventMsg::ToolCallBegin {
                 call_id: call.call_id.clone(),
@@ -978,6 +1031,23 @@ where
         let mut blocked: HashMap<String, ToolResult> = HashMap::new();
         let mut live: Vec<&ToolCall> = Vec::with_capacity(unique.len());
         for call in unique {
+            // Fork-scoped `allowed-tools` enforcement: denied calls fail
+            // as business errors so the model self-corrects, and never
+            // reach hooks, policy, or the approval gate.
+            if !self.run_allowlist.is_allowed(run_id, &call.name) {
+                blocked.insert(
+                    call.call_id.clone(),
+                    ToolResult {
+                        call_id: call.call_id.clone(),
+                        content: format!(
+                            "tool {:?} is not in this run's allowed tools",
+                            call.name
+                        ),
+                        is_error: true,
+                    },
+                );
+                continue;
+            }
             let report = self
                 .hooks
                 .run_tool(HookPoint::PreToolUse, &call.name, &call.input, None)
@@ -1978,6 +2048,65 @@ mod run_loop_tests {
             .join("\n");
         assert!(history.contains("nope"));
         assert!(history.contains("[c2] error"));
+    }
+
+    #[tokio::test]
+    async fn restricted_runs_refuse_denied_tools_without_executing() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let task_loop = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        // Fork-scoped surface: this run may only read files.
+        task_loop.run_allowlist().restrict(
+            &fx.ctx.run_id,
+            ["read_file".to_string()].into_iter().collect(),
+        );
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        assert!(task_loop.executor.lock_executed().is_empty());
+        let outcome = task_loop
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        // Denied, not executed: the executor never saw the call.
+        assert!(task_loop.executor.lock_executed().is_empty());
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("not in this run's allowed tools"));
     }
 
     #[tokio::test]

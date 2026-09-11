@@ -268,6 +268,9 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         },
         interrupt.clone(),
     ));
+    // Per-run tool allowlist for fork-scoped skill surfaces; the handle
+    // is Arc-backed, so grabbing it before `worker` moves is enough.
+    let run_allowlist = worker.run_allowlist();
     let driver = {
         // Session-end memory extraction rides the driver seam: the actor
         // calls `end_session` with the final transcript on teardown. No
@@ -291,6 +294,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         driver.clone() as Arc<dyn runtime_runner::TurnDriver>,
         children.clone(),
         String::new(),
+        run_allowlist,
     ));
     register_child_tools(&native, tasks.clone());
 
@@ -382,6 +386,7 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
                             kind,
                             input: text.to_string(),
                             parent_run_id: String::new(),
+                            allowed_tools: Vec::new(),
                         });
                         (id, false)
                     }

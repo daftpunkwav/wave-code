@@ -26,7 +26,7 @@ use std::sync::{
 
 use action_tasks::{TaskInfo, TaskKind, TaskOutcome, TaskRequest, TaskService, TaskState};
 use runtime_child::{ChildKind, ChildRuntime, ChildSpec};
-use runtime_runner::{RunContext, StopReason, TurnDriver};
+use runtime_runner::{RunAllowlist, RunContext, StopReason, TurnDriver};
 use state_store::Conversation;
 
 /// How often the stop watcher polls the ticket flag.
@@ -42,15 +42,23 @@ pub struct TurnChildService {
     driver: Arc<dyn TurnDriver>,
     runtime: Arc<ChildRuntime>,
     system: String,
+    allowlist: RunAllowlist,
 }
 
 impl TurnChildService {
-    /// Wire a driver, a runtime, and the system prompt for child turns.
-    pub fn new(driver: Arc<dyn TurnDriver>, runtime: Arc<ChildRuntime>, system: String) -> Self {
+    /// Wire a driver, a runtime, the system prompt, and the loop's
+    /// per-run tool allowlist for fork-scoped `allowed-tools`.
+    pub fn new(
+        driver: Arc<dyn TurnDriver>,
+        runtime: Arc<ChildRuntime>,
+        system: String,
+        allowlist: RunAllowlist,
+    ) -> Self {
         Self {
             driver,
             runtime,
             system,
+            allowlist,
         }
     }
 
@@ -67,6 +75,7 @@ impl TaskService for TurnChildService {
     fn spawn(&self, request: TaskRequest) -> String {
         let driver = self.driver.clone();
         let system = self.system.clone();
+        let allowlist = self.allowlist.clone();
         let turn_interrupt = driver.interrupt_handle();
         let done = Arc::new(AtomicBool::new(false));
         let watcher_done = done.clone();
@@ -77,6 +86,7 @@ impl TaskService for TurnChildService {
                 // ticket, so the service holds no second copy.
                 input: request.input,
                 parent_run_id: request.parent_run_id,
+                allowed_tools: request.allowed_tools,
             },
             move |ticket| async move {
                 // Stop bridge: poll the ticket flag into the driver's turn
@@ -101,10 +111,20 @@ impl TaskService for TurnChildService {
                     submission_id: ticket.task_id.clone(),
                     input: ticket.input.clone(),
                 };
+                // Restrict before the first sample so denied tools are
+                // hidden from the catalog and refused at execution;
+                // release on teardown so finished runs leave no entries.
+                if !ticket.allowed_tools.is_empty() {
+                    allowlist.restrict(
+                        &ticket.task_id,
+                        ticket.allowed_tools.iter().cloned().collect(),
+                    );
+                }
                 let mut conv = Conversation::new();
                 let outcome = driver
                     .drive_turn(&ctx, &mut conv, &ticket.input, &system, &|_| {})
                     .await;
+                allowlist.release(&ticket.task_id);
                 done.store(true, Ordering::SeqCst);
                 runtime_child::TaskResult {
                     status: match &outcome {
@@ -195,10 +215,12 @@ mod tests {
 
     #[tokio::test]
     async fn child_turns_complete_through_the_task_seam() {
+        let allowlist = RunAllowlist::default();
         let service = TurnChildService::new(
             Arc::new(EchoDriver),
             Arc::new(ChildRuntime::new()),
             "sys".to_string(),
+            allowlist.clone(),
         );
         let id = TaskService::spawn(
             &service,
@@ -206,6 +228,7 @@ mod tests {
                 kind: TaskKind::ReadOnly,
                 input: "summarize this".to_string(),
                 parent_run_id: "run-1".to_string(),
+                allowed_tools: Vec::new(),
             },
         );
         for _ in 0..1000 {
@@ -223,5 +246,46 @@ mod tests {
             Some(TaskOutcome::Completed { ref summary }) if summary.contains("child saw")
         ));
         assert!(!TaskService::stop(&service, "child-999"));
+    }
+
+    #[tokio::test]
+    async fn restricted_children_release_their_allowlist_entry() {
+        let allowlist = RunAllowlist::default();
+        let service = TurnChildService::new(
+            Arc::new(EchoDriver),
+            Arc::new(ChildRuntime::new()),
+            "sys".to_string(),
+            allowlist.clone(),
+        );
+        let id = TaskService::spawn(
+            &service,
+            TaskRequest {
+                kind: TaskKind::Standard,
+                input: "locked down".to_string(),
+                parent_run_id: "run-1".to_string(),
+                allowed_tools: vec!["read_file".to_string()],
+            },
+        );
+        for _ in 0..1000 {
+            if service.query(&id).and_then(|info| info.outcome).is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(service.query(&id).expect("task must be tracked").outcome.is_some());
+        // Teardown releases the restriction: no entry outlives the run.
+        assert!(allowlist.is_allowed(&id, "read_file"));
+        assert!(allowlist.is_allowed(&id, "shell"));
+        // Unrestricted spawns never register in the first place.
+        let open = TaskService::spawn(
+            &service,
+            TaskRequest {
+                kind: TaskKind::Standard,
+                input: "open".to_string(),
+                parent_run_id: "run-1".to_string(),
+                allowed_tools: Vec::new(),
+            },
+        );
+        assert!(allowlist.is_allowed(&open, "shell"));
     }
 }

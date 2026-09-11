@@ -32,6 +32,9 @@ pub struct TaskRequest {
     pub input: String,
     /// Parent run id for correlation.
     pub parent_run_id: String,
+    /// Fork-scoped tool surface from skill `allowed-tools`; empty keeps
+    /// the full surface.
+    pub allowed_tools: Vec<String>,
 }
 
 /// Lifecycle state of one tracked task.
@@ -228,6 +231,7 @@ mod tests {
             kind: TaskKind::ReadOnly,
             input: "summarize".to_string(),
             parent_run_id: "run-1".to_string(),
+            allowed_tools: Vec::new(),
         }
     }
 

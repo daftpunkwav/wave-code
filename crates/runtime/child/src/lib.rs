@@ -59,6 +59,8 @@ pub struct ChildSpec {
     pub input: String,
     /// Parent run id, used for correlation and idempotency.
     pub parent_run_id: String,
+    /// Fork-scoped tool surface; empty keeps the full surface.
+    pub allowed_tools: Vec<String>,
 }
 
 /// Terminal status of a finished child task.
@@ -137,6 +139,9 @@ pub struct ChildTicket {
     pub input: String,
     /// Parent run id for correlation, carried from the spawn spec.
     pub parent_run_id: String,
+    /// Fork-scoped tool surface, carried from the spawn spec so the
+    /// service can restrict the run before the first tool executes.
+    pub allowed_tools: Vec<String>,
     /// Stop signal; child work polls `is_triggered` at safe points.
     pub stop: InterruptHandle,
 }
@@ -258,6 +263,7 @@ impl ChildRuntime {
             kind: spec.kind,
             input: spec.input,
             parent_run_id: spec.parent_run_id,
+            allowed_tools: spec.allowed_tools,
             stop: slot.stop.clone(),
         };
         let sink = self.sink.clone();
@@ -364,6 +370,7 @@ mod tests {
             kind: ChildKind::Standard,
             input: input.to_string(),
             parent_run_id: "run-1".to_string(),
+            allowed_tools: Vec::new(),
         }
     }
 

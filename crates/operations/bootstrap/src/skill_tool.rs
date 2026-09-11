@@ -106,15 +106,15 @@ impl Tool for SkillTool {
                 is_error: false,
             }),
             SkillContext::Fork => {
-                // Fork inherits the session tool surface: per-skill
-                // `allowed-tools` filtering needs a child-scoped registry
-                // that does not exist yet, so the task runs Standard.
-                // The tool seam carries no run identity; the spawned id
-                // stays the correlation handle.
+                // Fork runs on the shared driver under a per-run allowlist:
+                // a declared `allowed-tools` set restricts the child's
+                // surface, empty keeps the full session surface. The
+                // spawned id stays the correlation handle.
                 let id = self.tasks.spawn(TaskRequest {
                     kind: TaskKind::Standard,
                     input: expanded,
                     parent_run_id: String::new(),
+                    allowed_tools: skill.meta.allowed_tools.clone(),
                 });
                 Ok(ToolOutput {
                     content: format!(
@@ -155,6 +155,15 @@ mod tests {
     }
 
     fn skill(name: &str, context: SkillContext, body: &str) -> Skill {
+        skill_with_tools(name, context, body, Vec::new())
+    }
+
+    fn skill_with_tools(
+        name: &str,
+        context: SkillContext,
+        body: &str,
+        allowed_tools: Vec<String>,
+    ) -> Skill {
         Skill {
             name: name.to_string(),
             dir: std::path::PathBuf::from("/skills"),
@@ -162,7 +171,7 @@ mod tests {
             meta: SkillMeta {
                 description: "test skill".to_string(),
                 when_to_use: None,
-                allowed_tools: Vec::new(),
+                allowed_tools,
                 context,
                 user_invocable: true,
                 argument_hint: None,
@@ -183,6 +192,12 @@ mod tests {
             "deep",
             SkillContext::Fork,
             "Research thoroughly in ${WAVECODE_SKILL_DIR}.",
+        ));
+        set.add(skill_with_tools(
+            "focused",
+            SkillContext::Fork,
+            "Read only.",
+            vec!["read_file".to_string(), "grep".to_string()],
         ));
         let tasks = Arc::new(FakeTasks {
             spawned: std::sync::Mutex::new(Vec::new()),
@@ -229,6 +244,33 @@ mod tests {
         assert_eq!(spawned.len(), 1);
         assert!(spawned[0].input.contains("/skills"));
         assert!(!tool.is_read_only());
+    }
+
+    #[tokio::test]
+    async fn fork_skills_carry_their_allowed_tools() {
+        let (tool, tasks) = tool();
+        let output = tool
+            .execute(serde_json::json!({"name": "focused"}), &ctx())
+            .await
+            .unwrap();
+        assert!(!output.is_error);
+        let spawned = tasks.spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 1);
+        assert_eq!(
+            spawned[0].allowed_tools,
+            vec!["read_file".to_string(), "grep".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_skills_without_a_surface_stay_unrestricted() {
+        let (tool, tasks) = tool();
+        tool.execute(serde_json::json!({"name": "deep"}), &ctx())
+            .await
+            .unwrap();
+        let spawned = tasks.spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 1);
+        assert!(spawned[0].allowed_tools.is_empty());
     }
 
     #[tokio::test]

@@ -137,8 +137,12 @@ impl ToolAllowlist {
 ///
 /// **不含** session 级 planning / skills 状态（[`TodoStore`] / [`ToolAllowlist`]）
 /// ——那些由会话配置持有，避免 Registry 成为跨业务变化中心。
+///
+/// The map is interior-mutable: late tools (registered after the registry
+/// is already shared, e.g. once child services exist) become visible to
+/// executors, policy, and model adapters without rebuilding assembly.
 pub struct Registry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: Mutex<HashMap<String, Arc<dyn Tool>>>,
 }
 
 impl Registry {
@@ -147,8 +151,8 @@ impl Registry {
     /// `todo_write` 须由调用方经 [`Registry::with_todo_write`] 注入，并与
     /// 会话配置中的 [`TodoStore`] 共享同一句柄。
     pub fn builtin() -> Self {
-        let mut reg = Self {
-            tools: HashMap::new(),
+        let reg = Self {
+            tools: Mutex::new(HashMap::new()),
         };
         reg.register(Arc::new(fs::ReadFile));
         reg.register(Arc::new(fs::WriteFile));
@@ -161,7 +165,7 @@ impl Registry {
     }
 
     /// 注册 `todo_write`，与会话级 [`TodoStore`] 共享状态。
-    pub fn with_todo_write(mut self, todos: TodoStore) -> Self {
+    pub fn with_todo_write(self, todos: TodoStore) -> Self {
         self.register(Arc::new(TodoWrite::new(todos)));
         self
     }
@@ -177,11 +181,11 @@ impl Registry {
     /// 仅保留名单内的工具（未知名静默略过——名单来自用户 frontmatter，
     /// 拼错的代价是该工具不可用，影响面局限于该 skill）。
     pub fn name_subset(&self, names: &[String]) -> Self {
-        let mut reg = Self {
-            tools: HashMap::new(),
+        let reg = Self {
+            tools: Mutex::new(HashMap::new()),
         };
         for name in names {
-            if let Some(tool) = self.tools.get(name) {
+            if let Some(tool) = lock(&self.tools).get(name) {
                 reg.register(tool.clone());
             }
         }
@@ -191,10 +195,10 @@ impl Registry {
     /// 派生只读子集注册表（P5 explore 类型子代理的工具面）：仅保留
     /// `is_read_only()` 的工具（`todo_write` 非只读，不会进入子集）。
     pub fn read_only_subset(&self) -> Self {
-        let mut reg = Self {
-            tools: HashMap::new(),
+        let reg = Self {
+            tools: Mutex::new(HashMap::new()),
         };
-        for tool in self.tools.values() {
+        for tool in lock(&self.tools).values() {
             if tool.is_read_only() {
                 reg.register(tool.clone());
             }
@@ -202,14 +206,16 @@ impl Registry {
         reg
     }
 
-    /// 注册工具（M3 起 MCP 等动态工具也经此注册）。
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        self.tools.insert(tool.name().to_owned(), tool);
+    /// 注册工具（M3 起 MCP 等动态工具也经此注册），`&self` 接收以支持
+    /// 装配后期的 late registration（见结构体文档）。
+    pub fn register(&self, tool: Arc<dyn Tool>) {
+        lock(&self.tools).insert(tool.name().to_owned(), tool);
     }
 
     /// 全部工具的 `ToolSpec`，按 name 排序，输出稳定。
     pub fn specs(&self) -> Vec<wavecode_llm::ToolSpec> {
-        let mut tools: Vec<&Arc<dyn Tool>> = self.tools.values().collect();
+        let guard = lock(&self.tools);
+        let mut tools: Vec<&Arc<dyn Tool>> = guard.values().collect();
         tools.sort_by_key(|t| t.name());
         tools
             .iter()
@@ -223,7 +229,7 @@ impl Registry {
 
     /// 按名查找工具。
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        lock(&self.tools).get(name).cloned()
     }
 }
 
@@ -280,5 +286,44 @@ mod tests {
             .unwrap();
         assert!(!out.is_error);
         assert_eq!(todos.snapshot().len(), 1, "子集工具与会话 store 须同句柄");
+    }
+
+    /// Late registration reaches already-shared handles: tools appended
+    /// after the registry is behind an `Arc` (skill tool, MCP tools) are
+    /// visible to executors, policy, and model adapters without rebuilds.
+    #[test]
+    fn late_registration_reaches_shared_handles() {
+        struct LateTool;
+        #[async_trait::async_trait]
+        impl Tool for LateTool {
+            fn name(&self) -> &str {
+                "late_tool"
+            }
+            fn description(&self) -> &str {
+                "test-only late tool"
+            }
+            fn input_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            fn is_read_only(&self) -> bool {
+                true
+            }
+            async fn execute(
+                &self,
+                _input: serde_json::Value,
+                _ctx: &ToolCtx,
+            ) -> Result<ToolOutput> {
+                Ok(ToolOutput {
+                    content: String::new(),
+                    is_error: false,
+                })
+            }
+        }
+        let registry = Arc::new(Registry::builtin());
+        assert!(registry.get("late_tool").is_none());
+        let before = registry.specs().len();
+        registry.register(Arc::new(LateTool));
+        assert!(registry.get("late_tool").is_some());
+        assert_eq!(registry.specs().len(), before + 1);
     }
 }

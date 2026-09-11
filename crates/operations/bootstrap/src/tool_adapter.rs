@@ -137,7 +137,7 @@ mod tests {
     }
 
     fn adapter() -> ToolAdapter {
-        let mut registry = wavecode_tools::Registry::builtin();
+        let registry = wavecode_tools::Registry::builtin();
         registry.register(Arc::new(EchoTool));
         registry.register(Arc::new(FaultyTool));
         ToolAdapter::new(

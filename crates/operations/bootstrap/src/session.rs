@@ -43,6 +43,7 @@ use crate::model_adapter::ModelAdapter;
 use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
+use crate::skill_tool::SkillTool;
 use crate::tool_adapter::ToolAdapter;
 
 /// Approval wait timeout applied to parked decisions.
@@ -140,7 +141,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         provider.base_url.clone(),
         api_key,
     ));
-    let (mut registry, todos) = wavecode_tools::Registry::builtin_with_todos();
+    let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
     // `memory_write` shares the prompt index root so model-written entries
     // surface in the next session without a restart. No home means no
     // memory at all (same gate as `assemble_memory` below).
@@ -185,7 +186,8 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
 
     // 4. Context sources with warn-and-continue degradation.
     let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
-    let (skill_catalog, skill_names) = assemble_skills(home.as_deref(), &cwd, &mut warnings);
+    let (skill_catalog, skill_names, skill_set) =
+        assemble_skills(home.as_deref(), &cwd, &mut warnings);
     let hooks = assemble_hooks(&config, &mut warnings);
     let mcp_servers = describe_mcp_servers(&config);
 
@@ -264,7 +266,15 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         children.clone(),
         String::new(),
     ));
-    register_child_tools(&native, tasks);
+    register_child_tools(&native, tasks.clone());
+
+    // The `skill` model tool needs the child service, which only exists
+    // after the driver is built: late registration on the shared registry
+    // makes it visible to the executor, policy, and model adapters live.
+    registry.register(Arc::new(SkillTool::new(
+        skill_set,
+        tasks.clone() as Arc<dyn action_tasks::TaskService>,
+    )));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     let tool_names: Vec<String> = registry
@@ -408,12 +418,13 @@ fn assemble_memory(
 }
 
 /// Assemble the skill catalog text with discovery warnings preserved,
-/// returning catalog text plus directly invokable names for UIs.
+/// returning catalog text, directly invokable names for UIs, and the set
+/// itself for the `skill` tool backend.
 fn assemble_skills(
     home: Option<&Path>,
     cwd: &Path,
     warnings: &mut Vec<String>,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, Arc<wavecode_skills::SkillSet>) {
     let roots = wavecode_skills::standard_roots(None, home, cwd);
     let discovery = wavecode_skills::discover(&roots);
     warnings.extend(discovery.warnings.iter().cloned());
@@ -423,7 +434,11 @@ fn assemble_skills(
         .filter(|skill| skill.meta.user_invocable)
         .map(|skill| skill.name.clone())
         .collect();
-    (discovery.set.catalog(DEFAULT_CATALOG_BUDGET), names)
+    (
+        discovery.set.catalog(DEFAULT_CATALOG_BUDGET),
+        names,
+        Arc::new(discovery.set),
+    )
 }
 
 /// Convert raw config hooks into an engine, warning past bad entries.

@@ -30,6 +30,7 @@ pub mod native;
 pub mod plan_adapter;
 pub mod policy_adapter;
 pub mod session;
+pub mod skill_tool;
 pub mod tool_adapter;
 
 pub use child_service::TurnChildService;
@@ -47,4 +48,5 @@ pub use session::{
     APPROVAL_TIMEOUT, AssembleOptions, DEFAULT_IDENTITY, DEFAULT_MAX_TOOL_ROUNDS, SessionError,
     SessionHandle, assemble_session,
 };
+pub use skill_tool::SkillTool;
 pub use tool_adapter::ToolAdapter;

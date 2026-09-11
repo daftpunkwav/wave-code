@@ -504,6 +504,67 @@ mod tests {
         assert!(has_hint);
     }
 
+    /// /snapshots: locally list labels (no Op); empty stores hint at the
+    /// snapshot tool instead of failing.
+    #[test]
+    fn snapshots_lists_labels_locally() {
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/snapshots");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty(), "/snapshots renders locally");
+        // User line plus at least one response row (hint or labels).
+        assert!(app.items.len() >= 2);
+        // Completion offers the new builtin.
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/s");
+        assert!(
+            app.slash_candidates().contains(&"/snapshots".to_string()),
+            "candidates: {:?}",
+            app.slash_candidates()
+        );
+    }
+
+    /// /rewind: usage without a label, rejection for bad labels, and an
+    /// unknown-label row for well-formed but missing labels (no Op ever).
+    #[test]
+    fn rewind_shows_usage_and_label_errors_locally() {
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/rewind");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty(), "/rewind renders locally");
+        let has_usage = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("usage: /rewind <label>"));
+        assert!(has_usage);
+
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/rewind a/b");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty());
+        let has_invalid = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("invalid snapshot label"));
+        assert!(has_invalid);
+
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/rewind wavecode-no-such-snapshot-1");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty());
+        let has_unknown = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("unknown snapshot"));
+        assert!(has_unknown);
+    }
+
     /// Event flow: buffered deltas render as markdown on complete;
     /// interrupt leftovers still render with the interrupted marker;
     /// TokenCount feeds the status bar.

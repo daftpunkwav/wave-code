@@ -3,13 +3,24 @@
 
 use operations_wire::Op;
 
+use std::path::PathBuf;
+
 use super::App;
-use super::types::{Item, dim, warn};
+use super::types::{Item, dim, err, warn};
 use crate::text::sanitize_terminal;
 
 /// Builtin slash commands (completion and routing share this list;
 /// skill names arrive injected from the assembly side).
-const BUILTIN_COMMANDS: &[&str] = &["compact", "memory", "mcp", "permissions", "quit", "exit"];
+const BUILTIN_COMMANDS: &[&str] = &[
+    "compact",
+    "memory",
+    "mcp",
+    "snapshots",
+    "rewind",
+    "permissions",
+    "quit",
+    "exit",
+];
 
 impl App {
     /// Slash candidates from the current input (builtins plus known
@@ -89,6 +100,8 @@ impl App {
             // carries turns, not inspection reads.
             "memory" => self.show_memory(),
             "mcp" => self.show_mcp(),
+            "snapshots" => self.show_snapshots(),
+            "rewind" => self.show_rewind(args),
             "permissions" => self.cycle_permission_mode(),
             _ => {
                 if self.ctx.skill_names.iter().any(|n| n == name) {
@@ -154,6 +167,92 @@ impl App {
         }
     }
 
+    /// `/snapshots`: list file-content snapshot labels (local display,
+    /// no Op; the tui must not depend on tools, so the store layout under
+    /// `<home>/.wavecode/snapshots/` is read directly).
+    fn show_snapshots(&mut self) {
+        const EMPTY_HINT: &str =
+            "(no snapshots yet; ask the agent to capture one with the snapshot tool)";
+        let Some(root) = Self::snapshot_store_root() else {
+            self.push_item(Item::plain(
+                "Snapshots unavailable (cannot resolve home directory)".into(),
+                warn(),
+            ));
+            return;
+        };
+        let mut labels: Vec<String> = match std::fs::read_dir(&root) {
+            Err(_) => Vec::new(),
+            Ok(dir) => dir
+                .flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| !n.starts_with(".staging-") && is_snapshot_label(n))
+                .collect(),
+        };
+        labels.sort();
+        if labels.is_empty() {
+            self.push_item(Item::plain(EMPTY_HINT.into(), dim()));
+        } else {
+            for label in labels {
+                self.push_item(Item::plain(
+                    sanitize_terminal(&label).into_owned(),
+                    dim(),
+                ));
+            }
+        }
+    }
+
+    /// `/rewind <label>`: show one snapshot's summary (local display only;
+    /// the rewind itself runs through the `restore` tool with approval).
+    fn show_rewind(&mut self, args: &str) {
+        let label = args.trim();
+        if label.is_empty() {
+            self.push_item(Item::plain(
+                "usage: /rewind <label> (see /snapshots for labels)".into(),
+                warn(),
+            ));
+            return;
+        }
+        if !is_snapshot_label(label) {
+            self.push_item(Item::plain(
+                format!("invalid snapshot label {label:?} ([A-Za-z0-9_-], max 64 chars)"),
+                err(),
+            ));
+            return;
+        }
+        let Some(root) = Self::snapshot_store_root() else {
+            self.push_item(Item::plain(
+                "Snapshots unavailable (cannot resolve home directory)".into(),
+                warn(),
+            ));
+            return;
+        };
+        match std::fs::read_to_string(root.join(label).join("manifest.json")) {
+            Err(_) => self.push_item(Item::plain(
+                format!("unknown snapshot {label:?} (see /snapshots for labels)"),
+                err(),
+            )),
+            Ok(text) => {
+                let raw = summarize_snapshot_manifest(label, &text);
+                let summary = sanitize_terminal(&raw);
+                self.push_item(Item::plain(summary.into_owned(), dim()));
+                self.push_item(Item::plain(
+                    "(rewind itself runs through the restore tool and needs approval)".into(),
+                    dim(),
+                ));
+            }
+        }
+    }
+
+    /// Snapshot store root (the tui cannot depend on tools, so the
+    /// `<home>/.wavecode/snapshots` convention is spelled out here,
+    /// mirroring the snapshot store layout).
+    fn snapshot_store_root() -> Option<PathBuf> {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(|home| PathBuf::from(home).join(".wavecode").join("snapshots"))
+    }
+
     /// `/permissions`: cycle four modes, syncing the driver side over
     /// the wire while applying the new mode locally at once.
     fn cycle_permission_mode(&mut self) {
@@ -167,4 +266,75 @@ impl App {
             dim(),
         ));
     }
+}
+
+/// Snapshot label rule, mirroring the snapshot store
+/// (`[A-Za-z0-9_-]{1,64}`; labels become a single directory name).
+fn is_snapshot_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 64
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Render a snapshot `manifest.json` leniently: counts and the file list
+/// head when present, a fallback line for unknown shapes (never fails, so
+/// `/rewind` display stays total).
+fn summarize_snapshot_manifest(label: &str, text: &str) -> String {
+    const MAX_FILES: usize = 20;
+    let manifest: serde_json::Value = match serde_json::from_str(text) {
+        Ok(manifest) => manifest,
+        Err(_) => return format!("Snapshot '{label}': unreadable manifest."),
+    };
+    let count = manifest
+        .get("file_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let bytes = manifest
+        .get("total_bytes")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let created = manifest
+        .get("created_at")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let caps = manifest
+        .get("caps_hit")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|caps| !caps.is_empty())
+        .unwrap_or_else(|| "none".to_owned());
+    let mut out = format!(
+        "Snapshot '{label}': {count} files ({bytes} bytes), captured at unix {created}. Caps hit: {caps}."
+    );
+    let files: Vec<&str> = manifest
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|e| e.get("path").and_then(serde_json::Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !files.is_empty() {
+        let head = files
+            .iter()
+            .take(MAX_FILES)
+            .copied()
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("\nfiles: {head}"));
+        if files.len() > MAX_FILES {
+            out.push_str(&format!(", and {} more", files.len() - MAX_FILES));
+        }
+    }
+    out
 }

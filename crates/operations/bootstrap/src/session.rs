@@ -359,6 +359,19 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     )));
     registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
     registry.register(Arc::new(TaskStopTool::new(task_service)));
+    // File-content snapshots ride the same late handle: the store root
+    // derives from the session memory root (`<home>/.wavecode/memories`
+    // -> `<home>/.wavecode/snapshots`) so injected roots stay hermetic.
+    // `snapshot` is read-only; `restore` is destructive (approval-gated).
+    let snapshot_memory_root = home.as_deref().map(wavecode_memory::MemoryStore::default_root);
+    let snapshot_root =
+        wavecode_tools::snapshot::snapshot_store_root_for_session(snapshot_memory_root.as_deref());
+    registry.register(Arc::new(wavecode_tools::snapshot::SnapshotTool::new(
+        snapshot_root.clone(),
+    )));
+    registry.register(Arc::new(
+        wavecode_tools::snapshot::RestoreTool::new(snapshot_root),
+    ));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     let tool_names: Vec<String> = registry

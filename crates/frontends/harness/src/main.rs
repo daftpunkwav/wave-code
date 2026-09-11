@@ -503,6 +503,11 @@ enum Slash {
     Memory,
     /// List configured MCP servers.
     Mcp,
+    /// List file-content snapshot labels (local display).
+    Snapshots,
+    /// Show one file-content snapshot (local display; the rewind itself
+    /// runs through the `restore` tool with approval).
+    Rewind(String),
     /// Cycle the session permission mode.
     Permissions,
     /// Show help text.
@@ -525,6 +530,8 @@ fn parse_slash(line: &str) -> Slash {
             "compact" => Slash::Compact,
             "memory" => Slash::Memory,
             "mcp" => Slash::Mcp,
+            "snapshots" => Slash::Snapshots,
+            "rewind" => Slash::Rewind(args),
             "permissions" => Slash::Permissions,
             "help" => Slash::Help,
             _ => Slash::Unknown {
@@ -537,7 +544,7 @@ fn parse_slash(line: &str) -> Slash {
 }
 
 /// REPL help text printed for `/help` and unknown commands.
-const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /permissions (cycle approval mode), /quit (end session), /help";
+const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /snapshots (list snapshots), /rewind <label> (show snapshot), /permissions (cycle approval mode), /quit (end session), /help";
 
 /// Guided turn text routing a slash-invoked skill through the model.
 ///
@@ -744,6 +751,39 @@ async fn run_repl(
                     for server in mcp_servers {
                         println!("- {server}");
                     }
+                }
+            }
+            // File-content snapshots (no git dependence): `/snapshots`
+            // lists labels, `/rewind <label>` shows one snapshot.
+            // Both are local display only; the actual rewind runs
+            // through the `restore` tool (approval-gated).
+            Slash::Snapshots => {
+                let store = wavecode_tools::snapshot::SnapshotStore::new(
+                    wavecode_tools::snapshot::default_snapshot_store_root(),
+                );
+                let labels = store.list_labels();
+                if labels.is_empty() {
+                    println!(
+                        "(no snapshots yet; ask the agent to capture one with the snapshot tool)"
+                    );
+                } else {
+                    for label in &labels {
+                        println!("{label}");
+                    }
+                }
+            }
+            Slash::Rewind(label) => {
+                if label.trim().is_empty() {
+                    println!("usage: /rewind <label> (see /snapshots for labels)");
+                } else {
+                    let store = wavecode_tools::snapshot::SnapshotStore::new(
+                        wavecode_tools::snapshot::default_snapshot_store_root(),
+                    );
+                    match store.load_info(label.trim()) {
+                        Ok(info) => println!("{}", info.display()),
+                        Err(e) => println!("cannot show snapshot: {e}"),
+                    }
+                    println!("(rewind itself runs through the restore tool and needs approval)");
                 }
             }
             Slash::Permissions => {
@@ -974,6 +1014,15 @@ mod tests {
         assert_eq!(parse_slash("  /compact  "), Slash::Compact);
         assert_eq!(parse_slash("/memory"), Slash::Memory);
         assert_eq!(parse_slash("/mcp"), Slash::Mcp);
+        assert_eq!(parse_slash("/snapshots"), Slash::Snapshots);
+        assert_eq!(
+            parse_slash("/rewind before-refactor"),
+            Slash::Rewind("before-refactor".to_string())
+        );
+        assert_eq!(
+            parse_slash("  /rewind  "),
+            Slash::Rewind(String::new())
+        );
         assert_eq!(parse_slash("/permissions"), Slash::Permissions);
         assert_eq!(parse_slash("/help"), Slash::Help);
         assert_eq!(

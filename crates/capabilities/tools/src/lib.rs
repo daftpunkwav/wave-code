@@ -15,6 +15,7 @@ mod path_guard;
 mod script;
 mod search;
 mod shell_tool;
+pub mod snapshot;
 mod todo_tool;
 mod webfetch;
 

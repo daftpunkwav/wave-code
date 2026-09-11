@@ -23,6 +23,13 @@ use std::sync::Arc;
 use futures::StreamExt;
 use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, Message, Role, StreamEvent};
 
+pub mod spill;
+pub use spill::{
+    DEFAULT_PRUNE_THRESHOLD_CHARS, PRUNE_HEAD_CHARS, PRUNE_MARKER, SPILL_SCHEME,
+    SPILL_TOTAL_CAP_BYTES, SpillError, SpillStore, default_spill_store_root, parse_spill_uri,
+    prune_tool_output, validate_spill_id,
+};
+
 // ---------------------------------------------------------------------------
 // token accounting
 // ---------------------------------------------------------------------------
@@ -58,6 +65,9 @@ pub fn estimate_tokens(messages: &[Message], chars_per_token: usize) -> u64 {
                     name.chars().count() as u64 + input.to_string().chars().count() as u64
                 }
                 ContentBlock::ToolResult { content, .. } => content.chars().count() as u64,
+                // Images travel as base64: count the encoded chars (upper bound;
+                // the estimate path already carries a multi-k token margin).
+                ContentBlock::Image { base64, .. } => base64.chars().count() as u64,
             };
         }
     }

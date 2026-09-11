@@ -12,14 +12,22 @@
 mod fs;
 mod lsp;
 mod path_guard;
+mod pty;
+mod remote;
 mod script;
 mod search;
 mod shell_tool;
 pub mod snapshot;
+mod spill_tool;
 mod todo_tool;
 mod webfetch;
+mod websearch;
 
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
+pub use fs::{Present, PresentStore, ReadImage};
+pub use lsp::{DocumentSymbols, FindReferences, GotoDefinition, Hover, LspProviders};
+pub use spill_tool::SpillRead;
+pub use websearch::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -165,13 +173,23 @@ impl Registry {
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));
+        reg.register(Arc::new(pty::PtyShell));
+        reg.register(Arc::new(remote::RemoteShell));
         reg.register(Arc::new(script::PythonTool));
         reg.register(Arc::new(script::NodeTool));
-        reg.register(Arc::new(lsp::DocumentSymbols));
-        reg.register(Arc::new(lsp::GotoDefinition));
-        reg.register(Arc::new(lsp::Hover));
-        reg.register(Arc::new(lsp::FindReferences));
+        reg.register(Arc::new(lsp::DocumentSymbols::new()));
+        reg.register(Arc::new(lsp::GotoDefinition::new()));
+        reg.register(Arc::new(lsp::Hover::new()));
+        reg.register(Arc::new(lsp::FindReferences::new()));
         reg.register(Arc::new(webfetch::WebFetch));
+        reg.register(Arc::new(websearch::WebSearch::new()));
+        reg.register(Arc::new(fs::ReadImage));
+        // Present records into a registry-scoped store (first version: no
+        // steering consumer needs the handle, unlike todo_write).
+        reg.register(Arc::new(fs::Present::new(fs::PresentStore::default())));
+        reg.register(Arc::new(spill_tool::SpillRead::new(
+            wavecode_context::default_spill_store_root(),
+        )));
         reg
     }
 
@@ -348,7 +366,8 @@ mod tests {
     }
 
     /// New tools are registered with the expected read-only surface:
-    /// scripts can write (not read-only), LSP navigation and webfetch are read-only.
+    /// scripts can write (not read-only), LSP navigation, webfetch, websearch,
+    /// image, spill, and present tools are read-only.
     #[test]
     fn builtin_registers_script_lsp_and_webfetch() {
         let reg = Registry::builtin();
@@ -360,6 +379,10 @@ mod tests {
             "hover",
             "find_references",
             "webfetch",
+            "web_search",
+            "read_image",
+            "spill_read",
+            "present",
         ] {
             assert!(reg.get(name).is_some(), "{name} must be registered");
         }
@@ -371,6 +394,10 @@ mod tests {
             "hover",
             "find_references",
             "webfetch",
+            "web_search",
+            "read_image",
+            "spill_read",
+            "present",
         ] {
             assert!(
                 reg.get(name).unwrap().is_read_only(),
@@ -385,6 +412,10 @@ mod tests {
             "hover",
             "find_references",
             "webfetch",
+            "web_search",
+            "read_image",
+            "spill_read",
+            "present",
         ] {
             assert!(
                 explore.get(name).is_some(),

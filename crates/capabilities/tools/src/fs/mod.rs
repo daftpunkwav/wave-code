@@ -1,4 +1,4 @@
-//! Four built-in file tools: `read_file` / `write_file` / `edit_file` / `list_dir`.
+//! Built-in file tools: `read_file` / `write_file` / `edit_file` / `list_dir` (+ `read_image` / `present`).
 //! All paths are confined under `ToolCtx::cwd` via [`crate::path_guard::resolve`].
 //! Failure semantics: business failures (missing file, non-unique match, missing/mistyped params, path escape)
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level io failures.
@@ -101,12 +101,16 @@ pub(super) async fn atomic_write(path: &std::path::Path, content: &str) -> std::
 
 /// Read a text file (read-only).
 mod edit;
+mod image;
 mod list;
+mod present;
 mod read;
 mod write;
 
 pub use edit::EditFile;
+pub use image::ReadImage;
 pub use list::ListDir;
+pub use present::{Present, PresentStore};
 pub use read::ReadFile;
 pub use write::WriteFile;
 
@@ -243,7 +247,13 @@ mod tests {
         let reg = crate::Registry::builtin();
         let specs = reg.specs();
         // builtin excludes todo_write (injected by session assembly via with_todo_write).
-        assert_eq!(specs.len(), 14);
+        // Exact counts are not asserted: concurrent milestones register more
+        // builtins (pty, websearch, spill, image, present, ...); the stable
+        // contract is sorted specs, object schemas, and per-tool presence.
+        assert!(specs.len() >= 14);
+        for name in ["read_file", "read_image", "present", "web_search", "spill_read"] {
+            assert!(specs.iter().any(|s| s.name == name), "{name} must be registered");
+        }
         let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -254,7 +264,7 @@ mod tests {
         assert!(reg.get("todo_write").is_none());
 
         let (full, _todos) = crate::Registry::builtin_with_todos();
-        assert_eq!(full.specs().len(), 15);
+        assert_eq!(full.specs().len(), specs.len() + 1);
         assert!(full.get("todo_write").is_some());
     }
 

@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use crate::{
     ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role,
-    StreamEvent, ToolSpec, Usage,
+    StreamEvent, ToolSpec, Usage, validate_image,
 };
 
 /// Streaming client for OpenAI-compatible Chat Completions endpoints.
@@ -207,12 +207,27 @@ fn tool_result_text(content: &str, is_error: bool) -> String {
     }
 }
 
+/// Render one validated image as an OpenAI `image_url` data-URL part.
+/// Invalid images (wrong mime, bad base64, over the 5MB cap) become a visible
+/// text part naming the constraint, never a silent drop.
+fn image_part(mime: &str, base64_data: &str) -> serde_json::Value {
+    match validate_image(mime, base64_data) {
+        Ok(_) => serde_json::json!({
+            "type": "image_url",
+            "image_url": {"url": format!("data:{mime};base64,{base64_data}")},
+        }),
+        Err(reason) => serde_json::json!({"type": "text", "text": format!("[invalid image: {reason}]")}),
+    }
+}
+
 fn translate_user(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
     let mut texts: Vec<String> = Vec::new();
+    let mut images: Vec<serde_json::Value> = Vec::new();
     let mut results: Vec<(&str, &str, bool)> = Vec::new();
     for block in blocks {
         match block {
             ContentBlock::Text { text } => texts.push(text.clone()),
+            ContentBlock::Image { mime, base64, .. } => images.push(image_part(mime, base64)),
             ContentBlock::ToolUse { id, name, input } => {
                 // A tool call inside a user message has no wire meaning; render it
                 // as text so the intent is preserved instead of dropped.
@@ -227,7 +242,16 @@ fn translate_user(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
     }
     let mut out = Vec::new();
     let text = texts.join("\n");
-    if !text.is_empty() || results.is_empty() {
+    if !images.is_empty() {
+        // Mixed text+image content uses the array shape; text-only keeps the
+        // legacy string shape for backwards compatibility.
+        let mut parts: Vec<serde_json::Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(serde_json::json!({"type": "text", "text": text}));
+        }
+        parts.extend(images);
+        out.push(serde_json::json!({"role": "user", "content": parts}));
+    } else if !text.is_empty() || results.is_empty() {
         out.push(serde_json::json!({"role": "user", "content": text}));
     }
     for (tool_use_id, content, is_error) in results {
@@ -256,6 +280,11 @@ fn translate_assistant(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
                         "arguments": input.to_string(),
                     },
                 }));
+            }
+            ContentBlock::Image { mime, .. } => {
+                // Defensive: assistants cannot emit images on the wire;
+                // keep a visible placeholder so the intent is not dropped.
+                texts.push(format!("[image {mime}]"));
             }
             ContentBlock::ToolResult {
                 content, is_error, ..
@@ -1104,5 +1133,82 @@ mod tests {
             matches!(&err, LlmError::Api { kind, .. } if kind == "context_length_exceeded"),
             "provider error code must be preserved: {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod image_translation_tests {
+    use super::*;
+    use crate::{ContentBlock, Message, Role};
+
+    fn tiny_png_base64() -> String {
+        // 1x1 PNG (68 bytes decoded), well under the 5MB cap.
+        use base64::Engine as _;
+        let bytes: Vec<u8> = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        ];
+        base64::engine::general_purpose::STANDARD.encode(&bytes)
+    }
+
+    #[test]
+    fn user_image_maps_to_image_url_data_url() {
+        let b64 = tiny_png_base64();
+        let messages = translate_messages(
+            "",
+            &[Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text { text: "see this".to_string() },
+                    ContentBlock::Image { id: None, mime: "image/png".to_string(), base64: b64.clone() },
+                ],
+            }],
+        );
+        assert_eq!(messages.len(), 1);
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            serde_json::Value::String(format!("data:image/png;base64,{b64}"))
+        );
+    }
+
+    #[test]
+    fn text_only_user_keeps_legacy_string_shape() {
+        let messages = translate_messages(
+            "",
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "hi".to_string() }],
+            }],
+        );
+        assert!(messages[0]["content"].is_string());
+    }
+
+    #[test]
+    fn invalid_image_becomes_visible_text_naming_constraint() {
+        let messages = translate_messages(
+            "",
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    id: None,
+                    mime: "image/bmp".to_string(),
+                    base64: "aaaa".to_string(),
+                }],
+            }],
+        );
+        let parts = messages[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert!(parts[0]["text"].as_str().unwrap().contains("unsupported image mime"));
+    }
+
+    #[test]
+    fn validate_image_rejects_bad_mime_and_names_cap() {
+        assert!(crate::validate_image("image/bmp", "aaaa").is_err());
+        assert!(crate::validate_image("image/png", "!!!not-base64!!!").is_err());
+        let err = crate::validate_image("image/png", &tiny_png_base64()).unwrap();
+        assert!(!err.is_empty());
     }
 }

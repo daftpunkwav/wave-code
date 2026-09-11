@@ -30,12 +30,73 @@ pub enum Role {
     Assistant,
 }
 
+/// Maximum decoded image bytes accepted for an attachment (5 MB).
+/// Oversized images are rejected with the cap named; no downscaling is
+/// attempted (downscaling would silently degrade model input).
+pub const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+/// Allowlisted image MIME types for attachments.
+pub const IMAGE_ALLOWED_MIMES: &[&str] =
+    &["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// Binary image attachment (validated, base64-encoded).
+///
+/// `mime` must be in [`IMAGE_ALLOWED_MIMES`]; `base64` must decode to at most
+/// [`IMAGE_MAX_BYTES`] bytes. Use [`validate_image`] to check both sides
+/// before sending.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Attachment {
+    /// MIME type (allowlisted, see [`IMAGE_ALLOWED_MIMES`]).
+    pub mime: String,
+    /// Base64-encoded image bytes.
+    pub base64: String,
+}
+
+/// Validate an image attachment: MIME allowlist plus base64 decode plus the
+/// [`IMAGE_MAX_BYTES`] cap. Returns the decoded bytes on success; the error
+/// string names the violated constraint (mime, base64, or the byte cap).
+pub fn validate_image(mime: &str, base64_str: &str) -> std::result::Result<Vec<u8>, String> {
+    if !IMAGE_ALLOWED_MIMES.contains(&mime) {
+        return Err(format!(
+            "unsupported image mime '{mime}': expected one of image/png, image/jpeg, image/webp, image/gif"
+        ));
+    }
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64_str)
+        .map_err(|e| format!("invalid image base64: {e}"))?;
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(format!(
+            "image too large ({} bytes), max {} bytes (5MB cap, no downscaling)",
+            bytes.len(),
+            IMAGE_MAX_BYTES
+        ));
+    }
+    Ok(bytes)
+}
+
 /// A message content block.
+///
+/// The `Image` variant carries a validated attachment inline (`id` is an
+/// optional client-side label, kept through translation). Providers map it
+/// onto their native wire shape (OpenAI `image_url` data-URL parts,
+/// Anthropic `image` blocks); oversized or non-allowlisted images are
+/// rejected during translation with the constraint named.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Plain-text block.
     Text { text: String },
+    /// Inline image attachment (see [`Attachment`]).
+    Image {
+        /// Optional client-side label (preserved, never sent to providers).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// MIME type (must be in [`IMAGE_ALLOWED_MIMES`]).
+        mime: String,
+        /// Base64-encoded image bytes (decoded size at most [`IMAGE_MAX_BYTES`]).
+        base64: String,
+    },
     /// A tool call initiated by the model.
     ToolUse {
         id: String,

@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 
 use crate::{
-    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, SseParser,
-    StreamEvent,
+    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role,
+    SseParser, StreamEvent, validate_image,
 };
 
 /// Anthropic Messages API streaming client.
@@ -105,11 +105,59 @@ pub(crate) fn build_request_body(req: &ChatRequest) -> serde_json::Value {
         "system": req.system,
         // Serialize via the Arc<Vec<Message>> snapshot deref (serde's rc feature is off,
         // so no need to enable an extra feature for this single serialization).
-        "messages": merge_adjacent_same_role(&req.messages),
+        "messages": translate_messages(&merge_adjacent_same_role(&req.messages)),
         "tools": req.tools,
         "max_tokens": req.max_tokens,
         "stream": true,
     })
+}
+
+/// Translates merged messages into Anthropic wire blocks.
+/// Images become `image` blocks with a base64 source (mime/size validated);
+/// invalid images become a visible text block naming the constraint, never a
+/// silent drop. Text / tool_use / tool_result shapes match the unified serde
+/// form so existing wire expectations are unchanged.
+pub(crate) fn translate_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            let content: Vec<serde_json::Value> = m.content.iter().map(translate_block).collect();
+            serde_json::json!({"role": role, "content": content})
+        })
+        .collect()
+}
+
+/// Translates one content block into its Anthropic wire shape.
+fn translate_block(block: &ContentBlock) -> serde_json::Value {
+    match block {
+        ContentBlock::Text { text } => serde_json::json!({"type": "text", "text": text}),
+        ContentBlock::Image { mime, base64, .. } => match validate_image(mime, base64) {
+            Ok(_) => serde_json::json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": base64},
+            }),
+            Err(reason) => {
+                serde_json::json!({"type": "text", "text": format!("[invalid image: {reason}]")})
+            }
+        },
+        ContentBlock::ToolUse { id, name, input } => {
+            serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})
+        }
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": content,
+            "is_error": is_error,
+        }),
+    }
 }
 
 /// Merges adjacent same-role messages: the official endpoint auto-merges consecutive same-role
@@ -671,5 +719,64 @@ mod tests {
             }
         }
         head
+    }
+}
+
+#[cfg(test)]
+mod image_translation_tests {
+    use super::*;
+    use crate::{ContentBlock, Message, Role};
+
+    fn tiny_png_base64() -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G', 0x0D, 0x0A])
+    }
+
+    #[test]
+    fn image_maps_to_anthropic_image_block() {
+        let b64 = tiny_png_base64();
+        let out = translate_messages(&[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                id: Some("a".to_string()),
+                mime: "image/png".to_string(),
+                base64: b64.clone(),
+            }],
+        }]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["role"], "user");
+        let block = &out[0]["content"][0];
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["type"], "base64");
+        assert_eq!(block["source"]["media_type"], "image/png");
+        assert_eq!(block["source"]["data"], serde_json::Value::String(b64));
+    }
+
+    #[test]
+    fn invalid_image_becomes_text_naming_constraint() {
+        let out = translate_messages(&[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Image {
+                id: None,
+                mime: "image/tiff".to_string(),
+                base64: "aaaa".to_string(),
+            }],
+        }]);
+        let block = &out[0]["content"][0];
+        assert_eq!(block["type"], "text");
+        assert!(block["text"].as_str().unwrap().contains("unsupported image mime"));
+    }
+
+    #[test]
+    fn text_tool_shapes_unchanged() {
+        let out = translate_messages(&[Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "a"}),
+            }],
+        }]);
+        assert_eq!(out[0]["content"][0]["type"], "tool_use");
     }
 }

@@ -110,6 +110,7 @@ fn message_text(message: &Message) -> (bool, String) {
     for block in &message.content {
         match block {
             ContentBlock::Text { text } => parts.push(text.clone()),
+            ContentBlock::Image { mime, .. } => parts.push(format!("[image:{mime}]")),
             ContentBlock::ToolUse { name, .. } => parts.push(format!("[tool:{name}]")),
             ContentBlock::ToolResult {
                 content, is_error, ..

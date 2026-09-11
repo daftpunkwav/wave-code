@@ -10,8 +10,11 @@
  */
 
 //! LSP navigation tools (`document_symbols` / `goto_definition` / `hover` /
-//! `find_references`): each call spawns the caller-provided language server
-//! over stdio, runs `initialize`, issues one request, then `shutdown`s.
+//! `find_references`): with an explicit `server_command` each call spawns the
+//! caller-provided language server over stdio, runs `initialize`, issues one
+//! request, then `shutdown`s. With a [`LspProviders`] registry the server for
+//! the file extension is spawned lazily once, initialized once, and reused
+//! across calls (shutdown on registry drop).
 //! No server is bundled: `server_command` names the binary explicitly
 //! (e.g. `rust-analyzer`, `pyright-langserver --stdio`).
 //!
@@ -19,12 +22,16 @@
 //! params, spawn failure, protocol errors) return `Ok(is_error=true)`;
 //! `Err` is reserved for implementation faults.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, lock};
 
 /// Default per-read timeout: 30 s.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -192,6 +199,172 @@ impl LspTransport for ChildLsp {
 
     async fn recv(&mut self, timeout: Duration) -> std::io::Result<Value> {
         read_frame(&mut self.stdout, timeout).await
+    }
+}
+
+/// Boxed LSP transport: lets the provider registry hold one client type while
+/// production spawns [`ChildLsp`] and tests inject in-memory fakes.
+pub struct AnyTransport(Box<dyn LspTransport>);
+
+impl AnyTransport {
+    /// Spawn a real language server over stdio.
+    pub fn spawn(server_command: &str, cwd: &Path) -> std::io::Result<Self> {
+        Ok(Self(Box::new(ChildLsp::spawn(server_command, cwd)?)))
+    }
+}
+
+#[async_trait::async_trait]
+impl LspTransport for AnyTransport {
+    async fn send(&mut self, msg: &Value) -> std::io::Result<()> {
+        self.0.send(msg).await
+    }
+
+    async fn recv(&mut self, timeout: Duration) -> std::io::Result<Value> {
+        self.0.recv(timeout).await
+    }
+}
+
+/// Normalize a file extension key: strip a leading dot, lowercase (`RS`
+/// and `.rs` both become `rs`).
+fn normalize_ext(ext: &str) -> String {
+    ext.strip_prefix('.').unwrap_or(ext).to_lowercase()
+}
+
+/// Extension of a model-provided path (lexical; empty when none).
+fn extension_of(path: &str) -> String {
+    Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+/// Lazy per-provider language-server registry, keyed by file extension.
+///
+/// Servers spawn once per extension on first use (initialized against the
+/// workspace root) and are reused across calls; a failed request drops the
+/// pooled client so the next call respawns fresh. Dropping the registry reaps
+/// every child via `kill_on_drop` (polite `shutdown` first with
+/// [`LspProviders::shutdown_all`]).
+/// One pooled language-server connection (shared across calls for an extension).
+type PooledClient = Arc<tokio::sync::Mutex<Option<LspClient<AnyTransport>>>>;
+
+/// Target of one LSP request (bundles the pooled-call params).
+struct RequestTarget<'a> {
+    uri: &'a str,
+    line: u32,
+    character: u32,
+}
+
+pub struct LspProviders {
+    /// Workspace root: server working directory and `initialize` rootUri.
+    /// Required at construction (no per-call cwd guessing).
+    root: PathBuf,
+    root_uri: String,
+    commands: std::sync::Mutex<HashMap<String, String>>,
+    pooled: std::sync::Mutex<HashMap<String, PooledClient>>,
+    spawns: AtomicU64,
+}
+
+impl LspProviders {
+    /// Build for `workspace_root` (must be the workspace directory; used as
+    /// the server working directory and the `initialize` rootUri).
+    pub fn new(workspace_root: PathBuf) -> Self {
+        let root_uri = path_to_uri(&workspace_root);
+        Self {
+            root: workspace_root,
+            root_uri,
+            commands: std::sync::Mutex::new(HashMap::new()),
+            pooled: std::sync::Mutex::new(HashMap::new()),
+            spawns: AtomicU64::new(0),
+        }
+    }
+
+    /// Register `server_command` for a file extension (`rs`, `.py`, ...).
+    /// Re-registering an extension replaces the command and drops the pooled
+    /// client (the old server is reaped on drop).
+    pub fn register(&self, extension: &str, server_command: String) {
+        let key = normalize_ext(extension);
+        lock(&self.commands).insert(key.clone(), server_command);
+        lock(&self.pooled).remove(&key);
+    }
+
+    /// Resolve the registered command for a path's extension, if any.
+    pub fn command_for_path(&self, path: &str) -> Option<String> {
+        lock(&self.commands).get(&extension_of(path)).cloned()
+    }
+
+    /// Real server spawns so far (failed spawns do not count).
+    pub fn spawn_count(&self) -> u64 {
+        self.spawns.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: install an already-connected client for an extension
+    /// (backed by an in-memory fake; no real spawn, counter untouched).
+    #[cfg(test)]
+    pub fn insert_ready(&self, extension: &str, client: LspClient<AnyTransport>) {
+        lock(&self.pooled).insert(
+            normalize_ext(extension),
+            Arc::new(tokio::sync::Mutex::new(Some(client))),
+        );
+    }
+
+    /// Polite teardown of every pooled server (best-effort; children are
+    /// reaped by `kill_on_drop` regardless).
+    pub async fn shutdown_all(&self) {
+        let handles: Vec<_> = lock(&self.pooled).values().cloned().collect();
+        for handle in handles {
+            let mut guard = handle.lock().await;
+            if let Some(mut client) = guard.take() {
+                let _ = client.shutdown(Duration::from_millis(1_000)).await;
+            }
+        }
+    }
+
+    /// Run one request against the pooled server for `ext` (spawn +
+    /// initialize lazily on first use). `Err` is a business-failure output.
+    async fn pooled_call(
+        &self,
+        ext: &str,
+        target: RequestTarget<'_>,
+        timeout: Duration,
+        method: &str,
+        call: impl AsyncFnOnce(&mut LspClient<AnyTransport>, &str, u32, u32, Duration) -> Result<Value>,
+    ) -> std::result::Result<Value, ToolOutput> {
+        let command = lock(&self.commands).get(ext).cloned().ok_or_else(|| {
+            err_output(format!(
+                "no language server registered for extension '{ext}': provide server_command explicitly or register one"
+            ))
+        })?;
+        let handle = {
+            let mut pooled = lock(&self.pooled);
+            pooled
+                .entry(ext.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+                .clone()
+        };
+        let mut guard = handle.lock().await;
+        if guard.is_none() {
+            let transport = AnyTransport::spawn(&command, &self.root).map_err(|e| {
+                err_output(format!("failed to spawn language server '{command}': {e}"))
+            })?;
+            let mut client = LspClient::new(transport);
+            if let Err(e) = client.initialize(&self.root_uri, timeout).await {
+                return Err(err_output(format!("LSP initialize failed: {e}")));
+            }
+            self.spawns.fetch_add(1, Ordering::Relaxed);
+            *guard = Some(client);
+        }
+        let client = guard.as_mut().expect("pooled client just installed");
+        match call(client, target.uri, target.line, target.character, timeout).await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                // The server may have died mid-request: drop the client so the
+                // next call respawns fresh instead of reusing a wedged pipe.
+                *guard = None;
+                Err(err_output(format!("LSP {method} failed: {e}")))
+            }
+        }
     }
 }
 
@@ -429,17 +602,31 @@ fn resolve_uri(ctx: &ToolCtx, path: &str) -> Result<std::result::Result<String, 
     }
 }
 
-/// Shared per-call flow: parse `server_command`, spawn, handshake,
-/// run one request closure, tear down, pretty-print the result JSON.
+/// Parse the optional `server_command` override: missing/null means "resolve
+/// from the registry"; present-but-mistyped is a business error.
+fn opt_server_command(input: &Value) -> std::result::Result<Option<String>, ToolOutput> {
+    match input.get("server_command") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(_) => Err(err_output(
+            "missing or invalid parameter 'server_command' (string required)",
+        )),
+    }
+}
+
+/// Shared flow: parse params, resolve the server (explicit `server_command`
+/// override spawns per call; otherwise the registry's pooled server for the
+/// file extension is used), run one request closure, pretty-print the result.
 async fn run_lsp_call(
     input: &Value,
     ctx: &ToolCtx,
+    providers: Option<&Arc<LspProviders>>,
     with_position: bool,
     method: &str,
-    call: impl AsyncFnOnce(&mut LspClient<ChildLsp>, &str, u32, u32, Duration) -> Result<Value>,
+    call: impl AsyncFnOnce(&mut LspClient<AnyTransport>, &str, u32, u32, Duration) -> Result<Value>,
 ) -> Result<ToolOutput> {
-    let server_command = match req_str(input, "server_command") {
-        Ok(s) => s,
+    let override_command = match opt_server_command(input) {
+        Ok(c) => c,
         Err(out) => return Ok(out),
     };
     let path = match req_str(input, "path") {
@@ -467,30 +654,74 @@ async fn run_lsp_call(
         Ok(u) => u,
         Err(out) => return Ok(out),
     };
-    let mut client = match ChildLsp::spawn(server_command, &ctx.cwd) {
-        Ok(t) => LspClient::new(t),
-        Err(e) => {
-            return Ok(err_output(format!(
-                "failed to spawn language server '{server_command}': {e}"
-            )));
+    if let Some(server_command) = override_command {
+        // Explicit override (also the fallback when the extension is
+        // unregistered): per-call spawn, handshake, one request, teardown.
+        let transport = match AnyTransport::spawn(&server_command, &ctx.cwd) {
+            Ok(transport) => transport,
+            Err(e) => {
+                return Ok(err_output(format!(
+                    "failed to spawn language server '{server_command}': {e}"
+                )));
+            }
+        };
+        let mut client = LspClient::new(transport);
+        if let Err(e) = client.initialize(&path_to_uri(&ctx.cwd), timeout).await {
+            return Ok(err_output(format!("LSP initialize failed: {e}")));
         }
-    };
-    if let Err(e) = client.initialize(&path_to_uri(&ctx.cwd), timeout).await {
-        return Ok(err_output(format!("LSP initialize failed: {e}")));
+        let result = match call(&mut client, &uri, line, character, timeout).await {
+            Ok(v) => v,
+            Err(e) => return Ok(err_output(format!("LSP {method} failed: {e}"))),
+        };
+        // Best-effort teardown: the child is reaped by kill_on_drop regardless.
+        let _ = client.shutdown(timeout).await;
+        return Ok(ok_output(
+            serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()),
+        ));
     }
-    let result = match call(&mut client, &uri, line, character, timeout).await {
-        Ok(v) => v,
-        Err(e) => return Ok(err_output(format!("LSP {method} failed: {e}"))),
+    let Some(providers) = providers else {
+        return Ok(err_output(
+            "missing parameter 'server_command' (no language server registry configured; provide server_command explicitly)",
+        ));
     };
-    // Best-effort teardown: the child is reaped by kill_on_drop regardless.
-    let _ = client.shutdown(timeout).await;
+    let ext = extension_of(path);
+    let result = match providers
+        .pooled_call(&ext, RequestTarget { uri: &uri, line, character }, timeout, method, call)
+        .await
+    {
+        Ok(v) => v,
+        Err(out) => return Ok(out),
+    };
     Ok(ok_output(
         serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()),
     ))
 }
 
 /// List document symbols (outline) for a file (read-only).
-pub struct DocumentSymbols;
+pub struct DocumentSymbols {
+    providers: Option<Arc<LspProviders>>,
+}
+
+impl DocumentSymbols {
+    /// Build without a registry (explicit `server_command` required per call).
+    pub fn new() -> Self {
+        Self { providers: None }
+    }
+
+    /// Build resolving default servers from `providers` (`server_command`
+    /// becomes a per-call override).
+    pub fn with_providers(providers: Arc<LspProviders>) -> Self {
+        Self {
+            providers: Some(providers),
+        }
+    }
+}
+
+impl Default for DocumentSymbols {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for DocumentSymbols {
@@ -500,7 +731,8 @@ impl Tool for DocumentSymbols {
 
     fn description(&self) -> &str {
         "List the symbol outline (functions, classes, etc.) of a file via a language \
-         server. Provide server_command (e.g. rust-analyzer, pyright-langserver --stdio); \
+         server. Omit server_command to use the registered provider for the file
+         extension, or provide it as an override (e.g. rust-analyzer, \
          no server is bundled. Path is relative to the working directory."
     }
 
@@ -521,7 +753,7 @@ impl Tool for DocumentSymbols {
                     "description": "Timeout per LSP round trip in milliseconds (default 30000, clamped to max 300000)"
                 }
             },
-            "required": ["server_command", "path"]
+            "required": ["path"]
         })
     }
 
@@ -533,6 +765,7 @@ impl Tool for DocumentSymbols {
         run_lsp_call(
             &input,
             ctx,
+            self.providers.as_ref(),
             false,
             "documentSymbol",
             async |c, uri, _, _, t| c.document_symbol(uri, t).await,
@@ -542,7 +775,30 @@ impl Tool for DocumentSymbols {
 }
 
 /// Jump to the definition of the symbol at a position (read-only).
-pub struct GotoDefinition;
+pub struct GotoDefinition {
+    providers: Option<Arc<LspProviders>>,
+}
+
+impl GotoDefinition {
+    /// Build without a registry (explicit `server_command` required per call).
+    pub fn new() -> Self {
+        Self { providers: None }
+    }
+
+    /// Build resolving default servers from `providers` (`server_command`
+    /// becomes a per-call override).
+    pub fn with_providers(providers: Arc<LspProviders>) -> Self {
+        Self {
+            providers: Some(providers),
+        }
+    }
+}
+
+impl Default for GotoDefinition {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for GotoDefinition {
@@ -552,7 +808,8 @@ impl Tool for GotoDefinition {
 
     fn description(&self) -> &str {
         "Jump to the definition of the symbol at a 0-based line/character position \
-         via a language server. Provide server_command (e.g. rust-analyzer, \
+         via a language server. Omit server_command to use the registered provider
+         for the file extension, or provide it as an override (e.g. rust-analyzer, \
          pyright-langserver --stdio); no server is bundled. Path is relative to \
          the working directory."
     }
@@ -582,7 +839,7 @@ impl Tool for GotoDefinition {
                     "description": "Timeout per LSP round trip in milliseconds (default 30000, clamped to max 300000)"
                 }
             },
-            "required": ["server_command", "path", "line", "character"]
+            "required": ["path", "line", "character"]
         })
     }
 
@@ -594,6 +851,7 @@ impl Tool for GotoDefinition {
         run_lsp_call(
             &input,
             ctx,
+            self.providers.as_ref(),
             true,
             "definition",
             async |c, uri, line, ch, t| c.definition(uri, line, ch, t).await,
@@ -603,7 +861,30 @@ impl Tool for GotoDefinition {
 }
 
 /// Hover documentation for the symbol at a position (read-only).
-pub struct Hover;
+pub struct Hover {
+    providers: Option<Arc<LspProviders>>,
+}
+
+impl Hover {
+    /// Build without a registry (explicit `server_command` required per call).
+    pub fn new() -> Self {
+        Self { providers: None }
+    }
+
+    /// Build resolving default servers from `providers` (`server_command`
+    /// becomes a per-call override).
+    pub fn with_providers(providers: Arc<LspProviders>) -> Self {
+        Self {
+            providers: Some(providers),
+        }
+    }
+}
+
+impl Default for Hover {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for Hover {
@@ -613,7 +894,8 @@ impl Tool for Hover {
 
     fn description(&self) -> &str {
         "Show hover documentation for the symbol at a 0-based line/character position \
-         via a language server. Provide server_command (e.g. rust-analyzer, \
+         via a language server. Omit server_command to use the registered provider
+         for the file extension, or provide it as an override (e.g. rust-analyzer, \
          pyright-langserver --stdio); no server is bundled. Path is relative to \
          the working directory."
     }
@@ -643,7 +925,7 @@ impl Tool for Hover {
                     "description": "Timeout per LSP round trip in milliseconds (default 30000, clamped to max 300000)"
                 }
             },
-            "required": ["server_command", "path", "line", "character"]
+            "required": ["path", "line", "character"]
         })
     }
 
@@ -652,7 +934,7 @@ impl Tool for Hover {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutput> {
-        run_lsp_call(&input, ctx, true, "hover", async |c, uri, line, ch, t| {
+        run_lsp_call(&input, ctx, self.providers.as_ref(), true, "hover", async |c, uri, line, ch, t| {
             c.hover(uri, line, ch, t).await
         })
         .await
@@ -660,7 +942,30 @@ impl Tool for Hover {
 }
 
 /// Find all references to the symbol at a position (read-only).
-pub struct FindReferences;
+pub struct FindReferences {
+    providers: Option<Arc<LspProviders>>,
+}
+
+impl FindReferences {
+    /// Build without a registry (explicit `server_command` required per call).
+    pub fn new() -> Self {
+        Self { providers: None }
+    }
+
+    /// Build resolving default servers from `providers` (`server_command`
+    /// becomes a per-call override).
+    pub fn with_providers(providers: Arc<LspProviders>) -> Self {
+        Self {
+            providers: Some(providers),
+        }
+    }
+}
+
+impl Default for FindReferences {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for FindReferences {
@@ -670,7 +975,9 @@ impl Tool for FindReferences {
 
     fn description(&self) -> &str {
         "Find all references (including the declaration) to the symbol at a 0-based \
-         line/character position via a language server. Provide server_command (e.g. \
+         line/character position via a language server. Omit server_command to use
+         the registered provider for the file extension, or provide it as an
+         override (e.g. \
          rust-analyzer, pyright-langserver --stdio); no server is bundled. Path is \
          relative to the working directory."
     }
@@ -700,7 +1007,7 @@ impl Tool for FindReferences {
                     "description": "Timeout per LSP round trip in milliseconds (default 30000, clamped to max 300000)"
                 }
             },
-            "required": ["server_command", "path", "line", "character"]
+            "required": ["path", "line", "character"]
         })
     }
 
@@ -712,6 +1019,7 @@ impl Tool for FindReferences {
         run_lsp_call(
             &input,
             ctx,
+            self.providers.as_ref(),
             true,
             "references",
             async |c, uri, line, ch, t| c.references(uri, line, ch, t).await,
@@ -841,6 +1149,191 @@ mod tests {
         assert!(req_position(&json!({"line": "3"}), "line").is_err());
     }
 
+    #[test]
+    fn registry_resolves_commands_by_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let providers = LspProviders::new(dir.path().to_path_buf());
+        assert!(providers.command_for_path("a.rs").is_none());
+        providers.register("rs", "rust-analyzer".to_owned());
+        providers.register(".PY", "pyright-langserver --stdio".to_owned());
+        assert_eq!(
+            providers.command_for_path("src/main.rs"),
+            Some("rust-analyzer".to_owned())
+        );
+        // Case-insensitive, dot-tolerant.
+        assert_eq!(
+            providers.command_for_path("a.py"),
+            Some("pyright-langserver --stdio".to_owned())
+        );
+        assert_eq!(
+            providers.command_for_path("A.PY"),
+            Some("pyright-langserver --stdio".to_owned())
+        );
+        // Re-registering replaces the command.
+        providers.register("rs", "other-server".to_owned());
+        assert_eq!(
+            providers.command_for_path("a.rs"),
+            Some("other-server".to_owned())
+        );
+        // Extensionless files resolve to nothing.
+        assert!(providers.command_for_path("Makefile").is_none());
+        assert_eq!(providers.spawn_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn unregistered_extension_is_a_business_error_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx {
+            cwd: dir.path().to_path_buf(),
+            deny_env: Vec::new(),
+        };
+        std::fs::write(dir.path().join("a.rs"), "fn main() {}\n").unwrap();
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        let out = DocumentSymbols::with_providers(providers.clone())
+            .execute(json!({"path": "a.rs"}), &ctx)
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("no language server registered"));
+        assert_eq!(providers.spawn_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_command_still_spawns_per_call_as_fallback() {
+        // Unregistered extension + explicit (missing) binary: the per-call
+        // spawn path runs and reports a business error, never touching the pool.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx {
+            cwd: dir.path().to_path_buf(),
+            deny_env: Vec::new(),
+        };
+        std::fs::write(dir.path().join("a.xyz"), "x\n").unwrap();
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        let out = DocumentSymbols::with_providers(providers.clone())
+            .execute(
+                json!({"server_command": "wavecode-definitely-missing-server", "path": "a.xyz"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("failed to spawn"));
+        assert_eq!(providers.spawn_count(), 0);
+    }
+
+    /// Counting fake: answers initialize + documentSymbol, counts symbol requests.
+    fn counting_server(
+        hits: Arc<std::sync::atomic::AtomicU64>,
+    ) -> tokio::io::DuplexStream {
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut io = tokio::io::BufReader::new(server_end);
+            let timeout = Duration::from_secs(10);
+            loop {
+                let msg = match read_frame(&mut io, timeout).await {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let method = msg
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if method == "exit" {
+                    break;
+                }
+                let Some(id) = msg.get("id").cloned() else {
+                    continue;
+                };
+                let reply = match method.as_str() {
+                    "initialize" => {
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": {}}})
+                    }
+                    "textDocument/documentSymbol" => {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        json!({"jsonrpc": "2.0", "id": id, "result": [{"name": "main", "kind": 12}]})
+                    }
+                    "textDocument/definition" => {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        json!({"jsonrpc": "2.0", "id": id, "result": [{"uri": "file:///work/a.py"}]})
+                    }
+                    "textDocument/hover" => {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"contents": "doc"}})
+                    }
+                    "textDocument/references" => {
+                        hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        json!({"jsonrpc": "2.0", "id": id, "result": []})
+                    }
+                    "shutdown" => json!({"jsonrpc": "2.0", "id": id, "result": null}),
+                    _ => {
+                        json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unknown method"}})
+                    }
+                };
+                if write_frame(&mut io, &reply).await.is_err() {
+                    break;
+                }
+            }
+        });
+        client_end
+    }
+
+    #[tokio::test]
+    async fn pooled_client_is_reused_across_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx {
+            cwd: dir.path().to_path_buf(),
+            deny_env: Vec::new(),
+        };
+        std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+        let hits = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        providers.register("py", "fake-server (injected)".to_owned());
+        // Handshake the injected client, then install it as the pooled entry.
+        let mut ready =
+            LspClient::new(AnyTransport(Box::new(DuplexLsp::new(counting_server(
+                hits.clone(),
+            )))));
+        ready
+            .initialize("file:///work", Duration::from_secs(10))
+            .await
+            .unwrap();
+        providers.insert_ready("py", ready);
+        let symbols = DocumentSymbols::with_providers(providers.clone());
+        for _ in 0..2 {
+            let out = symbols
+                .execute(json!({"path": "a.py"}), &ctx)
+                .await
+                .unwrap();
+            assert!(!out.is_error, "pooled call failed: {}", out.content);
+            assert!(out.content.contains("main"));
+        }
+        // Every navigation tool resolves the same pooled connection.
+        let pos = json!({"path": "a.py", "line": 0, "character": 0});
+        for (tool, marker) in [
+            (
+                Arc::new(GotoDefinition::with_providers(providers.clone())) as Arc<dyn Tool>,
+                "a.py",
+            ),
+            (
+                Arc::new(Hover::with_providers(providers.clone())) as Arc<dyn Tool>,
+                "doc",
+            ),
+            (
+                Arc::new(FindReferences::with_providers(providers.clone())) as Arc<dyn Tool>,
+                "[]",
+            ),
+        ] {
+            let out = tool.execute(pos.clone(), &ctx).await.unwrap();
+            assert!(!out.is_error, "pooled call failed: {}", out.content);
+            assert!(out.content.contains(marker), "unexpected body: {}", out.content);
+        }
+        // All calls rode one pooled connection (no real spawn, five requests).
+        assert_eq!(providers.spawn_count(), 0);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 5);
+        providers.shutdown_all().await;
+    }
+
     #[tokio::test]
     async fn tool_rejects_escape_and_missing_params() {
         let dir = tempfile::tempdir().unwrap();
@@ -849,13 +1342,13 @@ mod tests {
             deny_env: Vec::new(),
         };
         // Missing server_command never spawns.
-        let out = DocumentSymbols
+        let out = DocumentSymbols::new()
             .execute(json!({"path": "a.py"}), &ctx)
             .await
             .unwrap();
         assert!(out.is_error);
         // Escaping path never spawns either.
-        let out = GotoDefinition
+        let out = GotoDefinition::new()
             .execute(
                 json!({"server_command": "nope", "path": "../evil.py", "line": 0, "character": 0}),
                 &ctx,
@@ -866,7 +1359,7 @@ mod tests {
         assert!(out.content.contains("evil.py") || out.content.to_lowercase().contains("escape"));
         // Unknown binary is a business error, not a panic.
         std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
-        let out = Hover
+        let out = Hover::new()
             .execute(
                 json!({"server_command": "wavecode-definitely-missing-server", "path": "a.py", "line": 0, "character": 0}),
                 &ctx,

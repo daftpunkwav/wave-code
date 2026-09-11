@@ -295,12 +295,31 @@ pub fn standard_roots(builtin: Option<PathBuf>, home: Option<&Path>, cwd: &Path)
 
 /// Discovery product: the skill set plus warnings (each bad file warns and
 /// skips without breaking overall discovery).
+///
+/// The roots are retained so [`Discovery::refresh`] can re-sweep them later
+/// (poll-based watching: callers re-sweep on an interval; automatic periodic
+/// refresh with background threads is a documented future, not this version —
+/// a library crate must not spawn hidden threads).
 #[derive(Debug, Default)]
 pub struct Discovery {
     /// The override-resolved skill set.
     pub set: SkillSet,
     /// Discovery-time warnings (read / parse failures).
     pub warnings: Vec<String>,
+    roots: Vec<SkillRoot>,
+}
+
+impl Discovery {
+    /// Re-sweep the original roots and swap in the new skill set (new files
+    /// picked up, deleted files dropped, edits re-parsed; same-name override
+    /// order preserved). New warnings append to [`Discovery::warnings`].
+    pub fn refresh(&mut self) {
+        let roots = std::mem::take(&mut self.roots);
+        let fresh = discover(&roots);
+        self.roots = roots;
+        self.set.replace(fresh.set);
+        self.warnings.extend(fresh.warnings);
+    }
 }
 
 /// Discover every skill in priority order: `roots` must arrive low-priority
@@ -309,7 +328,10 @@ pub struct Discovery {
 /// silently (a missing source is a normal shape); individual bad skill files
 /// warn and continue.
 pub fn discover(roots: &[SkillRoot]) -> Discovery {
-    let mut discovery = Discovery::default();
+    let mut discovery = Discovery {
+        roots: roots.to_vec(),
+        ..Default::default()
+    };
     for root in roots {
         let entries = match std::fs::read_dir(&root.dir) {
             Ok(entries) => entries,
@@ -351,6 +373,12 @@ impl SkillSet {
     /// MCP-exposed skills later (P9).
     pub fn add(&mut self, skill: Skill) {
         self.skills.insert(skill.name.clone(), skill);
+    }
+
+    /// Swap the whole set for `other` (used by [`Discovery::refresh`] to
+    /// install a re-swept set without disturbing handles on `self`).
+    pub fn replace(&mut self, other: SkillSet) {
+        self.skills = other.skills;
     }
 
     /// Look up by name.
@@ -822,6 +850,43 @@ paths:
         let discovery = discover(&[root]);
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         assert_eq!(discovery.set.get("crlf").unwrap().body, "Body");
+    }
+
+    /// Poll-based watching: `refresh()` picks up a newly added SKILL.md in
+    /// an already-discovered root (deleted files drop on the next sweep).
+    #[test]
+    fn refresh_picks_up_new_skill_files() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "first", "---\ndescription: First skill\n---", "Body one");
+        let root = SkillRoot {
+            source: SkillSource::Project,
+            dir: dir.path().to_path_buf(),
+        };
+        let mut discovery = discover(&[root]);
+        assert_eq!(discovery.set.len(), 1);
+        write_skill(dir.path(), "second", "---\ndescription: Second skill\n---", "Body two");
+        discovery.refresh();
+        assert_eq!(discovery.set.len(), 2);
+        assert!(discovery.set.get("second").is_some());
+        // Deletions drop on the next sweep too.
+        std::fs::remove_dir_all(dir.path().join("first")).unwrap();
+        discovery.refresh();
+        assert_eq!(discovery.set.len(), 1);
+        assert!(discovery.set.get("first").is_none());
+    }
+
+    #[test]
+    fn skill_set_replace_swaps_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(dir.path(), "a", "---\ndescription: Skill A\n---", "Body");
+        let root = SkillRoot {
+            source: SkillSource::Project,
+            dir: dir.path().to_path_buf(),
+        };
+        let mut discovery = discover(&[root]);
+        assert_eq!(discovery.set.len(), 1);
+        discovery.set.replace(SkillSet::default());
+        assert!(discovery.set.is_empty());
     }
 
     /// The hard-cut fallback never exceeds the budget at any quota (including

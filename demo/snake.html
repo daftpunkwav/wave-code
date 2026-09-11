@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>贪吃蛇小游戏</title>
+<title>Snake Game</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -67,16 +67,16 @@
 </style>
 </head>
 <body>
-  <h1>🐍 贪吃蛇</h1>
+  <h1>🐍 Snake</h1>
   <div class="hud">
-    <div>得分: <span id="score">0</span></div>
-    <div>最高: <span id="best">0</span></div>
+    <div>Score: <span id="score">0</span></div>
+    <div>Best: <span id="best">0</span></div>
   </div>
   <div style="position: relative;">
     <canvas id="game" width="400" height="400"></canvas>
   </div>
   <div class="hint">
-    ↑ ↓ ← → 或 WASD 控制方向 · 撞墙或咬到自己即结束
+    ↑ ↓ ← → or WASD to move · hitting a wall or yourself ends the game
   </div>
 
 <script>
@@ -185,9 +185,9 @@
     const overlay = document.createElement('div');
     overlay.className = 'overlay';
     overlay.innerHTML = `
-      <h2>游戏结束</h2>
-      <p>本次得分: <strong style="color:#fbbf24">${score}</strong></p>
-      <button id="retry">再来一局</button>
+      <h2>Game Over</h2>
+      <p>Score: <strong style="color:#fbbf24">${score}</strong></p>
+      <button id="retry">Play Again</button>
     `;
     overlay.style.left = (canvas.width/2 - 110) + 'px';
     overlay.style.top = (canvas.height/2 - 60) + 'px';

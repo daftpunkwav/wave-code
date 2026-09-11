@@ -4,5 +4,5 @@
   "private": true,
   "license": "MIT",
   "packageManager": "pnpm@9.15.0",
-  "description": "WaveCode — 多平台 AI coding agent（CLI / TUI / Web / Desktop）"
+  "description": "WaveCode — multi-platform AI coding agent (CLI / TUI / Web / Desktop)"
 }

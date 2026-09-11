@@ -33,6 +33,6 @@ anstyle = "1.0"
 pulldown-cmark = "0.13"
 terminal_size = "0.4"
 unicode-width = "0.2"
-# P8 TUI：ratatui 0.29 与 crossterm 0.28 为官方配对版本（ratatui 的默认 backend）
+# P8 TUI: ratatui 0.29 pairs with crossterm 0.28 (ratatui's default backend)
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }

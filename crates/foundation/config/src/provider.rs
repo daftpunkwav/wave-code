@@ -39,14 +39,30 @@ impl std::fmt::Debug for ProviderConfig {
     }
 }
 
+/// Default context window (tokens) used when the provider config leaves
+/// `context_window` unset or sets it to zero.
+/// Single source of truth for the fallback; callers should reference this
+/// constant instead of hardcoding the value again.
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
+/// Default per-round output token cap used when the provider config leaves
+/// `max_output_tokens` unset or sets it to zero.
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
+
 impl ProviderConfig {
     /// 上下文窗口大小，默认 200_000。
+    /// Explicit zero is treated as unset: a zero-token window can never
+    /// satisfy a request, so it is always a misconfiguration, not intent.
     pub fn context_window(&self) -> u64 {
-        self.context_window.unwrap_or(200_000)
+        self.context_window
+            .filter(|&v| v > 0)
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW)
     }
 
     /// 最大输出 token 数，默认 8192。
+    /// Explicit zero is treated as unset (see [`Self::context_window`]).
     pub fn max_output_tokens(&self) -> u32 {
-        self.max_output_tokens.unwrap_or(8192)
+        self.max_output_tokens
+            .filter(|&v| v > 0)
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)
     }
 }

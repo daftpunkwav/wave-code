@@ -51,7 +51,7 @@ pub fn home_dir() -> Option<PathBuf> {
 
 pub use hooks::{ConfigError, HookRule, HookRuleSet};
 pub use mcp::McpServerRaw;
-pub use provider::{ProviderConfig, ProviderKind};
+pub use provider::{DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, ProviderConfig, ProviderKind};
 
 impl Config {
     /// 加载用户级 `~/.wavecode/config.toml`；不存在返回 [`ConfigError::NotFound`]。
@@ -95,8 +95,13 @@ impl Config {
             .and_then(|name| std::env::var(name).ok())
             // `export KEY=`（空串）不算有效 key：回落内联 api_key，
             // 而非带空 key 发请求。
-            .filter(|k| !k.is_empty())
+            // Whitespace-only values are likewise not valid keys for any API:
+            // an env var containing only blanks falls back to the inline key.
+            .filter(|k| !k.trim().is_empty())
             .or_else(|| provider.api_key.clone())
+            // An inline key of only blanks is also rejected (MissingApiKey
+            // instead of sending a blank key that the API would refuse).
+            .filter(|k| !k.trim().is_empty())
             .ok_or_else(|| ConfigError::MissingApiKey(self.model_provider.clone()))?;
 
         Ok((provider, key))
@@ -267,6 +272,60 @@ headers = {{ Authorization = "Bearer t" }}
             Err(ConfigError::MissingApiKey(_))
         ));
         unsafe { std::env::remove_var("TEST_KEY") };
+    }
+
+    #[test]
+    fn whitespace_only_env_key_falls_back_to_inline() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // Whitespace-only env values are never valid API keys: fall back
+        // to the inline key instead of sending blanks to the API.
+        unsafe { std::env::set_var("TEST_KEY", "   ") };
+        let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
+        cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
+        let (_p, key) = cfg.resolve_provider().unwrap();
+        assert_eq!(key, "k-inline");
+        // Whitespace env plus no inline key -> MissingApiKey.
+        cfg.model_providers.get_mut("minimax").unwrap().api_key = None;
+        assert!(matches!(
+            cfg.resolve_provider(),
+            Err(ConfigError::MissingApiKey(_))
+        ));
+        unsafe { std::env::remove_var("TEST_KEY") };
+    }
+
+    #[test]
+    fn whitespace_only_inline_key_is_missing_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("TEST_KEY") };
+        let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
+        cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("   ".into());
+        assert!(matches!(
+            cfg.resolve_provider(),
+            Err(ConfigError::MissingApiKey(_))
+        ));
+    }
+
+    #[test]
+    fn zero_token_limits_fall_back_to_defaults() {
+        // Explicit zero is a misconfiguration, not intent: it can never
+        // satisfy a request, so accessors treat it as unset.
+        let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
+        let prov = cfg.model_providers.get_mut("minimax").unwrap();
+        prov.context_window = Some(0);
+        prov.max_output_tokens = Some(0);
+        assert_eq!(prov.context_window(), DEFAULT_CONTEXT_WINDOW);
+        assert_eq!(prov.max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
+        assert_eq!(DEFAULT_CONTEXT_WINDOW, 200_000);
+        assert_eq!(DEFAULT_MAX_OUTPUT_TOKENS, 8192);
+        // Non-zero values are still honored; None still means default.
+        prov.context_window = Some(100_000);
+        prov.max_output_tokens = Some(4096);
+        assert_eq!(prov.context_window(), 100_000);
+        assert_eq!(prov.max_output_tokens(), 4096);
+        prov.context_window = None;
+        prov.max_output_tokens = None;
+        assert_eq!(prov.context_window(), 200_000);
+        assert_eq!(prov.max_output_tokens(), 8192);
     }
 
     #[test]

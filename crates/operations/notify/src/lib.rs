@@ -4,6 +4,7 @@
  *
  * Responsibilities:
  * - Fan notices out to per-topic subscribers synchronously.
+ * - Hand out subscription ids so dynamic subscribers can detach.
  * - Format webhook payloads for external delivery.
  * - Keep delivery itself with the composition root (no HTTP here).
  *
@@ -26,10 +27,17 @@ pub struct Notice {
 /// Subscriber callback type.
 pub type Subscriber = Box<dyn Fn(&Notice) + Send + Sync>;
 
+/// Handle to one subscription, returned by [`TopicBus::subscribe`].
+///
+/// Ids are bus-scoped and never reused within a bus lifetime, so a stale
+/// id can never detach a newer subscriber by accident.
+pub type SubscriptionId = u64;
+
 /// Synchronous in-process topic bus.
 #[derive(Default)]
 pub struct TopicBus {
-    subscribers: std::collections::HashMap<String, Vec<Subscriber>>,
+    subscribers: std::collections::HashMap<String, Vec<(SubscriptionId, Subscriber)>>,
+    next_id: SubscriptionId,
 }
 
 impl TopicBus {
@@ -38,12 +46,37 @@ impl TopicBus {
         Self::default()
     }
 
-    /// Subscribe one callback to a topic.
-    pub fn subscribe(&mut self, topic: impl Into<String>, subscriber: Subscriber) {
+    /// Subscribe one callback to a topic, returning its id for later
+    /// detachment with [`TopicBus::unsubscribe`].
+    pub fn subscribe(
+        &mut self,
+        topic: impl Into<String>,
+        subscriber: Subscriber,
+    ) -> SubscriptionId {
+        let id = self.next_id;
+        self.next_id += 1;
         self.subscribers
             .entry(topic.into())
             .or_default()
-            .push(subscriber);
+            .push((id, subscriber));
+        id
+    }
+
+    /// Detach one subscription by id; true when anything was removed.
+    ///
+    /// Unknown ids are silent no-ops (false): double-detach after a
+    /// re-subscribe must never disturb the newer subscriber, and ids
+    /// are never reused, so false always means "nothing held that id".
+    pub fn unsubscribe(&mut self, id: SubscriptionId) -> bool {
+        let mut removed = false;
+        for subscribers in self.subscribers.values_mut() {
+            if let Some(pos) = subscribers.iter().position(|(held, _)| *held == id) {
+                // Explicit drop: the removed subscriber owns a must-use box.
+                let _ = subscribers.remove(pos);
+                removed = true;
+            }
+        }
+        removed
     }
 
     /// Publish one notice to every subscriber of its topic, in order.
@@ -52,7 +85,7 @@ impl TopicBus {
     /// the publisher by design (bugs must surface, not hide in a bus).
     pub fn publish(&self, notice: Notice) {
         if let Some(subscribers) = self.subscribers.get(&notice.topic) {
-            for subscriber in subscribers {
+            for (_, subscriber) in subscribers {
                 subscriber(&notice);
             }
         }
@@ -123,6 +156,48 @@ mod tests {
             vec!["first:done".to_string(), "second:done".to_string()]
         );
         assert_eq!(bus.subscriber_count("turns"), 2);
+    }
+
+    #[test]
+    fn detached_subscribers_stop_receiving() {
+        let mut bus = TopicBus::new();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let first = {
+            let seen = seen.clone();
+            bus.subscribe(
+                "turns",
+                Box::new(move |notice: &Notice| {
+                    seen.lock().unwrap().push(format!("first:{}", notice.title));
+                }),
+            )
+        };
+        let seen2 = seen.clone();
+        bus.subscribe(
+            "turns",
+            Box::new(move |notice: &Notice| {
+                seen2.lock().unwrap().push(format!("second:{}", notice.title));
+            }),
+        );
+        let notice = |title: &str| Notice {
+            topic: "turns".to_string(),
+            title: title.to_string(),
+            body: "b".to_string(),
+        };
+        bus.publish(notice("one"));
+        assert!(bus.unsubscribe(first));
+        bus.publish(notice("two"));
+        // Unknown and already-removed ids remove nothing.
+        assert!(!bus.unsubscribe(first));
+        assert!(!bus.unsubscribe(999_999));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "first:one".to_string(),
+                "second:one".to_string(),
+                "second:two".to_string(),
+            ]
+        );
+        assert_eq!(bus.subscriber_count("turns"), 1);
     }
 
     #[test]

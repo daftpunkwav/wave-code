@@ -70,6 +70,15 @@ impl std::fmt::Display for PermissionMode {
 }
 
 /// What kind of approval an ask verdict requests.
+///
+/// Deprecated: this duplicates the canonical protocol types without
+/// adding methods or serialization. Use `operations_wire::ApprovalKind`
+/// (new harness stack) or `wavecode_protocol::ApprovalKind` (legacy
+/// stack) instead; this alias disappears in a later breaking-change
+/// window.
+#[deprecated(
+    note = "use operations_wire::ApprovalKind or wavecode_protocol::ApprovalKind instead"
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalKind {
     /// Arbitrary command execution.
@@ -146,6 +155,18 @@ impl ApprovalGate {
         }
     }
 
+    /// Withdraw one parked waiter without deciding; true when anything
+    /// was parked.
+    ///
+    /// Expiry paths call this so a timed-out wait stops reserving its
+    /// call id: without it, a later call reusing the id fails `wait_for`
+    /// with `DuplicateWaiter` and is spuriously denied. Dropping the
+    /// sender also releases any still-held receiver instead of leaving
+    /// it parked on a decision that will never arrive.
+    pub fn cancel(&self, call_id: &str) -> bool {
+        self.lock().remove(call_id).is_some()
+    }
+
     /// Drop all parked waiters, e.g. on run teardown.
     pub fn clear(&self) {
         self.lock().clear();
@@ -191,5 +212,20 @@ mod tests {
         let _rx = gate.wait_for("call-1").unwrap();
         let err = gate.wait_for("call-1").unwrap_err();
         assert_eq!(err, GateError::DuplicateWaiter("call-1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cancelled_waits_free_their_call_id() {
+        let gate = ApprovalGate::new();
+        let rx = gate.wait_for("call-1").unwrap();
+        assert_eq!(gate.pending_count(), 1);
+        assert!(gate.cancel("call-1"));
+        assert_eq!(gate.pending_count(), 0);
+        // Withdrawing twice withdraws nothing; the id parks fresh.
+        assert!(!gate.cancel("call-1"));
+        assert!(!gate.cancel("ghost"));
+        let _fresh = gate.wait_for("call-1").unwrap();
+        // The withdrawn receiver resolves as dropped, never as approved.
+        assert!(rx.await.is_err());
     }
 }

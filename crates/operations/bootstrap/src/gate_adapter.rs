@@ -56,12 +56,16 @@ impl ApprovalSource for GateApprovalSource {
             },
             // Expired waits deny with an explicit reason; the tool never
             // executes and the turn continues instead of parking forever.
-            // Late decisions find no waiter and are dropped by the gate.
-            Err(_) => ApprovalResolution::Deny {
-                reason: format!(
-                    "approval request timed out after {}s; not executed",
-                    self.timeout.as_secs()
-                ),
+            // The reservation is withdrawn so a later call reusing the id
+            // parks fresh; late decisions then find no waiter and drop.
+            Err(_) => {
+                self.gate.cancel(call_id);
+                ApprovalResolution::Deny {
+                    reason: format!(
+                        "approval request timed out after {}s; not executed",
+                        self.timeout.as_secs()
+                    ),
+                }
             },
         }
     }
@@ -144,12 +148,16 @@ mod tests {
 
     #[tokio::test]
     async fn expired_waits_deny_and_never_execute() {
-        let (source, _gate) = source(Duration::from_millis(20));
+        let (source, gate) = source(Duration::from_millis(20));
         let resolution = source.decide("c1", AskKind::Write, "d").await;
         assert!(matches!(
             resolution,
             ApprovalResolution::Deny { reason } if reason.contains("timed out")
         ));
+        // Expiry withdraws the reservation: the id parks fresh afterwards.
+        assert_eq!(gate.pending_count(), 0);
+        assert!(gate.wait_for("c1").is_ok());
+        assert_eq!(gate.pending_count(), 1);
     }
 
     #[tokio::test]

@@ -927,12 +927,18 @@ where
     /// All ToolCallBegin events go out upfront in declaration order; all
     /// ToolCallEnd events follow in declaration order. Every declared call
     /// gets exactly one result slot, so pairing can never break.
+    ///
+    /// Duplicate call ids (model misbehavior, never well-formed output)
+    /// collapse at admission: the first occurrence runs the full pipeline
+    /// while later ones fill error slots without executing, reaching
+    /// policy, or touching the approval gate. Pairing results by id would
+    /// otherwise consume one slot twice and panic on the second lookup.
     async fn execute_calls(
         &self,
         calls: &[ToolCall],
         emit: &(dyn Fn(EventMsg) + Send + Sync),
     ) -> Vec<ToolResult> {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         for call in calls {
             emit(EventMsg::ToolCallBegin {
@@ -942,11 +948,33 @@ where
             });
         }
 
-        // Pre-tool hooks run per call before policy; blocks never execute
-        // and never reach the approval gate.
-        let mut blocked: HashMap<String, ToolResult> = HashMap::new();
-        let mut live: Vec<&ToolCall> = Vec::with_capacity(calls.len());
+        let mut seen: HashSet<&str> = HashSet::with_capacity(calls.len());
+        let mut dupes: HashMap<String, ToolResult> = HashMap::new();
+        let mut unique: Vec<&ToolCall> = Vec::with_capacity(calls.len());
         for call in calls {
+            if seen.insert(call.call_id.as_str()) {
+                unique.push(call);
+            } else if !dupes.contains_key(call.call_id.as_str()) {
+                dupes.insert(
+                    call.call_id.clone(),
+                    ToolResult {
+                        call_id: call.call_id.clone(),
+                        content: format!(
+                            "duplicate tool call id {:?}: first occurrence runs, this one is refused without executing",
+                            call.call_id
+                        ),
+                        is_error: true,
+                    },
+                );
+            }
+        }
+
+        // Pre-tool hooks run per call before policy; blocks never execute
+        // and never reach the approval gate. Duplicates were already
+        // collapsed above, so only first occurrences flow through here.
+        let mut blocked: HashMap<String, ToolResult> = HashMap::new();
+        let mut live: Vec<&ToolCall> = Vec::with_capacity(unique.len());
+        for call in unique {
             let report = self
                 .hooks
                 .run_tool(HookPoint::PreToolUse, &call.name, &call.input, None)
@@ -1063,13 +1091,20 @@ where
         }
 
         // Merge hook-blocked slots, then emit ends and results strictly in
-        // declaration order.
+        // declaration order. Duplicates reuse their shared refusal slot;
+        // the trailing fallback keeps pairing total even against future
+        // pipeline changes that might skip a slot.
         results.extend(blocked);
         let mut ordered = Vec::with_capacity(calls.len());
         for call in calls {
             let result = results
                 .remove(&call.call_id)
-                .expect("every call has a result");
+                .or_else(|| dupes.get(&call.call_id).cloned())
+                .unwrap_or_else(|| ToolResult {
+                    call_id: call.call_id.clone(),
+                    content: "internal error: missing tool result slot".to_string(),
+                    is_error: true,
+                });
             emit(EventMsg::ToolCallEnd {
                 call_id: result.call_id.clone(),
                 is_error: result.is_error,
@@ -1929,6 +1964,67 @@ mod run_loop_tests {
             .join("\n");
         assert!(history.contains("nope"));
         assert!(history.contains("[c2] error"));
+    }
+
+    #[tokio::test]
+    async fn duplicate_call_ids_collapse_without_panicking() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![
+                    SampleBlock::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "shell".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                    SampleBlock::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "shell".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                ],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        // Previously this panicked pairing the second slot by id.
+        assert_eq!(outcome, StopReason::Completed);
+        let kinds = fx.event_kinds();
+        assert_eq!(kinds.iter().filter(|k| *k == "tool_call_begin").count(), 2);
+        assert_eq!(kinds.iter().filter(|k| *k == "tool_call_end").count(), 2);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("duplicate tool call id"));
     }
 
     #[tokio::test]

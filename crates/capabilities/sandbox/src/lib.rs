@@ -28,11 +28,14 @@
 //! - Human approvals: `Ask` verdicts park on the approval gate and execute
 //!   only on an explicit grant; headless sessions deny openly.
 //!
-//! Explicitly NOT provided: no OS isolation (Linux namespaces/seccomp,
-//! macOS seatbelt, Windows Job Objects), no containers or VMs, no syscall
-//! filtering. A spawned process runs with the user's own OS privileges, so
-//! a command that policy allows runs unconstrained by anything in this
-//! crate. Treat this crate as a policy gate, never as a containment boundary.
+//! Explicitly NOT provided: no containers or VMs, no syscall filtering.
+//! OS isolation is opt-in per spawn through the backend chain (Linux bwrap,
+//! then Landlock; macOS seatbelt; Windows has no enforcing backend and fails
+//! closed): a command that policy allows runs under the first available
+//! backend, or is refused when `sandbox_os` is on and nothing is available.
+//! Without confinement a spawned process runs with the user's own OS
+//! privileges — treat the policy gate as intent ruling, and the backend
+//! chain as the containment boundary only where it reports availability.
 //!
 //! Future seam: OS enforcement plugs in behind verdict execution without
 //! changing policy — the composition-root policy adapter consumes
@@ -43,12 +46,21 @@ use std::sync::{Arc, Mutex};
 
 use wavecode_protocol::{ApprovalKind, PermissionMode};
 
+pub mod bwrap;
+pub mod chain;
 pub mod os;
+pub mod seatbelt;
+pub mod windows;
 #[cfg(target_os = "linux")]
 pub use os::LinuxLandlockBackend;
+pub use bwrap::BwrapBackend;
+pub use chain::{PROBE_ORDER, first_available, status_line, unavailable};
 pub use os::{
-    ConfinementProfile, SandboxBackend, SandboxError, UnavailableBackend, detect_backend,
+    ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError, UnavailableBackend,
+    detect_backend,
 };
+pub use seatbelt::SeatbeltBackend;
+pub use windows::WINDOWS_UNAVAILABLE_REASON;
 
 /// Unified lock-poisoning recovery policy (single decision point for this
 /// crate): the mode lock's critical section is a single read / write, so a

@@ -59,12 +59,45 @@ pub enum SandboxError {
     ConfineFailed { reason: String },
 }
 
+/// Enforcement depth reported by every backend and surfaced in status
+/// lines (see `chain::status_line`): Full means user-namespace isolation
+/// with mount control (bwrap); Partial means kernel rulesets with known
+/// gaps (Landlock v1-only, no UDP), best-effort profiles (seatbelt
+/// allowlists), or the refusing fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnforcementLevel {
+    Full,
+    Partial,
+}
+
+impl std::fmt::Display for EnforcementLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnforcementLevel::Full => write!(f, "Full"),
+            EnforcementLevel::Partial => write!(f, "Partial"),
+        }
+    }
+}
+
 /// OS confinement backend seam: configure `cmd` so the child is confined
 /// before it execs. Implementations must be fail-closed — any failure returns
 /// `Err` and the child must never run unconfined.
+///
+/// Backends that rewrite `cmd` wholesale (bwrap, seatbelt) replace whatever
+/// the caller configured before (stdio included — `std` exposes no stdio
+/// accessors), so callers must configure stdio, env scrubbing and
+/// kill-on-drop AFTER `spawn_confined` returns.
 pub trait SandboxBackend: Send + Sync + std::fmt::Debug {
     /// Whether this backend can confine on the running kernel.
     fn is_available(&self) -> bool;
+    /// Stable backend name for status lines and logs.
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
+    /// Enforcement depth, surfaced in status lines.
+    fn enforcement(&self) -> EnforcementLevel {
+        EnforcementLevel::Partial
+    }
     /// Arm confinement on `cmd` for one spawn under `profile`.
     fn spawn_confined(
         &self,
@@ -81,6 +114,10 @@ pub struct UnavailableBackend;
 impl SandboxBackend for UnavailableBackend {
     fn is_available(&self) -> bool {
         false
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "unavailable"
     }
 
     fn spawn_confined(
@@ -117,6 +154,15 @@ pub struct LinuxLandlockBackend;
 impl SandboxBackend for LinuxLandlockBackend {
     fn is_available(&self) -> bool {
         probe_landlock_v1()
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "landlock"
+    }
+
+    fn enforcement(&self) -> EnforcementLevel {
+        // v1 rights only (newer rights stay allowed) and no UDP coverage.
+        EnforcementLevel::Partial
     }
 
     fn spawn_confined(
@@ -215,14 +261,33 @@ fn apply_landlock(profile: &ConfinementProfile) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Pick the platform backend: Linux gets Landlock, every other target gets
-/// the always-refusing fallback (fail-closed).
+/// Pick the platform backend in probe order (see `chain::PROBE_ORDER`):
+/// Linux tries bwrap, then Landlock; macOS tries seatbelt; Windows has no
+/// enforcing backend (see `windows.rs`). The first available backend wins;
+/// when nothing is available the refusing fallback is returned and any
+/// requested confinement fails closed (`SANDBOX_UNAVAILABLE`).
 pub fn detect_backend() -> Arc<dyn SandboxBackend> {
     #[cfg(target_os = "linux")]
     {
-        Arc::new(LinuxLandlockBackend)
+        let bwrap: Arc<dyn SandboxBackend> = Arc::new(crate::bwrap::BwrapBackend);
+        if bwrap.is_available() {
+            return bwrap;
+        }
+        let landlock: Arc<dyn SandboxBackend> = Arc::new(LinuxLandlockBackend);
+        if landlock.is_available() {
+            return landlock;
+        }
+        Arc::new(UnavailableBackend)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let seatbelt: Arc<dyn SandboxBackend> = Arc::new(crate::seatbelt::SeatbeltBackend);
+        if seatbelt.is_available() {
+            return seatbelt;
+        }
+        Arc::new(UnavailableBackend)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Arc::new(UnavailableBackend)
     }
@@ -278,12 +343,33 @@ mod tests {
     #[test]
     fn detect_backend_matches_platform() {
         let backend = detect_backend();
-        // Availability is kernel-dependent on Linux; elsewhere it is always
-        // the refusing fallback.
-        #[cfg(not(target_os = "linux"))]
+        // Availability is kernel-dependent on Linux/macOS; elsewhere it is
+        // always the refusing fallback.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         assert!(!backend.is_available());
         #[cfg(target_os = "linux")]
-        assert_eq!(backend.is_available(), LinuxLandlockBackend.is_available());
+        {
+            // Chain order: bwrap wins when available, else Landlock, else the
+            // refusing fallback (fail-closed only when neither is available).
+            if backend.is_available() {
+                assert!(
+                    ["bwrap", "landlock"].contains(&backend.backend_name()),
+                    "unexpected backend: {}",
+                    backend.backend_name()
+                );
+            } else {
+                assert!(!crate::bwrap::BwrapBackend.is_available());
+                assert!(!LinuxLandlockBackend.is_available());
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if backend.is_available() {
+                assert_eq!(backend.backend_name(), "seatbelt");
+            } else {
+                assert!(!crate::seatbelt::SeatbeltBackend.is_available());
+            }
+        }
     }
 
     /// Live confinement: a confined shell writes inside the cwd but cannot

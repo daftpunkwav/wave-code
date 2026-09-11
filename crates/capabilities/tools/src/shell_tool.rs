@@ -171,9 +171,28 @@ impl Tool for Shell {
 
         let (program, flag) = shell_invocation();
         let mut cmd = tokio::process::Command::new(program);
-        cmd.arg(flag)
-            .arg(command)
-            .current_dir(&ctx.cwd)
+        cmd.arg(flag).arg(command).current_dir(&ctx.cwd);
+        // OS confinement (chain: bwrap -> Landlock -> seatbelt; opt-in via
+        // WAVECODE_SANDBOX_OS): confine FIRST — rewriting backends replace
+        // `cmd` wholesale, so stdio, env scrubbing and kill_on_drop below
+        // apply to the final confined command. Any failure fails closed
+        // here (SANDBOX_UNAVAILABLE when no backend is available) — the
+        // command never runs unconfined when confinement was requested.
+        // Timeout / kill / truncate behavior below is unchanged.
+        if os_sandbox_enabled() {
+            let profile = wavecode_sandbox::ConfinementProfile::for_shell(&ctx.cwd);
+            let backend = wavecode_sandbox::detect_backend();
+            if let Err(e) = backend.spawn_confined(&mut cmd, &profile) {
+                return Ok(err_output(format!(
+                    "OS sandbox confinement failed ({}): {e}",
+                    backend.backend_name()
+                )));
+            }
+        }
+        // Scrubbing lands on the final command (post-confinement): strip
+        // deny_env entries and sensitive-shape variables to prevent leaks.
+        sanitize_env(&mut cmd, ctx);
+        cmd
             // Non-interactive: null stdin so interactive commands (read/pause/npm init) cannot steal the host terminal's input.
             .stdin(std::process::Stdio::null())
             // wait_with_output only collects piped streams; the default inherit would read nothing.
@@ -182,20 +201,6 @@ impl Tool for Shell {
             // Key: pairs with timeout cancellation semantics -- the child is auto-killed when the future is dropped
             // (only the shell itself; see the module docs for the orphaned-grandchildren limitation).
             .kill_on_drop(true);
-        // Scrubbing must happen before spawn: strip deny_env entries and sensitive-suffix variables to prevent leaks.
-        sanitize_env(&mut cmd, ctx);
-        // OS confinement (Linux Landlock; opt-in via WAVECODE_SANDBOX_OS):
-        // derive the shell profile (cwd writable, no network) and let the
-        // platform backend confine the child. Any failure fails closed here —
-        // the command never runs unconfined when confinement was requested.
-        // Timeout / kill / truncate / scrub behavior below is unchanged.
-        if os_sandbox_enabled() {
-            let profile = wavecode_sandbox::ConfinementProfile::for_shell(&ctx.cwd);
-            let backend = wavecode_sandbox::detect_backend();
-            if let Err(e) = backend.spawn_confined(&mut cmd, &profile) {
-                return Ok(err_output(format!("OS sandbox confinement failed: {e}")));
-            }
-        }
         // timeout wraps the whole run (spawn + output reads); wait_with_output drains both streams concurrently,
         // so a full pipe buffer cannot deadlock it.
         let run = async { cmd.spawn()?.wait_with_output().await };

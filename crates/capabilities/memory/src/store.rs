@@ -39,8 +39,11 @@ impl MemoryCategory {
     }
 
     /// 解析类别名；非法值返回 None（调用方转业务失败输出）。
+    /// Surrounding whitespace is trimmed before matching, so raw tool
+    /// input like `" user "` still resolves (model output is untrusted).
     pub fn parse(raw: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|c| c.as_str() == raw)
+        let normalized = raw.trim();
+        Self::ALL.into_iter().find(|c| c.as_str() == normalized)
     }
 
     /// 类别条目文件名。
@@ -80,7 +83,16 @@ impl MemoryStore {
     /// 追加一条记忆：条目写入类别文件（`- ` 列表项，多行内容缩进续行
     /// 保持在同一列表项内），索引追加一行 `- [category] 摘要`。
     /// 摘要取内容首行，截断 80 字符——索引是导航，正文在类别文件。
+    /// Blank content is rejected with an `InvalidInput` error before any
+    /// directory or file is created, so junk `- ` bullets never pollute
+    /// the category file or the index.
     pub fn append(&self, category: MemoryCategory, content: &str) -> std::io::Result<()> {
+        if content.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "memory content must not be empty",
+            ));
+        }
         std::fs::create_dir_all(&self.root)?;
         let entry = format_entry(content);
         append_line(&self.root.join(category.file_name()), &entry)?;
@@ -210,6 +222,44 @@ mod tests {
         }
         assert_eq!(MemoryCategory::parse("nope"), None);
         assert_eq!(MemoryCategory::parse(""), None);
+    }
+
+    /// Whitespace-padded names still resolve (tool params come straight
+    /// from untrusted model output); blank and unknown names are rejected.
+    #[test]
+    fn category_parse_trims_surrounding_whitespace() {
+        assert_eq!(MemoryCategory::parse("  user "), Some(MemoryCategory::User));
+        assert_eq!(
+            MemoryCategory::parse("\tproject\n"),
+            Some(MemoryCategory::Project)
+        );
+        assert_eq!(MemoryCategory::parse("   "), None);
+        assert_eq!(MemoryCategory::parse(""), None);
+    }
+
+    /// Blank content is rejected (InvalidInput) with no filesystem side
+    /// effects: no junk `- ` bullets in the category file or the index.
+    #[test]
+    fn append_rejects_blank_content_without_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("memories");
+        let store = MemoryStore::new(root.clone());
+
+        for blank in ["", "   ", "\n  \n"] {
+            let err = store.append(MemoryCategory::User, blank).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        assert!(
+            !root.exists(),
+            "rejected appends must not create the store dir"
+        );
+
+        // The guard only intercepts blanks; valid writes still work.
+        store.append(MemoryCategory::User, "偏好紧凑回复").unwrap();
+        assert_eq!(
+            store.read_category(MemoryCategory::User).unwrap(),
+            "- 偏好紧凑回复\n"
+        );
     }
 
     /// 长首行摘要截断 80 字符并补省略号。

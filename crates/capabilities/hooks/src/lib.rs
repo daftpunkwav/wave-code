@@ -18,6 +18,10 @@
 //!
 //! 信任边界（与 shell 工具不同）：hook 命令来自用户自己的配置文件，
 //! 属已授权配置而非模型产出，故不做环境变量剔除 / 路径约束。
+//! 配置诊断：[`HookEngine::validate`] 以静态方式指出永不生效的条目
+//! （空命令、空白 matcher、非工具事件点上的 matcher），装配层应在启动期
+//! 浮现一次；[`HookDef::effective_timeout`] 把 `timeout_ms == 0` 归一为
+//! [`DEFAULT_TIMEOUT_MS`]（"未设置"，而非"零等待"）。
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -114,6 +118,22 @@ pub struct HookDef {
     pub once: bool,
 }
 
+impl HookDef {
+    /// Effective timeout for execution: `timeout_ms == 0` means "unset"
+    /// and falls back to [`DEFAULT_TIMEOUT_MS`]. A zero
+    /// `tokio::time::timeout` could never win the race against spawn +
+    /// pipe setup, so treating 0 as "no waiting" was a trap (every
+    /// execution reported Timeout and consumed `once`); 0 now behaves
+    /// like an omitted value.
+    pub fn effective_timeout(&self) -> Duration {
+        Duration::from_millis(if self.timeout_ms == 0 {
+            DEFAULT_TIMEOUT_MS
+        } else {
+            self.timeout_ms
+        })
+    }
+}
+
 /// 一次 hook 触发的事件载荷。
 #[derive(Debug, Clone, Copy)]
 pub struct HookInput<'a> {
@@ -175,6 +195,52 @@ impl HookEngine {
         self.defs.get(&point).is_some_and(|d| !d.is_empty())
     }
 
+    /// Static configuration diagnostics (no execution): flags entries
+    /// that can never do anything useful — empty commands, blank
+    /// matchers, matchers on points that carry no tool name, and zero
+    /// timeouts (which fall back to [`DEFAULT_TIMEOUT_MS`] at runtime,
+    /// see [`HookDef::effective_timeout`]). Assembly layers should
+    /// surface these once at startup; [`HookEngine::run`] additionally
+    /// warns at runtime for empty commands on the hot path.
+    pub fn validate(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut points: Vec<HookEventPoint> = self.defs.keys().copied().collect();
+        points.sort_by_key(|p| p.as_str()); // deterministic order
+        for point in points {
+            let Some(defs) = self.defs.get(&point) else {
+                continue;
+            };
+            for (idx, def) in defs.iter().enumerate() {
+                if def.command.trim().is_empty() {
+                    out.push(format!(
+                        "[{}] entry #{idx} has an empty command (never executes)",
+                        point.as_str()
+                    ));
+                }
+                if def.timeout_ms == 0 {
+                    out.push(format!(
+                        "[{}] entry #{idx} timeout_ms is 0 (falls back to {DEFAULT_TIMEOUT_MS}ms)",
+                        point.as_str()
+                    ));
+                }
+                if let Some(matcher) = &def.matcher {
+                    if matcher.trim().is_empty() {
+                        out.push(format!(
+                            "[{}] entry #{idx} matcher is blank (never matches)",
+                            point.as_str()
+                        ));
+                    } else if !is_tool_point(point) {
+                        out.push(format!(
+                            "[{}] entry #{idx} has a matcher but this point carries no tool name (never fires)",
+                            point.as_str()
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// 触发一个事件点：按配置序逐条执行，汇总警告；可阻塞事件点的首个
     /// 退出码 2 短路返回 Block（后续条目不再执行——阻塞即终局）。
     pub async fn run(&self, point: HookEventPoint, input: &HookInput<'_>) -> HookReport {
@@ -184,12 +250,23 @@ impl HookEngine {
         };
         for (idx, def) in defs.iter().enumerate() {
             // matcher 过滤：仅工具类事件点可命中；非工具事件点配 matcher
-            // 的条目永不触发（配置错误以警告形式浮现——见下）。
+            // 的条目永不触发（启动期经 [`HookEngine::validate`] 浮现）。
             if let Some(matcher) = &def.matcher {
                 match input.tool_name {
                     Some(tool) if matcher_matches(matcher, tool) => {}
                     _ => continue,
                 }
+            }
+            // Empty command: config error, never spawns. Warn and skip
+            // *before* consuming `once` so a fixed config can still fire
+            // this session (same "no execution, no consumption" rule as
+            // matcher misses and spawn failures).
+            if def.command.trim().is_empty() {
+                report.warnings.push(format!(
+                    "[{}] entry #{idx} has an empty command (skipped)",
+                    point.as_str()
+                ));
+                continue;
             }
             // once：matcher 命中后的"实际执行"才消耗额度。
             if def.once && !lock(&self.fired).insert((point, idx)) {
@@ -221,7 +298,7 @@ impl HookEngine {
                         "[{}] hook `{}` 超时（{}ms）已强制终止（kill，按警告放行）",
                         point.as_str(),
                         def.command,
-                        def.timeout_ms
+                        def.effective_timeout().as_millis()
                     ));
                 }
                 ExecOutcome::SpawnFailed(reason) => {
@@ -241,6 +318,16 @@ impl HookEngine {
         }
         report
     }
+}
+
+/// Points that carry a tool name in [`HookInput::tool_name`]
+/// (PreToolUse / PostToolUse; all other points pass None, so a matcher
+/// configured on them can never fire).
+fn is_tool_point(point: HookEventPoint) -> bool {
+    matches!(
+        point,
+        HookEventPoint::PreToolUse | HookEventPoint::PostToolUse
+    )
 }
 
 /// matcher 匹配：`|` 分隔多值（任一命中），`*` 匹配全部，其余精确相等。
@@ -313,7 +400,7 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
     // 写入与等待整体纳入超时：write_all 在载荷超过管道缓冲而 hook 进程
     // 不读 stdin 时会无限阻塞，放在 timeout 之外等于超时保护失效（整个
     // turn 挂死）。超时 drop future 即 drop child，kill_on_drop 发 kill。
-    let waited = tokio::time::timeout(Duration::from_millis(def.timeout_ms), async {
+    let waited = tokio::time::timeout(def.effective_timeout(), async {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             let _ = stdin.write_all(payload.to_string().as_bytes()).await;
@@ -566,5 +653,119 @@ mod tests {
         }
         assert_eq!(HookEventPoint::parse("pre_tool_use"), None);
         assert_eq!(HookEventPoint::parse("Notification"), None);
+    }
+
+    // —— timeout 归一 / 空命令 / 静态校验 ——
+
+    /// `timeout_ms == 0` 视为"未设置"：回落到 DEFAULT 而非立即超时。
+    #[test]
+    fn effective_timeout_maps_zero_to_default() {
+        assert_eq!(
+            HookDef {
+                timeout_ms: 0,
+                ..def("true")
+            }
+            .effective_timeout(),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            HookDef {
+                timeout_ms: 42,
+                ..def("true")
+            }
+            .effective_timeout(),
+            Duration::from_millis(42)
+        );
+    }
+
+    /// 运行时证明：`timeout_ms == 0` 的快速成功命令仍放行无警告
+    /// （回落前此处必报超时）。
+    #[tokio::test]
+    async fn zero_timeout_falls_back_to_default_at_runtime() {
+        let e = engine(&[(
+            HookEventPoint::PreToolUse,
+            HookDef {
+                timeout_ms: 0,
+                ..def(&exit_cmd(0, ""))
+            },
+        )]);
+        let report = e
+            .run(HookEventPoint::PreToolUse, &input(Some("shell")))
+            .await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert!(report.warnings.is_empty());
+    }
+
+    /// 空命令：警告后跳过，不真正 spawn，且不消耗 `once` 额度
+    /// （连续两次都有警告——若第一次消耗了额度，第二次将静默跳过）。
+    #[tokio::test]
+    async fn empty_command_skips_with_warning_without_consuming_once() {
+        let e = engine(&[(
+            HookEventPoint::PreToolUse,
+            HookDef {
+                once: true,
+                ..def("   ")
+            },
+        )]);
+        for _ in 0..2 {
+            let report = e
+                .run(HookEventPoint::PreToolUse, &input(Some("shell")))
+                .await;
+            assert_eq!(report.verdict, HookVerdict::Allow);
+            assert_eq!(report.warnings.len(), 1);
+            assert!(report.warnings[0].contains("empty command"));
+        }
+    }
+
+    /// 静态校验：不执行任何命令即指出永不生效的条目；干净配置零诊断。
+    #[test]
+    fn validate_flags_dead_entries() {
+        let e = engine(&[
+            (
+                HookEventPoint::SessionStart,
+                HookDef {
+                    matcher: Some("shell".to_owned()),
+                    ..def("echo hi")
+                },
+            ),
+            (HookEventPoint::PreToolUse, def("  ")),
+            (
+                HookEventPoint::PreToolUse,
+                HookDef {
+                    matcher: Some("  ".to_owned()),
+                    ..def(&exit_cmd(0, ""))
+                },
+            ),
+            (
+                HookEventPoint::PostToolUse,
+                HookDef {
+                    timeout_ms: 0,
+                    ..def(&exit_cmd(0, ""))
+                },
+            ),
+        ]);
+        let diagnostics = e.validate();
+        assert_eq!(diagnostics.len(), 4, "{diagnostics:?}");
+        assert!(
+            diagnostics.iter().any(|d| d.contains("empty command")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.contains("matcher is blank")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("carries no tool name")),
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.iter().any(|d| d.contains("timeout_ms is 0")),
+            "{diagnostics:?}"
+        );
+
+        let clean = engine(&[(HookEventPoint::PreToolUse, def(&exit_cmd(0, "")))]);
+        assert!(clean.validate().is_empty());
     }
 }

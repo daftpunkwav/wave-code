@@ -320,27 +320,48 @@ mod tests {
 
     /// Crate boundary: the TUI workspace dependencies are exactly
     /// operations-wire and operations-actor. Nothing else internal.
+    ///
+    /// Prefix guards are not enough here: `state-store` or `runtime-runner`
+    /// match neither `operations-` nor `wavecode-` and would slip through.
+    /// Collect every `path =` edge in `[dependencies]` and compare exactly.
     #[test]
     fn dependency_matrix_locked() {
-        let manifest = include_str!("../Cargo.toml");
-        assert!(
-            !manifest.contains("wavecode-core"),
-            "tui must not depend on core"
+        assert_eq!(
+            internal_path_deps(include_str!("../Cargo.toml")),
+            ["operations-actor", "operations-wire"],
+            "tui internal deps changed; update the matrix deliberately",
         );
+    }
+
+    #[test]
+    fn path_dep_scan_catches_prefix_evasions() {
+        let manifest = "[dependencies]\noperations-wire = { path = \"x\" }\nstate-store = { path = \"y\" }\nratatui.workspace = true\n[dev-dependencies]\nruntime-runner = { path = \"z\" }\n";
+        assert_eq!(
+            internal_path_deps(manifest),
+            ["operations-wire", "state-store"],
+            " dev-deps ignored, registry deps ignored, other prefixes caught",
+        );
+    }
+
+    /// Names of in-workspace `path =` dependencies in `[dependencies]`.
+    ///
+    /// Workspace-inherited (`foo.workspace = true`) and registry deps carry
+    /// no path and never match; section-scoped so `[dev-dependencies]` and
+    /// `[build-dependencies]` cannot smuggle runtime edges.
+    fn internal_path_deps(manifest: &str) -> Vec<String> {
+        let mut in_deps = false;
+        let mut names = Vec::new();
         for line in manifest.lines() {
-            let Some(name) = line.split('=').next().map(str::trim) else {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_deps = trimmed == "[dependencies]";
                 continue;
-            };
-            if name.starts_with("operations-") {
-                assert!(
-                    matches!(name, "operations-wire" | "operations-actor"),
-                    "tui new internal deps need a matrix update: {name}"
-                );
             }
-            assert!(
-                !name.starts_with("wavecode-"),
-                "tui must not depend on legacy crates: {name}"
-            );
+            if in_deps && trimmed.contains("path =") {
+                names.extend(trimmed.split('=').next().map(str::trim).map(str::to_string));
+            }
         }
+        names.sort();
+        names
     }
 }

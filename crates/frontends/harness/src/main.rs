@@ -805,6 +805,39 @@ mod tests {
         assert_eq!(args.permission_mode, None);
     }
 
+    /// Crate boundary: the binary's workspace edges stay exactly the
+    /// composition it was assembled against (actor, bootstrap, wire,
+    /// persistence, config, tui). New internal deps need a deliberate
+    /// matrix update, not a silent Cargo.toml line.
+    #[test]
+    fn dependency_matrix_locked() {
+        let mut in_deps = false;
+        let mut names = Vec::new();
+        for line in include_str!("../Cargo.toml").lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_deps = trimmed == "[dependencies]";
+                continue;
+            }
+            if in_deps && trimmed.contains("path =") {
+                names.extend(trimmed.split('=').next().map(str::trim).map(str::to_string));
+            }
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "operations-actor",
+                "operations-bootstrap",
+                "operations-wire",
+                "state-persistence",
+                "wavecode-config",
+                "wavecode-tui",
+            ],
+            "harness internal deps changed; update the matrix deliberately",
+        );
+    }
+
     #[test]
     fn outcomes_map_to_exit_codes() {
         assert_eq!(Outcome::Completed.exit_code(), 0);

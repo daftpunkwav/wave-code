@@ -117,21 +117,6 @@ impl TurnState {
 /// melts the turn. A successful sample resets the count.
 pub const MAX_REACTIVE_COMPACTS: u8 = 3;
 
-/// Decision produced by the planning/decision layer for one loop iteration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PolicyDecision {
-    /// Proceed to the next sample or tool dispatch.
-    Continue,
-    /// Terminate the run with the given reason.
-    Finish(StopReason),
-    /// Inject a plan reminder and continue sampling.
-    Steer(String),
-    /// Compact context first, then retry the sample.
-    CompactAndRetry,
-    /// Abort the run with a human-readable cause.
-    Fail(String),
-}
-
 /// One tool invocation requested by the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {

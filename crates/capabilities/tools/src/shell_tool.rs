@@ -51,7 +51,7 @@ fn shell_invocation() -> (String, &'static str) {
 }
 
 /// Decode and truncate one output stream: UTF-8 boundary safe, appending `[truncated]` past the cap.
-fn truncate_output(bytes: &[u8]) -> String {
+pub(crate) fn truncate_output(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
     if text.len() <= MAX_OUTPUT_BYTES {
         return text.into_owned();
@@ -71,7 +71,7 @@ fn truncate_output(bytes: &[u8]) -> String {
 ///
 /// Threat-model boundary: this only guards "leaks via child-process environment inheritance"; reading an inline
 /// api_key straight from `type config.toml` is an accepted M1 surface (on record in the M1 review), out of scope here.
-fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
+pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
     for name in &ctx.deny_env {
         cmd.env_remove(name);
     }

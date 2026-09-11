@@ -10,10 +10,13 @@
 //! add web / browser tools; the execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
 
 mod fs;
+mod lsp;
 mod path_guard;
+mod script;
 mod search;
 mod shell_tool;
 mod todo_tool;
+mod webfetch;
 
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 
@@ -161,6 +164,13 @@ impl Registry {
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));
+        reg.register(Arc::new(script::PythonTool));
+        reg.register(Arc::new(script::NodeTool));
+        reg.register(Arc::new(lsp::DocumentSymbols));
+        reg.register(Arc::new(lsp::GotoDefinition));
+        reg.register(Arc::new(lsp::Hover));
+        reg.register(Arc::new(lsp::FindReferences));
+        reg.register(Arc::new(webfetch::WebFetch));
         reg
     }
 
@@ -325,5 +335,52 @@ mod tests {
         registry.register(Arc::new(LateTool));
         assert!(registry.get("late_tool").is_some());
         assert_eq!(registry.specs().len(), before + 1);
+    }
+
+    /// New tools are registered with the expected read-only surface:
+    /// scripts can write (not read-only), LSP navigation and webfetch are read-only.
+    #[test]
+    fn builtin_registers_script_lsp_and_webfetch() {
+        let reg = Registry::builtin();
+        for name in [
+            "run_python",
+            "run_node",
+            "document_symbols",
+            "goto_definition",
+            "hover",
+            "find_references",
+            "webfetch",
+        ] {
+            assert!(reg.get(name).is_some(), "{name} must be registered");
+        }
+        assert!(!reg.get("run_python").unwrap().is_read_only());
+        assert!(!reg.get("run_node").unwrap().is_read_only());
+        for name in [
+            "document_symbols",
+            "goto_definition",
+            "hover",
+            "find_references",
+            "webfetch",
+        ] {
+            assert!(
+                reg.get(name).unwrap().is_read_only(),
+                "{name} must be read-only"
+            );
+        }
+        // Read-only explore subset picks up the navigation/fetch tools.
+        let explore = reg.read_only_subset();
+        for name in [
+            "document_symbols",
+            "goto_definition",
+            "hover",
+            "find_references",
+            "webfetch",
+        ] {
+            assert!(
+                explore.get(name).is_some(),
+                "{name} must be in the explore subset"
+            );
+        }
+        assert!(explore.get("run_python").is_none());
     }
 }

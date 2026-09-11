@@ -530,7 +530,7 @@ mod tests {
     fn builtin_tool_names_match_classification_table() {
         let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
         // (tool name, is_file_edit, is_session_state, approval_kind)
-        let expected: [(&str, bool, bool, ApprovalKind); 8] = [
+        let expected: [(&str, bool, bool, ApprovalKind); 15] = [
             ("read_file", false, false, ApprovalKind::Write),
             ("write_file", true, false, ApprovalKind::Write),
             ("edit_file", true, false, ApprovalKind::Write),
@@ -538,6 +538,13 @@ mod tests {
             ("grep", false, false, ApprovalKind::Write),
             ("glob", false, false, ApprovalKind::Write),
             ("shell", false, false, ApprovalKind::Exec),
+            ("run_python", false, false, ApprovalKind::Write),
+            ("run_node", false, false, ApprovalKind::Write),
+            ("document_symbols", false, false, ApprovalKind::Write),
+            ("goto_definition", false, false, ApprovalKind::Write),
+            ("hover", false, false, ApprovalKind::Write),
+            ("find_references", false, false, ApprovalKind::Write),
+            ("webfetch", false, false, ApprovalKind::Write),
             ("todo_write", false, true, ApprovalKind::Write),
         ];
         for (name, file_edit, session_state, kind) in expected {

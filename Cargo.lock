@@ -581,6 +581,8 @@ dependencies = [
  "state-persistence",
  "tokio",
  "wavecode-config",
+ "wavecode-skills",
+ "wavecode-tools",
  "wavecode-tui",
 ]
 
@@ -1831,7 +1833,10 @@ dependencies = [
 name = "state-checkpoint"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+ "tempfile",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2186,6 +2191,7 @@ dependencies = [
 name = "transport-mcp"
 version = "0.1.0"
 dependencies = [
+ "reqwest",
  "serde_json",
  "thiserror",
  "tokio",
@@ -2459,6 +2465,7 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -2468,7 +2475,9 @@ dependencies = [
  "async-trait",
  "glob",
  "regex",
+ "reqwest",
  "serde_json",
+ "state-checkpoint",
  "tempfile",
  "thiserror",
  "tokio",

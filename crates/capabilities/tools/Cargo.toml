@@ -5,11 +5,13 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+state-checkpoint = { path = "../../state/checkpoint" }
 wavecode-llm = { path = "../../foundation/llm" }
 serde_json.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+reqwest.workspace = true
 regex.workspace = true
 glob.workspace = true
 

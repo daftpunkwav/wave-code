@@ -240,7 +240,7 @@ mod tests {
         let reg = crate::Registry::builtin();
         let specs = reg.specs();
         // builtin excludes todo_write (injected by session assembly via with_todo_write).
-        assert_eq!(specs.len(), 7);
+        assert_eq!(specs.len(), 14);
         let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort();
@@ -251,7 +251,7 @@ mod tests {
         assert!(reg.get("todo_write").is_none());
 
         let (full, _todos) = crate::Registry::builtin_with_todos();
-        assert_eq!(full.specs().len(), 8);
+        assert_eq!(full.specs().len(), 15);
         assert!(full.get("todo_write").is_some());
     }
 

@@ -325,7 +325,7 @@ mod tests {
     }
 
     fn test_registry() -> Arc<wavecode_tools::Registry> {
-        let mut registry = wavecode_tools::Registry::builtin();
+        let registry = wavecode_tools::Registry::builtin();
         registry.register(Arc::new(EchoTool));
         registry.register(Arc::new(FaultyTool));
         Arc::new(registry)

@@ -138,7 +138,14 @@ fn parse_tool_result(payload: &serde_json::Value) -> std::result::Result<McpTool
 }
 
 fn transport_error(context: &str, error: transport_mcp::TransportError) -> McpError {
-    McpError::Transport(format!("{context}: {error}"))
+    // Protocol failures (bad frames, JSON-RPC errors, unsupported
+    // interactive auth) stay protocol errors; the rest reads as transport.
+    match error {
+        transport_mcp::TransportError::Protocol(detail) => {
+            McpError::Protocol(format!("{context}: {detail}"))
+        }
+        other => McpError::Transport(format!("{context}: {other}")),
+    }
 }
 
 /// Real MCP client over a spawned stdio server process.
@@ -230,6 +237,112 @@ impl StdioMcpClient {
 
 #[async_trait::async_trait]
 impl McpClient for StdioMcpClient {
+    async fn list_tools(&self) -> std::result::Result<Vec<McpToolDef>, McpError> {
+        let mut tools = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let mut params = serde_json::json!({});
+            if let Some(next) = &cursor {
+                params["cursor"] = serde_json::Value::String(next.clone());
+            }
+            let payload = self.request("tools/list", params).await?;
+            let (mut defs, next) = parse_tools_list(&payload)?;
+            tools.append(&mut defs);
+            cursor = next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(tools)
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> std::result::Result<McpToolOutput, McpError> {
+        let payload = self
+            .request(
+                "tools/call",
+                serde_json::json!({"name": name, "arguments": input}),
+            )
+            .await?;
+        parse_tool_result(&payload)
+    }
+}
+
+/// Real MCP client over a streamable-HTTP server endpoint.
+pub struct HttpMcpClient {
+    transport: tokio::sync::Mutex<transport_mcp::http::HttpMcp>,
+}
+
+impl HttpMcpClient {
+    /// Build the transport and run the `initialize` handshake.
+    pub async fn connect(
+        url: &str,
+        headers: HashMap<String, String>,
+        oauth: Option<transport_mcp::http::OAuthClientCredentials>,
+    ) -> std::result::Result<Self, McpError> {
+        let transport = transport_mcp::http::HttpMcp::new(transport_mcp::http::HttpMcpConfig {
+            endpoint: url.to_string(),
+            headers,
+            oauth,
+        })
+        .map_err(|e| transport_error("build", e))?;
+        let client = Self {
+            transport: tokio::sync::Mutex::new(transport),
+        };
+        let payload = client
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "wavecode",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    },
+                }),
+            )
+            .await?;
+        check_initialize(&payload)?;
+        client
+            .notify("notifications/initialized", serde_json::json!({}))
+            .await?;
+        Ok(client)
+    }
+
+    /// One request/response exchange over the HTTP transport.
+    async fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, McpError> {
+        self.transport
+            .lock()
+            .await
+            .rpc(method, params)
+            .await
+            .map_err(|e| transport_error("request", e))
+    }
+
+    /// One fire-and-forget notification.
+    async fn notify(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<(), McpError> {
+        self.transport
+            .lock()
+            .await
+            .notify(method, params)
+            .await
+            .map_err(|e| transport_error("notify", e))
+    }
+}
+
+#[async_trait::async_trait]
+impl McpClient for HttpMcpClient {
     async fn list_tools(&self) -> std::result::Result<Vec<McpToolDef>, McpError> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -380,6 +493,10 @@ async fn connect_one(
         (None, Some(url)) => wavecode_mcp::McpServerConfig::Http {
             url: url.clone(),
             headers: raw.headers.clone(),
+            oauth_token_url: raw.oauth_token_url.clone(),
+            oauth_client_id: raw.oauth_client_id.clone(),
+            oauth_client_secret: raw.oauth_client_secret.clone(),
+            oauth_scope: raw.oauth_scope.clone(),
         },
         (None, None) => {
             let reason = format!("MCP server {name:?} sets neither command nor url");
@@ -390,12 +507,54 @@ async fn connect_one(
         return (format!("{name} — skipped ({reason})"), Some(reason));
     }
     match config {
-        wavecode_mcp::McpServerConfig::Http { url, .. } => (
-            format!("{name} (http: {url}) — unavailable (http transport not implemented)"),
-            Some(format!(
-                "MCP server {name:?}: http transport is not implemented; tools skipped"
-            )),
-        ),
+        wavecode_mcp::McpServerConfig::Http {
+            url,
+            headers,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_scope,
+        } => {
+            let oauth = match (oauth_token_url, oauth_client_id, oauth_client_secret) {
+                (Some(token_url), Some(client_id), Some(client_secret)) => {
+                    Some(transport_mcp::http::OAuthClientCredentials {
+                        token_url,
+                        client_id,
+                        client_secret,
+                        scope: oauth_scope,
+                    })
+                }
+                _ => None,
+            };
+            let summary = format!("http: {url}");
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(MCP_CONNECT_TIMEOUT_SECS),
+                connect_http(name, &url, headers, oauth, registry),
+            )
+            .await
+            {
+                Ok(Ok(count)) => (
+                    format!(
+                        "{name} ({summary}) — connected ({count} tool{})",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                    None,
+                ),
+                Ok(Err(error)) => {
+                    let reason = format!("MCP server {name:?} failed: {error}; tools skipped");
+                    (format!("{name} ({summary}) — unavailable ({error})"), Some(reason))
+                }
+                Err(_) => {
+                    let reason = format!(
+                        "MCP server {name:?} connect timed out after {MCP_CONNECT_TIMEOUT_SECS}s; tools skipped"
+                    );
+                    (
+                        format!("{name} ({summary}) — unavailable (connect timed out)"),
+                        Some(reason),
+                    )
+                }
+            }
+        }
         wavecode_mcp::McpServerConfig::Stdio { command, args, env } => {
             let summary = wavecode_mcp::McpServerConfig::Stdio {
                 command: command.clone(),
@@ -444,6 +603,29 @@ async fn connect_stdio(
 ) -> std::result::Result<usize, McpError> {
     let client: Arc<dyn McpClient> =
         Arc::new(StdioMcpClient::connect(name, command, args, env).await?);
+    let tools = client.list_tools().await?;
+    let mut count = 0;
+    for def in &tools {
+        // Empty tool names never reach the registry; the handshake told
+        // us the server speaks, so one bad item skips quietly.
+        if let Some(bridge) = McpToolBridge::new(name, def, client.clone()) {
+            registry.register(Arc::new(bridge));
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Handshake, list, and bridge one HTTP server; returns bridged count.
+async fn connect_http(
+    name: &str,
+    url: &str,
+    headers: HashMap<String, String>,
+    oauth: Option<transport_mcp::http::OAuthClientCredentials>,
+    registry: &Arc<wavecode_tools::Registry>,
+) -> std::result::Result<usize, McpError> {
+    let client: Arc<dyn McpClient> =
+        Arc::new(HttpMcpClient::connect(url, headers, oauth).await?);
     let tools = client.list_tools().await?;
     let mut count = 0;
     for def in &tools {
@@ -640,6 +822,10 @@ mod tests {
             env: HashMap::new(),
             url: url.map(|s| s.to_string()),
             headers: HashMap::new(),
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
         }
     }
 

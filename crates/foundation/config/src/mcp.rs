@@ -22,4 +22,14 @@ pub struct McpServerRaw {
     /// Extra request headers.
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// OAuth token endpoint URL (client-credentials grant; optional, set
+    /// together with `oauth_client_id` + `oauth_client_secret` or not at
+    /// all; the all-or-nothing check lives in the assembly layer).
+    pub oauth_token_url: Option<String>,
+    /// OAuth client id (client-credentials grant).
+    pub oauth_client_id: Option<String>,
+    /// OAuth client secret (client-credentials grant).
+    pub oauth_client_secret: Option<String>,
+    /// Optional OAuth scope to request.
+    pub oauth_scope: Option<String>,
 }

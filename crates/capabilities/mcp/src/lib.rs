@@ -203,13 +203,23 @@ pub enum McpServerConfig {
         /// (overriding the inherited environment).
         env: HashMap<String, String>,
     },
-    /// streamable-http transport (incl. OAuth 2.0 + PKCE, SPEC section 10).
+    /// streamable-http transport (incl. OAuth 2.0 client-credentials, SPEC section 10).
     Http {
         /// Server endpoint URL.
         url: String,
-        /// Extra request headers (e.g. a manually configured Authorization
-        /// placeholder until OAuth lands).
+        /// Extra request headers (e.g. a pre-provisioned `Authorization`
+        /// value; a static `Authorization` header wins over OAuth).
         headers: HashMap<String, String>,
+        /// OAuth token endpoint URL (client-credentials grant). Set together
+        /// with `oauth_client_id` + `oauth_client_secret`, or not at all
+        /// (see `validate`).
+        oauth_token_url: Option<String>,
+        /// OAuth client id (client-credentials grant).
+        oauth_client_id: Option<String>,
+        /// OAuth client secret (client-credentials grant; never logged).
+        oauth_client_secret: Option<String>,
+        /// Optional OAuth scope to request.
+        oauth_scope: Option<String>,
     },
 }
 
@@ -234,7 +244,13 @@ impl McpServerConfig {
                 }
                 Ok(())
             }
-            Self::Http { url, .. } => {
+            Self::Http {
+                url,
+                oauth_token_url,
+                oauth_client_id,
+                oauth_client_secret,
+                ..
+            } => {
                 let trimmed = url.trim();
                 if trimmed.is_empty() {
                     return Err("http MCP server url must not be empty".to_owned());
@@ -243,6 +259,15 @@ impl McpServerConfig {
                     return Err(format!(
                         "http MCP server url must start with http:// or https://: {trimmed}"
                     ));
+                }
+                let triple = [
+                    oauth_token_url.is_some(),
+                    oauth_client_id.is_some(),
+                    oauth_client_secret.is_some(),
+                ];
+                if triple.iter().any(|set| *set) && triple.iter().any(|set| !set) {
+                    return Err("OAuth client-credentials needs all of `oauth_token_url`,                         `oauth_client_id`, `oauth_client_secret` (or none)"
+                        .to_owned());
                 }
                 Ok(())
             }
@@ -336,6 +361,10 @@ mod tests {
         let http = McpServerConfig::Http {
             url: "https://mcp.example.com/sse".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer x".into())]),
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
         };
         assert_eq!(http.transport_kind(), "http");
         assert_eq!(http.summary(), "http: https://mcp.example.com/sse");
@@ -398,17 +427,48 @@ mod tests {
         let ok_http = McpServerConfig::Http {
             url: "https://mcp.example.com/mcp".into(),
             headers: HashMap::new(),
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
         };
         assert!(ok_http.validate().is_ok());
         let empty_url = McpServerConfig::Http {
             url: "".into(),
             headers: HashMap::new(),
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
         };
         assert!(empty_url.validate().is_err());
         let bad_scheme = McpServerConfig::Http {
             url: "ftp://mcp.example.com/x".into(),
             headers: HashMap::new(),
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
         };
         assert!(bad_scheme.validate().is_err());
+
+        // OAuth client-credentials is all-or-nothing: a partial triple fails.
+        let mut partial = McpServerConfig::Http {
+            url: "https://mcp.example.com/mcp".into(),
+            headers: HashMap::new(),
+            oauth_token_url: Some("https://auth.example.com/token".into()),
+            oauth_client_id: Some("wave".into()),
+            oauth_client_secret: None,
+            oauth_scope: None,
+        };
+        assert!(partial.validate().is_err());
+        if let McpServerConfig::Http {
+            oauth_client_secret,
+            ..
+        } = &mut partial
+        {
+            *oauth_client_secret = Some("s3cret".into());
+        }
+        assert!(partial.validate().is_ok());
     }
 }

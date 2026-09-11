@@ -21,6 +21,9 @@ use std::collections::HashMap;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+/// Streamable-HTTP transport (JSON-RPC over POST with SSE responses).
+pub mod http;
+
 /// Next request id seed; ids increase monotonically per transport.
 pub const FIRST_REQUEST_ID: u64 = 1;
 
@@ -115,6 +118,13 @@ pub enum TransportError {
     /// Underlying IO failure.
     #[error("transport IO failed: {0}")]
     Io(#[from] std::io::Error),
+    /// HTTP-layer failure (request send, non-401 status, body read, ...).
+    #[error("HTTP request failed: {0}")]
+    Http(String),
+    /// Protocol-layer failure (bad URL config, unparseable response,
+    /// server-returned JSON-RPC error, unsupported interactive auth, ...).
+    #[error("MCP protocol error: {0}")]
+    Protocol(String),
 }
 
 /// Child-process MCP transport over stdio pipes.

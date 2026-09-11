@@ -1,44 +1,44 @@
-//! Anthropic Messages streaming SSE 事件解析。
+//! Anthropic Messages streaming SSE event parsing.
 //!
-//! 将每一条 SSE 消息的 `data` JSON 文本翻译为 [`StreamEvent`]
-//! （见 [`SseParser::feed`]）。未知事件类型一律忽略，保证向前兼容。
+//! Translates the `data` JSON text of each SSE message into a [`StreamEvent`]
+//! (see [`SseParser::feed`]). Unknown event types are always ignored for forward compatibility.
 
 use serde::Deserialize;
 
 use crate::{StreamEvent, Usage};
 
-/// Anthropic Messages streaming SSE 解析器。
+/// Anthropic Messages streaming SSE parser.
 ///
-/// 有状态：累计 `message_start` 上报的 input_tokens，在 `message_delta`
-/// 合成 [`StreamEvent::MessageComplete`] 时一并返回。
+/// Stateful: accumulates the input_tokens reported by `message_start` and returns
+/// them when synthesizing [`StreamEvent::MessageComplete`] on `message_delta`.
 #[derive(Default)]
 pub struct SseParser {
     input_tokens: u64,
 }
 
 impl SseParser {
-    /// 新建解析器。
+    /// Creates a new parser.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 输入一条 SSE 消息的 data JSON 文本，产出零或一个 [`StreamEvent`]。
+    /// Feeds one SSE message's data JSON text, producing zero or one [`StreamEvent`].
     ///
-    /// 事件类型分发规则（未知类型 / `ping` / `message_stop` 返回 `Ok(None)`）：
-    /// - `message_start`：累计 `message.usage.input_tokens`；
-    /// - `content_block_start`：`tool_use` → [`StreamEvent::ToolUseBegin`]，
-    ///   `text` 及其他类型忽略；
-    /// - `content_block_delta`：`text_delta` → [`StreamEvent::TextDelta`]，
-    ///   `input_json_delta` → [`StreamEvent::ToolUseInputDelta`]，其他忽略；
-    /// - `content_block_stop`：[`StreamEvent::BlockEnd`]；
-    /// - `message_delta`：合成 [`StreamEvent::MessageComplete`]（含累计的
-    ///   input_tokens；`stop_reason` 为 null 时按空串处理）；
-    /// - `error`：经 `classify_api_error` 分类——超长形态为
-    ///   [`crate::LlmError::PromptTooLong`]，其余为 [`crate::LlmError::Api`]。
+    /// Event-type dispatch rules (unknown types / `ping` / `message_stop` return `Ok(None)`):
+    /// - `message_start`: accumulate `message.usage.input_tokens`;
+    /// - `content_block_start`: `tool_use` becomes [`StreamEvent::ToolUseBegin`],
+    ///   `text` and other types are ignored;
+    /// - `content_block_delta`: `text_delta` becomes [`StreamEvent::TextDelta`],
+    ///   `input_json_delta` becomes [`StreamEvent::ToolUseInputDelta`], others are ignored;
+    /// - `content_block_stop`: [`StreamEvent::BlockEnd`];
+    /// - `message_delta`: synthesize [`StreamEvent::MessageComplete`] (with the accumulated
+    ///   input_tokens; a null `stop_reason` is treated as an empty string);
+    /// - `error`: classified via `classify_api_error` - the too-long shape becomes
+    ///   [`crate::LlmError::PromptTooLong`], everything else becomes [`crate::LlmError::Api`].
     pub fn feed(&mut self, data: &str) -> crate::Result<Option<StreamEvent>> {
         let value: serde_json::Value = serde_json::from_str(data)?;
         let Some(ty) = value.get("type").and_then(|t| t.as_str()) else {
-            // 缺少 type 字段：按未知事件处理，保持向前兼容。
+            // Missing type field: treat as an unknown event for forward compatibility.
             return Ok(None);
         };
         match ty {
@@ -88,7 +88,7 @@ impl SseParser {
     }
 }
 
-// ---- 以下为各事件类型的私有反序列化结构 ----
+// ---- Private deserialization structs for each event type ----
 
 #[derive(Deserialize)]
 struct MessageStartEvent {
@@ -111,7 +111,7 @@ struct ContentBlockStartEvent {
     content_block: StartedBlock,
 }
 
-/// `content_block_start` 中的内容块；未知类型归入 Other 并忽略。
+/// Content block inside `content_block_start`; unknown types fall into Other and are ignored.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum StartedBlock {
@@ -129,9 +129,9 @@ struct ContentBlockDeltaEvent {
     delta: Delta,
 }
 
-/// `content_block_delta` 中的增量；未知类型归入 Other 并忽略。
+/// Delta inside `content_block_delta`; unknown types fall into Other and are ignored.
 ///
-/// 变体名刻意与 SSE 协议 type 字段（text_delta / input_json_delta）保持一致。
+/// Variant names deliberately mirror the SSE protocol type field (text_delta / input_json_delta).
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[allow(clippy::enum_variant_names)]
@@ -149,15 +149,15 @@ enum Delta {
 #[derive(Deserialize)]
 struct MessageDeltaEvent {
     delta: MessageDeltaBody,
-    /// 官方端点总是携带 usage；第三方兼容网关可能省略——缺省按 0 计，
-    /// 不让整条流（含已生成的文本）因统计字段缺失而终止。
+    /// Official endpoints always carry usage; third-party compatible gateways may omit it -
+    /// default to 0 so the whole stream (including generated text) is not aborted over a missing stat field.
     #[serde(default)]
     usage: MessageDeltaUsage,
 }
 
 #[derive(Deserialize)]
 struct MessageDeltaBody {
-    /// 中途的 message_delta 事件 stop_reason 可能为 null。
+    /// The stop_reason of an in-flight message_delta event may be null.
     #[serde(default)]
     stop_reason: Option<String>,
 }
@@ -189,12 +189,12 @@ mod tests {
     fn parses_text_delta() {
         let mut p = SseParser::new();
         let ev = p
-            .feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"你好"}}"#)
+            .feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}"#)
             .unwrap();
         assert_eq!(
             ev,
             Some(StreamEvent::TextDelta {
-                text: "你好".into()
+                text: "hello".into()
             })
         );
     }
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn unknown_nested_delta_is_ignored() {
         let mut p = SseParser::new();
-        // 未来新增的 delta 类型（如 signature_delta）不应炸流
+        // Future delta types (e.g. signature_delta) must not break the stream
         assert!(p.feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"x"}}"#).unwrap().is_none());
     }
 

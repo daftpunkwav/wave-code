@@ -1,24 +1,25 @@
-//! MCP server 原始配置（阶段 5 拆分自 lib.rs）：[mcp_servers] 段。
+//! Raw MCP server config (split from lib.rs in phase 5): the [mcp_servers] section.
 
 use super::*;
 
-/// 单个 MCP server 的原始配置（SPEC §13 `[mcp_servers.<name>]` 段字段，
-/// P9）。stdio 形态填 `command`（+ 可选 `args` / `env`），http 形态填
-/// `url`（+ 可选 `headers`）；两种形态的二选一校验不在本层（config 无
-/// workspace 内依赖，同 hooks 的原始解析纪律）。
+/// Raw config of a single MCP server (SPEC section 13 `[mcp_servers.<name>]` fields,
+/// P9). The stdio form fills `command` (plus optional `args` / `env`); the http
+/// form fills `url` (plus optional `headers`). The either-or validation of the
+/// two forms does not live in this layer (config has no in-workspace
+/// dependencies, same raw-parse discipline as hooks).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct McpServerRaw {
-    /// stdio transport 的可执行命令（stdio 形态必填）。
+    /// Executable command for the stdio transport (required in the stdio form).
     pub command: Option<String>,
-    /// 命令参数。
+    /// Command arguments.
     #[serde(default)]
     pub args: Vec<String>,
-    /// 追加注入子进程的环境变量。
+    /// Extra environment variables injected into the child process.
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// streamable-http endpoint（http 形态必填）。
+    /// streamable-http endpoint (required in the http form).
     pub url: Option<String>,
-    /// 追加的请求头。
+    /// Extra request headers.
     #[serde(default)]
     pub headers: HashMap<String, String>,
 }

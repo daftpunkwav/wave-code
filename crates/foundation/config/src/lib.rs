@@ -1,12 +1,12 @@
-//! wavecode-config — TOML 配置加载与 provider 解析。
+//! wavecode-config - TOML config loading and provider resolution.
 //!
-//! M1 阶段实现：加载用户级 `~/.wavecode/config.toml`，解析 `model` /
-//! `model_provider` / `model_providers` 配置段，并解析当前 provider 的
-//! api key（优先级：`env_key` 指向的环境变量 > 内联 `api_key`）。
+//! M1 implementation: loads the user-level `~/.wavecode/config.toml`, parses the `model` /
+//! `model_provider` / `model_providers` sections, and resolves the current provider's
+//! api key (priority: the env var pointed to by `env_key` > inline `api_key`).
 //!
-//! 规划中的分层合并（CLI 参数 > 项目级 `.wavecode/config.toml` > 用户级 >
-//! 内置默认值）与 `profiles` 等能力将在后续里程碑落地；`mcp_servers`
-//! 原始解析已于 P9 落地（SPEC §10/§13）。
+//! The planned layered merge (CLI args > project-level `.wavecode/config.toml` > user-level >
+//! built-in defaults) and capabilities like `profiles` land in later milestones; raw
+//! parsing of `mcp_servers` landed in P9 (SPEC sections 10/13).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,34 +15,34 @@ mod hooks;
 mod mcp;
 mod provider;
 
-/// 顶层配置。
+/// Top-level config.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
     pub model: String,
     pub model_provider: String,
     #[serde(default)]
     pub model_providers: HashMap<String, ProviderConfig>,
-    /// 权限模式（SPEC §12 四档字符串：default / plan / acceptEdits /
-    /// bypassPermissions）；缺省 None，由装配层回退 default。
-    /// P2 仅落地此单字段；profiles / projects 覆盖等分层合并留后续里程碑。
+    /// Permission mode (SPEC section 12, four string values: default / plan / acceptEdits /
+    /// bypassPermissions); None by default, the assembly layer falls back to default.
+    /// P2 lands only this single field; layered merges like profiles / projects overrides stay for later milestones.
     #[serde(default)]
     pub permission_mode: Option<String>,
-    /// hooks 配置（SPEC §9）：`[hooks.<EventPoint>]` 表或表数组。
-    /// config 层只做原始解析（config 无 workspace 内依赖，SPEC §3 矩阵）；
-    /// 事件点合法性校验与执行语义由 core 经 hooks crate 落地。
+    /// hooks config (SPEC section 9): a `[hooks.<EventPoint>]` table or array of tables.
+    /// The config layer only does raw parsing (config has no in-workspace dependencies, SPEC section 3 matrix);
+    /// event-point validity checks and execution semantics land in core via the hooks crate.
     #[serde(default)]
     pub hooks: HashMap<String, HookRuleSet>,
-    /// MCP server 配置（SPEC §10/§13，P9）：`[mcp_servers.<name>]` 表。
-    /// config 层只做原始解析；stdio（command）与 http（url）二选一的
-    /// 合法性校验由 core 经 mcp crate 转换时完成。
+    /// MCP server config (SPEC sections 10/13, P9): `[mcp_servers.<name>]` tables.
+    /// The config layer only does raw parsing; the either-or (stdio `command` vs http `url`)
+    /// validity check happens in core during conversion via the mcp crate.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerRaw>,
 }
 
-/// 用户主目录：`USERPROFILE`（Windows）优先，兜底 `HOME`；两者皆未
-/// 设置时返回 `None`（调用方显式降级依赖 home 的能力，不猜相对路径）。
-/// 全 workspace 单点定义——memory / core / cli 经本函数取，不再各自
-/// `var_os` 一份。
+/// User home directory: `USERPROFILE` (Windows) first, `HOME` as fallback; when neither
+/// is set, returns `None` (callers explicitly degrade home-dependent behavior instead of guessing a relative path).
+/// Single definition point for the whole workspace - memory / core / cli all go through
+/// this function instead of each reading `var_os` on their own.
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -54,12 +54,12 @@ pub use mcp::McpServerRaw;
 pub use provider::{DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, ProviderConfig, ProviderKind};
 
 impl Config {
-    /// 加载用户级 `~/.wavecode/config.toml`；不存在返回 [`ConfigError::NotFound`]。
+    /// Loads the user-level `~/.wavecode/config.toml`; returns [`ConfigError::NotFound`] when absent.
     ///
-    /// home 目录取 `USERPROFILE`（Windows），兜底 `HOME`；两者皆未设置时
-    /// 显式返回 NotFound（错误路径为相对形态 `.wavecode/config.toml`）——
-    /// 不回退相对路径查找：空 home 会让项目内 `.wavecode/config.toml`
-    /// 被静默当作用户级配置加载（来源混淆，且属静默降级）。
+    /// The home directory comes from `USERPROFILE` (Windows), falling back to `HOME`; when neither is set,
+    /// returns NotFound explicitly (with the relative-looking `.wavecode/config.toml` as the error path) -
+    /// never falls back to a relative-path lookup: an empty home would let the project-local
+    /// `.wavecode/config.toml` be silently loaded as user-level config (source confusion, and a silent downgrade).
     pub fn load() -> Result<Self, ConfigError> {
         let Some(home) = home_dir() else {
             return Err(ConfigError::NotFound(
@@ -69,20 +69,20 @@ impl Config {
         Self::load_from(&Path::new(&home).join(".wavecode").join("config.toml"))
     }
 
-    /// 从指定路径加载配置。
+    /// Loads config from the given path.
     ///
-    /// 文件不存在（或不可读）→ [`ConfigError::NotFound`]；TOML 解析失败 →
-    /// [`ConfigError::Parse`]。
+    /// Missing (or unreadable) file maps to [`ConfigError::NotFound`]; TOML parse failure maps to
+    /// [`ConfigError::Parse`].
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
-        // M1 约定：读取失败（含权限问题）与文件不存在一样按 NotFound 处理，
-        // 错误信息中带路径，足以定位问题。
+        // M1 convention: read failures (including permission issues) are treated as NotFound,
+        // just like a missing file; the path in the error is enough to locate the problem.
         let content =
             std::fs::read_to_string(path).map_err(|_| ConfigError::NotFound(path.to_path_buf()))?;
         Ok(toml::from_str(&content)?)
     }
 
-    /// 解析当前 provider；api key 优先级：`env_key` 指向的环境变量 > 内联 `api_key`
-    ///（环境变量存在但为空串时视为未设置）。
+    /// Resolves the current provider; api key priority: the env var pointed to by `env_key` > inline `api_key`
+    /// (an env var that exists but is empty counts as unset).
     pub fn resolve_provider(&self) -> Result<(&ProviderConfig, String), ConfigError> {
         let provider = self
             .model_providers
@@ -93,8 +93,8 @@ impl Config {
             .env_key
             .as_deref()
             .and_then(|name| std::env::var(name).ok())
-            // `export KEY=`（空串）不算有效 key：回落内联 api_key，
-            // 而非带空 key 发请求。
+            // `export KEY=` (empty string) is not a valid key: fall back to the inline api_key
+            // instead of sending a request with an empty key.
             // Whitespace-only values are likewise not valid keys for any API:
             // an env var containing only blanks falls back to the inline key.
             .filter(|k| !k.trim().is_empty())
@@ -134,8 +134,8 @@ env_key = "TEST_KEY"
         assert_eq!(prov.max_output_tokens(), 8192);
     }
 
-    /// permission_mode（P2）：可选字段——缺失为 None，配置了原样保留
-    ///（合法性由装配层校验并回退 default，config 层不拒绝未知字符串）。
+    /// permission_mode (P2): optional field - missing means None, a configured value is kept as-is
+    /// (validity is checked by the assembly layer with fallback to default; the config layer does not reject unknown strings).
     #[test]
     fn permission_mode_is_optional() {
         let cfg: Config = toml::from_str(TOML_OK).unwrap();
@@ -149,8 +149,8 @@ env_key = "TEST_KEY"
         assert_eq!(cfg.permission_mode, Some("plan".to_owned()));
     }
 
-    /// hooks 配置（P7，SPEC §9）：单表与表数组两种形态；缺省为空表。
-    /// 事件点合法性不在 config 层校验（无 workspace 内依赖，由 core 转换时校验）。
+    /// hooks config (P7, SPEC section 9): single-table and array-of-tables forms; empty map by default.
+    /// Event-point validity is not checked in the config layer (no in-workspace deps; core checks during conversion).
     #[test]
     fn hooks_parse_single_and_array_forms() {
         let toml = format!(
@@ -180,13 +180,13 @@ command = "cargo clippy"
         assert_eq!(post.len(), 2);
         assert_eq!(post[1].matcher.as_deref(), Some("write_file|edit_file"));
         assert_eq!(post[0].timeout_ms, None);
-        // 缺省为空表。
+        // Empty map by default.
         let cfg: Config = toml::from_str(TOML_OK).unwrap();
         assert!(cfg.hooks.is_empty());
     }
 
-    /// mcp_servers 配置（P9，SPEC §13）：stdio（command+args+env）与
-    /// http（url+headers）两种形态；缺省为空表；二选一校验不在本层。
+    /// mcp_servers config (P9, SPEC section 13): stdio (command+args+env) and
+    /// http (url+headers) forms; empty map by default; the either-or check is not in this layer.
     #[test]
     fn mcp_servers_parse_stdio_and_http_forms() {
         let toml = format!(
@@ -216,18 +216,18 @@ headers = {{ Authorization = "Bearer t" }}
         assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/sse"));
         assert_eq!(remote.headers["Authorization"], "Bearer t");
         assert!(remote.command.is_none() && remote.args.is_empty());
-        // 缺省为空表。
+        // Empty map by default.
         let cfg: Config = toml::from_str(TOML_OK).unwrap();
         assert!(cfg.mcp_servers.is_empty());
     }
 
-    // TEST_KEY 是进程级状态，依赖它的测试需互斥执行。
+    // TEST_KEY is process-level state; tests depending on it must run mutually exclusively.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn missing_api_key_is_error() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // env 未设置且无内联 api_key → MissingApiKey
+        // env unset and no inline api_key -> MissingApiKey
         unsafe { std::env::remove_var("TEST_KEY") };
         let cfg: Config = toml::from_str(TOML_OK).unwrap();
         assert!(matches!(
@@ -259,13 +259,13 @@ headers = {{ Authorization = "Bearer t" }}
     #[test]
     fn empty_env_key_falls_back_to_inline() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // export KEY=（空串）：视为未设置，回落内联 api_key
+        // export KEY= (empty string): treated as unset, falls back to the inline api_key
         unsafe { std::env::set_var("TEST_KEY", "") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
         let (_p, key) = cfg.resolve_provider().unwrap();
         assert_eq!(key, "k-inline");
-        // 空 env 且无内联 api_key → MissingApiKey
+        // Empty env plus no inline api_key -> MissingApiKey
         cfg.model_providers.get_mut("minimax").unwrap().api_key = None;
         assert!(matches!(
             cfg.resolve_provider(),
@@ -341,7 +341,7 @@ headers = {{ Authorization = "Bearer t" }}
 
     #[test]
     fn missing_required_field_is_parse_error() {
-        // 缺必填字段 model：serde 反序列化失败 → Parse
+        // Missing required field model: serde deserialization fails -> Parse
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomodel.toml");
         std::fs::write(&path, r#"model_provider = "minimax""#).unwrap();
@@ -371,8 +371,8 @@ headers = {{ Authorization = "Bearer t" }}
         ));
     }
 
-    /// home 环境变量（USERPROFILE / HOME）皆未设置：显式 NotFound，不回退
-    /// 相对路径查找（防止项目内 `.wavecode/config.toml` 被误当用户级配置）。
+    /// Both home env vars (USERPROFILE / HOME) unset: explicit NotFound, no fallback to
+    /// relative-path lookup (so a project-local `.wavecode/config.toml` is never mistaken for user config).
     #[test]
     fn load_without_home_is_not_found_not_relative_lookup() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -383,7 +383,7 @@ headers = {{ Authorization = "Bearer t" }}
             std::env::remove_var("HOME");
         }
         let result = Config::load();
-        // 无论断言成败都先恢复进程级环境（与 ENV_LOCK 纪律一致）。
+        // Restore the process-level env before asserting either way (same ENV_LOCK discipline).
         unsafe {
             if let Some(v) = saved_user {
                 std::env::set_var("USERPROFILE", v);
@@ -401,17 +401,17 @@ headers = {{ Authorization = "Bearer t" }}
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some(REAL_KEY.into());
 
-        // ProviderConfig 自身与包含它的 Config，Debug 都不得泄露 key 原文。
+        // Neither ProviderConfig itself nor the Config containing it may leak the raw key via Debug.
         let dbg_provider = format!("{:?}", cfg.model_providers["minimax"]);
         let dbg_config = format!("{cfg:?}");
         for output in [&dbg_provider, &dbg_config] {
-            assert!(!output.contains(REAL_KEY), "Debug 泄露 api key: {output}");
-            assert!(output.contains("***"), "Debug 应含脱敏标记: {output}");
+            assert!(!output.contains(REAL_KEY), "Debug leaked the api key: {output}");
+            assert!(output.contains("***"), "Debug should carry the redaction marker: {output}");
         }
-        // 其余字段正常显示。
+        // All other fields render normally.
         assert!(dbg_provider.contains("https://api.minimaxi.com/anthropic"));
 
-        // api_key 为 None 时显示 None，同样无泄露。
+        // A None api_key renders as None, likewise with no leak.
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = None;
         let dbg_none = format!("{:?}", cfg.model_providers["minimax"]);

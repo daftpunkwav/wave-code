@@ -13,5 +13,5 @@ async-trait.workspace = true
 reqwest.workspace = true
 async-stream.workspace = true
 bytes.workspace = true
-# tokio::time 为流读停滞检测（stall_guard）的生产依赖，非仅测试所需。
+# tokio::time is a production dependency for stream stall detection (stall_guard), not test-only.
 tokio.workspace = true

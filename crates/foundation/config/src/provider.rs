@@ -1,6 +1,6 @@
-//! provider 配置（阶段 5 拆分自 lib.rs）：ProviderKind / ProviderConfig。
+//! provider config (split from lib.rs in phase 5): ProviderKind / ProviderConfig.
 
-/// Provider 类型（配置中的 `type` 字段，kebab-case 形式）。
+/// Provider type (the `type` field in config, kebab-case form).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
@@ -8,18 +8,19 @@ pub enum ProviderKind {
     OpenAiCompatible,
 }
 
-/// 单个 model provider 的配置。
+/// Config of a single model provider.
 ///
-/// `Debug` 手写脱敏：`api_key` 永不显示真实值（Some 显示 `***`，None 显示
-/// `None`），防日志 / 错误输出泄露密钥；其余字段正常显示。
+/// Hand-written redacted `Debug`: `api_key` never shows the real value (Some
+/// renders as `***`, None as `None`) so secrets cannot leak via log / error
+/// output; all other fields render normally.
 #[derive(Clone, serde::Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "type")]
     pub kind: ProviderKind,
     pub base_url: String,
-    /// 指向环境变量名，运行时从该环境变量读取 api key。
+    /// Name of the env var the api key is read from at runtime.
     pub env_key: Option<String>,
-    /// 内联 api key（M1 便利项，优先级低于 env_key）。
+    /// Inline api key (M1 convenience, lower priority than env_key).
     pub api_key: Option<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u32>,
@@ -31,7 +32,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("kind", &self.kind)
             .field("base_url", &self.base_url)
             .field("env_key", &self.env_key)
-            // 脱敏：只保留 Some/None 形态，真实 key 永不进入 Debug 输出。
+            // Redacted: keep only the Some/None shape, the real key never enters Debug output.
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .field("context_window", &self.context_window)
             .field("max_output_tokens", &self.max_output_tokens)
@@ -49,7 +50,7 @@ pub const DEFAULT_CONTEXT_WINDOW: u64 = 200_000;
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 
 impl ProviderConfig {
-    /// 上下文窗口大小，默认 200_000。
+    /// Context window size, default 200_000.
     /// Explicit zero is treated as unset: a zero-token window can never
     /// satisfy a request, so it is always a misconfiguration, not intent.
     pub fn context_window(&self) -> u64 {
@@ -58,7 +59,7 @@ impl ProviderConfig {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW)
     }
 
-    /// 最大输出 token 数，默认 8192。
+    /// Max output tokens, default 8192.
     /// Explicit zero is treated as unset (see [`Self::context_window`]).
     pub fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens

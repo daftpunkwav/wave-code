@@ -1,33 +1,33 @@
-//! hooks 配置（阶段 5 拆分自 lib.rs）：HookRule / HookRuleSet 与 ConfigError。
+//! hooks config (split from lib.rs in phase 5): HookRule / HookRuleSet and ConfigError.
 
 use super::*;
 
-/// 单条 hook 规则（`[hooks.<EventPoint>]` 表的字段，SPEC §9 配置示例）。
+/// A single hook rule (fields of the `[hooks.<EventPoint>]` table, SPEC section 9 config example).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct HookRule {
-    /// 工具名匹配器（可选；语义由 hooks crate 定义）。
+    /// Tool name matcher (optional; semantics defined by the hooks crate).
     pub matcher: Option<String>,
-    /// shell 命令串（必填）。
+    /// Shell command string (required).
     pub command: String,
-    /// 超时毫秒（缺省由 hooks crate 补默认值）。
+    /// Timeout in milliseconds (defaults filled in by the hooks crate when absent).
     pub timeout_ms: Option<u64>,
-    /// 每会话只触发一次（缺省 false）。
+    /// Trigger at most once per session (defaults to false).
     pub once: Option<bool>,
 }
 
-/// 事件点下的 hook 条目：单表 `[hooks.PreToolUse]` 或表数组
-/// `[[hooks.PreToolUse]]` 两种形态都接受（untagged）。
+/// Hook entries under one event point: either a single table `[hooks.PreToolUse]`
+/// or an array of tables `[[hooks.PreToolUse]]` (untagged).
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(untagged)]
 pub enum HookRuleSet {
-    /// 单表形态。
+    /// Single-table form.
     One(HookRule),
-    /// 表数组形态（多条 hook 按配置序执行）。
+    /// Array-of-tables form (multiple hooks run in config order).
     Many(Vec<HookRule>),
 }
 
 impl HookRuleSet {
-    /// 统一为切片视图（两种形态无差别遍历）。
+    /// Unified slice view (iterate both forms the same way).
     pub fn rules(&self) -> &[HookRule] {
         match self {
             Self::One(rule) => std::slice::from_ref(rule),
@@ -36,19 +36,19 @@ impl HookRuleSet {
     }
 }
 
-/// 配置加载 / 解析错误。
+/// Config load / parse errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// 配置文件不存在（或不可读）。
-    #[error("配置文件不存在: {}", .0.display())]
+    /// Config file missing (or unreadable).
+    #[error("config file not found: {}", .0.display())]
     NotFound(PathBuf),
-    /// TOML 解析失败。
-    #[error("配置解析失败: {0}")]
+    /// TOML parse failure.
+    #[error("failed to parse config: {0}")]
     Parse(#[from] toml::de::Error),
-    /// `model_provider` 未在 `model_providers` 中定义。
-    #[error("未定义的 provider: {0}")]
+    /// `model_provider` is not defined in `model_providers`.
+    #[error("undefined provider: {0}")]
     MissingProvider(String),
-    /// provider 缺少可用的 api key。
-    #[error("provider {0} 缺少 api key（env_key 环境变量未设置且无内联 api_key）")]
+    /// Provider has no usable api key.
+    #[error("provider {0} is missing an api key (env_key env var unset and no inline api_key)")]
     MissingApiKey(String),
 }

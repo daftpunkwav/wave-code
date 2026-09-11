@@ -1,13 +1,13 @@
-//! wavecode-llm — 多 provider 抽象层。
+//! wavecode-llm - multi-provider abstraction layer.
 //!
-//! 定义统一的 Messages 请求 / 流式事件接口（SSE），M1 阶段包含：
-//! - 公共类型（[`Message`] / [`ContentBlock`] / [`ToolSpec`] / [`StreamEvent`] 等）
-//!   与 [`ChatModel`] trait；
-//! - Anthropic Messages streaming SSE 解析器（[`SseParser`]）；
-//! - 内置实现：Anthropic Messages API 流式客户端（[`AnthropicClient`]）。
+//! Defines the unified Messages request / streaming event interface (SSE). M1 covers:
+//! - Shared types ([`Message`] / [`ContentBlock`] / [`ToolSpec`] / [`StreamEvent`], etc.)
+//!   and the [`ChatModel`] trait;
+//! - The Anthropic Messages streaming SSE parser ([`SseParser`]);
+//! - Built-in implementation: the Anthropic Messages API streaming client ([`AnthropicClient`]).
 //!
-//! OpenAI 兼容 provider 的 HTTP 客户端实现，以及 token 计数与
-//! 模型能力表（上下文窗口、最大输出等）将在后续里程碑落地。
+//! The HTTP client implementation for OpenAI-compatible providers, plus token
+//! counting and the model capability table (context window, max output, etc.), land in later milestones.
 
 use std::sync::Arc;
 
@@ -19,7 +19,7 @@ mod sse;
 pub use anthropic::AnthropicClient;
 pub use sse::SseParser;
 
-/// 对话角色。
+/// Conversation role.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -27,19 +27,19 @@ pub enum Role {
     Assistant,
 }
 
-/// 消息内容块。
+/// A message content block.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    /// 纯文本块。
+    /// Plain-text block.
     Text { text: String },
-    /// 模型发起的工具调用。
+    /// A tool call initiated by the model.
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
     },
-    /// 工具执行结果，回填给模型。
+    /// A tool execution result, fed back to the model.
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -48,14 +48,14 @@ pub enum ContentBlock {
     },
 }
 
-/// 一条对话消息。
+/// One conversation message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
 }
 
-/// 工具定义（随请求发给模型）。
+/// A tool definition (sent to the model with the request).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolSpec {
     pub name: String,
@@ -63,85 +63,87 @@ pub struct ToolSpec {
     pub input_schema: serde_json::Value,
 }
 
-/// token 用量统计。
+/// Token usage statistics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
 
-/// 流式响应事件。
+/// A streaming response event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
-    /// 文本增量。
+    /// Text delta.
     TextDelta { text: String },
-    /// 工具调用块开始。
+    /// Start of a tool-call block.
     ToolUseBegin { id: String, name: String },
-    /// 工具调用 input JSON 增量。
+    /// Incremental input JSON of a tool call.
     ToolUseInputDelta { partial_json: String },
-    /// 当前内容块结束。
+    /// End of the current content block.
     BlockEnd,
-    /// 整条消息完成。
+    /// The whole message is complete.
     MessageComplete { stop_reason: String, usage: Usage },
 }
 
-/// 一次流式对话请求。
+/// One streaming chat request.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub model: String,
     pub system: String,
-    /// 历史快照以 `Arc` 共享（P3，SPEC §17.5 M4）：调用方每轮以 O(1)
-    /// 指针克隆冻结当轮历史，取代逐轮深拷贝的 O(n²)；provider 实现
-    /// 在 `stream()` 内即完成序列化，不长期持有快照。
+    /// History snapshots are shared via `Arc` (P3, SPEC section 17.5 M4): callers freeze
+    /// the current round of history with an O(1) pointer clone instead of a per-round
+    /// O(n²) deep copy; provider implementations serialize inside `stream()`,
+    /// never holding the snapshot long-term.
     pub messages: Arc<Vec<Message>>,
     pub tools: Vec<ToolSpec>,
     pub max_tokens: u32,
 }
 
-/// 流式事件流的统一返回类型（`ChatModel::stream` 与各 provider 实现共用）。
+/// Unified return type for streaming event streams (shared by `ChatModel::stream` and each provider implementation).
 pub type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>;
 
-/// 统一的流式对话模型抽象。
+/// Unified streaming chat-model abstraction.
 #[async_trait::async_trait]
 pub trait ChatModel: Send + Sync {
-    /// 发起流式请求，返回事件流。
+    /// Start a streaming request and return the event stream.
     async fn stream(&self, req: ChatRequest) -> Result<EventStream>;
 }
 
-/// llm crate 统一错误类型。
+/// Unified error type for the llm crate.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    /// HTTP 传输层错误。
-    #[error("HTTP 错误: {0}")]
+    /// HTTP transport error.
+    #[error("HTTP error: {0}")]
     Http(String),
-    /// API 返回的业务错误（如 overloaded_error）。
-    #[error("API 错误 ({kind}): {message}")]
+    /// Business error returned by the API (e.g. overloaded_error).
+    #[error("API error ({kind}): {message}")]
     Api { kind: String, message: String },
-    /// 上下文超长错误（core reactive compact 的触发条件，SPEC §5.2）：
-    /// provider 明确返回 prompt / request 过大（如 Anthropic 400
-    /// "prompt is too long"、413 request_too_large）。从通用 Api 错误中
-    /// 单列变体，让上层做枚举匹配而非字符串嗅探。
-    #[error("prompt 超出上下文上限: {message}")]
+    /// Overlong-context error (the trigger for core reactive compact, SPEC section 5.2):
+    /// the provider explicitly reports an oversized prompt / request (e.g. Anthropic 400
+    /// "prompt is too long", 413 request_too_large). Split out from the generic Api error
+    /// as its own variant so upper layers can match on the enum instead of sniffing strings.
+    #[error("prompt exceeds context limit: {message}")]
     PromptTooLong { message: String },
-    /// SSE 帧解析错误。
-    #[error("SSE 解析错误: {0}")]
+    /// SSE frame parse error.
+    #[error("SSE parse error: {0}")]
     Sse(String),
-    /// 流式读停滞超时（stall 看门狗主动判定，非传输层报错）：相邻字节块
-    /// 间隔超过空闲阈值，上游连接可能已停滞。与 [`LlmError::Http`] 分列，
-    /// 供上层区分"连接错误"与"上游停滞"（如未来重试策略的依据）。
-    #[error("流读停滞超时: {0}")]
+    /// Streaming-read stall timeout (decided by the stall watchdog, not a transport error):
+    /// the gap between adjacent byte chunks exceeded the idle threshold, so the upstream
+    /// connection may have stalled. Kept separate from [`LlmError::Http`] so upper layers
+    /// can tell "connection error" apart from "upstream stall" (e.g. for future retry policy).
+    #[error("stream stall timeout: {0}")]
     Timeout(String),
-    /// JSON 序列化 / 反序列化错误。
-    #[error("JSON 错误: {0}")]
+    /// JSON serialization / deserialization error.
+    #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 }
 
-/// API 错误的统一构造点（anthropic 非 2xx 响应与 SSE error 事件共用）：
-/// 识别 prompt_too_long 已知形态——kind 或 message 含
-/// `prompt_too_long` / `request_too_large` 标记，或 message 含
-/// "prompt is too long"（Anthropic 400 文案）——归入
-/// [`LlmError::PromptTooLong`]；其余按通用 [`LlmError::Api`] 返回。
-/// 分类集中在此单点，新增 provider 形态只改这里。
+/// Single construction point for API errors (shared by anthropic non-2xx responses and SSE error events):
+/// Recognizes the known prompt_too_long shapes - when kind or message contains
+/// the `prompt_too_long` / `request_too_large` markers, or message contains
+/// "prompt is too long" (the Anthropic 400 wording) - it becomes
+/// [`LlmError::PromptTooLong`]; everything else is returned as generic [`LlmError::Api`].
+/// Classification is centralized at this single point; new provider shapes only change this spot.
 pub(crate) fn classify_api_error(kind: String, message: String) -> LlmError {
     let too_long = kind.contains("prompt_too_long")
         || kind.contains("request_too_large")
@@ -155,7 +157,7 @@ pub(crate) fn classify_api_error(kind: String, message: String) -> LlmError {
     }
 }
 
-/// crate 内统一 Result 别名。
+/// Crate-wide unified Result alias.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
 #[cfg(test)]
@@ -164,7 +166,7 @@ mod tests {
 
     #[test]
     fn classify_maps_known_too_long_shapes() {
-        // Anthropic 400 文案形态
+        // Anthropic 400 wording shape
         assert!(matches!(
             classify_api_error(
                 "http_400".into(),
@@ -172,7 +174,7 @@ mod tests {
             ),
             LlmError::PromptTooLong { .. }
         ));
-        // 413 request_too_large（kind 与 message 两种携带位置）
+        // 413 request_too_large (carried in either kind or message)
         assert!(matches!(
             classify_api_error("request_too_large".into(), "request too large".into()),
             LlmError::PromptTooLong { .. }
@@ -184,7 +186,7 @@ mod tests {
             ),
             LlmError::PromptTooLong { .. }
         ));
-        // SSE error 事件的 kind 形态
+        // SSE error event kind shape
         assert!(matches!(
             classify_api_error("prompt_too_long".into(), "too long".into()),
             LlmError::PromptTooLong { .. }
@@ -196,9 +198,9 @@ mod tests {
         let err = classify_api_error("overloaded_error".into(), "overloaded".into());
         assert!(
             matches!(&err, LlmError::Api { kind, message } if kind == "overloaded_error" && message == "overloaded"),
-            "非超长形态应保持 Api 变体: {err:?}"
+            "non-too-long shapes should stay the Api variant: {err:?}"
         );
-        // 401 等鉴权错误不误判
+        // 401-style auth errors must not be misclassified
         assert!(matches!(
             classify_api_error("http_401".into(), "invalid api key".into()),
             LlmError::Api { .. }

@@ -1,7 +1,7 @@
-//! Anthropic Messages API 流式 HTTP 客户端。
+//! Anthropic Messages API streaming HTTP client.
 //!
-//! `POST {base_url}/v1/messages` 发起 SSE 流式请求，字节块流经缓冲切帧后
-//! 交给 [`crate::SseParser`] 逐条解析为 [`crate::StreamEvent`]。
+//! `POST {base_url}/v1/messages` starts an SSE streaming request; byte chunks flow through
+//! buffering and framing, then [`crate::SseParser`] parses each frame into [`crate::StreamEvent`].
 
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use crate::{
     StreamEvent,
 };
 
-/// Anthropic Messages API 流式客户端。
+/// Anthropic Messages API streaming client.
 pub struct AnthropicClient {
     base_url: String,
     api_key: String,
@@ -20,7 +20,7 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    /// 新建客户端。
+    /// Creates a new client.
     pub fn new(base_url: String, api_key: String) -> Self {
         Self {
             base_url,
@@ -30,20 +30,21 @@ impl AnthropicClient {
     }
 }
 
-/// 构造 HTTP 客户端。
+/// Builds the HTTP client.
 ///
-/// - 只设 `connect_timeout`（10s）：防 connect 阶段停滞挂死；**不能**设
-///   `Client::timeout`——那会掐断正常的长 SSE 流。流读停滞由 [`stall_guard`]
-///   在流层检测（[`STREAM_IDLE_TIMEOUT`] 内无任何字节即 Err 终止流）。
-/// - 禁用重定向：Messages API 端点无合法重定向语义，重定向即报错；reqwest
-///   默认跟随重定向会把 `x-api-key` 带到跨源目标（PoC 实测），必须杜绝。
+/// - Only `connect_timeout` is set (10s): it guards against hangs in the connect phase; never set
+///   `Client::timeout` - that would cut off healthy long-lived SSE streams. Read stalls are detected
+///   at the stream layer by [`stall_guard`] (no bytes within [`STREAM_IDLE_TIMEOUT`] ends the stream with Err).
+/// - Redirects are disabled: the Messages API endpoint has no legitimate redirect semantics,
+///   so a redirect is an error; reqwest follows redirects by default and would carry `x-api-key`
+///   to a cross-origin target (verified with a PoC), which must be ruled out.
 fn build_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        // 与 reqwest 自带 `Client::new()` 一致：仅 TLS 初始化失败才可能走到这里。
-        .expect("HTTP 客户端构造失败")
+        // Same as reqwest's own `Client::new()`: only TLS init failure can reach this path.
+        .expect("failed to build HTTP client")
 }
 
 #[async_trait::async_trait]
@@ -83,27 +84,27 @@ impl ChatModel for AnthropicClient {
     }
 }
 
-/// 拼接 Messages API URL：base_url 尾部 `/` 剔除，避免双斜杠。
+/// Builds the Messages API URL: strips trailing `/` from base_url to avoid double slashes.
 fn messages_url(base_url: &str) -> String {
     format!("{}/v1/messages", base_url.trim_end_matches('/'))
 }
 
-/// 错误响应体最大保留字符数。
+/// Max retained chars of an error response body.
 const MAX_ERROR_BODY_CHARS: usize = 2000;
 
-/// 错误响应体截断：最多保留前 [`MAX_ERROR_BODY_CHARS`] 个字符（按 char 截断，
-/// 不会切碎多字节字符）；API key 仅在请求头中，绝不写入错误信息。
+/// Truncates an error response body: keeps at most the first [`MAX_ERROR_BODY_CHARS`] chars (truncated
+/// by char, so multibyte chars are never split); the API key only travels in request headers and is never written into error text.
 fn truncate_error_body(body: &str) -> String {
     body.chars().take(MAX_ERROR_BODY_CHARS).collect()
 }
 
-/// 构造 Anthropic Messages API 请求体（stream 固定 true）。
+/// Builds the Anthropic Messages API request body (stream is always true).
 pub(crate) fn build_request_body(req: &ChatRequest) -> serde_json::Value {
     serde_json::json!({
         "model": req.model,
         "system": req.system,
-        // Arc<Vec<Message>> 快照解引用序列化（serde 的 rc feature 未开，
-        // 无须为单点序列化扩 feature）。
+        // Serialize via the Arc<Vec<Message>> snapshot deref (serde's rc feature is off,
+        // so no need to enable an extra feature for this single serialization).
         "messages": merge_adjacent_same_role(&req.messages),
         "tools": req.tools,
         "max_tokens": req.max_tokens,
@@ -111,11 +112,13 @@ pub(crate) fn build_request_body(req: &ChatRequest) -> serde_json::Value {
     })
 }
 
-/// 合并相邻同角色消息：官方端点对连续同角色自动合并，但强制角色交替的
-/// 第三方兼容网关会对"历史末条 tool_result（user）+ 追加指令（user）"
-/// 形态（压缩摘要、上下文采样等管线产物）返回 400——客户端侧合并后
-/// 兼容全部端点。合并 = content 块数组串联；相邻 Text 块之间补换行防
-/// 粘连，ToolResult 块按协议并列（多个 tool_result 同属一条 user 合法）。
+/// Merges adjacent same-role messages: the official endpoint auto-merges consecutive same-role
+/// messages, but third-party gateways that enforce role alternation reject the "trailing
+/// history tool_result (user) + appended instruction (user)" shape (a routine product of the
+/// compact/sampling pipelines) with 400 - merging client-side stays compatible with every
+/// endpoint. Merge means concatenating the content block arrays; adjacent Text blocks get a newline
+/// separator so they cannot glue together, while ToolResult blocks sit side by side per protocol (several
+/// tool_result blocks may legally belong to one user message).
 fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(messages.len());
     for msg in messages {
@@ -142,19 +145,21 @@ fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
     out
 }
 
-/// SSE 字节缓冲硬上限（8 MiB）：超出即判定服务端未按 SSE 帧边界发数据，
-/// yield Err 终止流——防恶意/异常服务端用无帧边界数据撑爆内存（OOM）。
+/// Hard cap on the SSE byte buffer (8 MiB): exceeding it means the server is not sending SSE frame
+/// boundaries, so yield Err and terminate the stream - this stops a malicious/broken server from
+/// blowing up memory with boundary-less data (OOM).
 const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
 
-/// 流读停滞超时：相邻字节块间隔超过该值即判定上游停滞（连接挂死），
-/// 以 Err 终止流。只约束"块间空闲"，不限制整流时长——长回复只要持续
-/// 产出字节（Anthropic 的 ping / delta 均算字节）就不受影响；200 级
-/// 体量下 120s 无任何字节基本只剩死连接一种解释。
+/// Read-stall timeout: when the gap between adjacent byte chunks exceeds this value, the upstream
+/// is considered stalled (wedged connection), and the stream ends with Err. Only "idle time between
+/// chunks" is constrained, never the whole-stream duration - a long reply that keeps producing
+/// bytes (Anthropic ping / delta both count) is unaffected; at this scale, 120s with zero bytes
+/// basically leaves a dead connection as the only explanation.
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// 字节流读停滞守卫：每次 `next()` 包一层空闲超时，超时以
-/// [`LlmError::Timeout`] 终止流。放在 [`decode_event_stream`] 上游而非其内部，
-/// 使帧解析逻辑保持与超时策略正交（测试可独立驱动）。
+/// Byte-stream stall guard: wraps each `next()` with an idle timeout; a timeout ends the stream with
+/// [`LlmError::Timeout`]. It sits upstream of [`decode_event_stream`] rather than inside it,
+/// keeping frame-parsing logic orthogonal to the timeout policy (tests can drive each independently).
 fn stall_guard<S>(
     byte_stream: S,
     idle_timeout: Duration,
@@ -165,12 +170,12 @@ where
     let mut byte_stream = Box::pin(byte_stream);
     async_stream::try_stream! {
         loop {
-            // 仅在被消费方 poll 时计时：消费方挂起（如等审批）不消耗预算。
+            // Only counts while the consumer polls: a suspended consumer (e.g. waiting on approval) spends no budget.
             match tokio::time::timeout(idle_timeout, byte_stream.as_mut().next()).await {
-                // 停滞：上游在超时内未产出任何字节。
+                // Stalled: the upstream produced no bytes within the timeout.
                 Err(_) => {
                     Err::<(), _>(LlmError::Timeout(format!(
-                        "stream idle timeout: no data for {idle_timeout:?}（上游连接可能已停滞）"
+                        "stream idle timeout: no data for {idle_timeout:?} (upstream connection may have stalled)"
                     )))?;
                 }
                 Ok(None) => break,
@@ -180,11 +185,11 @@ where
     }
 }
 
-/// 字节块流 → 事件流：缓冲字节、按空行切 SSE 帧、提取 data 交给 [`SseParser`]。
+/// Byte-chunk stream to event stream: buffers bytes, splits SSE frames on blank lines, and hands data to [`SseParser`].
 ///
-/// chunk 边界任意（TCP 可能把一帧拆成多个 chunk），帧切分必须在字节缓冲层做；
-/// 缓冲达到 `max_buf` 仍无帧边界即 yield Err 终止流。
-/// 本函数是 [`ChatModel::stream`] 与测试共用的核心解析路径。
+/// chunk boundaries are arbitrary (TCP may split one frame across chunks), so framing must happen at the byte-buffer layer;
+/// when the buffer reaches `max_buf` with no frame boundary, yield Err and terminate the stream.
+/// This function is the core parse path shared by [`ChatModel::stream`] and the tests.
 fn decode_event_stream<S>(
     byte_stream: S,
     max_buf: usize,
@@ -195,41 +200,41 @@ where
     let mut byte_stream = Box::pin(byte_stream);
     async_stream::try_stream! {
         let mut buf: Vec<u8> = Vec::new();
-        // buf[..scanned] 已确认不含完整帧边界，下轮从 scanned - 3 续扫即可
-        //（回退 3 字节：最长分隔符 \r\n\r\n 为 4 字节，可能跨 chunk 边界），
-        // 避免无界长帧下每个 chunk 全缓冲重扫的 O(n²)。
+        // buf[..scanned] is confirmed to hold no complete frame boundary; resuming the next scan at scanned - 3 suffices
+        // (step 3 bytes back: the longest separator \r\n\r\n is 4 bytes and may straddle a chunk boundary),
+        // avoiding an O(n²) full-buffer rescan per chunk under unbounded long frames.
         let mut scanned: usize = 0;
         let mut parser = SseParser::new();
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk?;
             buf.extend_from_slice(&chunk);
             if buf.len() > max_buf {
-                // yield Err 并终止流（与下方 feed 的 ? 行为一致）。
+                // Yield Err and terminate the stream (same as the `?` behavior on feed below).
                 Err::<(), _>(LlmError::Sse(format!(
-                    "SSE 缓冲超过 {max_buf} 字节上限（服务端未发送帧边界）"
+                    "SSE buffer exceeded the {max_buf}-byte cap (server sent no frame boundary)"
                 )))?;
             }
             let mut from = scanned.saturating_sub(3);
             while let Some((body_end, sep_len)) = find_frame_boundary(&buf[from..]) {
                 let frame: Vec<u8> = buf.drain(..from + body_end + sep_len).collect();
                 if let Some(data) = extract_data(&frame[..from + body_end])? {
-                    // feed 返回 Err：yield Err 并终止流（? 运算符行为）。
+                    // feed returned Err: yield Err and terminate the stream (`?` operator behavior).
                     if let Some(event) = parser.feed(&data)? {
                         yield event;
                     }
                 }
-                // 切走一帧后剩余字节前移，从头继续切（同一 chunk 可能含多帧）。
+                // After cutting one frame the remaining bytes shift forward; keep cutting from the head (one chunk may hold several frames).
                 from = 0;
             }
             scanned = buf.len();
         }
-        // 流末尾的不完整帧按 SSE 惯例丢弃。
+        // A trailing incomplete frame at end of stream is dropped per SSE convention.
     }
 }
 
-/// 在缓冲中查找帧边界（`\n\n` 或 `\r\n\r\n`，取先出现者）。
+/// Finds a frame boundary in the buffer (`\n\n` or `\r\n\r\n`, whichever comes first).
 ///
-/// 返回 `(帧体长度, 分隔符长度)`。
+/// Returns `(body length, separator length)`.
 fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     let lf = find_subsequence(buf, b"\n\n").map(|i| (i, 2));
     let crlf = find_subsequence(buf, b"\r\n\r\n").map(|i| (i, 4));
@@ -239,21 +244,21 @@ fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
-/// 子串查找：返回 `needle` 在 `haystack` 中首次出现的下标。
+/// Substring search: returns the first index of `needle` in `haystack`.
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// 从单条 SSE 帧提取 `data:` 负载（多行 data 以 `\n` 拼接）。
+/// Extracts the `data:` payload from a single SSE frame (multiple data lines are joined with `\n`).
 ///
-/// 无 data 行的帧（如纯 `event:` / 注释行）返回 `Ok(None)`。
+/// A frame with no data lines (e.g. a bare `event:` / comment line) returns `Ok(None)`.
 fn extract_data(frame: &[u8]) -> Result<Option<String>> {
     let text = std::str::from_utf8(frame).map_err(|e| LlmError::Sse(e.to_string()))?;
     let mut data_lines: Vec<&str> = Vec::new();
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if let Some(payload) = line.strip_prefix("data:") {
-            // SSE 规范：冒号后可有至多一个前导空格。
+            // SSE spec: at most one leading space may follow the colon.
             data_lines.push(payload.strip_prefix(' ').unwrap_or(payload));
         }
     }
@@ -266,8 +271,8 @@ mod tests {
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
 
-    /// 流读停滞守卫：首块正常通过，其后上游挂起——空闲超时内以 Err 终止
-    /// 流，且计时真实生效（远小于超时上限返回）。
+    /// Stall guard: the first chunk passes through, then the upstream hangs - ends with Err
+    /// within the idle timeout, and the timing is real (returns far below the generous upper bound).
     #[tokio::test]
     async fn stall_guard_errors_after_idle_timeout() {
         let first = Ok(bytes::Bytes::from_static(b"event: ping\n\n"));
@@ -277,20 +282,20 @@ mod tests {
             Duration::from_millis(30),
         );
         let mut s = Box::pin(s);
-        assert!(s.next().await.is_some(), "首个字节块应正常通过");
+        assert!(s.next().await.is_some(), "the first byte chunk should pass through");
         let started = std::time::Instant::now();
         let second = s.next().await;
-        let err = second.expect("停滞应产出 Err 项而非流终止").unwrap_err();
+        let err = second.expect("a stall should yield an Err item, not end the stream").unwrap_err();
         assert!(err.to_string().contains("idle timeout"), "{err}");
         assert!(
             started.elapsed() >= Duration::from_millis(30)
                 && started.elapsed() < Duration::from_secs(5),
-            "超时应真实计时而非立即返回: {:?}",
+            "the timeout should count real time, not return immediately: {:?}",
             started.elapsed()
         );
     }
 
-    /// 上游正常结束（None）不受守卫影响：守卫透传流终止。
+    /// A clean upstream end (None) is unaffected by the guard: the guard passes stream termination through.
     #[tokio::test]
     async fn stall_guard_passes_through_clean_eof() {
         let chunks = vec![
@@ -299,12 +304,12 @@ mod tests {
         ];
         let s = stall_guard(futures::stream::iter(chunks), Duration::from_millis(30));
         let events: Vec<_> = Box::pin(s).collect().await;
-        assert_eq!(events.len(), 2, "干净 EOF 不产生停滞 Err: {events:?}");
+        assert_eq!(events.len(), 2, "a clean EOF produces no stall Err: {events:?}");
         assert!(events.iter().all(|r| r.is_ok()));
     }
 
-    /// 测试辅助：把字符串块转成字节块流，喂给实现内部的核心解析函数
-    /// （与 `stream()` 共用同一解析路径），收集全部 Ok 事件。
+    /// Test helper: turns string chunks into a byte-chunk stream, feeds the implementation-internal
+    /// core parse function (the same parse path `stream()` uses), and collects all Ok events.
     async fn collect_events_from_chunks(chunks: Vec<&'static str>) -> Vec<crate::StreamEvent> {
         let byte_stream = futures::stream::iter(
             chunks
@@ -339,14 +344,14 @@ mod tests {
     fn error_body_truncated_at_2000_chars() {
         let short = "x".repeat(100);
         assert_eq!(truncate_error_body(&short), short);
-        // 超长按 char 截断到 2000
+        // Overlong bodies truncate to 2000 by char
         let long = "y".repeat(3000);
         assert_eq!(truncate_error_body(&long).chars().count(), 2000);
-        // 多字节字符按 char 计，不会被切碎（否则 from_utf8 层面就乱码了）
-        let wide = "汉".repeat(2500);
+        // Multibyte chars count by char and are never split (splitting would garble at the from_utf8 level)
+        let wide = "é".repeat(2500);
         let truncated = truncate_error_body(&wide);
         assert_eq!(truncated.chars().count(), 2000);
-        assert!(truncated.chars().all(|c| c == '汉'));
+        assert!(truncated.chars().all(|c| c == 'é'));
     }
 
     #[test]
@@ -393,8 +398,8 @@ mod tests {
         assert_eq!(v["tools"][0]["name"], "read_file");
     }
 
-    /// 相邻同角色消息在请求体中合并(第三方强制交替端点兼容):
-    /// 历史 tool_result(user) + 追加指令(user) 是压缩/采样管线的常态产物。
+    /// Adjacent same-role messages merge in the request body (third-party alternating-role endpoint compat):
+    /// A trailing history tool_result (user) + appended instruction (user) is the routine product of compact/sampling pipelines.
     #[test]
     fn request_body_merges_adjacent_same_role_messages() {
         let req = ChatRequest {
@@ -404,19 +409,19 @@ mod tests {
                 Message {
                     role: Role::User,
                     content: vec![ContentBlock::Text {
-                        text: "第一条".into(),
+                        text: "first".into(),
                     }],
                 },
                 Message {
                     role: Role::User,
                     content: vec![ContentBlock::Text {
-                        text: "第二条".into(),
+                        text: "second".into(),
                     }],
                 },
                 Message {
                     role: Role::Assistant,
                     content: vec![ContentBlock::Text {
-                        text: "回复".into(),
+                        text: "reply".into(),
                     }],
                 },
             ]),
@@ -425,17 +430,16 @@ mod tests {
         };
         let v = build_request_body(&req);
         let messages = v["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2, "相邻 user 应合并为一条");
+        assert_eq!(messages.len(), 2, "adjacent user messages should merge into one");
         assert_eq!(messages[0]["role"], "user");
         let text = messages[0]["content"][0]["text"].as_str().unwrap();
         assert_eq!(
             text,
-            "第一条
-第二条",
-            "相邻 Text 块间补换行防粘连"
+            "first\nsecond",
+            "adjacent Text blocks get a newline separator so they cannot glue together"
         );
         assert_eq!(messages[1]["role"], "assistant");
-        // 输入不变(合并只发生在序列化侧)。
+        // The input is untouched (merging only happens on the serialization side).
         assert_eq!(req.messages.len(), 3);
     }
 
@@ -463,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_handles_split_frames() {
-        // SSE 帧被 TCP 拆成两段到达，解析不得丢事件
+        // An SSE frame split across two TCP segments must not lose events
         let full: &'static str = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"AB\"}}\n\n";
         let (a, b) = full.split_at(37);
         let events = collect_events_from_chunks(vec![a, b]).await;
@@ -476,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_handles_crlf_frames() {
-        // 纯 CRLF 帧 + LF/CRLF 混合流，事件均不得丢失
+        // Pure-CRLF frames plus mixed LF/CRLF streams must not lose events
         let sse: &'static str = concat!(
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"A\"}}\r\n\r\n",
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"B\"}}\n\n",
@@ -494,8 +498,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_joins_multi_line_data() {
-        // 一帧内多行 data: 以 \n 拼接后交给 parser；本例拼接后仍是合法 JSON
-        //（\n 落在 JSON token 之间），应正常解析出事件——锁定"拼接"行为本身。
+        // Multiple data lines in one frame join with \n before reaching the parser; the joined text here is still valid JSON
+        // (\n lands between JSON tokens), so it should parse into an event - this locks the "joining" behavior itself.
         let sse: &'static str = concat!(
             "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":\n",
             "data: {\"type\":\"text_delta\",\"text\":\"M\"}}\n\n",
@@ -510,8 +514,8 @@ mod tests {
 
     #[tokio::test]
     async fn stream_handles_crlf_separator_split_across_chunks() {
-        // 4 字节分隔符 \r\n\r\n 以 3 字节一片喂入必跨 chunk：
-        // 锁定续扫回退（scanned - 3）逻辑的正确性，事件不得丢失。
+        // Feeding the 4-byte separator \r\n\r\n in 3-byte pieces guarantees a cross-chunk split:
+        // locks the correctness of the resume-scan step-back (scanned - 3); no event may be lost.
         let frame: &'static str = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"X\"}}\r\n\r\n";
         let byte_stream = futures::stream::iter(
             frame
@@ -535,30 +539,30 @@ mod tests {
 
     #[tokio::test]
     async fn stream_errors_and_terminates_when_buffer_exceeds_cap() {
-        // 缓冲超上限：yield Err 并终止流——第三个 chunk 不再被消费，
-        // 若只报错不终止，结果里会多出后续 chunk 的错误项。
+        // Over-cap buffer: yield Err and terminate the stream - the third chunk is never consumed,
+        // if it only errored without terminating, the results would carry extra error items from later chunks.
         let chunk = || Ok::<_, LlmError>(bytes::Bytes::from_static(b"data: no-boundary-here\n"));
         let byte_stream = futures::stream::iter([chunk(), chunk(), chunk()]);
         let results: Vec<_> = decode_event_stream(byte_stream, 32).collect().await;
-        assert_eq!(results.len(), 1, "超限后流应立即终止: {results:?}");
+        assert_eq!(results.len(), 1, "the stream should terminate right after exceeding the cap: {results:?}");
         assert!(
-            matches!(&results[0], Err(LlmError::Sse(msg)) if msg.contains("上限")),
-            "应报缓冲超限错误: {:?}",
+            matches!(&results[0], Err(LlmError::Sse(msg)) if msg.contains("cap")),
+            "should report the buffer-over-cap error: {:?}",
             results[0]
         );
     }
 
-    /// 回归测试（审查批 A2）：禁重定向防 `x-api-key` 泄露到跨源目标。
+    /// Regression test (review batch A2): no redirects, so `x-api-key` cannot leak to a cross-origin target.
     ///
-    /// A 服务对 POST 返回 301 指向 B；断言客户端直接报错（http_301）而非跟随，
-    /// 且 B 永远收不到请求（reqwest 默认跟随重定向会携带 `x-api-key`，PoC 实测）。
+    /// Service A answers POST with a 301 to B; assert the client errors directly (http_301) instead of following,
+    /// and B never receives a request (reqwest follows redirects by default and would carry `x-api-key`, verified with a PoC).
     #[tokio::test]
     async fn redirect_is_not_followed_and_api_key_not_leaked() {
         use std::io::Write;
         use std::net::TcpListener;
         use std::sync::mpsc;
 
-        // B：重定向目标服务，收到请求即把请求头全文送回主线程。
+        // B: the redirect target; on receiving a request it sends the full request head back to the main thread.
         let (b_tx, b_rx) = mpsc::channel::<String>();
         let listener_b = TcpListener::bind("127.0.0.1:0").unwrap();
         let port_b = listener_b.local_addr().unwrap().port();
@@ -569,7 +573,7 @@ mod tests {
             }
         });
 
-        // A：入口服务，记录请求头（证明 key 确实发给了 A）后回 301 指向 B。
+        // A: the entry service; records the request head (proving the key did reach A) then replies 301 to B.
         let (a_tx, a_rx) = mpsc::channel::<String>();
         let listener_a = TcpListener::bind("127.0.0.1:0").unwrap();
         let port_a = listener_a.local_addr().unwrap().port();
@@ -593,32 +597,32 @@ mod tests {
             max_tokens: 1,
         };
         let err = match client.stream(req).await {
-            Ok(_) => panic!("301 应直接报错而非跟随重定向"),
+            Ok(_) => panic!("a 301 should error directly instead of being followed"),
             Err(e) => e,
         };
-        // 禁重定向后 301 作为普通响应返回，stream() 按非 2xx 报错。
+        // With redirects disabled, the 301 comes back as a plain response and stream() reports it as non-2xx.
         assert!(
             matches!(&err, LlmError::Api { kind, .. } if kind.as_str() == "http_301"),
-            "301 应报 http_301 而非跟随: {err:?}"
+            "a 301 should report http_301, not be followed: {err:?}"
         );
-        // 前置条件：A 确实收到了带 key 的请求（否则本测试无意义）。
+        // Precondition: A did receive the request carrying the key (otherwise this test is meaningless).
         let head_a = a_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert!(
             head_a.contains("x-api-key: sk-secret-key"),
-            "A 应收到带 key 的请求头: {head_a}"
+            "A should have received the request head carrying the key: {head_a}"
         );
-        // B 永远收不到请求：本地回环 500ms 无连接即视为未跟随。
+        // B never receives a request: no connection on loopback within 500ms counts as not followed.
         assert!(
             b_rx.recv_timeout(std::time::Duration::from_millis(500))
                 .is_err(),
-            "重定向被跟随，api key 泄露到了 B"
+            "the redirect was followed; the api key leaked to B"
         );
     }
 
-    /// 测试辅助：读取 HTTP 请求头（至 `\r\n\r\n`），并按 Content-Length 读完
-    /// body——不回读 body 就提前响应/关连接，客户端写 body 时可能撞 RST。
+    /// Test helper: reads the HTTP request head (up to `\r\n\r\n`) and then reads the full
+    /// body per Content-Length - responding/closing before reading the body risks an RST while the client writes its body.
     fn read_http_request_head(s: &mut std::net::TcpStream) -> String {
         use std::io::Read;
         let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));

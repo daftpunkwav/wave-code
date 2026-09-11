@@ -181,8 +181,12 @@ impl Skill {
     }
 }
 
-/// 拆分 frontmatter 与正文：文件以 `---` 行起首、下一个 `---` 行收尾之间
-/// 为 YAML frontmatter，其余为正文。返回 None = 无 frontmatter。
+/// 拆分 frontmatter 与正文：文件以 `---` 行起首、下一个独占一行的 `---`
+/// 收尾，之间为 YAML frontmatter，其余为正文。返回 None = 无合法 frontmatter。
+///
+/// 收尾行只允许 `---` + 行尾空白；`---` 后跟同行内容（如 `--- junk`）不是
+/// 合法收尾（继续向后找下一个候选，找不到则 None）——否则畸形收尾会无声地
+/// 污染正文（同行残留混入 body）。
 fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let mut lines = raw.splitn(2, '\n');
@@ -190,15 +194,26 @@ fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
         return None;
     }
     let rest = lines.next()?;
-    let end = rest.find("\n---")?;
-    let frontmatter = &rest[..end];
-    let body = rest[end + 4..]
-        .strip_prefix('\n')
-        .or_else(|| rest[end + 4..].strip_prefix("\r\n"))
-        .unwrap_or(&rest[end + 4..]);
-    // `---` 收尾行后若还有同行内容（如 `--- x`）不属于合法 frontmatter；
-    // 宽松处理：以行为单位，收尾行只取到行尾前的部分不影响 body。
-    Some((frontmatter, body))
+    let mut base = 0;
+    let mut search = rest;
+    loop {
+        let idx = search.find("\n---")?;
+        let end = base + idx;
+        let after = &rest[end + 4..];
+        let fence_rest = after.split('\n').next().unwrap_or("");
+        if fence_rest.trim().is_empty() {
+            let frontmatter = &rest[..end];
+            let tail = &after[fence_rest.len()..];
+            let body = tail
+                .strip_prefix('\n')
+                .or_else(|| tail.strip_prefix("\r\n"))
+                .unwrap_or(tail);
+            return Some((frontmatter, body));
+        }
+        // 非独占行：不是合法收尾，从该换行之后继续找下一个候选。
+        base = end + 1;
+        search = &rest[base..];
+    }
 }
 
 /// skill 解析 / 读取错误（发现阶段转为警告）。
@@ -355,11 +370,16 @@ impl SkillSet {
         if truncated.chars().count() <= max_chars {
             return truncated;
         }
-        let mut cut = max_chars.saturating_sub(40);
-        while !truncated.is_char_boundary(cut) {
-            cut -= 1;
+        // 终兜底硬截断：按字符口径裁剪并保证结果不超 `max_chars`
+        // （字节下标会把 CJK 文本砍短数倍；固定后缀本身约 28 字符，
+        // 极小额度下直接无后缀截断，否则后缀自己就会超预算）。
+        const TRUNC_SUFFIX: &str = "\n…(skills catalog truncated)";
+        let suffix_len = TRUNC_SUFFIX.chars().count();
+        if max_chars <= suffix_len {
+            return truncated.chars().take(max_chars).collect();
         }
-        format!("{}\n…(skills catalog truncated)", &truncated[..cut])
+        let kept: String = truncated.chars().take(max_chars - suffix_len).collect();
+        format!("{kept}{TRUNC_SUFFIX}")
     }
 
     /// 清单渲染：`include_when` 控制 when_to_use 后缀；`desc_limit` 为单条
@@ -697,5 +717,80 @@ paths:
         let catalog = set.catalog(no_when_budget);
         assert!(!catalog.contains("(when:"));
         assert!(catalog.contains(long_desc));
+    }
+
+    #[test]
+    fn malformed_closing_fence_is_warning_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        // 收尾行带同行内容：非法 frontmatter，警告跳过而非污染正文。
+        write_skill(
+            dir.path(),
+            "badfence",
+            "---\ndescription: 好技能\n--- junk",
+            "正文",
+        );
+        let root = SkillRoot {
+            source: SkillSource::User,
+            dir: dir.path().to_path_buf(),
+        };
+        let discovery = discover(&[root]);
+        assert!(discovery.set.is_empty());
+        assert_eq!(discovery.warnings.len(), 1);
+    }
+
+    #[test]
+    fn closing_fence_allows_trailing_whitespace() {
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(
+            dir.path(),
+            "ok",
+            "---\ndescription: 好技能\n---   ",
+            "正文",
+        );
+        let root = SkillRoot {
+            source: SkillSource::User,
+            dir: dir.path().to_path_buf(),
+        };
+        let discovery = discover(&[root]);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.set.get("ok").unwrap().body, "正文");
+    }
+
+    #[test]
+    fn crlf_closing_fence_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("crlf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\r\ndescription: 好技能\r\n---\r\n正文\r\n",
+        )
+        .unwrap();
+        let root = SkillRoot {
+            source: SkillSource::User,
+            dir: dir.path().to_path_buf(),
+        };
+        let discovery = discover(&[root]);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        assert_eq!(discovery.set.get("crlf").unwrap().body, "正文");
+    }
+
+    /// 硬截断兜底在任意额度（含极小额度）下都不超预算。
+    #[test]
+    fn catalog_never_exceeds_budget_even_when_tiny() {
+        let set = catalog_set(&[(
+            "a-very-long-skill-name",
+            "很长很长的中文能力描述，用来撑满注入预算做测试",
+            Some("同样很长的触发条件说明文本"),
+        )]);
+        for budget in [1usize, 5, 10, 27, 28, 29, 40, 60] {
+            let catalog = set.catalog(budget);
+            assert!(
+                catalog.chars().count() <= budget,
+                "预算 {budget} 超支: {} > {budget}",
+                catalog.chars().count()
+            );
+            assert!(!catalog.is_empty());
+        }
     }
 }

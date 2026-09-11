@@ -74,8 +74,9 @@ impl App {
         self.follow_tail = true;
     }
 
-    /// Slash routing: builtins handled locally or by op; skill names
-    /// warn until execution lands behind a wire operation.
+    /// Slash routing: builtins handled locally or by op; known skill
+    /// names route through the model (catalog plus `skill` tool), unknown
+    /// names warn.
     fn route_slash(&mut self, rest: &str) {
         let (name, args) = match rest.split_once(char::is_whitespace) {
             Some((n, a)) => (n, a.trim()),
@@ -91,10 +92,18 @@ impl App {
             "permissions" => self.cycle_permission_mode(),
             _ => {
                 if self.ctx.skill_names.iter().any(|n| n == name) {
-                    self.push_item(Item::plain(
-                        format!("/{name} 已发现但 skill 执行尚未接入（参数：{args}）"),
-                        warn(),
-                    ));
+                    // No skill wire op exists by design: the model already
+                    // holds the catalog and the `skill` tool executes with
+                    // proper inline/fork routing, so naming the skill plus
+                    // its arguments deterministically triggers it.
+                    let request = if args.is_empty() {
+                        format!("Please use the '{name}' skill for this request.")
+                    } else {
+                        format!(
+                            "Please use the '{name}' skill for this request. Arguments: {args}"
+                        )
+                    };
+                    self.outbox.push(Op::UserInput { text: request });
                 } else {
                     self.push_item(Item::plain(
                         format!(

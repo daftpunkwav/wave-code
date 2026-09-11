@@ -396,21 +396,21 @@ mod tests {
         // Tab completes the selected item
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.input, "/commit");
-        // Input exactly matches a candidate: Enter submits (skills have no
-        // execution backend yet: warning row, no Op)
+        // Input exactly matches a candidate: Enter submits (known skills
+        // route through the model as a guided turn, no warning row).
         app.handle_key(key(KeyCode::Enter));
         let ops = app.take_ops();
         assert!(
-            ops.is_empty(),
-            "skills have no execution backend yet: {ops:?}"
+            matches!(&ops[..], [Op::UserInput { text }] if text.contains("/commit") || text.contains("'commit'")),
+            "skill slash should submit a guided turn: {ops:?}"
         );
         let has_warn = app
             .items
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("/commit"));
-        assert!(has_warn, "should note the skill state");
+            .any(|s| s.content.contains("尚未接入"));
+        assert!(!has_warn, "skill routing no longer warns");
     }
 
     /// Enter with the popup open and a prefix input completes first

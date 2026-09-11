@@ -4,6 +4,8 @@
  *
  * Responsibilities:
  * - Spawn child turns through any TurnDriver with fresh conversations.
+ * - Pass depth/parent through so the runtime enforces the depth cap.
+ * - Continue finished children with depth + 1 follow-ups and lineage.
  * - Bridge ticket stop signals into turn interrupts with a watcher.
  * - Map runtime outcomes onto the capability-neutral task vocabulary.
  *
@@ -19,8 +21,9 @@
 //! past completion. Mid-turn stops therefore land within milliseconds,
 //! while pre-start stops skip work entirely via the runtime fast path.
 
+use std::collections::HashMap;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -43,6 +46,9 @@ pub struct TurnChildService {
     runtime: Arc<ChildRuntime>,
     system: String,
     allowlist: RunAllowlist,
+    /// Spawned requests by id, so `continue_task` can rebuild the parent
+    /// profile (kind, run correlation, tool scope) for a follow-up child.
+    history: Mutex<HashMap<String, TaskRequest>>,
 }
 
 impl TurnChildService {
@@ -59,6 +65,7 @@ impl TurnChildService {
             runtime,
             system,
             allowlist,
+            history: Mutex::new(HashMap::new()),
         }
     }
 
@@ -79,14 +86,22 @@ impl TaskService for TurnChildService {
         let turn_interrupt = driver.interrupt_handle();
         let done = Arc::new(AtomicBool::new(false));
         let watcher_done = done.clone();
-        self.runtime.spawn_background(
+        // Depth/parent flow straight into the runtime spec: the runtime
+        // owns cap enforcement, refusing depth past its max with an
+        // explicit Failed outcome (no panic, visible through query), so
+        // this spawn signature stays non-breaking by design. The request
+        // is cloned (not moved) so the history map can rebuild the parent
+        // profile for `continue_task` follow-ups.
+        let allocated = self.runtime.spawn_background(
             ChildSpec {
                 kind: Self::profile(request.kind),
-                // Moved, not cloned: the factory reads both back off the
-                // ticket, so the service holds no second copy.
-                input: request.input,
-                parent_run_id: request.parent_run_id,
-                allowed_tools: request.allowed_tools,
+                // Cloned so the factory still reads everything back off
+                // the ticket while history keeps the parent profile.
+                input: request.input.clone(),
+                parent_run_id: request.parent_run_id.clone(),
+                allowed_tools: request.allowed_tools.clone(),
+                depth: request.depth,
+                parent: request.parent.clone(),
             },
             move |ticket| async move {
                 // Stop bridge: poll the ticket flag into the driver's turn
@@ -142,7 +157,12 @@ impl TaskService for TurnChildService {
                     output_tokens: conv.usage_carry().output_tokens,
                 }
             },
-        )
+        );
+        self.history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(allocated.clone(), request);
+        allocated
     }
 
     fn query(&self, id: &str) -> Option<TaskInfo> {
@@ -162,11 +182,37 @@ impl TaskService for TurnChildService {
                 runtime_child::TaskState::Finished => TaskState::Finished,
             },
             outcome,
+            lineage: view.lineage,
         })
     }
 
     fn stop(&self, id: &str) -> bool {
         self.runtime.stop(id)
+    }
+
+    /// Spawn a depth + 1 follow-up of a tracked task.
+    ///
+    /// Rebuilds the parent request (kind, run correlation, tool scope)
+    /// with the follow-up input, `depth + 1`, and `parent` set to `id`,
+    /// so the lineage chain extends by one. Unknown ids return `None`.
+    /// A follow-up past the runtime cap still returns an id, but the
+    /// runtime refuses it with an explicit Failed outcome visible in
+    /// query, matching direct over-depth spawns.
+    fn continue_task(&self, id: &str, followup_input: String) -> Option<String> {
+        let parent = self
+            .history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()?;
+        Some(self.spawn(TaskRequest {
+            kind: parent.kind,
+            input: followup_input,
+            parent_run_id: parent.parent_run_id,
+            allowed_tools: parent.allowed_tools,
+            depth: parent.depth + 1,
+            parent: Some(id.to_string()),
+        }))
     }
 }
 
@@ -229,6 +275,8 @@ mod tests {
                 input: "summarize this".to_string(),
                 parent_run_id: "run-1".to_string(),
                 allowed_tools: Vec::new(),
+                depth: 0,
+                parent: None,
             },
         );
         for _ in 0..1000 {
@@ -264,6 +312,8 @@ mod tests {
                 input: "locked down".to_string(),
                 parent_run_id: "run-1".to_string(),
                 allowed_tools: vec!["read_file".to_string()],
+                depth: 0,
+                parent: None,
             },
         );
         for _ in 0..1000 {
@@ -284,8 +334,92 @@ mod tests {
                 input: "open".to_string(),
                 parent_run_id: "run-1".to_string(),
                 allowed_tools: Vec::new(),
+                depth: 0,
+                parent: None,
             },
         );
         assert!(allowlist.is_allowed(&open, "shell"));
+    }
+
+    fn top_level(input: &str) -> TaskRequest {
+        TaskRequest {
+            kind: TaskKind::ReadOnly,
+            input: input.to_string(),
+            parent_run_id: "run-1".to_string(),
+            allowed_tools: Vec::new(),
+            depth: 0,
+            parent: None,
+        }
+    }
+
+    async fn wait_for_outcome(service: &TurnChildService, id: &str) -> TaskInfo {
+        for _ in 0..1000 {
+            if let Some(info) = service.query(id)
+                && info.outcome.is_some()
+            {
+                return info;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("task {id} produced no outcome in time");
+    }
+
+    #[tokio::test]
+    async fn continue_task_extends_the_lineage_chain() {
+        let service = TurnChildService::new(
+            Arc::new(EchoDriver),
+            Arc::new(ChildRuntime::new()),
+            "sys".to_string(),
+            RunAllowlist::default(),
+        );
+        let root = TaskService::spawn(&service, top_level("root work"));
+        wait_for_outcome(&service, &root).await;
+        // Unknown ids continue nothing.
+        assert_eq!(service.continue_task("child-999", "x".to_string()), None);
+        let middle = service
+            .continue_task(&root, "follow up".to_string())
+            .expect("known task continues");
+        assert_ne!(middle, root);
+        let middle_info = wait_for_outcome(&service, &middle).await;
+        assert!(matches!(
+            middle_info.outcome,
+            Some(TaskOutcome::Completed { .. })
+        ));
+        assert_eq!(middle_info.lineage, vec![root.clone(), middle.clone()]);
+        let leaf = service
+            .continue_task(&middle, "follow up again".to_string())
+            .expect("middle continues");
+        let leaf_info = wait_for_outcome(&service, &leaf).await;
+        assert_eq!(
+            leaf_info.lineage,
+            vec![root.clone(), middle.clone(), leaf.clone()]
+        );
+        // Root lineage stays a single-element chain.
+        assert_eq!(service.query(&root).unwrap().lineage, vec![root.clone()]);
+    }
+
+    #[tokio::test]
+    async fn over_depth_spawns_fail_open_through_the_task_seam() {
+        let service = TurnChildService::new(
+            Arc::new(EchoDriver),
+            Arc::new(ChildRuntime::new()),
+            "sys".to_string(),
+            RunAllowlist::default(),
+        );
+        // Past the runtime cap: tracked, immediately Finished, Failed
+        // naming the cap, no panic, no driver work.
+        let id = TaskService::spawn(
+            &service,
+            TaskRequest {
+                depth: runtime_child::MAX_CHILD_DEPTH + 1,
+                ..top_level("too deep")
+            },
+        );
+        let info = wait_for_outcome(&service, &id).await;
+        assert_eq!(info.state, TaskState::Finished);
+        assert!(matches!(
+            info.outcome,
+            Some(TaskOutcome::Failed { ref reason }) if reason.contains("max child depth")
+        ));
     }
 }

@@ -206,6 +206,7 @@ mod tests {
             TaskInfo {
                 state: TaskState::Running,
                 outcome: None,
+                lineage: vec!["task-1".to_string()],
             },
         );
         service.tasks.lock().unwrap().insert(
@@ -215,6 +216,7 @@ mod tests {
                 outcome: Some(TaskOutcome::Completed {
                     summary: "all done".to_string(),
                 }),
+                lineage: vec!["task-2".to_string()],
             },
         );
         service

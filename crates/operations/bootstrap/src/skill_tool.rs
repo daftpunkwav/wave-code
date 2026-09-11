@@ -115,6 +115,8 @@ impl Tool for SkillTool {
                     input: expanded,
                     parent_run_id: String::new(),
                     allowed_tools: skill.meta.allowed_tools.clone(),
+                    depth: 0,
+                    parent: None,
                 });
                 Ok(ToolOutput {
                     content: format!(

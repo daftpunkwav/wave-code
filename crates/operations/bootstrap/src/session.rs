@@ -574,6 +574,8 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
                             input: text.to_string(),
                             parent_run_id: String::new(),
                             allowed_tools: Vec::new(),
+                            depth: 0,
+                            parent: None,
                         });
                         (id, false)
                     }

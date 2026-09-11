@@ -1,9 +1,11 @@
 /*!
  * @file ChildRuntime
- * @description Tracked background child tasks with depth-1 isolation.
+ * @description Tracked background child tasks with depth accounting.
  *
  * Responsibilities:
  * - Spawn, query, and stop background child tasks.
+ * - Enforce a max child depth cap with explicit failed outcomes.
+ * - Expose lineage chains on query for continuable children.
  * - Collect completion notifications with a bounded drop-oldest queue.
  * - Guarantee by construction that children cannot spawn grandchildren.
  *
@@ -16,11 +18,16 @@
 //!
 //! Child work is built by a factory that receives a [`ChildTicket`]
 //! (identity plus a stop signal) and never a [`ChildRuntime`] reference, so
-//! grandchild spawning is unconstructable: there is simply no handle to
-//! call. Panics inside child work are caught at the task boundary and
-//! recorded as failures, so one faulty child can never take down the parent
-//! runtime. Completion reports flow through a data-only [`CompletionSink`],
-//! which carries no spawn capability by design.
+//! autonomous grandchild spawning from inside a child (e.g. a child model
+//! invoking a fork tool) is unconstructable: there is simply no handle to
+//! call. Nested depth still exists through the parent-side service layer,
+//! which spawns follow-up children with `depth + 1` and `parent` set; the
+//! runtime accounts that depth and refuses anything past [`MAX_CHILD_DEPTH`]
+//! with an explicit failed outcome instead of panicking. Panics inside child
+//! work are caught at the task boundary and recorded as failures, so one
+//! faulty child can never take down the parent runtime. Completion reports
+//! flow through a data-only [`CompletionSink`], which carries no spawn
+//! capability by design.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -40,6 +47,13 @@ use tokio::sync::Notify;
 /// authoritative terminal state lives in the task table, so dropping the
 /// oldest entry on overflow loses no result.
 pub const MAX_NOTIFICATIONS: usize = 64;
+
+/// Maximum accepted child depth.
+///
+/// Depth 0 is a top-level child spawned by the parent loop; each follow-up
+/// generation adds one. Spawns past this cap are refused with an explicit
+/// failed result (see [`ChildRuntime::spawn_background`]), never a panic.
+pub const MAX_CHILD_DEPTH: u8 = 3;
 
 /// Capability profile of one child task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +75,11 @@ pub struct ChildSpec {
     pub parent_run_id: String,
     /// Fork-scoped tool surface; empty keeps the full surface.
     pub allowed_tools: Vec<String>,
+    /// Nesting depth: 0 for top-level children, parent depth + 1 for
+    /// follow-ups. Past [`MAX_CHILD_DEPTH`] the spawn is refused.
+    pub depth: u8,
+    /// Parent task id for lineage; None for top-level children.
+    pub parent: Option<String>,
 }
 
 /// Terminal status of a finished child task.
@@ -121,13 +140,19 @@ pub struct TaskView {
     pub state: TaskState,
     /// Terminal result once finished.
     pub result: Option<TaskResult>,
+    /// Lineage chain from the oldest ancestor down to this task itself
+    /// (last element is always the queried id); best-effort when a parent
+    /// id is unknown or untracked.
+    pub lineage: Vec<String>,
 }
 
 /// Handle handed to child work.
 ///
 /// Deliberately minimal: identity plus a stop signal. Because child work
-/// never receives the runtime itself, depth beyond one level cannot be
-/// expressed in code.
+/// never receives the runtime itself, autonomous grandchild spawning (a
+/// child invoking a fork from inside) cannot be expressed in code; deeper
+/// generations are only created parent-side via follow-up spawns that bump
+/// `depth` and set `parent`.
 #[derive(Debug, Clone)]
 pub struct ChildTicket {
     /// Identifier of this child task (`child-N`).
@@ -142,6 +167,10 @@ pub struct ChildTicket {
     /// Fork-scoped tool surface, carried from the spawn spec so the
     /// service can restrict the run before the first tool executes.
     pub allowed_tools: Vec<String>,
+    /// Nesting depth carried from the spawn spec, for observability.
+    pub depth: u8,
+    /// Parent task id carried from the spawn spec; None at depth 0.
+    pub parent: Option<String>,
     /// Stop signal; child work polls `is_triggered` at safe points.
     pub stop: InterruptHandle,
 }
@@ -181,6 +210,10 @@ impl CompletionSink {
 /// Per-task tracking slot.
 #[derive(Debug)]
 struct TaskSlot {
+    /// Nesting depth recorded at spawn, authoritative for cap checks.
+    depth: u8,
+    /// Parent task id recorded at spawn, for lineage walks.
+    parent: Option<String>,
     /// Stop requested before the driver started or during the run.
     stop_requested: std::sync::atomic::AtomicBool,
     /// Interrupt handle observed by the running child work.
@@ -192,8 +225,10 @@ struct TaskSlot {
 }
 
 impl TaskSlot {
-    fn new() -> Self {
+    fn new(depth: u8, parent: Option<String>) -> Self {
         Self {
+            depth,
+            parent,
             stop_requested: std::sync::atomic::AtomicBool::new(false),
             stop: InterruptHandle::new(),
             state: Mutex::new(TaskState::Running),
@@ -252,16 +287,36 @@ impl ChildRuntime {
     /// Spawn a background child task and return its id immediately.
     ///
     /// The factory receives only a [`ChildTicket`]; it cannot reach this
-    /// runtime, which is what makes depth-1 structural instead of
+    /// runtime, which is what makes depth isolation structural instead of
     /// conventional. A stop requested before the driver starts is honoured
     /// without running any child work.
+    ///
+    /// Depth cap: a spec with `depth > MAX_CHILD_DEPTH` is refused without
+    /// running any child work. The returned id is still tracked and its
+    /// query view is immediately `Finished` with a `Failed` result naming
+    /// the cap, so callers observe the refusal through the normal query
+    /// path instead of a panic or an unknown id.
     pub fn spawn_background<F, MakeWork>(&self, spec: ChildSpec, make_work: MakeWork) -> String
     where
         F: Future<Output = TaskResult> + Send + 'static,
         MakeWork: FnOnce(ChildTicket) -> F + Send + 'static,
     {
         let id = self.alloc_id();
-        let slot = Arc::new(TaskSlot::new());
+        if spec.depth > MAX_CHILD_DEPTH {
+            let slot = Arc::new(TaskSlot::new(spec.depth, spec.parent));
+            slot.finish(TaskResult::failed(format!(
+                "max child depth {} exceeded",
+                MAX_CHILD_DEPTH
+            )));
+            self.lock_tasks().insert(id.clone(), slot);
+            // Keep the completion contract: a refused spawn still files a
+            // notification carrying the child id, like any terminal task.
+            self.sink.push(&id);
+            // The factory is never built, so over-depth work cannot run.
+            let _ = make_work;
+            return id;
+        }
+        let slot = Arc::new(TaskSlot::new(spec.depth, spec.parent.clone()));
         self.lock_tasks().insert(id.clone(), slot.clone());
         let ticket = ChildTicket {
             task_id: id.clone(),
@@ -269,6 +324,8 @@ impl ChildRuntime {
             input: spec.input,
             parent_run_id: spec.parent_run_id,
             allowed_tools: spec.allowed_tools,
+            depth: spec.depth,
+            parent: spec.parent,
             stop: slot.stop.clone(),
         };
         let sink = self.sink.clone();
@@ -306,12 +363,42 @@ impl ChildRuntime {
     }
 
     /// Query the current view of one task; `None` for unknown ids.
+    ///
+    /// The lineage chain runs from the oldest tracked ancestor down to the
+    /// queried task itself; a parent id that is unknown or untracked ends
+    /// the walk, so the chain is best-effort rather than exact.
     pub fn query(&self, task_id: &str) -> Option<TaskView> {
         let slot = self.lock_tasks().get(task_id).cloned()?;
         Some(TaskView {
             state: *slot.lock_state(),
             result: slot.lock_result().clone(),
+            lineage: self.lineage_of(task_id),
         })
+    }
+
+    /// Recorded nesting depth of one task; `None` for unknown ids.
+    pub fn depth_of(&self, task_id: &str) -> Option<u8> {
+        self.lock_tasks().get(task_id).map(|slot| slot.depth)
+    }
+
+    /// Walk parent links root-first, ending with the queried id itself.
+    /// Cycle-safe: a repeated id ends the walk instead of looping.
+    fn lineage_of(&self, task_id: &str) -> Vec<String> {
+        let tasks = self.lock_tasks();
+        let mut chain = vec![task_id.to_string()];
+        let mut current = task_id.to_string();
+        while let Some(slot) = tasks.get(&current) {
+            let parent = slot.parent.clone();
+            match parent {
+                Some(parent_id) if !chain.contains(&parent_id) => {
+                    chain.push(parent_id.clone());
+                    current = parent_id;
+                }
+                _ => break,
+            }
+        }
+        chain.reverse();
+        chain
     }
 
     /// Request a stop; true when a tracked task accepted the signal.
@@ -385,6 +472,19 @@ mod tests {
             input: input.to_string(),
             parent_run_id: "run-1".to_string(),
             allowed_tools: Vec::new(),
+            depth: 0,
+            parent: None,
+        }
+    }
+
+    fn child_spec(input: &str, depth: u8, parent: Option<&str>) -> ChildSpec {
+        ChildSpec {
+            kind: ChildKind::Standard,
+            input: input.to_string(),
+            parent_run_id: "run-1".to_string(),
+            allowed_tools: Vec::new(),
+            depth,
+            parent: parent.map(|id| id.to_string()),
         }
     }
 
@@ -454,6 +554,88 @@ mod tests {
         let result = rt.query(&id).unwrap().result.unwrap();
         assert_eq!(result.status, TaskStatus::Failed);
         assert_eq!(result.summary, "child task panicked");
+    }
+
+    #[test]
+    fn max_child_depth_cap_is_three() {
+        assert_eq!(MAX_CHILD_DEPTH, 3);
+    }
+
+    #[tokio::test]
+    async fn spawn_past_max_depth_refuses_with_a_failed_outcome() {
+        let rt = ChildRuntime::new();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_flag = ran.clone();
+        // Depth past the cap must not run any child work and must not
+        // panic: the refusal surfaces as an immediate Failed result.
+        let id = rt.spawn_background(
+            child_spec("too deep", MAX_CHILD_DEPTH + 1, Some("child-1")),
+            move |_ticket| {
+                ran_flag.store(true, Ordering::SeqCst);
+                async { TaskResult::completed("must never run", 0) }
+            },
+        );
+        wait_until_finished(&rt, &id).await;
+        assert!(!ran.load(Ordering::SeqCst));
+        let view = rt.query(&id).unwrap();
+        assert_eq!(view.state, TaskState::Finished);
+        let result = view.result.unwrap();
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert!(result.summary.contains("max child depth"));
+        assert!(result.summary.contains(&MAX_CHILD_DEPTH.to_string()));
+        assert_eq!(rt.depth_of(&id), Some(MAX_CHILD_DEPTH + 1));
+        // The refused spawn still files a notification with the child id.
+        let notes = wait_for_notification(&rt, &id).await;
+        assert!(notes.iter().any(|n| n.contains(&id)));
+    }
+
+    #[tokio::test]
+    async fn spawn_at_max_depth_still_runs() {
+        let rt = ChildRuntime::new();
+        let id = rt.spawn_background(child_spec("edge", MAX_CHILD_DEPTH, None), |ticket| async move {
+            assert_eq!(ticket.depth, MAX_CHILD_DEPTH);
+            TaskResult::completed("done", 0)
+        });
+        wait_until_finished(&rt, &id).await;
+        assert_eq!(
+            rt.query(&id).unwrap().result.unwrap().status,
+            TaskStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn query_exposes_lineage_from_ancestor_to_self() {
+        let rt = ChildRuntime::new();
+        let root = rt.spawn_background(spec("root"), |_ticket| async {
+            TaskResult::completed("root done", 0)
+        });
+        wait_until_finished(&rt, &root).await;
+        let root_id = root.clone();
+        let middle = rt.spawn_background(
+            child_spec("middle", 1, Some(&root)),
+            |ticket| async move {
+                assert_eq!(ticket.depth, 1);
+                assert_eq!(ticket.parent, Some(root_id.clone()));
+                TaskResult::completed("middle done", 0)
+            },
+        );
+        wait_until_finished(&rt, &middle).await;
+        let leaf = rt.spawn_background(
+            child_spec("leaf", 2, Some(&middle)),
+            |_ticket| async { TaskResult::completed("leaf done", 0) },
+        );
+        wait_until_finished(&rt, &leaf).await;
+        assert_eq!(rt.query(&root).unwrap().lineage, vec![root.clone()]);
+        assert_eq!(
+            rt.query(&middle).unwrap().lineage,
+            vec![root.clone(), middle.clone()]
+        );
+        assert_eq!(
+            rt.query(&leaf).unwrap().lineage,
+            vec![root.clone(), middle.clone(), leaf.clone()]
+        );
+        assert_eq!(rt.depth_of(&leaf), Some(2));
+        assert!(rt.depth_of("child-999").is_none());
     }
 
     #[tokio::test]

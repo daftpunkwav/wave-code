@@ -47,23 +47,38 @@ impl Tool for Grep {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
+        // Empty regex matches every line: almost always a model mistake
+        // (and would burn the match cap). Reject it like glob rejects
+        // empty patterns in `validate_pattern`.
+        if pattern.is_empty() {
+            return Ok(err_output("pattern must not be empty"));
+        }
         let regex = match regex::Regex::new(pattern) {
             Ok(r) => r,
             Err(e) => return Ok(err_output(format!("invalid regex pattern: {e}"))),
         };
-        let path = input.get("path").and_then(Value::as_str).unwrap_or(".");
+        // Optional params are strictly typed: a present-but-non-string
+        // value is a caller bug, not "use the default" (silently ignoring
+        // it would search a wider scope than the caller asked for).
+        // Explicit null keeps the default for JSON callers.
+        let path = match input.get("path") {
+            None | Some(Value::Null) => ".",
+            Some(Value::String(s)) => s.as_str(),
+            Some(_) => return Ok(err_output("invalid parameter 'path' (string required)")),
+        };
         let root = match resolve_path(ctx, path)? {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
-        let filter = match input.get("glob").and_then(Value::as_str) {
-            None => None,
-            Some(f) => {
+        let filter = match input.get("glob") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(f)) => {
                 if let Err(out) = validate_pattern(f) {
                     return Ok(out);
                 }
                 Some(f.to_owned())
             }
+            Some(_) => return Ok(err_output("invalid parameter 'glob' (string required)")),
         };
         let cwd = ctx.cwd.clone();
         // 遍历 + 读文件 + 正则扫描为阻塞 IO，整体移出 executor 线程；

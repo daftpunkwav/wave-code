@@ -196,6 +196,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grep_rejects_empty_pattern() {
+        // Empty regex matches every line: reject it instead of burning
+        // the match cap on a full-tree dump.
+        let (_d, c) = ctx();
+        std::fs::write(c.cwd.join("a.txt"), "hello\n").unwrap();
+        let out = Grep
+            .execute(serde_json::json!({"pattern":""}), &c)
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_non_string_optional_params() {
+        // Present-but-wrong-typed optionals must fail loudly: silently
+        // defaulting would search a wider scope than the caller asked for.
+        let (_d, c) = ctx();
+        std::fs::write(c.cwd.join("a.txt"), "hit\n").unwrap();
+        for bad in [
+            serde_json::json!({"pattern":"hit","path":42}),
+            serde_json::json!({"pattern":"hit","path":true}),
+            serde_json::json!({"pattern":"hit","glob":42}),
+            serde_json::json!({"pattern":"hit","glob":true}),
+            serde_json::json!({"pattern":"hit","glob":["*.rs"]}),
+        ] {
+            let out = Grep.execute(bad.clone(), &c).await.unwrap();
+            assert!(out.is_error, "input {bad} should be rejected");
+        }
+        // Explicit null keeps the defaults (JSON callers).
+        let out = Grep
+            .execute(
+                serde_json::json!({"pattern":"hit","path":null,"glob":null}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("a.txt:1:hit"));
+    }
+
+    #[tokio::test]
     async fn grep_no_matches() {
         let (_d, c) = ctx();
         std::fs::write(c.cwd.join("a.txt"), "hello\n").unwrap();

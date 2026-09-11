@@ -39,6 +39,11 @@ struct Args {
     #[arg(long, global = true)]
     model: Option<String>,
 
+    /// Permission mode override winning over the configured mode
+    /// (`default`, `plan`, `acceptEdits`, `bypassPermissions`).
+    #[arg(long, global = true)]
+    permission_mode: Option<String>,
+
     /// Subcommand selecting the frontend surface; empty runs the TUI on a
     /// TTY and the REPL otherwise.
     #[command(subcommand)]
@@ -181,12 +186,13 @@ async fn main() -> anyhow::Result<()> {
     // Bare invocation: fullscreen TUI on a TTY, line REPL otherwise.
     if args.command.is_none() {
         if std::io::stdout().is_terminal() {
-            run_tui_new(args.config, args.model, cwd, home).await?;
+            run_tui_new(args.config, args.model, args.permission_mode, cwd, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
         let mut handle = assemble_session(AssembleOptions {
             config_path: args.config,
             model_override: args.model,
+            permission_override: args.permission_mode.clone(),
             cwd,
             home: home.clone(),
             identity: DEFAULT_IDENTITY.to_string(),
@@ -212,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
     let mut handle = assemble_session(AssembleOptions {
         config_path: args.config,
         model_override: args.model,
+        permission_override: args.permission_mode.clone(),
         cwd,
         home: home.clone(),
         identity: DEFAULT_IDENTITY.to_string(),
@@ -239,7 +246,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(Outcome::Completed.exit_code())
         }
         Some(Command::Resume { thread_id }) => {
-            run_resume(thread_id, home).await?;
+            run_resume(thread_id, args.permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
         None => unreachable!("bare invocation returns above"),
@@ -253,12 +260,14 @@ async fn main() -> anyhow::Result<()> {
 async fn run_tui_new(
     config: Option<PathBuf>,
     model: Option<String>,
+    permission_mode: Option<String>,
     cwd: PathBuf,
     home: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let handle = match assemble_session(AssembleOptions {
         config_path: config,
         model_override: model,
+        permission_override: permission_mode,
         cwd: cwd.clone(),
         home,
         identity: DEFAULT_IDENTITY.to_string(),
@@ -328,7 +337,11 @@ env_key = "ANTHROPIC_API_KEY"
 /// Without an id, lists recent threads newest-first. With an id, imports
 /// its history into a fresh assembly and continues in the REPL. History
 /// import is plain text: tool payloads collapse to bracketed lines.
-async fn run_resume(thread_id: Option<String>, home: Option<PathBuf>) -> anyhow::Result<()> {
+async fn run_resume(
+    thread_id: Option<String>,
+    permission_mode: Option<String>,
+    home: Option<PathBuf>,
+) -> anyhow::Result<()> {
     use state_persistence::legacy::{default_root, list_threads, load_history};
 
     let Some(home) = home else {
@@ -363,6 +376,7 @@ async fn run_resume(thread_id: Option<String>, home: Option<PathBuf>) -> anyhow:
     let mut handle = assemble_session(AssembleOptions {
         config_path: None,
         model_override: None,
+        permission_override: permission_mode,
         cwd,
         home: Some(home),
         identity: DEFAULT_IDENTITY.to_string(),
@@ -777,6 +791,15 @@ async fn drain_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_permission_mode_flag_parses() {
+        let args = Args::try_parse_from(["wavecode", "--permission-mode", "plan", "exec", "hi"])
+            .unwrap();
+        assert_eq!(args.permission_mode.as_deref(), Some("plan"));
+        let args = Args::try_parse_from(["wavecode", "repl"]).unwrap();
+        assert_eq!(args.permission_mode, None);
+    }
 
     #[test]
     fn outcomes_map_to_exit_codes() {

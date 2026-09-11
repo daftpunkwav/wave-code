@@ -92,6 +92,8 @@ pub struct AssembleOptions {
     pub config_path: Option<PathBuf>,
     /// `--model` override winning over the configured model.
     pub model_override: Option<String>,
+    /// `--permission-mode` override winning over the configured mode.
+    pub permission_override: Option<String>,
     /// Working directory for tools and relative paths.
     pub cwd: PathBuf,
     /// Home directory; `None` degrades memory without failing.
@@ -106,6 +108,35 @@ pub struct AssembleOptions {
     pub initial_history: Vec<(bool, String)>,
 }
 
+/// Resolve the effective permission mode: CLI override wins over config.
+///
+/// Unknown values warn and fall back to `Default` so a typo never locks
+/// the session into a mode the policy rejected.
+pub fn resolve_permission_mode(
+    config_value: Option<&str>,
+    cli_override: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> wavecode_protocol::PermissionMode {
+    if let Some(raw) = cli_override {
+        return wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
+            warnings.push(format!(
+                "unrecognized --permission-mode {raw:?}; falling back to default"
+            ));
+            wavecode_protocol::PermissionMode::Default
+        });
+    }
+    config_value
+        .and_then(|raw| {
+            wavecode_protocol::PermissionMode::parse(raw).or_else(|| {
+                warnings.push(format!(
+                    "unrecognized permission_mode {raw:?}; falling back to default"
+                ));
+                None
+            })
+        })
+        .unwrap_or(wavecode_protocol::PermissionMode::Default)
+}
+
 /// Assemble a live session: config to client handle.
 ///
 /// Must be called inside a tokio runtime (the actor task spawns here).
@@ -115,6 +146,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let AssembleOptions {
         config_path,
         model_override,
+        permission_override,
         cwd,
         home,
         identity,
@@ -162,18 +194,11 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         .unwrap_or_default();
 
     // 3. Policy: permission mode with explicit fallback, rules unconfigured.
-    let permission_mode = config
-        .permission_mode
-        .as_deref()
-        .map(|raw| {
-            wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
-                warnings.push(format!(
-                    "unrecognized permission_mode {raw:?}; falling back to default"
-                ));
-                wavecode_protocol::PermissionMode::Default
-            })
-        })
-        .unwrap_or(wavecode_protocol::PermissionMode::Default);
+    let permission_mode = resolve_permission_mode(
+        config.permission_mode.as_deref(),
+        permission_override.as_deref(),
+        &mut warnings,
+    );
     // Effective wire name for status displays (post-fallback, so the UI
     // never shows a mode the policy rejected).
     let permission_mode_raw = match permission_mode {
@@ -544,6 +569,7 @@ api_key = "k-inline"
         let mut handle = assemble_session(AssembleOptions {
             config_path: Some(path),
             model_override: None,
+            permission_override: None,
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
@@ -572,6 +598,37 @@ api_key = "k-inline"
             .await
             .unwrap();
         assert!(handle.client.next_event().await.is_none());
+    }
+
+    #[test]
+    fn cli_permission_override_wins_over_config() {
+        let mut warnings = Vec::new();
+        let mode = resolve_permission_mode(Some("plan"), Some("bypassPermissions"), &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::BypassPermissions);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn invalid_permission_values_warn_and_fall_back() {
+        let mut warnings = Vec::new();
+        let mode = resolve_permission_mode(Some("plan"), Some("nope"), &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Default);
+        assert!(warnings.iter().any(|w| w.contains("--permission-mode")));
+        warnings.clear();
+        let mode = resolve_permission_mode(Some("nope"), None, &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Default);
+        assert!(warnings.iter().any(|w| w.contains("permission_mode")));
+    }
+
+    #[test]
+    fn config_permission_used_without_override() {
+        let mut warnings = Vec::new();
+        let mode = resolve_permission_mode(Some("acceptEdits"), None, &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::AcceptEdits);
+        assert!(warnings.is_empty());
+        let mode = resolve_permission_mode(None, None, &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Default);
+        assert!(warnings.is_empty());
     }
 
     #[test]

@@ -43,6 +43,11 @@ use std::sync::{Arc, Mutex};
 
 use wavecode_protocol::{ApprovalKind, PermissionMode};
 
+pub mod os;
+pub use os::{ConfinementProfile, SandboxBackend, SandboxError, UnavailableBackend, detect_backend};
+#[cfg(target_os = "linux")]
+pub use os::LinuxLandlockBackend;
+
 /// Unified lock-poisoning recovery policy (single decision point for this
 /// crate): the mode lock's critical section is a single read / write, so a
 /// panic while holding the lock leaves no half-written invariant — recover the
@@ -328,6 +333,7 @@ pub struct Sandbox {
     mode: Arc<Mutex<PermissionMode>>,
     allow: Arc<Mutex<Vec<Rule>>>,
     deny: Vec<Rule>,
+    backend: Arc<dyn SandboxBackend>,
 }
 
 impl Sandbox {
@@ -345,6 +351,7 @@ impl Sandbox {
             mode: Arc::new(Mutex::new(mode)),
             allow: Arc::new(Mutex::new(parse_all(allow)?)),
             deny: parse_all(deny)?,
+            backend: detect_backend(),
         })
     }
 
@@ -362,6 +369,26 @@ impl Sandbox {
     /// on the next decide).
     pub fn mode_handle(&self) -> Arc<Mutex<PermissionMode>> {
         self.mode.clone()
+    }
+
+    /// Attach an OS confinement backend (builder; defaults to
+    /// [`detect_backend`]: Linux Landlock, an always-refusing fallback
+    /// elsewhere).
+    pub fn with_backend(mut self, backend: Arc<dyn SandboxBackend>) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// The OS confinement backend shells confine spawns through (see
+    /// [`SandboxBackend::spawn_confined`]).
+    pub fn backend(&self) -> &Arc<dyn SandboxBackend> {
+        &self.backend
+    }
+
+    /// Platform backend selection: Linux tries Landlock, every other target
+    /// gets the always-refusing fallback (see [`detect_backend`]).
+    pub fn detect_backend() -> Arc<dyn SandboxBackend> {
+        detect_backend()
     }
 
     /// "Always allow" (`ApprovalDecision::AllowAlways`): derive one

@@ -10,8 +10,13 @@ license.workspace = true
 wavecode-protocol = { path = "../../foundation/protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
 
 [dev-dependencies]
+tempfile.workspace = true
 # The tool-name classification lock test mirrors the tools builtin set
 # (capabilities production sides do not depend on each other, so tool names
 # cannot be bound at compile time — locked by a dev-dep test instead, which

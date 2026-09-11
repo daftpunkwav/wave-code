@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 state-checkpoint = { path = "../../state/checkpoint" }
+wavecode-sandbox = { path = "../sandbox" }
 wavecode-llm = { path = "../../foundation/llm" }
 serde_json.workspace = true
 async-trait.workspace = true

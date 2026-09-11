@@ -50,6 +50,17 @@ fn shell_invocation() -> (String, &'static str) {
     }
 }
 
+/// Whether OS-level confinement applies to shell spawns.
+///
+/// Default off: set `WAVECODE_SANDBOX_OS=1` (the config layer's `sandbox_os`
+/// flag maps to this variable) to require it. When enabled and the platform
+/// has no backend, the command fails closed with a business error — execution
+/// never silently downgrades to an unconfined spawn.
+fn os_sandbox_enabled() -> bool {
+    std::env::var("WAVECODE_SANDBOX_OS")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// Decode and truncate one output stream: UTF-8 boundary safe, appending `[truncated]` past the cap.
 pub(crate) fn truncate_output(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
@@ -174,6 +185,18 @@ impl Tool for Shell {
             .kill_on_drop(true);
         // Scrubbing must happen before spawn: strip deny_env entries and sensitive-suffix variables to prevent leaks.
         sanitize_env(&mut cmd, ctx);
+        // OS confinement (Linux Landlock; opt-in via WAVECODE_SANDBOX_OS):
+        // derive the shell profile (cwd writable, no network) and let the
+        // platform backend confine the child. Any failure fails closed here —
+        // the command never runs unconfined when confinement was requested.
+        // Timeout / kill / truncate / scrub behavior below is unchanged.
+        if os_sandbox_enabled() {
+            let profile = wavecode_sandbox::ConfinementProfile::for_shell(&ctx.cwd);
+            let backend = wavecode_sandbox::detect_backend();
+            if let Err(e) = backend.spawn_confined(&mut cmd, &profile) {
+                return Ok(err_output(format!("OS sandbox confinement failed: {e}")));
+            }
+        }
         // timeout wraps the whole run (spawn + output reads); wait_with_output drains both streams concurrently,
         // so a full pipe buffer cannot deadlock it.
         let run = async { cmd.spawn()?.wait_with_output().await };
@@ -392,5 +415,68 @@ mod tests {
         assert!(!out.content.contains("secret456"));
         // No over-stripping: normal variables remain visible to the child.
         assert!(out.content.contains("visible789"));
+    }
+
+    #[test]
+    fn os_sandbox_flag_defaults_off_and_parses() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+        unsafe {
+            std::env::remove_var("WAVECODE_SANDBOX_OS");
+        }
+        assert!(!os_sandbox_enabled(), "confinement defaults off");
+        for on in ["1", "true", "TRUE"] {
+            unsafe {
+                std::env::set_var("WAVECODE_SANDBOX_OS", on);
+            }
+            assert!(os_sandbox_enabled(), "{on} enables confinement");
+        }
+        for off in ["0", "false", "yes", ""] {
+            unsafe {
+                std::env::set_var("WAVECODE_SANDBOX_OS", off);
+            }
+            assert!(!os_sandbox_enabled(), "{off:?} must not enable confinement");
+        }
+        unsafe {
+            std::env::remove_var("WAVECODE_SANDBOX_OS");
+            if let Some(v) = prior {
+                std::env::set_var("WAVECODE_SANDBOX_OS", v);
+            }
+        }
+    }
+
+    #[tokio::test]
+    // Same process-global env discipline as the scrubbing test above.
+    #[allow(clippy::await_holding_lock)]
+    async fn os_sandbox_enabled_runs_confined_or_fails_closed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+        unsafe {
+            std::env::set_var("WAVECODE_SANDBOX_OS", "1");
+        }
+        let (_d, c) = ctx();
+        let out = Shell
+            .execute(serde_json::json!({"command": "echo hello"}), &c)
+            .await
+            .unwrap();
+        unsafe {
+            std::env::remove_var("WAVECODE_SANDBOX_OS");
+            if let Some(v) = prior {
+                std::env::set_var("WAVECODE_SANDBOX_OS", v);
+            }
+        }
+        if wavecode_sandbox::detect_backend().is_available() {
+            // Confinement armed and the shell still runs inside it.
+            assert!(!out.is_error, "confined echo must succeed: {}", out.content);
+            assert!(out.content.contains("hello"));
+        } else {
+            // No backend: fail closed, never silently unconfined.
+            assert!(out.is_error);
+            assert!(
+                out.content.contains("OS sandbox confinement failed"),
+                "hard error names confinement: {}",
+                out.content
+            );
+        }
     }
 }

@@ -1194,6 +1194,13 @@ pub trait TurnDriver: Send + Sync {
         false
     }
 
+    /// Session teardown hook: the actor calls this once with the final
+    /// transcript (one `role: text` line per entry) before returning from
+    /// Shutdown or client disconnect. The default is a no-op; composition
+    /// roots override it for best-effort end-of-session work (memory
+    /// extraction) that must never block exit or fail the shutdown.
+    async fn end_session(&self, _transcript: &[String]) {}
+
     /// Interrupt handle observed by driven turns, if the driver exposes
     /// one. Composition roots bridge scoped stop signals into it.
     fn interrupt_handle(&self) -> Option<InterruptHandle> {

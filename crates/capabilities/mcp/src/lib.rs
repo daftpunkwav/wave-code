@@ -33,6 +33,25 @@ pub fn tool_name(server: &str, tool: &str) -> String {
     format!("{MCP_TOOL_PREFIX}{server}{NAME_SEPARATOR}{tool}")
 }
 
+/// Check whether a server name is valid for registry names: non-empty and
+/// free of `__` (a separator inside the server segment would break the
+/// `tool_name` / `parse_tool_name` round-trip; enforced by the assembly
+/// layer, exposed here for pre-validation).
+pub fn is_valid_server_name(name: &str) -> bool {
+    !name.is_empty() && !name.contains(NAME_SEPARATOR)
+}
+
+/// Validated registry-name assembly: returns `Some(mcp__{server}__{tool})`
+/// when `server` is valid (see [`is_valid_server_name`]) and `tool` is
+/// non-empty, else `None`. Validating counterpart of [`tool_name`], which is
+/// kept as-is for compatibility and performs no checks.
+pub fn try_tool_name(server: &str, tool: &str) -> Option<String> {
+    if !is_valid_server_name(server) || tool.is_empty() {
+        return None;
+    }
+    Some(tool_name(server, tool))
+}
+
 /// 拆分注册表工具名 → `(server, tool)`；非 `mcp__` 前缀、缺分隔符或
 /// 任一段为空均返回 `None`。
 pub fn parse_tool_name(name: &str) -> Option<(&str, &str)> {
@@ -53,6 +72,14 @@ pub struct McpToolDef {
     pub description: Option<String>,
     /// 参数的 JSON Schema（`inputSchema`，注入采样请求）。
     pub input_schema: Value,
+}
+
+impl McpToolDef {
+    /// Registry-qualified name of this tool (`mcp__{server}__{name}`);
+    /// returns `None` when `server` is invalid (see [`try_tool_name`]).
+    pub fn qualified_name(&self, server: &str) -> Option<String> {
+        try_tool_name(server, &self.name)
+    }
 }
 
 /// MCP 工具调用结果（对齐协议 `tools/call` 结果）。
@@ -166,6 +193,33 @@ impl McpServerConfig {
         }
     }
 
+    /// Validate the server endpoint configuration: stdio requires a
+    /// non-empty `command`; http requires a non-empty `url` starting with
+    /// `http://` or `https://`. Returns `Err` with the reason so the
+    /// assembly layer can surface it as a configuration error.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Stdio { command, .. } => {
+                if command.trim().is_empty() {
+                    return Err("stdio MCP server command must not be empty".to_owned());
+                }
+                Ok(())
+            }
+            Self::Http { url, .. } => {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    return Err("http MCP server url must not be empty".to_owned());
+                }
+                if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+                    return Err(format!(
+                        "http MCP server url must start with http:// or https://: {trimmed}"
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// 单行摘要（`/mcp` 展示面）：stdio 为 command + args 拼接，http 为
     /// URL。env / headers 不展示（可能含敏感值）。
     pub fn summary(&self) -> String {
@@ -250,5 +304,74 @@ mod tests {
         assert_eq!(http.transport_kind(), "http");
         assert_eq!(http.summary(), "http: https://mcp.example.com/sse");
         assert!(!http.summary().contains("Bearer"));
+    }
+
+    /// Validated name assembly accepts well-formed pairs and rejects empty
+    /// segments or a server name containing the separator.
+    #[test]
+    fn try_tool_name_validates_segments() {
+        assert_eq!(
+            try_tool_name("playwright", "click"),
+            Some("mcp__playwright__click".to_owned())
+        );
+        // Tool names may contain the separator; only the server may not.
+        assert_eq!(
+            try_tool_name("srv", "a__b"),
+            Some("mcp__srv__a__b".to_owned())
+        );
+        assert_eq!(try_tool_name("", "click"), None);
+        assert_eq!(try_tool_name("srv", ""), None);
+        assert_eq!(try_tool_name("a__b", "tool"), None);
+        assert!(!is_valid_server_name(""));
+        assert!(!is_valid_server_name("a__b"));
+        assert!(is_valid_server_name("playwright"));
+    }
+
+    /// Qualified names round-trip through the parser; invalid servers yield
+    /// `None` instead of a silently unparseable name.
+    #[test]
+    fn qualified_name_roundtrips() {
+        let def = McpToolDef {
+            name: "click".to_owned(),
+            description: None,
+            input_schema: serde_json::json!({}),
+        };
+        let qualified = def.qualified_name("playwright").expect("valid server");
+        assert_eq!(parse_tool_name(&qualified), Some(("playwright", "click")));
+        assert_eq!(def.qualified_name("a__b"), None);
+    }
+
+    /// Server config validation rejects empty commands, empty urls, and
+    /// non-http(s) urls while accepting well-formed configs.
+    #[test]
+    fn server_config_validate() {
+        let ok_stdio = McpServerConfig::Stdio {
+            command: "npx".into(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(ok_stdio.validate().is_ok());
+        let empty_cmd = McpServerConfig::Stdio {
+            command: "  ".into(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        assert!(empty_cmd.validate().is_err());
+
+        let ok_http = McpServerConfig::Http {
+            url: "https://mcp.example.com/mcp".into(),
+            headers: HashMap::new(),
+        };
+        assert!(ok_http.validate().is_ok());
+        let empty_url = McpServerConfig::Http {
+            url: "".into(),
+            headers: HashMap::new(),
+        };
+        assert!(empty_url.validate().is_err());
+        let bad_scheme = McpServerConfig::Http {
+            url: "ftp://mcp.example.com/x".into(),
+            headers: HashMap::new(),
+        };
+        assert!(bad_scheme.validate().is_err());
     }
 }

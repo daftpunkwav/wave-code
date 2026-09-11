@@ -3,8 +3,8 @@
  * @description JSON-RPC framing over child-process stdio pipes.
  *
  * Responsibilities:
- * - Encode requests and decode line-delimited responses.
- * - Correlate responses to requests by numeric id.
+ * - Encode requests and decode `jsonrpc: "2.0"` line-delimited responses.
+ * - Correlate responses to requests by numeric id (wrapping, never zero).
  * - Manage child process stdio with timeouts on every read.
  *
  * This module must not depend on: any workspace protocol crate. MCP
@@ -21,6 +21,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Next request id seed; ids increase monotonically per transport.
 pub const FIRST_REQUEST_ID: u64 = 1;
+
+/// Advance a request id without panicking on overflow and without reusing 0.
+fn next_id_after(current: u64) -> u64 {
+    let next = current.wrapping_add(1);
+    if next == 0 {
+        FIRST_REQUEST_ID
+    } else {
+        next
+    }
+}
 
 /// Read timeout for one response line in seconds.
 pub const DEFAULT_RESPONSE_TIMEOUT_SECS: u64 = 30;
@@ -59,16 +69,22 @@ pub struct JsonRpcResponse {
 }
 
 /// Decode one response line, rejecting malformed frames explicitly.
+///
+/// Only `jsonrpc: "2.0"` frames are accepted. When a frame carries both
+/// `result` and `error`, the error wins so failures are never read as success.
 pub fn decode_response(line: &str) -> Result<JsonRpcResponse, TransportError> {
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|_| TransportError::BadFrame(line.to_string()))?;
+    if value.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Err(TransportError::BadFrame(line.to_string()));
+    }
     let id = value
         .get("id")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| TransportError::BadFrame(line.to_string()))?;
     let payload = value
-        .get("result")
-        .or_else(|| value.get("error"))
+        .get("error")
+        .or_else(|| value.get("result"))
         .cloned()
         .unwrap_or(serde_json::Value::Null);
     Ok(JsonRpcResponse { id, payload })
@@ -152,7 +168,7 @@ impl ChildTransport {
         params: serde_json::Value,
     ) -> Result<u64, TransportError> {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = next_id_after(id);
         let request = JsonRpcRequest {
             id,
             method: method.into(),
@@ -212,6 +228,58 @@ mod tests {
             decode_response("{\"jsonrpc\":\"2.0\"}"),
             Err(TransportError::BadFrame(_))
         ));
+    }
+
+    #[test]
+    fn decode_rejects_non_2_0_frames() {
+        assert!(matches!(
+            decode_response("{\"jsonrpc\":\"1.0\",\"id\":1,\"result\":{}}"),
+            Err(TransportError::BadFrame(_))
+        ));
+        assert!(matches!(
+            decode_response("{\"id\":1,\"result\":{}}"),
+            Err(TransportError::BadFrame(_))
+        ));
+    }
+
+    #[test]
+    fn decode_prefers_error_over_result() {
+        let response = decode_response(
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true},\"error\":{\"code\":-1,\"message\":\"boom\"}}",
+        )
+        .unwrap();
+        assert_eq!(response.id, 3);
+        assert_eq!(
+            response.payload,
+            serde_json::json!({"code": -1, "message": "boom"})
+        );
+    }
+
+    #[test]
+    fn decode_accepts_error_frames_and_rejects_bad_shapes() {
+        let response =
+            decode_response("{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":0,\"message\":\"x\"}}")
+                .unwrap();
+        assert_eq!(response.id, 4);
+        assert_eq!(
+            response.payload,
+            serde_json::json!({"code": 0, "message": "x"})
+        );
+        assert!(matches!(
+            decode_response("[1, 2, 3]"),
+            Err(TransportError::BadFrame(_))
+        ));
+        assert!(matches!(
+            decode_response("{\"jsonrpc\":\"2.0\",\"id\":\"7\",\"result\":{}}"),
+            Err(TransportError::BadFrame(_))
+        ));
+    }
+
+    #[test]
+    fn request_ids_wrap_without_zero() {
+        assert_eq!(next_id_after(1), 2);
+        assert_eq!(next_id_after(u64::MAX), FIRST_REQUEST_ID);
+        assert_ne!(next_id_after(u64::MAX), 0);
     }
 
     #[tokio::test]

@@ -67,8 +67,7 @@ fn truncate_output(bytes: &[u8]) -> String {
 ///
 /// Two layers:
 /// 1. The explicit `ctx.deny_env` list (the assembly layer injects the provider's `env_key`, e.g. `MINIMAX_API_KEY`);
-/// 2. A sensitive-suffix fallback: variable names ending (case-insensitively) in `_API_KEY` / `_TOKEN` / `_SECRET` /
-///    `_PASSWORD` are always stripped, blocking common secret shapes even without deny_env.
+/// 2. A shape fallback ([`is_sensitive_env_name`]): common secret shapes stay stripped even without deny_env.
 ///
 /// Threat-model boundary: this only guards "leaks via child-process environment inheritance"; reading an inline
 /// api_key straight from `type config.toml` is an accepted M1 surface (on record in the M1 review), out of scope here.
@@ -76,13 +75,29 @@ fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
     for name in &ctx.deny_env {
         cmd.env_remove(name);
     }
-    const SENSITIVE_SUFFIXES: [&str; 4] = ["_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD"];
     for (key, _) in std::env::vars_os() {
-        let upper = key.to_string_lossy().to_uppercase();
-        if SENSITIVE_SUFFIXES.iter().any(|s| upper.ends_with(s)) {
+        if is_sensitive_env_name(&key.to_string_lossy()) {
             cmd.env_remove(&key);
         }
     }
+}
+
+/// True when an env var name looks like a secret carrier (case-insensitive).
+///
+/// Fail-closed shapes: `_SECRET` / `_TOKEN` / `_PASSW` / `_PRIVATE` segments,
+/// `_KEY` / `_PAT` suffixes (AWS_SECRET_ACCESS_KEY, *_PRIVATE_KEY, GITHUB_PAT,
+/// bare API_KEY), and the bare names SECRET / TOKEN / PASSWORD / PRIVATE /
+/// KEY / PAT. A pure suffix list misses real shapes (`AWS_SECRET_ACCESS_KEY`
+/// ends in `_KEY`, not `_API_KEY`), so match segments and suffixes instead.
+/// Anything else passes so normal configuration stays visible to children.
+fn is_sensitive_env_name(name: &str) -> bool {
+    const MARKERS: [&str; 4] = ["_SECRET", "_TOKEN", "_PASSW", "_PRIVATE"];
+    const SUFFIXES: [&str; 2] = ["_KEY", "_PAT"];
+    const BARE: [&str; 6] = ["SECRET", "TOKEN", "PASSWORD", "PRIVATE", "KEY", "PAT"];
+    let upper = name.to_uppercase();
+    MARKERS.iter().any(|m| upper.contains(m))
+        || SUFFIXES.iter().any(|s| upper.ends_with(s))
+        || BARE.contains(&upper.as_str())
 }
 
 /// Execute a shell command (a writing tool: may modify files or spawn processes, needs serial scheduling).
@@ -309,6 +324,36 @@ mod tests {
         let out = truncate_output(&bytes);
         assert!(out.ends_with("[truncated]"));
         assert!(out.len() <= MAX_OUTPUT_BYTES + "\n[truncated]".len());
+    }
+
+    #[test]
+    fn sensitive_names_cover_secret_shapes_without_over_stripping() {
+        for name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "API_KEY",
+            "MY_API_KEY",
+            "GITHUB_PAT",
+            "DB_PRIVATE_KEY",
+            "NPM_TOKEN",
+            "SECRET_MANAGER_TOKEN",
+            "DB_PASSWORD",
+            "SECRET",
+        ] {
+            assert!(is_sensitive_env_name(name), "{name}");
+        }
+        for name in [
+            "PATH",
+            "HOME",
+            "FOO_NORMAL",
+            "SSH_AUTH_SOCK",
+            "KUBECONFIG",
+            "NODE_ENV",
+            "NUMBER_OF_PROCESSORS",
+            "GITHUB_ACTIONS",
+            "RUSTUP_HOME",
+        ] {
+            assert!(!is_sensitive_env_name(name), "{name}");
+        }
     }
 
     // Environment variables are process-global state; tests touching them must run mutually exclusively (same pattern as the config crate).

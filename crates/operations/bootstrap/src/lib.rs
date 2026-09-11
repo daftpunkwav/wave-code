@@ -39,6 +39,7 @@ pub mod session;
 pub mod skill_tool;
 pub mod task_tools;
 pub mod tool_adapter;
+pub mod workflow_tools;
 
 pub use child_service::TurnChildService;
 pub use compactor::ContextCompactor;

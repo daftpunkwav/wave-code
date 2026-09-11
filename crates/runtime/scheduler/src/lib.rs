@@ -457,3 +457,8 @@ mod tests {
         assert_eq!(gate.available(), 1);
     }
 }
+
+/// Durable cron entries persisted across restarts.
+pub mod durable;
+
+pub use durable::{ScheduleEntry, SchedulePersistError, Scheduler};

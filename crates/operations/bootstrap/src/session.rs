@@ -443,7 +443,38 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     let task_service = tasks.clone() as Arc<dyn action_tasks::TaskService>;
     registry.register(Arc::new(SkillTool::new(skill_set, task_service.clone())));
     registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
-    registry.register(Arc::new(TaskStopTool::new(task_service)));
+    registry.register(Arc::new(TaskStopTool::new(task_service.clone())));
+    // Workflow engine (fan-out DAG runs plus Ralph loops) and durable
+    // schedules ride the same child handle: schedules persist under
+    // `<home>/.wavecode/schedule.json` so cron entries survive restarts.
+    // Restored entries each owe one immediate fire covering the missed
+    // window before the cadence resumes; running jobs are never persisted,
+    // so a previous process's in-flight work reads as interrupted.
+    let (scheduler_state, schedule_catchup) = match home.as_deref() {
+        Some(home_dir) => runtime_scheduler::Scheduler::load_or_default(home_dir),
+        None => (runtime_scheduler::Scheduler::default(), 0),
+    };
+    if schedule_catchup > 0 {
+        warnings.push(format!(
+            "schedule missed {schedule_catchup} fire(s) while away; each restored entry fires once, then the cadence resumes"
+        ));
+    }
+    let scheduler = Arc::new(Mutex::new(scheduler_state));
+    registry.register(Arc::new(crate::workflow_tools::WorkflowRunTool::new(
+        task_service.clone(),
+    )));
+    registry.register(Arc::new(crate::workflow_tools::RalphRunTool::new(
+        task_service.clone(),
+    )));
+    registry.register(Arc::new(crate::workflow_tools::ScheduleAddTool::new(
+        scheduler.clone(),
+    )));
+    registry.register(Arc::new(crate::workflow_tools::ScheduleListTool::new(
+        scheduler.clone(),
+    )));
+    registry.register(Arc::new(crate::workflow_tools::ScheduleRemoveTool::new(
+        scheduler,
+    )));
     // Background shell jobs for long work that must not block the turn.
     // They file completion notices on the same child runtime the actor
     // drains, so results re-enter turns exactly like child tasks.

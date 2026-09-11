@@ -129,6 +129,13 @@ fn message_text(message: &Message) -> (bool, String) {
 ///
 /// Compaction records reset accumulated history; corrupt lines end the
 /// scan with earlier records kept; missing files read as empty.
+///
+/// Scope decision: import stays text-only by design. The new-stack
+/// conversation holds role plus text, so structured tool-call blocks have
+/// no representation to land in; tool calls collapse to `[tool:name]` /
+/// `[error:...]` markers that keep pairing visible to the model. True
+/// replay (re-execution or structured re-import) is out of scope: replay
+/// is read-only analysis, never re-execution.
 pub fn load_history(root: &Path, thread_id: &str) -> Result<Vec<(bool, String)>, LegacyError> {
     let path = journal_path(root, thread_id)?;
     let text = match std::fs::read_to_string(&path) {
@@ -276,6 +283,31 @@ mod tests {
         assert_eq!(abc.message_count, 3);
         assert_eq!(abc.compaction_count, 1);
         assert_eq!(abc.first_user_text.as_deref(), Some("summary"));
+    }
+
+    #[test]
+    fn tool_blocks_collapse_to_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        journal(
+            dir.path(),
+            "tools-1",
+            &[
+                r#"{"kind":"message","seq":1,"message":{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"shell","input":{}}]}}"#,
+                r#"{"kind":"message","seq":2,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c1","content":"out","is_error":false}]}}"#,
+                r#"{"kind":"message","seq":3,"message":{"role":"assistant","content":[{"type":"tool_use","id":"c2","name":"grep","input":{}}]}}"#,
+                r#"{"kind":"message","seq":4,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"c2","content":"boom","is_error":true}]}}"#,
+            ],
+        );
+        let history = load_history(dir.path(), "tools-1").unwrap();
+        assert_eq!(
+            history,
+            vec![
+                (true, "[tool:shell]".to_string()),
+                (false, "out".to_string()),
+                (true, "[tool:grep]".to_string()),
+                (false, "[error:boom]".to_string()),
+            ]
+        );
     }
 
     #[test]

@@ -151,6 +151,14 @@ impl CronField {
             .map_err(|_| ScheduleError::InvalidCron(text.to_string()))
     }
 
+    /// Exact value when this field is not a wildcard.
+    pub fn exact_value(&self) -> Option<u8> {
+        match self {
+            Self::Any => None,
+            Self::Exact(value) => Some(*value),
+        }
+    }
+
     /// True when `value` satisfies this field.
     pub fn matches(&self, value: u8) -> bool {
         match self {
@@ -192,18 +200,39 @@ pub struct CronSpec {
 
 impl CronSpec {
     /// Parse `minute hour day month weekday` with `*` wildcards.
+    ///
+    /// Exact values must name real moments (minute 0-59, hour 0-23, day
+    /// 1-31, month 1-12, weekday 0-6): out-of-range fields parse as
+    /// integers but can never match a valid [`CivilTime`], so accepting
+    /// them would arm a dead schedule that silently never fires.
     pub fn parse(text: &str) -> Result<Self, ScheduleError> {
         let parts: Vec<&str> = text.split_whitespace().collect();
         if parts.len() != 5 {
             return Err(ScheduleError::InvalidCron(text.to_string()));
         }
-        Ok(Self {
+        let spec = Self {
             minute: CronField::parse(parts[0])?,
             hour: CronField::parse(parts[1])?,
             day: CronField::parse(parts[2])?,
             month: CronField::parse(parts[3])?,
             weekday: CronField::parse(parts[4])?,
-        })
+        };
+        let ranges = [
+            (spec.minute, 0, 59),
+            (spec.hour, 0, 23),
+            (spec.day, 1, 31),
+            (spec.month, 1, 12),
+            (spec.weekday, 0, 6),
+        ];
+        let in_range = ranges.iter().all(|(field, lo, hi)| {
+            field
+                .exact_value()
+                .is_none_or(|value| value >= *lo && value <= *hi)
+        });
+        if !in_range {
+            return Err(ScheduleError::InvalidCron(text.to_string()));
+        }
+        Ok(spec)
     }
 
     /// True when every field matches the given civil time.
@@ -231,7 +260,7 @@ pub enum ScheduleError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronDaemon {
     spec: CronSpec,
-    last_fired: Option<(u8, u8, u8)>,
+    last_fired: Option<CivilTime>,
 }
 
 impl CronDaemon {
@@ -248,11 +277,13 @@ impl CronDaemon {
         if !self.spec.matches(time) {
             return false;
         }
-        let minute_key = (time.day, time.hour, time.minute);
-        if self.last_fired == Some(minute_key) {
+        // The whole timestamp is the edge key: any field differing means a
+        // different minute, so matching minutes in different months (or on
+        // different weekdays) each fire instead of sharing one dedup slot.
+        if self.last_fired == Some(time) {
             return false;
         }
-        self.last_fired = Some(minute_key);
+        self.last_fired = Some(time);
         true
     }
 }
@@ -354,6 +385,26 @@ mod tests {
     }
 
     #[test]
+    fn cron_rejects_out_of_range_fields() {
+        for bad in [
+            "99 9 * * *", // minute
+            "0 24 * * *", // hour
+            "0 9 0 * *",  // day zero
+            "0 9 32 * *", // day overflow
+            "0 9 * 0 *",  // month zero
+            "0 9 * 13 *", // month overflow
+            "0 9 * * 7",  // weekday overflow
+            "99 99 99 99 99",
+        ] {
+            assert!(CronSpec::parse(bad).is_err(), "{bad} should not parse");
+        }
+        // Boundaries and wildcards still parse.
+        for good in ["0 0 1 1 0", "59 23 31 12 6", "* * * * *", "0 9 * * *"] {
+            assert!(CronSpec::parse(good).is_ok(), "{good} should parse");
+        }
+    }
+
+    #[test]
     fn cron_daemon_fires_once_per_matching_minute() {
         let mut daemon = CronDaemon::new(CronSpec::parse("0 9 * * *").unwrap());
         let morning = CivilTime {
@@ -373,6 +424,24 @@ mod tests {
             weekday: 1,
         };
         assert!(!daemon.tick(evening));
+    }
+
+    #[test]
+    fn cron_daemon_fires_matching_minutes_across_months() {
+        let mut daemon = CronDaemon::new(CronSpec::parse("0 9 1 * *").unwrap());
+        let january = CivilTime {
+            minute: 0,
+            hour: 9,
+            day: 1,
+            month: 1,
+            weekday: 3,
+        };
+        let february = CivilTime { month: 2, weekday: 6, ..january };
+        assert!(daemon.tick(january));
+        assert!(!daemon.tick(january));
+        // Same day/hour/minute in another month is another minute.
+        assert!(daemon.tick(february));
+        assert!(!daemon.tick(february));
     }
 
     #[tokio::test]

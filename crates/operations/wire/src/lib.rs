@@ -281,6 +281,31 @@ mod tests {
             let value = serde_json::to_value(&msg).unwrap();
             assert_eq!(value.get("type").unwrap(), &tag);
         }
+
+        // Inner enum values lock too: frontends match on these strings.
+        let decisions = [
+            (WireDecision::AllowOnce, "allow_once"),
+            (WireDecision::AllowAlways, "allow_always"),
+        ];
+        for (decision, tag) in decisions {
+            let value = serde_json::to_value(&decision).unwrap();
+            assert_eq!(value.get("type").unwrap(), &tag);
+        }
+        let denied = serde_json::to_value(&WireDecision::Deny {
+            reason: "no".to_string(),
+        })
+        .unwrap();
+        assert_eq!(denied.get("type").unwrap(), &"deny");
+        assert_eq!(denied.get("reason").unwrap(), &"no");
+        // Approval display kinds serialize as bare strings.
+        assert_eq!(
+            serde_json::to_value(ApprovalKind::Exec).unwrap(),
+            serde_json::json!("exec")
+        );
+        assert_eq!(
+            serde_json::to_value(ApprovalKind::Write).unwrap(),
+            serde_json::json!("write")
+        );
     }
 
     #[test]

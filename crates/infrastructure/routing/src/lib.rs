@@ -64,6 +64,9 @@ pub enum RoutingError {
     /// No price registered for the model.
     #[error("no price registered for model: {0}")]
     UnknownModel(String),
+    /// A price was not finite or was negative; carries the model name.
+    #[error("invalid price for model {0}: prices must be finite and non-negative")]
+    InvalidPrice(String),
 }
 
 /// Spend tracker fed by settled token usage.
@@ -80,6 +83,11 @@ impl CostTracker {
     }
 
     /// Register per-1k input/output prices for one model.
+    ///
+    /// Unchecked: NaN or negative prices silently poison every later
+    /// recording (spend drifts to NaN or decreases). Prefer
+    /// [`CostTracker::try_set_price`] unless the values are already
+    /// validated upstream.
     pub fn set_price(
         &mut self,
         model: impl Into<String>,
@@ -88,6 +96,28 @@ impl CostTracker {
     ) {
         self.prices
             .insert(model.into(), (price_in_per_1k, price_out_per_1k));
+    }
+
+    /// Register prices, rejecting non-finite or negative values.
+    ///
+    /// A single NaN price would turn all future [`CostTracker::spend`]
+    /// totals into NaN, so validation happens here at registration —
+    /// the one point where bad values can still be refused.
+    pub fn try_set_price(
+        &mut self,
+        model: impl Into<String>,
+        price_in_per_1k: f64,
+        price_out_per_1k: f64,
+    ) -> Result<(), RoutingError> {
+        let model = model.into();
+        if !price_in_per_1k.is_finite() || !price_out_per_1k.is_finite() {
+            return Err(RoutingError::InvalidPrice(model));
+        }
+        if price_in_per_1k < 0.0 || price_out_per_1k < 0.0 {
+            return Err(RoutingError::InvalidPrice(model));
+        }
+        self.prices.insert(model, (price_in_per_1k, price_out_per_1k));
+        Ok(())
     }
 
     /// Add spend for reported usage; unknown models fail explicitly
@@ -157,5 +187,29 @@ mod tests {
             tracker.record("m9", 1, 1).unwrap_err(),
             RoutingError::UnknownModel("m9".to_string())
         );
+    }
+
+    #[test]
+    fn validated_prices_reject_nan_infinity_and_negatives() {
+        let mut tracker = CostTracker::new();
+        for (price_in, price_out) in [
+            (f64::NAN, 1.0),
+            (1.0, f64::NAN),
+            (f64::INFINITY, 1.0),
+            (1.0, f64::NEG_INFINITY),
+            (-0.5, 1.0),
+            (1.0, -2.0),
+        ] {
+            assert_eq!(
+                tracker.try_set_price("m", price_in, price_out).unwrap_err(),
+                RoutingError::InvalidPrice("m".to_string())
+            );
+        }
+        // Rejected prices register nothing; valid ones record cleanly.
+        assert!(tracker.record("m", 1000, 0).is_err());
+        tracker.try_set_price("m", 2.0, 4.0).unwrap();
+        let cost = tracker.record("m", 1000, 1000).unwrap();
+        assert!((cost - 6.0).abs() < f64::EPSILON);
+        assert!(tracker.spend().is_finite());
     }
 }

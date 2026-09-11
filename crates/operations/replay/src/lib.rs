@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Fold recorded events into trajectory steps and observations.
  * - Keep replay structural: deltas collapse, pairing stays explicit.
+ * - Surface approvals, interruptions, and truncated calls in the output.
  * - Never re-execute anything; replay is read-only analysis.
  *
  * This module must not depend on: drivers, tools, models, or transport.
@@ -15,7 +16,7 @@
 //! Text deltas are intentionally skipped: replay answers "what ran, in
 //! what order, with what outcome", while transcripts keep the words.
 
-use operations_wire::{Event, EventMsg};
+use operations_wire::{ApprovalKind, Event, EventMsg};
 use state_trajectory::{ActionKind, Trajectory};
 
 /// Replay recorded events into a fresh trajectory.
@@ -68,10 +69,34 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
                 let seq = trajectory.push_action(ActionKind::Note, message.clone());
                 trajectory.push_observation(seq, message.clone(), true);
             }
-            // Deltas, token counts, approvals, and completions carry no
-            // structural signal beyond the steps above.
+            EventMsg::ApprovalRequested { call_id, kind, detail } => {
+                // Approval gates are structural: dropping them hides
+                // safety-relevant pauses in the trajectory.
+                let kind_name = match kind {
+                    ApprovalKind::Exec => "exec",
+                    ApprovalKind::Write => "write",
+                };
+                trajectory.push_action(
+                    ActionKind::Note,
+                    format!("approval requested: {call_id} ({kind_name}): {detail}"),
+                );
+            }
+            EventMsg::TurnCompleted { interrupted: true } => {
+                // Clean completions carry no signal beyond the steps above;
+                // interruptions are an outcome worth keeping.
+                trajectory.push_action(ActionKind::Note, "turn interrupted");
+            }
+            // Deltas and token counts carry no structural signal beyond
+            // the steps above.
             _ => {}
         }
+    }
+    // Truncated recordings may end with calls that never closed: mark them
+    // so readers can tell "still open" apart from success.
+    let mut dangling: Vec<(String, u64)> = open.into_iter().collect();
+    dangling.sort_by_key(|(_, seq)| *seq);
+    for (call_id, seq) in dangling {
+        trajectory.push_observation(seq, format!("{call_id} truncated: no end event"), false);
     }
     trajectory
 }
@@ -122,5 +147,63 @@ mod tests {
         let replay = trajectory.replay();
         assert_eq!(replay.len(), 1);
         assert!(replay[0].contains("unpaired end"));
+    }
+
+    #[test]
+    fn approval_requests_stay_visible() {
+        let trajectory = replay_to_trajectory(&[event(EventMsg::ApprovalRequested {
+            call_id: "c7".to_string(),
+            kind: ApprovalKind::Exec,
+            detail: "rm -rf /".to_string(),
+        })]);
+        let replay = trajectory.replay();
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].contains("approval requested"));
+        assert!(replay[0].contains("c7"));
+    }
+
+    #[test]
+    fn interrupted_turns_stay_visible() {
+        let trajectory =
+            replay_to_trajectory(&[event(EventMsg::TurnCompleted { interrupted: true })]);
+        let replay = trajectory.replay();
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].contains("interrupted"));
+    }
+
+    #[test]
+    fn unclosed_calls_are_marked_truncated() {
+        let trajectory = replay_to_trajectory(&[event(EventMsg::ToolCallBegin {
+            call_id: "c5".to_string(),
+            name: "shell".to_string(),
+            input: serde_json::Value::Null,
+        })]);
+        let replay = trajectory.replay();
+        assert_eq!(replay.len(), 1);
+        assert!(!replay[0].contains("[error]"));
+        let seq = trajectory.steps()[0].seq;
+        let observations = trajectory.observations_for(seq);
+        assert_eq!(observations.len(), 1);
+        assert!(observations[0].content.contains("truncated"));
+        assert!(!observations[0].is_error);
+    }
+
+    #[test]
+    fn paired_calls_gain_no_truncation_mark() {
+        let trajectory = replay_to_trajectory(&[
+            event(EventMsg::ToolCallBegin {
+                call_id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::Value::Null,
+            }),
+            event(EventMsg::ToolCallEnd {
+                call_id: "c1".to_string(),
+                is_error: false,
+            }),
+        ]);
+        let seq = trajectory.steps()[0].seq;
+        let observations = trajectory.observations_for(seq);
+        assert_eq!(observations.len(), 1);
+        assert!(!observations[0].content.contains("truncated"));
     }
 }

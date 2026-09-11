@@ -1,0 +1,7 @@
+[
+  { "id": "s1", "type": "tool_call_begin", "call_id": "c5", "name": "shell", "input": { "command": "ls" } },
+  { "id": "s1", "type": "tool_call_end", "call_id": "c9", "is_error": false },
+  { "id": "s1", "type": "compact_completed", "summary_tokens": 42 },
+  { "id": "s1", "type": "error", "message": "disk full", "recoverable": false },
+  { "id": "s1", "type": "turn_completed", "interrupted": false }
+]

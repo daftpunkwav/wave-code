@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "policy": "PASS at or under warn_beyond x median, WARN up to fail_beyond x median, FAIL beyond fail_beyond x median or on any correctness mismatch. Timing never fails CI on noise: medians are generous and fail_beyond is 10x.",
+  "warn_beyond": 2.0,
+  "fail_beyond": 10.0,
+  "benches": {
+    "continuation_micro": {
+      "median_ms": 800,
+      "note": "Real RunLoop over scripted model, 8 tool rounds, offline. Typical runs finish in low tens of ms."
+    },
+    "session_open": {
+      "median_ms": 1200,
+      "note": "Offline assembly (loop + conversation + system prompt) plus 5 scripted turns. No network, no credentials."
+    },
+    "replay_golden": {
+      "median_ms": 200,
+      "note": "replay_to_trajectory over each committed fixture plus timeline render. Pure CPU over tiny inputs."
+    }
+  }
+}

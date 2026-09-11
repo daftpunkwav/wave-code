@@ -44,6 +44,7 @@ use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
 use crate::skill_tool::SkillTool;
+use crate::task_tools::{TaskOutputTool, TaskStopTool};
 use crate::tool_adapter::ToolAdapter;
 
 /// Approval wait timeout applied to parked decisions.
@@ -271,10 +272,15 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     // The `skill` model tool needs the child service, which only exists
     // after the driver is built: late registration on the shared registry
     // makes it visible to the executor, policy, and model adapters live.
+    // `task_output` / `task_stop` ride the same handle so the model can
+    // observe and stop what skills forked.
+    let task_service = tasks.clone() as Arc<dyn action_tasks::TaskService>;
     registry.register(Arc::new(SkillTool::new(
         skill_set,
-        tasks.clone() as Arc<dyn action_tasks::TaskService>,
+        task_service.clone(),
     )));
+    registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
+    registry.register(Arc::new(TaskStopTool::new(task_service)));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     let tool_names: Vec<String> = registry

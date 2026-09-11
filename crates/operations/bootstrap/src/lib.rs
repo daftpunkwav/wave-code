@@ -31,6 +31,7 @@ pub mod plan_adapter;
 pub mod policy_adapter;
 pub mod session;
 pub mod skill_tool;
+pub mod task_tools;
 pub mod tool_adapter;
 
 pub use child_service::TurnChildService;
@@ -49,4 +50,5 @@ pub use session::{
     SessionHandle, assemble_session,
 };
 pub use skill_tool::SkillTool;
+pub use task_tools::{TaskOutputTool, TaskStopTool};
 pub use tool_adapter::ToolAdapter;

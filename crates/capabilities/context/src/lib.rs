@@ -53,6 +53,34 @@ pub fn estimate_tokens(messages: &[Message], chars_per_token: usize) -> u64 {
     chars / ratio + 4 * messages.len() as u64
 }
 
+/// Estimated usage including the fixed system overhead.
+///
+/// Convenience wrapper over [`estimate_tokens`] using the config ratio, with
+/// [`SYSTEM_OVERHEAD_TOKENS`] added. Callers computing a PreTurn budget without
+/// provider usage must use this instead of hand-rolling `estimate + overhead`,
+/// so the overhead can never be silently dropped (a 2k underestimate would
+/// shift every threshold line).
+pub fn estimate_with_overhead(messages: &[Message], cfg: &ContextConfig) -> u64 {
+    estimate_tokens(messages, cfg.estimate_chars_per_token).saturating_add(SYSTEM_OVERHEAD_TOKENS)
+}
+
+/// Stage-1 usage accounting: authoritative provider `input_tokens` win,
+/// otherwise fall back to [`estimate_with_overhead`].
+///
+/// `usage_input_tokens` already covers the full history including system
+/// overhead, so it is returned as-is; only the estimation path adds the fixed
+/// overhead quota.
+pub fn resolve_used_tokens(
+    messages: &[Message],
+    usage_input_tokens: Option<u64>,
+    cfg: &ContextConfig,
+) -> u64 {
+    match usage_input_tokens {
+        Some(input) => input,
+        None => estimate_with_overhead(messages, cfg),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 三级阈值
 // ---------------------------------------------------------------------------
@@ -111,6 +139,28 @@ impl Thresholds {
             BudgetLevel::Ok
         }
     }
+
+    /// Validate margin ordering: `warning >= auto_compact >= blocking`.
+    ///
+    /// [`check`] probes the deepest level first, so inverted margins silently
+    /// make an outer level unreachable (e.g. `warning_margin < blocking_margin`
+    /// means `Warning` can never fire). Returns a human-readable reason on
+    /// misconfiguration; [`check`] itself stays total and never panics.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.warning_margin < self.auto_compact_margin {
+            return Err(format!(
+                "warning_margin ({}) < auto_compact_margin ({})",
+                self.warning_margin, self.auto_compact_margin
+            ));
+        }
+        if self.auto_compact_margin < self.blocking_margin {
+            return Err(format!(
+                "auto_compact_margin ({}) < blocking_margin ({})",
+                self.auto_compact_margin, self.blocking_margin
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +194,18 @@ impl Default for ContextConfig {
             summary_max_tokens: DEFAULT_SUMMARY_MAX_TOKENS,
             estimate_chars_per_token: DEFAULT_CHARS_PER_TOKEN,
         }
+    }
+}
+
+impl ContextConfig {
+    /// Validate the whole pipeline config in one call.
+    ///
+    /// Numeric fields are already saturation/clamp-defended at their use sites
+    /// (`saturating_sub` in [`Thresholds::check`], `max(1)` in the estimate and
+    /// summary paths), so only the threshold margin ordering can fail silently
+    /// and is checked here. Returns a human-readable reason on misconfiguration.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        self.thresholds.validate()
     }
 }
 
@@ -805,5 +867,92 @@ crates/shop/src/cart.rs（已创建）；crates/shop/src/order.rs（已修改）
         let strategy = ModelSummary::new(model, "mock".into());
         let result = strategy.summarize(&long_history(), 777).await;
         assert!(matches!(result, Err(ContextError::EmptySummary)));
+    }
+    // --- stage-1 accounting ---
+
+    #[test]
+    fn resolve_used_tokens_prefers_authoritative_usage() {
+        let cfg = ContextConfig::default();
+        let history = vec![user_text(&"x".repeat(4000))];
+        // Authoritative input_tokens returned as-is, never re-estimated.
+        assert_eq!(resolve_used_tokens(&history, Some(9999), &cfg), 9999);
+        assert_eq!(resolve_used_tokens(&[], Some(0), &cfg), 0);
+    }
+
+    #[test]
+    fn resolve_used_tokens_falls_back_to_estimate_plus_overhead() {
+        let cfg = ContextConfig::default();
+        let history = vec![user_text(&"x".repeat(400))];
+        let expected =
+            estimate_tokens(&history, cfg.estimate_chars_per_token) + SYSTEM_OVERHEAD_TOKENS;
+        assert_eq!(resolve_used_tokens(&history, None, &cfg), expected);
+        // Empty history still accounts for the fixed system overhead.
+        assert_eq!(resolve_used_tokens(&[], None, &cfg), SYSTEM_OVERHEAD_TOKENS);
+        assert_eq!(
+            estimate_with_overhead(&history, &cfg),
+            expected,
+            "overhead must be impossible to forget on the estimate path"
+        );
+    }
+
+    // --- config validation ---
+
+    #[test]
+    fn thresholds_validate_accepts_ordered_margins() {
+        assert!(Thresholds::default().validate().is_ok());
+        assert!(
+            Thresholds {
+                warning_margin: 200,
+                auto_compact_margin: 100,
+                blocking_margin: 10,
+            }
+            .validate()
+            .is_ok()
+        );
+        // Equal margins are degenerate but well-defined (levels collapse).
+        assert!(
+            Thresholds {
+                warning_margin: 100,
+                auto_compact_margin: 100,
+                blocking_margin: 100,
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn thresholds_validate_rejects_inverted_margins() {
+        let err = Thresholds {
+            warning_margin: 100,
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("warning < auto_compact must be rejected");
+        assert!(err.contains("warning_margin"), "unexpected reason: {err}");
+        let err = Thresholds {
+            auto_compact_margin: 100,
+            ..Default::default()
+        }
+        .validate()
+        .expect_err("auto_compact < blocking must be rejected");
+        assert!(
+            err.contains("auto_compact_margin"),
+            "unexpected reason: {err}"
+        );
+    }
+
+    #[test]
+    fn context_config_validate_delegates_to_thresholds() {
+        assert!(ContextConfig::default().validate().is_ok());
+        let bad = ContextConfig {
+            thresholds: Thresholds {
+                warning_margin: 1,
+                auto_compact_margin: 100,
+                blocking_margin: 10,
+            },
+            ..Default::default()
+        };
+        assert!(bad.validate().is_err());
     }
 }

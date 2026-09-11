@@ -23,6 +23,7 @@ pub mod child_service;
 pub mod compactor;
 pub mod composite;
 pub mod gate_adapter;
+pub mod goal_tools;
 pub mod hook_adapter;
 pub mod job_tools;
 pub mod mcp_bridge;

@@ -499,6 +499,37 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     )));
     registry.register(Arc::new(crate::plan_tools::PlanStatusTool::new(plan_store)));
 
+    // Durable goal service (persisted per-session objective with CAS and a
+    // tools-only round driver): the store path derives from home
+    // (`<home>/.wavecode/goals/<session>.json`) so resume in the same home
+    // reopens the same goal. Corrupt content warns and starts empty, never
+    // a hard stop. The mutating tools are not read-only, but they are not
+    // destructive either (they touch goal state, not the repo), so they
+    // never park on an approval gate. The driver has no loop hook yet: the
+    // model calls goal_tick once per round.
+    let (goal_state, goal_warning) = crate::goal_tools::load_for_session(
+        home.as_deref(),
+        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
+    );
+    if let Some(warning) = goal_warning {
+        warnings.push(warning);
+    }
+    let goal_store = Arc::new(crate::goal_tools::GoalStore::new(
+        goal_state,
+        home.as_deref(),
+        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
+    ));
+    registry.register(Arc::new(crate::goal_tools::GoalSetTool::new(
+        goal_store.clone(),
+    )));
+    registry.register(Arc::new(crate::goal_tools::GoalUpdateTool::new(
+        goal_store.clone(),
+    )));
+    registry.register(Arc::new(crate::goal_tools::GoalStatusTool::new(
+        goal_store.clone(),
+    )));
+    registry.register(Arc::new(crate::goal_tools::GoalTickTool::new(goal_store)));
+
     // 8. System prompt from assembled slots plus the live tool catalog.
     let tool_names: Vec<String> = registry
         .specs()

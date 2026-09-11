@@ -156,6 +156,13 @@ pub enum EventMsg {
     },
     /// A reviewed plan was approved.
     PlanApproved,
+    /// A durable goal was set (display routing).
+    GoalSet {
+        /// Goal objective text for transcript rendering.
+        objective: String,
+    },
+    /// A durable goal was completed.
+    GoalCompleted,
     /// Non-fatal condition worth surfacing.
     Warning {
         /// Human-readable warning text.
@@ -273,6 +280,13 @@ mod tests {
                 "plan_proposed",
             ),
             (EventMsg::PlanApproved, "plan_approved"),
+            (
+                EventMsg::GoalSet {
+                    objective: "x".to_string(),
+                },
+                "goal_set",
+            ),
+            (EventMsg::GoalCompleted, "goal_completed"),
             (
                 EventMsg::Warning {
                     message: "w".to_string(),

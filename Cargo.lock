@@ -12,6 +12,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "action-jobs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "runtime-child",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "action-kit"
 version = "0.1.0"
 dependencies = [
@@ -28,20 +38,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "action-jobs"
-version = "0.1.0"
-dependencies = [
- "libc",
- "runtime-child",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "action-tasks"
 version = "0.1.0"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "action-workflow"
+version = "0.1.0"
+dependencies = [
+ "action-tasks",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -1113,16 +1124,20 @@ version = "0.1.0"
 dependencies = [
  "action-jobs",
  "action-tasks",
+ "action-workflow",
  "async-trait",
  "futures",
  "infrastructure-base",
  "operations-actor",
  "operations-wire",
  "runtime-child",
+ "runtime-plugin",
  "runtime-prompt",
  "runtime-runner",
+ "runtime-scheduler",
  "safety-gate",
  "serde_json",
+ "state-goal",
  "state-plan",
  "state-store",
  "tempfile",
@@ -1536,6 +1551,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-plugin"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror",
+ "toml",
+]
+
+[[package]]
 name = "runtime-prompt"
 version = "0.1.0"
 dependencies = [
@@ -1882,6 +1907,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "state-goal"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

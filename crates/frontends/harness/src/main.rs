@@ -192,6 +192,14 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             stderr.push_str("[plan approved]\n");
             None
         }
+        EventMsg::GoalSet { objective } => {
+            stderr.push_str(&format!("[goal set]\n{objective}\n"));
+            None
+        }
+        EventMsg::GoalCompleted => {
+            stderr.push_str("[goal completed]\n");
+            None
+        }
         EventMsg::Warning { message } => {
             stderr.push_str(&format!("[warn] {message}\n"));
             None
@@ -556,6 +564,8 @@ enum Slash {
     Mcp,
     /// Show reviewed-plan status (local display only, mirrors /mcp).
     Plan(String),
+    /// Show durable-goal status (local display only, mirrors /plan).
+    Goal(String),
     /// List file-content snapshot labels (local display).
     Snapshots,
     /// Show one file-content snapshot (local display; the rewind itself
@@ -584,6 +594,7 @@ fn parse_slash(line: &str) -> Slash {
             "memory" => Slash::Memory,
             "mcp" => Slash::Mcp,
             "plan" => Slash::Plan(args),
+            "goal" => Slash::Goal(args),
             "snapshots" => Slash::Snapshots,
             "rewind" => Slash::Rewind(args),
             "permissions" => Slash::Permissions,
@@ -598,7 +609,7 @@ fn parse_slash(line: &str) -> Slash {
 }
 
 /// REPL help text printed for `/help` and unknown commands.
-const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /plan (show reviewed-plan status), /snapshots (list snapshots), /rewind <label> (show snapshot), /permissions (cycle approval mode), /quit (end session), /help";
+const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /plan (show reviewed-plan status), /goal (show durable-goal status), /snapshots (list snapshots), /rewind <label> (show snapshot), /permissions (cycle approval mode), /quit (end session), /help";
 
 /// Guided turn text routing a slash-invoked skill through the model.
 ///
@@ -682,6 +693,79 @@ fn render_plan_text(text: &str) -> String {
         _ => out.push_str("\n(no plan text yet)"),
     }
     out.push_str(&format!("\n{PLAN_USAGE}"));
+    out
+}
+
+/// Render the durable-goal status for `/goal` from the home-derived
+/// goal file (`<home>/.wavecode/goals/default.json`).
+///
+/// Local display only, mirroring `/plan`: the TUI spells out the same
+/// convention, and neither frontend depends on the goal state crate.
+fn goal_status_display() -> String {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    render_goal_file(home.as_deref())
+}
+
+/// Lenient rendering of one home directory's goal file: status plus the
+/// objective head, or a hint when no goal exists yet. Never fails, so
+/// `/goal` display stays total.
+fn render_goal_file(home: Option<&std::path::Path>) -> String {
+    const EMPTY: &str =
+        "(no durable goal yet; ask the agent to set one with the goal_set tool)";
+    let Some(home) = home else {
+        return format!("{EMPTY}\n{GOAL_USAGE}");
+    };
+    let path = home.join(".wavecode").join("goals").join("default.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return format!("{EMPTY}\n{GOAL_USAGE}"),
+    };
+    render_goal_text(&text)
+}
+
+/// Usage line shared by every `/goal` rendering: setting and ticking run
+/// through the model tools, never through the slash command.
+const GOAL_USAGE: &str =
+    "usage: /goal (status display only; the model sets the goal with goal_set and ticks it with goal_tick once per round)";
+
+/// Lenient rendering of raw goal file content (exposed for tests; the
+/// file shape is owned by the goal state crate).
+fn render_goal_text(text: &str) -> String {
+    const HEAD_CHARS: usize = 500;
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_) => {
+            return format!(
+                "(durable-goal file unreadable; delete <home>/.wavecode/goals/default.json to start over)\n{GOAL_USAGE}"
+            );
+        }
+    };
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("active");
+    let version = value
+        .get("version")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let round = value
+        .get("round")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mut out = format!("goal status: {status} (version {version}, round {round})");
+    match value.get("objective").and_then(|v| v.as_str()) {
+        Some(body) if !body.trim().is_empty() => {
+            let head: String = body.chars().take(HEAD_CHARS).collect();
+            out.push_str(&format!("\ngoal:\n{head}"));
+            if body.chars().count() > HEAD_CHARS {
+                out.push_str("\n(truncated; ask the agent for the full goal)");
+            }
+        }
+        _ => out.push_str("\n(no objective yet)"),
+    }
+    out.push_str(&format!("\n{GOAL_USAGE}"));
     out
 }
 
@@ -877,6 +961,13 @@ async fn run_repl(
             // renders status plus usage, never writes.
             Slash::Plan(_) => {
                 println!("{}", plan_status_display());
+            }
+            // Durable goal mode is local display only (mirrors /plan):
+            // the goal file lives under `<home>/.wavecode/goals/` and the
+            // model mutates it through the goal_* tools, so the REPL only
+            // renders status plus usage, never writes.
+            Slash::Goal(_) => {
+                println!("{}", goal_status_display());
             }
             // File-content snapshots (no git dependence): `/snapshots`
             // lists labels, `/rewind <label>` shows one snapshot.
@@ -1147,6 +1238,8 @@ mod tests {
         assert_eq!(parse_slash("/mcp"), Slash::Mcp);
         assert_eq!(parse_slash("/plan"), Slash::Plan(String::new()));
         assert_eq!(parse_slash("  /plan  "), Slash::Plan(String::new()));
+        assert_eq!(parse_slash("/goal"), Slash::Goal(String::new()));
+        assert_eq!(parse_slash("  /goal  "), Slash::Goal(String::new()));
         assert_eq!(parse_slash("/snapshots"), Slash::Snapshots);
         assert_eq!(
             parse_slash("/rewind before-refactor"),
@@ -1212,6 +1305,40 @@ mod tests {
         })
         .to_string();
         assert!(render_plan_text(&long).contains("truncated"));
+    }
+
+    #[test]
+    fn goal_renders_status_head_and_hints() {
+        // Missing home and missing files hint instead of failing.
+        assert!(render_goal_file(None).contains("no durable goal"));
+        let dir = std::env::temp_dir().join("wavecode-goal-missing-home");
+        assert!(render_goal_file(Some(dir.as_path())).contains("no durable goal"));
+        // An active goal renders status, version, round, text head, and usage.
+        let text = serde_json::json!({
+            "status": "active",
+            "objective": "ship the milestone",
+            "version": 2,
+            "round": 1,
+            "updated_at": 0,
+        })
+        .to_string();
+        let rendered = render_goal_text(&text);
+        assert!(rendered.contains("active"), "{rendered}");
+        assert!(rendered.contains("version 2"), "{rendered}");
+        assert!(rendered.contains("round 1"), "{rendered}");
+        assert!(rendered.contains("ship the milestone"), "{rendered}");
+        assert!(rendered.contains("goal_set"), "{rendered}");
+        // Empty text and corrupt content stay total.
+        let empty = serde_json::json!({"status": "active"}).to_string();
+        assert!(render_goal_text(&empty).contains("no objective yet"));
+        assert!(render_goal_text("{not json}").contains("unreadable"));
+        // Long goals truncate to a display head.
+        let long = serde_json::json!({
+            "status": "active",
+            "objective": "x".repeat(600),
+        })
+        .to_string();
+        assert!(render_goal_text(&long).contains("truncated"));
     }
 
     #[test]

@@ -529,6 +529,32 @@ mod tests {
         assert!(app.slash_candidates().contains(&"/plan".to_string()));
     }
 
+    /// /goal: locally render durable-goal status (no Op); hint when no
+    /// goal exists yet. The file read hits the real home directory,
+    /// so the test accepts either rendering, never an Op.
+    #[test]
+    fn goal_shows_status_locally() {
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/goal");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty(), "/goal renders locally");
+        let has_row = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| {
+                s.content.contains("goal status:")
+                    || s.content.contains("no durable goal")
+                    || s.content.contains("goal file unreadable")
+            });
+        assert!(has_row);
+        // Completion offers the new builtin.
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/g");
+        assert!(app.slash_candidates().contains(&"/goal".to_string()));
+    }
+
     /// /snapshots: locally list labels (no Op); empty stores hint at the
     /// snapshot tool instead of failing.
     #[test]

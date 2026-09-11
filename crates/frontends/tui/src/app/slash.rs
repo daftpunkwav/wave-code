@@ -16,6 +16,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "memory",
     "mcp",
     "plan",
+    "goal",
     "snapshots",
     "rewind",
     "permissions",
@@ -102,6 +103,7 @@ impl App {
             "memory" => self.show_memory(),
             "mcp" => self.show_mcp(),
             "plan" => self.show_plan(),
+            "goal" => self.show_goal(),
             "snapshots" => self.show_snapshots(),
             "rewind" => self.show_rewind(args),
             "permissions" => self.cycle_permission_mode(),
@@ -219,6 +221,67 @@ impl App {
                 out.push_str(&format!("\nplan:\n{head}"));
                 if body.chars().count() > HEAD_CHARS {
                     out.push_str("\n(truncated; ask the agent for the full plan)");
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
+    }
+
+    /// `/goal`: show durable-goal status (local display only, mirroring
+    /// `/plan`; the tui cannot depend on the goal crate, so the
+    /// `<home>/.wavecode/goals/default.json` convention is spelled out
+    /// here. Setting and ticking run through the model tools.)
+    fn show_goal(&mut self) {
+        match Self::goal_status_text() {
+            Some(text) => self.push_item(Item::plain(sanitize_terminal(&text).into_owned(), dim())),
+            None => self.push_item(Item::plain(
+                "(no durable goal yet; ask the agent to set one with the goal_set tool)".into(),
+                dim(),
+            )),
+        }
+    }
+
+    /// Read and leniently render the durable-goal file. `None` means no
+    /// goal exists yet (missing file or empty objective); corrupt content
+    /// reports itself instead of failing the display.
+    fn goal_status_text() -> Option<String> {
+        const HEAD_CHARS: usize = 500;
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+        let text = std::fs::read_to_string(
+            PathBuf::from(home)
+                .join(".wavecode")
+                .join("goals")
+                .join("default.json"),
+        )
+        .ok()?;
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => {
+                return Some(
+                    "(durable-goal file unreadable; delete <home>/.wavecode/goals/default.json to start over)".to_string(),
+                );
+            }
+        };
+        let status = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("active");
+        let version = value
+            .get("version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let round = value
+            .get("round")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut out = format!("goal status: {status} (version {version}, round {round})");
+        match value.get("objective").and_then(|v| v.as_str()) {
+            Some(body) if !body.trim().is_empty() => {
+                let head: String = body.chars().take(HEAD_CHARS).collect();
+                out.push_str(&format!("\ngoal:\n{head}"));
+                if body.chars().count() > HEAD_CHARS {
+                    out.push_str("\n(truncated; ask the agent for the full goal)");
                 }
             }
             _ => return None,

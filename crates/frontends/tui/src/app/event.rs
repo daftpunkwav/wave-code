@@ -76,6 +76,17 @@ impl App {
                 self.flush_message();
                 self.push_item(Item::plain("Plan approved".into(), dim()));
             }
+            // Durable goal display: set objective plus completion notice
+            // (both render locally; no Op involved).
+            M::GoalSet { objective } => {
+                self.flush_message();
+                let objective = sanitize_terminal(objective).into_owned();
+                self.push_item(Item::plain(format!("Goal set:\n{objective}"), dim()));
+            }
+            M::GoalCompleted => {
+                self.flush_message();
+                self.push_item(Item::plain("Goal completed".into(), dim()));
+            }
             // Approval request: yellow notice line + inline popup
             // (decisions are handled on keys).
             M::ApprovalRequested {

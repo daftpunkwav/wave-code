@@ -379,15 +379,68 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
             }
         }
     };
-    if json {
-        print!("{json_lines}");
-    } else {
-        print!("{stdout_text}");
+    // Graceful shutdown: SessionEnd hooks speak during the bounded
+    // drain instead of dying on client drop (Drop aborts the actor).
+    // A hung hook cannot hold exit open past the deadline.
+    let _ = client
+        .submit(Submission {
+            id: "exec-shutdown".to_string(),
+            op: Op::Shutdown,
+        })
+        .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while let Some(event) = tokio::time::timeout_at(deadline, client.next_event())
+        .await
+        .ok()
+        .flatten()
+    {
+        if json {
+            json_lines.push_str(
+                &serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()),
+            );
+            json_lines.push('\n');
+        } else {
+            render_event(&event.msg, &mut stdout_text, &mut stderr_text);
+        }
     }
-    eprint!("{stderr_text}");
-    std::io::stdout().flush()?;
-    std::io::stderr().flush()?;
-    Ok(if failed { Outcome::Failed } else { outcome })
+    let end = if failed {
+        Outcome::Failed
+    } else {
+        outcome
+    };
+    let broken = if json {
+        flush_buffers(&json_lines, &stderr_text)?
+    } else {
+        flush_buffers(&stdout_text, &stderr_text)?
+    };
+    Ok(if broken {
+        // Closed stdout pipe (e.g. `| head`): the user took what they
+        // needed; a clean end, not an error.
+        Outcome::Completed
+    } else {
+        end
+    })
+}
+
+/// Flush buffered streams with locked handles.
+///
+/// Returns true on a closed stdout pipe; panicking `print!` would turn
+/// `| head` into a crash, while `writeln!` lets a broken pipe read as a
+/// clean end. Stderr failures stay hard errors.
+fn flush_buffers(stdout_text: &str, stderr_text: &str) -> std::io::Result<bool> {
+    let mut out = std::io::stdout().lock();
+    match out
+        .write_all(stdout_text.as_bytes())
+        .and_then(|()| out.flush())
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(true),
+        Err(e) => return Err(e),
+    }
+    let mut err = std::io::stderr().lock();
+    err.write_all(stderr_text.as_bytes())?;
+    err.flush()?;
+    Ok(false)
 }
 
 /// Interactive multi-turn session over one shared conversation.

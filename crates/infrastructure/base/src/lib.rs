@@ -71,7 +71,11 @@ impl InterruptHandle {
 /// Truncate text to a character budget, appending an ellipsis on cut.
 ///
 /// Operates on `char` boundaries so truncation never splits UTF-8.
+/// A zero budget yields an empty string rather than a bare ellipsis.
 pub fn truncate(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
@@ -100,5 +104,17 @@ mod tests {
         assert_eq!(truncate("abc", 10), "abc");
         let cut = truncate("abcdef", 3);
         assert_eq!(cut, "abc...");
+    }
+
+    #[test]
+    fn truncation_zero_budget_returns_empty() {
+        assert_eq!(truncate("abcdef", 0), "");
+        assert_eq!(truncate("", 0), "");
+    }
+
+    #[test]
+    fn truncation_cuts_on_char_boundaries() {
+        assert_eq!(truncate("\u{65e5}\u{672c}\u{8a9e}", 2), "\u{65e5}\u{672c}...");
+        assert_eq!(truncate("a\u{1f642}b", 2), "a\u{1f642}...");
     }
 }

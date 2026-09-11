@@ -109,7 +109,8 @@ impl TurnState {
     }
 }
 
-/// Maximum reactive compactions per turn.
+/// Maximum reactive compactions per turn (default for
+/// [`RunConfig::max_reactive_compacts`).
 ///
 /// Counts consecutive prompt-too-long failures like the legacy loop: two
 /// successful compactions are attempted and the third consecutive failure
@@ -423,11 +424,14 @@ pub async fn dispatch_calls<E: ToolExecutor>(
 pub const CONTINUATION_PROMPT: &str =
     "Output token limit reached. Continue exactly where you left off.";
 
-/// Maximum model continuations per turn.
+/// Maximum model continuations per turn (default for
+/// [`RunConfig::max_continuations`]).
 pub const MAX_CONTINUATIONS: u8 = 2;
-/// Maximum plan-steering reminders per turn.
+/// Maximum plan-steering reminders per turn (default for
+/// [`RunConfig::max_plan_nudges`]).
 pub const MAX_PLAN_NUDGES: u8 = 3;
-/// Maximum Stop-hook blocks per turn before the loop proceeds anyway.
+/// Maximum Stop-hook blocks per turn before the loop proceeds anyway
+/// (default for [`RunConfig::max_stop_blocks`]).
 pub const MAX_STOP_BLOCKS: u8 = 3;
 
 /// Static run configuration, frozen per session rather than per turn.
@@ -441,6 +445,14 @@ pub struct RunConfig {
     pub max_output_tokens: u32,
     /// Tool dispatch rounds per turn; reaching it stops with Completed.
     pub max_tool_rounds: u32,
+    /// Model continuations per turn on output truncation.
+    pub max_continuations: u8,
+    /// Plan-steering reminders per turn while todos stay unfinished.
+    pub max_plan_nudges: u8,
+    /// Stop-hook blocks per turn before the loop proceeds anyway.
+    pub max_stop_blocks: u8,
+    /// Reactive compactions per turn on overlong prompts.
+    pub max_reactive_compacts: u8,
 }
 
 /// User decision delivered for one parked approval request.
@@ -722,11 +734,13 @@ where
             {
                 Err(SampleError::PromptTooLong) => {
                     reactive_compacts += 1;
-                    if reactive_compacts >= MAX_REACTIVE_COMPACTS {
+                    if reactive_compacts >= self.cfg.max_reactive_compacts {
                         settle(conv, &last_input, &state, &emit_msg);
                         emit_msg(EventMsg::Error {
-                            message: "prompt exceeds context window after 3 compactions"
-                                .to_string(),
+                            message: format!(
+                                "prompt exceeds context window after {} compactions",
+                                self.cfg.max_reactive_compacts
+                            ),
                             recoverable: false,
                         });
                         emit_msg(EventMsg::TurnCompleted { interrupted: false });
@@ -787,18 +801,19 @@ where
             emit_msg(EventMsg::AgentMessageComplete { text });
 
             if calls.is_empty() {
-                if response.truncated && continuations < MAX_CONTINUATIONS {
+                if response.truncated && continuations < self.cfg.max_continuations {
                     continuations += 1;
                     emit_msg(EventMsg::Warning {
                         message: format!(
-                            "output truncated at max_tokens; continuing ({continuations}/2)"
+                            "output truncated at max_tokens; continuing ({continuations}/{})",
+                            self.cfg.max_continuations
                         ),
                     });
                     conv.push(Role::User, CONTINUATION_PROMPT);
                     continue;
                 }
                 let unfinished = self.plans.unfinished();
-                if unfinished > 0 && nudges < MAX_PLAN_NUDGES {
+                if unfinished > 0 && nudges < self.cfg.max_plan_nudges {
                     nudges += 1;
                     emit_msg(EventMsg::Warning {
                         message: format!(
@@ -809,7 +824,7 @@ where
                     continue;
                 }
                 let stop = self.hooks.run(HookPoint::Stop, "").await;
-                if !stop.allow && stop_blocks < MAX_STOP_BLOCKS {
+                if !stop.allow && stop_blocks < self.cfg.max_stop_blocks {
                     stop_blocks += 1;
                     let reason = if stop.message.is_empty() {
                         "(hook gave no reason)".to_string()
@@ -817,7 +832,10 @@ where
                         stop.message.clone()
                     };
                     emit_msg(EventMsg::Warning {
-                        message: format!("Stop hook blocked turn completion ({stop_blocks}/3)"),
+                        message: format!(
+                            "Stop hook blocked turn completion ({stop_blocks}/{})",
+                            self.cfg.max_stop_blocks
+                        ),
                     });
                     conv.push(
                         Role::User,
@@ -1758,6 +1776,10 @@ mod run_loop_tests {
                 context_window: 200_000,
                 max_output_tokens: 100,
                 max_tool_rounds,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
             },
             interrupt,
         )
@@ -2103,6 +2125,60 @@ mod run_loop_tests {
     }
 
     #[tokio::test]
+    async fn continuation_ceiling_comes_from_config() {
+        async fn reminders_with(max_continuations: u8) -> usize {
+            let fx = Fixture::new();
+            let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+            for _ in 0..5 {
+                model
+                    .steps
+                    .lock()
+                    .unwrap()
+                    .push_back(ModelStep::Answer(SampleResponse {
+                        blocks: vec![SampleBlock::Text("more".to_string())],
+                        input_tokens: Some(10),
+                        output_tokens: Some(1),
+                        truncated: true,
+                    }));
+            }
+            let conv = &mut Conversation::new();
+            let events = fx.events.clone();
+            let outcome = RunLoop::new(
+                exec,
+                policy,
+                hooks,
+                model,
+                approvals,
+                plans,
+                compactor,
+                RunConfig {
+                    model_name: "test".to_string(),
+                    context_window: 200_000,
+                    max_output_tokens: 100,
+                    max_tool_rounds: 8,
+                    max_continuations,
+                    max_plan_nudges: MAX_PLAN_NUDGES,
+                    max_stop_blocks: MAX_STOP_BLOCKS,
+                    max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                },
+                fx.interrupt.clone(),
+            )
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+            assert_eq!(outcome, StopReason::Completed);
+            conv.snapshot()
+                .iter()
+                .filter(|e| e.text == CONTINUATION_PROMPT)
+                .count()
+        }
+        // Zero disables continuations; one allows exactly one.
+        assert_eq!(reminders_with(0).await, 0);
+        assert_eq!(reminders_with(1).await, 1);
+    }
+
+    #[tokio::test]
     async fn plan_nudges_cap_at_three() {
         let fx = Fixture::new();
         let (exec, policy, hooks, model, approvals, _, compactor) = default_parts();
@@ -2289,6 +2365,10 @@ mod run_loop_tests {
                 context_window: 25_100,
                 max_output_tokens: 100,
                 max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
             },
             fx.interrupt.clone(),
         )

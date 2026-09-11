@@ -132,6 +132,11 @@ pub struct ChildTicket {
     pub task_id: String,
     /// Capability profile of this child.
     pub kind: ChildKind,
+    /// Input text the child works on, carried from the spawn spec so
+    /// factories stop cloning it around the runtime.
+    pub input: String,
+    /// Parent run id for correlation, carried from the spawn spec.
+    pub parent_run_id: String,
     /// Stop signal; child work polls `is_triggered` at safe points.
     pub stop: InterruptHandle,
 }
@@ -251,6 +256,8 @@ impl ChildRuntime {
         let ticket = ChildTicket {
             task_id: id.clone(),
             kind: spec.kind,
+            input: spec.input,
+            parent_run_id: spec.parent_run_id,
             stop: slot.stop.clone(),
         };
         let sink = self.sink.clone();
@@ -377,6 +384,22 @@ mod tests {
         assert_eq!(result.output_tokens, 7);
         let notes = wait_for_notification(&rt, &id).await;
         assert!(notes.iter().any(|n| n.contains(&id)));
+    }
+
+    #[tokio::test]
+    async fn ticket_carries_spec_input_and_parent() {
+        let rt = ChildRuntime::new();
+        let id = rt.spawn_background(spec("summarize this"), |ticket| async move {
+            assert_eq!(ticket.input, "summarize this");
+            assert_eq!(ticket.parent_run_id, "run-1");
+            assert!(ticket.task_id.starts_with("child-"));
+            TaskResult::completed("done", 0)
+        });
+        wait_until_finished(&rt, &id).await;
+        assert_eq!(
+            rt.query(&id).unwrap().result.unwrap().status,
+            TaskStatus::Completed
+        );
     }
 
     #[tokio::test]

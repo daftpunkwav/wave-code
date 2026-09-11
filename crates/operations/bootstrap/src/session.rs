@@ -221,6 +221,10 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
             context_window: provider.context_window(),
             max_output_tokens: provider.max_output_tokens(),
             max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
+            max_continuations: runtime_runner::MAX_CONTINUATIONS,
+            max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
+            max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
+            max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
         },
         interrupt.clone(),
     ));

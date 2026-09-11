@@ -1,34 +1,40 @@
-//! wavecode-mcp — Model Context Protocol 双向支持（P9 接口边界）。
+//! wavecode-mcp — two-way Model Context Protocol support (P9 interface boundary).
 //!
-//! - 客户端：stdio 与 streamable-http（含 OAuth）transport，外部工具以
-//!   `mcp__{server}__{tool}` 命名空间注入工具注册表；
-//! - 服务端：把 WaveCode 自身能力暴露为 MCP server，供其他 agent /
-//!   IDE 调用。
+//! - Client: stdio and streamable-http (incl. OAuth) transports, with external
+//!   tools injected into the tool registry under the `mcp__{server}__{tool}`
+//!   namespace;
+//! - Server: exposes WaveCode's own capabilities as an MCP server for other
+//!   agents / IDEs to call.
 //!
-//! **P9 范围（诚实声明）**：本 crate 只定义接口边界——[`McpClient`] /
-//! [`McpServerHandler`] trait、工具与 prompt 的数据类型、命名约定、
-//! [`McpServerConfig`] 配置类型。**不实现真实 transport**：stdio /
-//! streamable-http 连接为后续迭代（实现时对齐 rmcp 官方 crate 的能力面，
-//! 本 trait 面按 MCP 协议的 `tools/list`、`tools/call`、`prompts/list`
-//! 方法设计，避免对接时返工；resources / 通知等其余协议面留待需要时
-//! 扩展）。工具桥接（MCP 工具 → wavecode `Tool`）与配置解析的编排在
-//! core 侧（core→mcp 边由 SPEC §3 矩阵允许；mcp 自身无 workspace 内
-//! 依赖）。
+//! **P9 scope (honest disclosure)**: this crate only defines the interface
+//! boundary — the [`McpClient`] / [`McpServerHandler`] traits, the tool and
+//! prompt data types, the naming convention, and the [`McpServerConfig`]
+//! config type. **No real transports**: stdio / streamable-http connections
+//! land in a later iteration (then aligned with the official rmcp crate's
+//! capability surface; this trait surface is designed against the MCP
+//! protocol's `tools/list`, `tools/call`, and `prompts/list` methods to avoid
+//! rework at integration time, while the remaining protocol surface —
+//! resources, notifications, etc. — extends on demand). Bridging MCP tools
+//! into wavecode `Tool`s and config-parsing orchestration live on the core
+//! side (the core->mcp edge is allowed by the SPEC section 3 matrix; mcp
+//! itself has no workspace-internal dependencies).
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 
-/// MCP 工具注入注册表时的命名前缀（SPEC §10）：完整工具名为
-/// `mcp__{server}__{tool}`，与内置工具天然不冲突。
+/// Name prefix for MCP tools injected into the registry (SPEC section 10):
+/// the full tool name is `mcp__{server}__{tool}`, which never collides with
+/// builtin tools.
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
 
-/// server 名与 tool 名之间的分隔符（[`parse_tool_name`] 按首个分隔符
-/// 拆分——tool 名自身含 `__` 不影响往返，server 名则不得含 `__`，
-/// 由装配层（core 配置转换）校验）。
+/// Separator between the server name and the tool name ([`parse_tool_name`]
+/// splits on the first separator — a tool name containing `__` survives the
+/// round trip, while a server name must not contain `__`, enforced by the
+/// assembly layer (core config translation)).
 pub const NAME_SEPARATOR: &str = "__";
 
-/// 拼接注册表工具名：`mcp__{server}__{tool}`。
+/// Assemble a registry tool name: `mcp__{server}__{tool}`.
 pub fn tool_name(server: &str, tool: &str) -> String {
     format!("{MCP_TOOL_PREFIX}{server}{NAME_SEPARATOR}{tool}")
 }
@@ -52,8 +58,9 @@ pub fn try_tool_name(server: &str, tool: &str) -> Option<String> {
     Some(tool_name(server, tool))
 }
 
-/// 拆分注册表工具名 → `(server, tool)`；非 `mcp__` 前缀、缺分隔符或
-/// 任一段为空均返回 `None`。
+/// Split a registry tool name into `(server, tool)`; returns `None` for a
+/// missing `mcp__` prefix, a missing separator, or an empty segment on either
+/// side.
 pub fn parse_tool_name(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix(MCP_TOOL_PREFIX)?;
     let (server, tool) = rest.split_once(NAME_SEPARATOR)?;
@@ -63,17 +70,21 @@ pub fn parse_tool_name(name: &str) -> Option<(&str, &str)> {
     Some((server, tool))
 }
 
-/// MCP server 暴露的工具定义（对齐协议 `tools/list` 结果项）。
+/// A tool definition exposed by an MCP server (mirrors a protocol
+/// `tools/list` result item).
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpToolDef {
-    /// server 侧原始工具名（**不含** `mcp__` 前缀；`call_tool` 用此名）。
+    /// Original server-side tool name (**without** the `mcp__` prefix;
+    /// `call_tool` uses this name).
     pub name: String,
-    /// 能力描述（协议中可选；桥接层缺省时给回退文案）。
+    /// Capability description (optional in the protocol; the bridge layer
+    /// falls back to placeholder text when missing).
     pub description: Option<String>,
-    /// 参数的 JSON Schema（`inputSchema`，注入采样请求）。
+    /// Parameter JSON Schema (`inputSchema`, injected into sampling requests).
     pub input_schema: Value,
-    /// 服务端 `annotations.readOnlyHint`：为 true 时桥接工具标只读。
-    /// 缺省 false（未知副作用一律按写入处理，走审批面）。
+    /// Server-side `annotations.readOnlyHint`: bridged tools are marked
+    /// read-only when true. Defaults to false (unknown side effects are
+    /// always treated as writes and go through approvals).
     pub read_only_hint: bool,
 }
 
@@ -85,110 +96,125 @@ impl McpToolDef {
     }
 }
 
-/// MCP 工具调用结果（对齐协议 `tools/call` 结果）。
+/// An MCP tool call result (mirrors a protocol `tools/call` result).
 ///
-/// 首版为扁平文本形态：协议的 content 块数组（text / image / resource）
-/// 在真实 transport 落地时再结构化，桥接层届时把多块拼接进 `content`。
+/// The first version is flat text: the protocol's content-block array (text /
+/// image / resource) becomes structured when the real transport lands, at
+/// which point the bridge layer splices the blocks into `content`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpToolOutput {
-    /// 人类可读输出（回灌模型）。
+    /// Human-readable output (fed back to the model).
     pub content: String,
-    /// 业务失败标记（协议 `isError`；与 transport/协议级故障区分——后者
-    /// 走 [`McpError`]）。
+    /// Business-failure flag (protocol `isError`; distinct from
+    /// transport/protocol-level failures, which travel as [`McpError`]).
     pub is_error: bool,
 }
 
-/// MCP prompt 的参数定义（协议 `prompts/list` 的 `arguments` 项）。
+/// A parameter definition for an MCP prompt (an `arguments` item of protocol
+/// `prompts/list`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpPromptArgument {
-    /// 参数名。
+    /// Parameter name.
     pub name: String,
-    /// 参数描述（可选）。
+    /// Parameter description (optional).
     pub description: Option<String>,
-    /// 是否必填。
+    /// Whether it is required.
     pub required: bool,
 }
 
-/// MCP server 暴露的 prompt 定义（对齐协议 `prompts/list` 结果项）。
+/// A prompt definition exposed by an MCP server (mirrors a protocol
+/// `prompts/list` result item).
 ///
-/// SPEC §10 要求 prompt 自动转换为 inline skill：转换需 `prompts/get`
-/// 拉取内容，依赖真实 transport，随后续迭代在 core 侧接线（skills crate
-/// 已落地 `SkillSource::Mcp` 来源占位）。
+/// SPEC section 10 requires prompts to auto-convert into inline skills: the
+/// conversion needs `prompts/get` content fetches, which depend on a real
+/// transport and wire up on the core side in a later iteration (the skills
+/// crate already carries the `SkillSource::Mcp` source placeholder).
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpPromptDef {
-    /// prompt 名。
+    /// Prompt name.
     pub name: String,
-    /// 描述（可选）。
+    /// Description (optional).
     pub description: Option<String>,
-    /// 参数清单。
+    /// Parameter list.
     pub arguments: Vec<McpPromptArgument>,
 }
 
-/// MCP 客户端错误。
+/// MCP client errors.
 ///
-/// 仅 transport / 协议级故障走 `Err`；工具业务失败由 server 经
-/// [`McpToolOutput::is_error`] 表达，实现不得把业务失败包装为 `Err`
-///（与 wavecode `Tool::execute` 的错误契约对齐）。
+/// Only transport / protocol-level failures travel as `Err`; tool business
+/// failures are expressed by the server via [`McpToolOutput::is_error`], and
+/// implementations must not wrap business failures as `Err` (aligned with the
+/// wavecode `Tool::execute` error contract).
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
-    /// transport 层故障（连接断开、进程退出、HTTP 错误、超时等）。
-    #[error("MCP transport 错误: {0}")]
+    /// Transport-layer failure (dropped connection, exited process, HTTP
+    /// error, timeout, …).
+    #[error("MCP transport error: {0}")]
     Transport(String),
-    /// 协议层故障（初始化握手失败、响应无法解析、server 返回 JSON-RPC
-    /// 错误等）。
-    #[error("MCP 协议错误: {0}")]
+    /// Protocol-layer failure (failed init handshake, unparseable response,
+    /// server-returned JSON-RPC error, …).
+    #[error("MCP protocol error: {0}")]
     Protocol(String),
 }
 
-/// MCP 客户端：与一个外部 MCP server 的会话面。
+/// MCP client: the session surface to one external MCP server.
 ///
-/// 方法对齐协议能力面（`tools/list` / `tools/call` / `prompts/list`）；
-/// 对象安全 + Send + Sync，桥接层以 `Arc<dyn McpClient>` 持有。
+/// Methods mirror the protocol capability surface (`tools/list` /
+/// `tools/call` / `prompts/list`); object-safe + Send + Sync, held by the
+/// bridge layer as `Arc<dyn McpClient>`.
 ///
-/// **实现状态**：stdio 实现为装配侧 `StdioMcpClient`（子进程 +
-/// `transport-mcp` 成帧）；streamable-http 仍为后续迭代。P9 的验证面是
-/// mock 实现（见装配侧 `McpToolBridge` 的测试）。连接失败的指数退避重连
-/// （SPEC §10）属 transport 实现细节，不进 trait 面。
+/// **Implementation status**: the stdio implementation is the assembly-side
+/// `StdioMcpClient` (child process + `transport-mcp` framing);
+/// streamable-http remains a later iteration. P9's verification surface is a
+/// mock (see the assembly-side `McpToolBridge` tests). Exponential-backoff
+/// reconnects on connection failure (SPEC section 10) are a transport
+/// implementation detail and stay out of the trait surface.
 #[async_trait::async_trait]
 pub trait McpClient: Send + Sync {
-    /// 列出 server 暴露的全部工具（`tools/list`）。
+    /// List every tool the server exposes (`tools/list`).
     async fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError>;
-    /// 调用工具（`tools/call`；`name` 为 server 侧原始名，不含
-    /// `mcp__{server}__` 前缀——前缀只是注册表命名空间）。
+    /// Call a tool (`tools/call`; `name` is the server-side original, without
+    /// the `mcp__{server}__` prefix — the prefix is only a registry namespace).
     async fn call_tool(&self, name: &str, input: Value) -> Result<McpToolOutput, McpError>;
-    /// 列出 server 暴露的 prompt（`prompts/list`）。可选能力：server
-    /// 不支持 prompts 时默认实现返回空清单。
+    /// List the prompts the server exposes (`prompts/list`). Optional
+    /// capability: the default impl returns an empty list when the server
+    /// does not support prompts.
     async fn list_prompts(&self) -> Result<Vec<McpPromptDef>, McpError> {
         Ok(vec![])
     }
 }
 
-/// MCP server 配置（SPEC §13 `[mcp_servers.<name>]` 段的两种形态）。
+/// MCP server config (the two shapes of the SPEC section 13
+/// `[mcp_servers.<name>]` section).
 ///
-/// 与 config crate 原始表的转换在 core 侧（config 无 workspace 内依赖，
-/// 只做原始解析；二选一校验见 core 的 `servers_from_config`）。
+/// Conversion from the config crate's raw tables happens on the core side (the
+/// config crate has no workspace-internal dependencies and only does raw
+/// parsing; either-or validation lives in core's `servers_from_config`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpServerConfig {
-    /// stdio transport：spawn 子进程，经标准输入输出收发 JSON-RPC。
+    /// stdio transport: spawn a child process, exchanging JSON-RPC over
+    /// standard input/output.
     Stdio {
-        /// 可执行命令（如 `npx`）。
+        /// Executable command (e.g. `npx`).
         command: String,
-        /// 命令参数。
+        /// Command arguments.
         args: Vec<String>,
-        /// 追加注入子进程的环境变量（在继承环境之上覆盖）。
+        /// Extra environment variables injected into the child process
+        /// (overriding the inherited environment).
         env: HashMap<String, String>,
     },
-    /// streamable-http transport（含 OAuth 2.0 + PKCE，SPEC §10）。
+    /// streamable-http transport (incl. OAuth 2.0 + PKCE, SPEC section 10).
     Http {
-        /// server endpoint URL。
+        /// Server endpoint URL.
         url: String,
-        /// 追加的请求头（如 Authorization 占位；OAuth 落地前手工配置）。
+        /// Extra request headers (e.g. a manually configured Authorization
+        /// placeholder until OAuth lands).
         headers: HashMap<String, String>,
     },
 }
 
 impl McpServerConfig {
-    /// transport 类型名（`/mcp` 状态展示与诊断用）。
+    /// Transport kind name (for `/mcp` status display and diagnostics).
     pub fn transport_kind(&self) -> &'static str {
         match self {
             Self::Stdio { .. } => "stdio",
@@ -223,8 +249,9 @@ impl McpServerConfig {
         }
     }
 
-    /// 单行摘要（`/mcp` 展示面）：stdio 为 command + args 拼接，http 为
-    /// URL。env / headers 不展示（可能含敏感值）。
+    /// One-line summary (the `/mcp` display surface): command + args joined
+    /// for stdio, the URL for http. env / headers never display (they may
+    /// hold secrets).
     pub fn summary(&self) -> String {
         match self {
             Self::Stdio { command, args, .. } => {
@@ -240,20 +267,23 @@ impl McpServerConfig {
     }
 }
 
-/// MCP 服务端占位 trait（SPEC §10 服务端：`wavecode mcp serve` 经 stdio
-/// 暴露 WaveCode 工具集与会话能力，供 IDE / 其他 agent 调用）。
+/// MCP server-side placeholder trait (SPEC section 10 server: `wavecode mcp
+/// serve` exposes WaveCode's tool set and session capabilities over stdio for
+/// IDEs / other agents to call).
 ///
-/// **实现状态**：P10 之后实现——届时把 Registry 的工具面适配为本 trait
-/// 的实现，再经 rmcp 的 server 端暴露；鉴权（默认仅本机、client 白名单）
-/// 在 serve 装配层完成，不进 trait 面。方法面与 [`McpClient`] 镜像是
-/// 刻意的：同一协议的两个方向。
+/// **Implementation status**: lands after P10 — the Registry's tool surface is
+/// then adapted into an impl of this trait and exposed via rmcp's server side;
+/// auth (localhost-only by default, client allowlist) is completed at the
+/// serve assembly layer and stays out of the trait surface. The mirrored
+/// method surface with [`McpClient`] is deliberate: two directions of one
+/// protocol.
 #[async_trait::async_trait]
 pub trait McpServerHandler: Send + Sync {
-    /// 回应 `tools/list`。
+    /// Answer `tools/list`.
     async fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError>;
-    /// 回应 `tools/call`。
+    /// Answer `tools/call`.
     async fn call_tool(&self, name: &str, input: Value) -> Result<McpToolOutput, McpError>;
-    /// 回应 `prompts/list`（可选能力，默认空清单）。
+    /// Answer `prompts/list` (optional capability, empty list by default).
     async fn list_prompts(&self) -> Result<Vec<McpPromptDef>, McpError> {
         Ok(vec![])
     }
@@ -263,7 +293,8 @@ pub trait McpServerHandler: Send + Sync {
 mod tests {
     use super::*;
 
-    /// 命名拼接与拆分往返；tool 名含 `__` 不破坏往返（按首个分隔符拆）。
+    /// Name assembly and split round-trip; a tool name containing `__` does
+    /// not break the round trip (split on the first separator).
     #[test]
     fn tool_name_roundtrip() {
         assert_eq!(tool_name("playwright", "click"), "mcp__playwright__click");
@@ -274,11 +305,12 @@ mod tests {
         assert_eq!(
             parse_tool_name("mcp__srv__a__b"),
             Some(("srv", "a__b")),
-            "tool 段含分隔符时按首个分隔符拆分，server 段不受影响"
+            "tool segments holding the separator split on the first one; the server segment is unaffected"
         );
     }
 
-    /// 拆分拒绝非法形态：无前缀 / 缺分隔符 / server 或 tool 段为空。
+    /// Splitting rejects malformed shapes: no prefix / missing separator /
+    /// empty server or tool segment.
     #[test]
     fn parse_tool_name_rejects_invalid() {
         assert_eq!(parse_tool_name("read_file"), None);
@@ -288,7 +320,8 @@ mod tests {
         assert_eq!(parse_tool_name(""), None);
     }
 
-    /// 配置类型：transport 类型名与单行摘要（env / headers 不进摘要）。
+    /// Config types: transport kind names and one-line summaries (env /
+    /// headers stay out of the summary).
     #[test]
     fn server_config_kind_and_summary() {
         let stdio = McpServerConfig::Stdio {

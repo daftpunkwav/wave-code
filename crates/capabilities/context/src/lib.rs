@@ -1,16 +1,22 @@
-//! wavecode-context — 上下文管理管线（单一实现，策略可插拔）。
+//! wavecode-context — context-management pipeline (one implementation, pluggable policy).
 //!
-//! 单一管线三个阶段（SPEC §6）：
-//! 1. **核算**：优先使用 provider 回传的 usage（`input_tokens` 已是覆盖完整
-//!    历史的权威值）；无 usage（首个 turn / 压缩后未再采样）时回退
-//!    [`estimate_tokens`] 字符估算。
-//! 2. **三级阈值**（[`Thresholds`]，按窗口比例参数化，默认值对齐 SPEC §6）：
-//!    警告线 window-20k / 自动压缩线 window-13k / 阻塞线 window-3k。
-//! 3. **压缩**：[`CompactionStrategy`] trait 抽象（可替换），首版实现
-//!    [`ModelSummary`]（一次模型调用生成五要素结构化摘要）；新历史 =
-//!    摘要消息 + 最近 N 条原文，经 [`normalize_history`] 保证配对完整。
+//! One pipeline in three stages (SPEC section 6):
+//! 1. **Accounting**: prefer the provider-returned usage (`input_tokens`
+//!    already authoritatively covers the full history); with no usage (first
+//!    turn / not yet re-sampled after compaction) fall back to the
+//!    [`estimate_tokens`] character estimate.
+//! 2. **Three-level thresholds** ([`Thresholds`], parameterized by window
+//!    proportion, defaults aligned with SPEC section 6): warn line at
+//!    window-20k / auto-compact line at window-13k / blocking line at
+//!    window-3k.
+//! 3. **Compaction**: abstracted behind the [`CompactionStrategy`] trait
+//!    (replaceable); the first implementation is [`ModelSummary`] (a
+//!    five-element structured summary from one model call); the new history =
+//!    summary message + the most recent N verbatim messages, with
+//!    [`normalize_history`] guaranteeing pairing integrity.
 //!
-//! 本 crate 只依赖 `wavecode-llm`（SPEC §3 矩阵）；触发时序由 core 编排。
+//! This crate depends only on `wavecode-llm` (SPEC section 3 matrix); trigger
+//! timing is orchestrated by core.
 
 use std::sync::Arc;
 
@@ -18,23 +24,29 @@ use futures::StreamExt;
 use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, Message, Role, StreamEvent};
 
 // ---------------------------------------------------------------------------
-// token 核算
+// token accounting
 // ---------------------------------------------------------------------------
 
-/// 字符估算比率的默认值（字符/token）。
+/// Default value of the character-estimate ratio (chars/token).
 pub const DEFAULT_CHARS_PER_TOKEN: usize = 4;
 
-/// 系统提示词与工具清单的固定开销定额（SPEC §6 "预计系统开销"）。
-/// 粗略定额：系统提示词模板 ~百级 token + 内置工具 schema ~1–2k token；
-/// 只在估算路径（无 usage）参与，usage 路径的 input_tokens 已含全部开销。
+/// Fixed overhead quota for the system prompt and tool manifest (SPEC section 6
+/// "expected system overhead").
+/// Rough quota: the system-prompt template runs ~hundreds of tokens plus the
+/// builtin tool schemas at ~1-2k tokens; it only participates on the estimate
+/// path (no usage) — the usage path's input_tokens already includes all
+/// overhead.
 pub const SYSTEM_OVERHEAD_TOKENS: u64 = 2_000;
 
-/// 历史消息的 token 估算（无 provider usage 时的回退路径）。
+/// Token estimate for the history messages (fallback path when no provider
+/// usage is available).
 ///
-/// 误差边界（须知晓，勿当权威值）：英文/代码文本 ~4 字符/token（±20%）；
-/// 中文 ~1.5–2 字符/token，本估算对中文历史可低估约一半。因此三级阈值的
-/// 触发以 usage 为准，估算只用于"还从未拿到 usage"的窗口（首个 turn、
-/// 压缩后未再采样），误差由阈值的 margin 量级（≥3k）兜底。
+/// Error bounds (know them; never treat this as authoritative): English/code
+/// text runs ~4 chars/token (±20%); CJK text runs ~1.5-2 chars/token, so this
+/// estimate may undercount CJK history by about half. The three-level
+/// thresholds therefore trigger off usage; the estimate only serves windows
+/// that never produced usage yet (first turn, unsampled after compaction),
+/// with the thresholds' margin scale (>= 3k) absorbing the error.
 pub fn estimate_tokens(messages: &[Message], chars_per_token: usize) -> u64 {
     let ratio = chars_per_token.max(1) as u64;
     let mut chars = 0u64;
@@ -49,7 +61,7 @@ pub fn estimate_tokens(messages: &[Message], chars_per_token: usize) -> u64 {
             };
         }
     }
-    // 每条消息的结构开销（role / 块框架）按 ~4 token 定额。
+    // Per-message structural overhead (role / block framing) at a flat ~4 tokens.
     chars / ratio + 4 * messages.len() as u64
 }
 
@@ -82,34 +94,37 @@ pub fn resolve_used_tokens(
 }
 
 // ---------------------------------------------------------------------------
-// 三级阈值
+// three-level thresholds
 // ---------------------------------------------------------------------------
 
-/// 预算水位（[`Thresholds::check`] 的判定结果，逐级加深）。
+/// Budget water level (the verdict of [`Thresholds::check`], deepening stepwise).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BudgetLevel {
-    /// 充裕。
+    /// Comfortable.
     Ok,
-    /// 警告线：`used ≥ window - warning_margin`——提示"接近上限"。
+    /// Warn line: `used >= window - warning_margin` — "nearing the limit".
     Warning,
-    /// 自动压缩线：`used ≥ window - auto_compact_margin`——触发压缩。
+    /// Auto-compact line: `used >= window - auto_compact_margin` — compact now.
     AutoCompact,
-    /// 阻塞线：`used ≥ window - blocking_margin`——强制先压缩再采样。
+    /// Blocking line: `used >= window - blocking_margin` — compact before sampling.
     Blocking,
 }
 
-/// 三级阈值（SPEC §6，默认值对齐 Claude Code 实测值）。
+/// Three-level thresholds (SPEC section 6, defaults aligned with measured
+/// Claude Code values).
 ///
-/// 以"距窗口上沿的 margin"参数化而非比例浮点数：20k/13k/3k 是 token 量纲
-/// 的实测经验值，不同窗口大小下直接平移即可；如需按窗口比例配置，由
-/// 调用方（配置层）换算成本结构体的 margin。
+/// Parameterized as "margins below the top of the window" rather than ratio
+/// floats: 20k/13k/3k are measured token-scale experience values that shift
+/// directly across window sizes; window-proportional configuration, if ever
+/// needed, is converted into this struct's margins by the caller (the config
+/// layer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Thresholds {
-    /// 警告线 margin（默认 20_000）。
+    /// Warn-line margin (default 20_000).
     pub warning_margin: u64,
-    /// 自动压缩线 margin（默认 13_000）。
+    /// Auto-compact-line margin (default 13_000).
     pub auto_compact_margin: u64,
-    /// 阻塞线 margin（默认 3_000）。
+    /// Blocking-line margin (default 3_000).
     pub blocking_margin: u64,
 }
 
@@ -124,10 +139,11 @@ impl Default for Thresholds {
 }
 
 impl Thresholds {
-    /// 判定 `used / window` 所处的水位（取最深一级）。
+    /// Judge which water level `used / window` sits at (deepest level wins).
     ///
-    /// `window` 小于 margin 时按 saturating 处理（水位线压到 0，即任何
-    /// 占用都触发最深级别）——配置错误宁可过度压缩，不可静默越窗。
+    /// When `window` is smaller than a margin, saturating arithmetic pins that
+    /// waterline at 0 (any usage triggers the deepest level) — a misconfigured
+    /// window over-compacts rather than silently overflowing.
     pub fn check(&self, used: u64, window: u64) -> BudgetLevel {
         if used >= window.saturating_sub(self.blocking_margin) {
             BudgetLevel::Blocking
@@ -164,25 +180,28 @@ impl Thresholds {
 }
 
 // ---------------------------------------------------------------------------
-// 压缩
+// compaction
 // ---------------------------------------------------------------------------
 
-/// 压缩后保留的最近原文消息条数默认值（SPEC §6 "默认 10"）。
+/// Default count of most-recent verbatim messages kept after compaction (SPEC
+/// section 6 "default 10").
 pub const DEFAULT_KEEP_RECENT: usize = 10;
 
-/// 摘要调用的默认输出预算（max_tokens）。
+/// Default output budget (max_tokens) for summary calls.
 pub const DEFAULT_SUMMARY_MAX_TOKENS: u32 = 4096;
 
-/// 上下文管线配置（core 的 SessionConfig 内嵌一份，构造后冻结）。
+/// Context pipeline config (core embeds one in SessionConfig, frozen after
+/// construction).
 #[derive(Debug, Clone)]
 pub struct ContextConfig {
-    /// 三级阈值。
+    /// Three-level thresholds.
     pub thresholds: Thresholds,
-    /// 压缩后保留的最近原文消息条数。
+    /// Count of most-recent verbatim messages kept after compaction.
     pub keep_recent: usize,
-    /// 摘要调用的输出预算（max_tokens）。
+    /// Output budget (max_tokens) for summary calls.
     pub summary_max_tokens: u32,
-    /// 无 usage 回退估算的字符/token 比率（误差边界见 [`estimate_tokens`]）。
+    /// Chars/token ratio for the no-usage fallback estimate (error bounds, see
+    /// [`estimate_tokens`]).
     pub estimate_chars_per_token: usize,
 }
 
@@ -209,56 +228,63 @@ impl ContextConfig {
     }
 }
 
-/// crate 统一错误类型。
+/// Crate-wide error type.
 #[derive(Debug, thiserror::Error)]
 pub enum ContextError {
-    /// 摘要模型调用或流消费失败。
-    #[error("摘要模型调用失败: {0}")]
+    /// Summary model call or stream consumption failed.
+    #[error("summary model call failed: {0}")]
     Model(#[from] wavecode_llm::LlmError),
-    /// 摘要模型未产出任何文本（畸形流 / 空响应）。
-    #[error("摘要模型未产出文本")]
+    /// The summary model produced no text (malformed stream / empty response).
+    #[error("summary model produced no text")]
     EmptySummary,
 }
 
-/// crate 统一 Result 别名。
+/// Crate-wide Result alias.
 pub type Result<T> = std::result::Result<T, ContextError>;
 
-/// 压缩策略抽象（SPEC §6：`summarize(history, budget) -> summary`）。
+/// Compaction strategy abstraction (SPEC section 6:
+/// `summarize(history, budget) -> summary`).
 ///
-/// 策略可替换（本地摘要 / 更强模型摘要等），但触发管线只有一条（core
-/// 编排：阈值线 / reactive compact / `/compact` 共用同一入口）。
+/// Strategies are replaceable (local summary / stronger-model summary, …),
+/// but there is exactly one trigger pipeline (core orchestration: the
+/// threshold line / reactive compact / `/compact` share one entry point).
 #[async_trait::async_trait]
 pub trait CompactionStrategy: Send + Sync {
-    /// 对 `history` 生成结构化摘要；`budget` 为摘要调用的输出 token 预算。
+    /// Produce a structured summary of `history`; `budget` is the summary
+    /// call's output token budget.
     async fn summarize(&self, history: &[Message], budget: u32) -> Result<String>;
 }
 
-/// 摘要请求的 system prompt（与主会话区分；测试 mock 可据此分流脚本）。
+/// System prompt for summary requests (kept distinct from the main session;
+/// test mocks use it to route scripted responses).
 const SUMMARY_SYSTEM: &str =
     "You are a context compaction assistant producing structured conversation summaries.";
 
-/// 摘要指令（追加在历史末尾的 user 消息）：五要素标题原样锁定——
-/// 目标 / 进展 / 关键决策 / 文件清单 / 待办（SPEC §6 / DEV-PLAN P3 验收锚点）。
+/// Summary instruction (a user message appended at the end of history): the
+/// five element titles are pinned verbatim — Goal / Progress / Key decisions /
+/// File inventory / Todo (SPEC section 6 / DEV-PLAN P3 acceptance anchor).
 const SUMMARY_INSTRUCTION: &str = "\
-以上是编程 agent 与用户的对话历史。请压缩为结构化摘要，必须原样包含以下五节标题：
-## 目标 —— 用户的总体目标与当前任务
-## 进展 —— 已完成的工作、当前进行到哪一步
-## 关键决策 —— 已确认的技术选型、方案与约束（含理由）
-## 文件清单 —— 已创建 / 修改 / 读取的关键文件路径及其状态
-## 待办 —— 尚未完成的事项与下一步
-要求：保留具体文件名、路径、命令与错误信息；只输出摘要本身，不要寒暄。";
+The above is the conversation history between a coding agent and the user. Compress it into a structured summary that contains the following five section titles verbatim:
+## Goal — the user's overall objective and current task
+## Progress — work completed and where things currently stand
+## Key decisions — confirmed technical choices, plans, and constraints (with reasons)
+## File inventory — key files created / modified / read, with their status
+## Todo — unfinished items and next steps
+Requirements: keep concrete filenames, paths, commands, and error messages; output only the summary itself, no pleasantries.";
 
-/// 摘要消息正文的前缀（user 角色的 meta 消息，标注其后历史的口径）。
-pub const SUMMARY_MESSAGE_PREFIX: &str = "[上下文压缩] 早前对话已压缩为以下摘要：";
+pub const SUMMARY_MESSAGE_PREFIX: &str =
+    "[context compaction] earlier conversation compacted into the summary below:";
 
-/// 首版压缩策略：用当前模型的一次调用生成五要素结构化摘要。
+/// First-version compaction strategy: a five-element structured summary from
+/// one call to the current model.
 pub struct ModelSummary {
     model: Arc<dyn ChatModel>,
     model_name: String,
 }
 
 impl ModelSummary {
-    /// `model` 复用主会话模型通道（压缩与主会话同模型，SPEC §6 首版）。
+    /// `model` reuses the main session's model channel (compaction uses the
+    /// same model as the main session, SPEC section 6 first version).
     pub fn new(model: Arc<dyn ChatModel>, model_name: String) -> Self {
         Self { model, model_name }
     }
@@ -295,23 +321,28 @@ impl CompactionStrategy for ModelSummary {
     }
 }
 
-/// 压缩产物。
+/// Compaction product.
 #[derive(Debug)]
 pub struct CompactOutcome {
-    /// 压缩后的新历史（摘要消息 + 最近 N 条原文，已 normalize）。
+    /// New post-compaction history (summary message + most recent N verbatim
+    /// messages, normalized).
     pub messages: Vec<Message>,
-    /// 摘要正文（不含 [`SUMMARY_MESSAGE_PREFIX`]）。
+    /// Summary body (excluding [`SUMMARY_MESSAGE_PREFIX`]).
     pub summary: String,
 }
 
-/// 压缩管线唯一入口（core 的三类触发共用）：
-/// 摘要消息 + 最近 `cfg.keep_recent` 条原文组成新历史。
+/// The compaction pipeline's single entry point (shared by core's three
+/// trigger kinds): the summary message plus the most recent
+/// `cfg.keep_recent` verbatim messages form the new history.
 ///
-/// 截断边界的配对处理策略（二选一，本实现选**剔除孤儿**）：
-/// 从后往前取 N 条时，若窗口首条是 tool_result user 消息，其配对
-/// assistant tool_use 已被丢弃——向前扩展到 user 文本边界会把更多原文
-/// （往往是大段 tool 输出）留在窗口内，条数不可控，违背压缩目的；改为交
-/// 由 [`normalize_history`] 剔除孤儿块，被丢弃部分的信息由摘要承接。
+/// Pairing policy at the truncation boundary (two options; this implementation
+/// picks **drop orphans**): when taking N messages from the back, a window
+/// whose first message is a tool_result user message has lost its paired
+/// assistant tool_use — extending forward to a user-text boundary would keep
+/// more verbatim history (often large tool outputs) inside the window, making
+/// the message count uncontrollable and defeating compaction; instead
+/// [`normalize_history`] drops the orphan blocks, and the summary carries the
+/// dropped part's information.
 pub async fn compact_history(
     history: &[Message],
     strategy: &dyn CompactionStrategy,
@@ -332,25 +363,30 @@ pub async fn compact_history(
 }
 
 // ---------------------------------------------------------------------------
-// 历史 normalize 与配对检查
+// history normalize and pairing checks
 // ---------------------------------------------------------------------------
 
-/// 孤儿 tool_use 补全结果的回灌文案（is_error，模型可据此重试或放弃）。
+/// Backfill text for orphan tool_use completions (is_error — the model can
+/// retry or give up from it).
 const MISSING_RESULT_CONTENT: &str = "tool result unavailable (history normalized)";
 
-/// 历史 normalize（压缩 / 恢复路径共用的独立纯函数，100% 可单测）：
-/// 1. 移除空 content 消息（被中断的空消息等，Anthropic 拒绝空 content 数组）；
-/// 2. 孤儿 tool_use（assistant 声明了调用但无配对 tool_result）：按声明序补
-///    is_error 结果（对齐 Anthropic "tool_use 必有配对 tool_result" 约束）；
-/// 3. 孤儿 tool_result（无配对 tool_use，典型来源是压缩截断）：剔除该块，
-///    消息变空则整条移除；同一 user 消息中的其他块（文本等）保留。
+/// History normalize (a standalone pure function shared by the compaction /
+/// restore paths, 100% unit-tested):
+/// 1. Drop empty-content messages (interrupted empty messages, … — Anthropic
+///    rejects empty content arrays);
+/// 2. Orphan tool_use (an assistant declared a call with no paired
+///    tool_result): backfill is_error results in declaration order (matching
+///    Anthropic's "every tool_use needs a paired tool_result" constraint);
+/// 3. Orphan tool_result (no paired tool_use, typically from a compaction cut):
+///    drop the block, removing the whole message if it goes empty; other
+///    blocks (text, …) in the same user message are kept.
 pub fn normalize_history(history: &[Message]) -> Vec<Message> {
     let mut out: Vec<Message> = Vec::with_capacity(history.len());
     let mut i = 0;
     while i < history.len() {
         let m = &history[i];
         if m.content.is_empty() {
-            i += 1; // 规则 1：空 content 消息移除
+            i += 1; // Rule 1: drop empty-content messages.
             continue;
         }
         let tool_use_ids: Vec<&str> = if m.role == Role::Assistant {
@@ -366,7 +402,8 @@ pub fn normalize_history(history: &[Message]) -> Vec<Message> {
         };
         if !tool_use_ids.is_empty() {
             out.push(m.clone());
-            // 紧随的 user 消息提供配对结果（按声明序逐 id 匹配）。
+            // The immediately following user message supplies the paired
+            // results (matched per id, in declaration order).
             let next = history.get(i + 1).filter(|n| n.role == Role::User);
             let mut results = Vec::with_capacity(tool_use_ids.len());
             for id in &tool_use_ids {
@@ -386,7 +423,8 @@ pub fn normalize_history(history: &[Message]) -> Vec<Message> {
                 content: results,
             });
             if let Some(n) = next {
-                // next 中未消费的块：孤儿 ToolResult 剔除（规则 3），其余保留。
+                // Unconsumed blocks in next: orphan ToolResults dropped (rule
+                // 3), everything else kept.
                 let rest: Vec<ContentBlock> = n
                     .content
                     .iter()
@@ -405,7 +443,8 @@ pub fn normalize_history(history: &[Message]) -> Vec<Message> {
             }
             continue;
         }
-        // 规则 3：user 消息中的孤儿 ToolResult 块剔除，其余块保留。
+        // Rule 3: drop orphan ToolResult blocks in user messages, keep the
+        // remaining blocks.
         if m.role == Role::User
             && m.content
                 .iter()
@@ -432,12 +471,13 @@ pub fn normalize_history(history: &[Message]) -> Vec<Message> {
     out
 }
 
-/// 配对完整性检查（压缩 / 恢复路径的测试断言复用）：
-/// 返回全部违例描述，空 Vec = 配对完整。
+/// Pairing integrity check (shared by the compaction / restore paths' test
+/// assertions): returns every violation description; an empty Vec means the
+/// pairing is intact.
 ///
-/// 约束（Anthropic）：assistant 的每个 tool_use 必须在紧随的 user 消息中
-/// 有同 id 的 tool_result；user 消息中的每个 tool_result 必须配对前一条
-/// assistant 消息中的 tool_use。
+/// Constraints (Anthropic): every assistant tool_use must have a same-id
+/// tool_result in the immediately following user message; every tool_result in
+/// a user message must pair with a tool_use in the previous assistant message.
 pub fn find_pairing_violations(history: &[Message]) -> Vec<String> {
     let mut violations = Vec::new();
     for (i, m) in history.iter().enumerate() {
@@ -462,7 +502,7 @@ pub fn find_pairing_violations(history: &[Message]) -> Vec<String> {
                         )
                     });
                     if !paired {
-                        violations.push(format!("消息[{i}] 的 tool_use({id}) 无配对 tool_result"));
+                        violations.push(format!("message[{i}] tool_use({id}) has no paired tool_result"));
                     }
                 }
             }
@@ -486,7 +526,7 @@ pub fn find_pairing_violations(history: &[Message]) -> Vec<String> {
                         && !prev_ids.contains(&tool_use_id.as_str())
                     {
                         violations.push(format!(
-                            "消息[{i}] 的 tool_result({tool_use_id}) 无配对 tool_use"
+                            "message[{i}] tool_result({tool_use_id}) has no paired tool_use"
                         ));
                     }
                 }
@@ -543,33 +583,33 @@ mod tests {
         }
     }
 
-    // --- 核算 ---
+    // --- accounting ---
 
     #[test]
     fn estimate_tokens_scales_with_chars_and_ratio() {
         let history = vec![user_text(&"x".repeat(400))];
         let est4 = estimate_tokens(&history, 4);
         let est2 = estimate_tokens(&history, 2);
-        assert_eq!(est4, 100 + 4, "400 字符 / 4 + 1 条消息结构开销");
+        assert_eq!(est4, 100 + 4, "400 chars / 4 + one message of structural overhead");
         assert_eq!(est2, 200 + 4);
         assert_eq!(estimate_tokens(&[], 4), 0);
-        // ratio 防零：按 1 处理不 panic
+        // Zero-proof ratio: treated as 1, never panics.
         assert!(estimate_tokens(&history, 0) > 0);
     }
 
-    // --- 三级阈值边界 ---
+    // --- three-level threshold edges ---
 
     #[test]
     fn threshold_boundaries() {
         let t = Thresholds::default();
         let w = 200_000u64;
-        // 警告线：window - 20k = 180_000
+        // Warn line: window - 20k = 180_000.
         assert_eq!(t.check(179_999, w), BudgetLevel::Ok);
         assert_eq!(t.check(180_000, w), BudgetLevel::Warning);
-        // 自动压缩线：window - 13k = 187_000
+        // Auto-compact line: window - 13k = 187_000.
         assert_eq!(t.check(186_999, w), BudgetLevel::Warning);
         assert_eq!(t.check(187_000, w), BudgetLevel::AutoCompact);
-        // 阻塞线：window - 3k = 197_000
+        // Blocking line: window - 3k = 197_000.
         assert_eq!(t.check(196_999, w), BudgetLevel::AutoCompact);
         assert_eq!(t.check(197_000, w), BudgetLevel::Blocking);
         assert_eq!(t.check(200_000, w), BudgetLevel::Blocking);
@@ -578,9 +618,11 @@ mod tests {
     #[test]
     fn threshold_saturates_when_window_smaller_than_margin() {
         let t = Thresholds::default();
-        // 窗口 2k < blocking_margin 3k：任何占用都阻塞（宁过度压缩不越窗）
+        // 2k window < 3k blocking_margin: any usage blocks (over-compact
+        // rather than overflow the window).
         assert_eq!(t.check(1, 2_000), BudgetLevel::Blocking);
-        // 窗口 10k：介于 13k 与 3k 之间——警告/自动线压到 0，阻塞线 7k
+        // 10k window: between 13k and 3k — warn/auto lines pin at 0, blocking
+        // line at 7k.
         assert_eq!(t.check(100, 10_000), BudgetLevel::AutoCompact);
         assert_eq!(t.check(7_000, 10_000), BudgetLevel::Blocking);
     }
@@ -604,9 +646,10 @@ mod tests {
 
     #[test]
     fn normalize_completes_orphan_tool_use_with_error_result() {
-        // assistant 声明了两个调用，user 只回了一个，且夹带文本
+        // The assistant declared two calls; the user answered only one, with
+        // extra text attached.
         let history = vec![
-            user_text("干活"),
+            user_text("get to work"),
             Message {
                 role: Role::Assistant,
                 content: vec![
@@ -631,14 +674,15 @@ mod tests {
                         is_error: false,
                     },
                     ContentBlock::Text {
-                        text: "补充说明".into(),
+                        text: "extra note".into(),
                     },
                 ],
             },
         ];
         let out = normalize_history(&history);
         assert!(find_pairing_violations(&out).is_empty());
-        // 配对消息：t1 用原结果，t2 补 is_error
+        // Paired message: t1 keeps its original result, t2 gets an is_error
+        // backfill.
         let pair = &out[2];
         assert_eq!(pair.role, Role::User);
         let contents: Vec<(&str, bool)> = pair
@@ -654,14 +698,14 @@ mod tests {
             })
             .collect();
         assert_eq!(contents, vec![("t1", false), ("t2", true)]);
-        // 文本块保留为独立 user 消息
-        assert!(matches!(&out[3].content[0], ContentBlock::Text { text } if text == "补充说明"));
+        // The text block survives as a standalone user message.
+        assert!(matches!(&out[3].content[0], ContentBlock::Text { text } if text == "extra note"));
     }
 
     #[test]
     fn normalize_drops_orphan_tool_results() {
         let history = vec![
-            tool_result("ghost", false), // 无配对 tool_use（如压缩截断的窗口头）
+            tool_result("ghost", false), // No paired tool_use (e.g. a compaction-cut window head).
             Message {
                 role: Role::User,
                 content: vec![
@@ -671,7 +715,7 @@ mod tests {
                         is_error: false,
                     },
                     ContentBlock::Text {
-                        text: "保留文本".into(),
+                        text: "kept text".into(),
                     },
                 ],
             },
@@ -679,26 +723,26 @@ mod tests {
         ];
         let out = normalize_history(&history);
         assert!(find_pairing_violations(&out).is_empty());
-        assert_eq!(out.len(), 2, "整条孤儿消息移除、混合消息只剩文本块");
-        assert!(matches!(&out[0].content[0], ContentBlock::Text { text } if text == "保留文本"));
+        assert_eq!(out.len(), 2, "wholly orphaned messages removed, mixed ones keep only text");
+        assert!(matches!(&out[0].content[0], ContentBlock::Text { text } if text == "kept text"));
     }
 
     #[test]
     fn normalize_is_idempotent_on_wellformed_history() {
         let history = vec![
-            user_text("读文件"),
+            user_text("read the file"),
             tool_use("t1"),
             tool_result("t1", false),
-            assistant_text("读完了"),
+            assistant_text("done reading"),
         ];
         let out = normalize_history(&history);
-        assert_eq!(out, history, "配对完整的历史原样通过");
+        assert_eq!(out, history, "fully paired history passes through untouched");
         assert!(find_pairing_violations(&out).is_empty());
     }
 
-    // --- 压缩（含信息保留率验收锚点） ---
+    // --- compaction (incl. the retention acceptance anchor) ---
 
-    /// 脚本化 mock：回放预排事件序列。
+    /// Scripted mock: replays a pre-arranged event sequence.
     struct MockModel {
         scripts: Vec<Vec<StreamEvent>>,
         calls: Mutex<u32>,
@@ -710,13 +754,14 @@ mod tests {
             &self,
             req: ChatRequest,
         ) -> wavecode_llm::Result<wavecode_llm::EventStream> {
-            // 摘要请求断言：历史完整透传 + 五要素指令 + 无工具 + 预算生效
+            // Summary-request assertions: full history passed through + the
+            // five-element instruction + no tools + the budget applied.
             assert_eq!(req.system, SUMMARY_SYSTEM);
             assert!(req.tools.is_empty());
             assert_eq!(req.max_tokens, 777);
-            let last = req.messages.last().expect("摘要指令已追加");
+            let last = req.messages.last().expect("summary instruction appended");
             assert!(
-                matches!(&last.content[0], ContentBlock::Text { text } if text.contains("## 目标") && text.contains("## 待办"))
+                matches!(&last.content[0], ContentBlock::Text { text } if text.contains("## Goal") && text.contains("## Todo"))
             );
             let mut n = self.calls.lock().unwrap();
             let idx = (*n as usize).min(self.scripts.len() - 1);
@@ -727,19 +772,19 @@ mod tests {
         }
     }
 
-    /// 含五要素的脚本化摘要响应。
+    /// Scripted summary response carrying all five elements.
     fn scripted_summary() -> Vec<StreamEvent> {
         let summary = "\
-## 目标
-搭建电商平台后端（Rust workspace）。
-## 进展
-已完成购物车服务与订单骨架，库存扣减进行中。
-## 关键决策
-选用 SQLite 落地首版（理由：零运维）；支付走 mock gateway。
-## 文件清单
-crates/shop/src/cart.rs（已创建）；crates/shop/src/order.rs（已修改）。
-## 待办
-库存并发扣减测试；接入结算流水。";
+## Goal
+Build the shop backend (Rust workspace).
+## Progress
+Cart service and order skeleton done; stock deduction in progress.
+## Key decisions
+SQLite for v1 (reason: zero ops); payments via a mock gateway.
+## File inventory
+crates/shop/src/cart.rs (created); crates/shop/src/order.rs (modified).
+## Todo
+Concurrent stock-deduction test; settlement ledger integration.";
         vec![
             StreamEvent::TextDelta {
                 text: summary.into(),
@@ -754,26 +799,29 @@ crates/shop/src/cart.rs（已创建）；crates/shop/src/order.rs（已修改）
         ]
     }
 
-    /// 构造含五要素信息 + 工具配对的长会话历史（16 条）。
+    /// A long session history (16 messages) with five-element content + tool
+    /// pairing.
     fn long_history() -> Vec<Message> {
         let mut h = vec![
-            user_text("目标：搭建电商平台后端，先做购物车。"),
-            assistant_text("关键决策：首版用 SQLite，零运维。"),
+            user_text("Goal: build the shop backend, cart first."),
+            assistant_text("Key decision: SQLite for v1, zero ops."),
             tool_use("t1"),
             tool_result("t1", false),
-            assistant_text("已创建 crates/shop/src/cart.rs。"),
+            assistant_text("Created crates/shop/src/cart.rs."),
             tool_use("t2"),
             tool_result("t2", false),
-            assistant_text("订单骨架完成，待办：库存并发扣减测试。"),
+            assistant_text("Order skeleton done; todo: concurrent stock-deduction test."),
         ];
-        // 补足长度（>keep_recent），内容与五要素无关的中间过程
+        // Pad the length (> keep_recent) with mid-process content unrelated to
+        // the five elements.
         for i in 0..8 {
-            h.push(user_text(&format!("中间过程 {i}")));
+            h.push(user_text(&format!("filler step {i}")));
         }
         h
     }
 
-    /// P3 验收锚点：压缩信息保留率——摘要逐项含五要素，最近 N 条原文保留。
+    /// P3 acceptance anchor: compaction retention — the summary carries each
+    /// of the five elements, and the most recent N verbatim messages survive.
     #[tokio::test]
     async fn compact_retains_five_elements_and_recent_tail() {
         let history = long_history();
@@ -790,42 +838,44 @@ crates/shop/src/cart.rs（已创建）；crates/shop/src/order.rs（已修改）
         };
         let outcome = compact_history(&history, &strategy, &cfg).await.unwrap();
 
-        // 摘要消息在首位（user meta），逐项含五要素
+        // The summary message comes first (user meta), carrying each element.
         let first = &outcome.messages[0];
         assert_eq!(first.role, Role::User);
         let ContentBlock::Text { text } = &first.content[0] else {
-            panic!("首条应为摘要文本消息")
+            panic!("first message should be the summary text message")
         };
         assert!(text.starts_with(SUMMARY_MESSAGE_PREFIX));
-        for element in ["目标", "进展", "关键决策", "文件清单", "待办"] {
-            assert!(text.contains(element), "摘要缺要素「{element}」: {text}");
+        for element in ["Goal", "Progress", "Key decisions", "File inventory", "Todo"] {
+            assert!(text.contains(element), "summary missing element \"{element}\": {text}");
         }
 
-        // 最近 4 条原文完整保留（与源历史逐条相等）
+        // The most recent 4 verbatim messages survive intact (message by
+        // message equal to the source history).
         assert_eq!(outcome.messages.len(), 1 + 4);
         assert_eq!(
             &outcome.messages[1..],
             &history[tail_start..],
-            "最近 N 条原文应逐条保留"
+            "most recent N verbatim messages should survive message by message"
         );
 
-        // 配对完整性（验收锚点复用断言函数）
+        // Pairing integrity (reuses the assertion helper as an anchor).
         assert_eq!(
             find_pairing_violations(&outcome.messages),
             Vec::<String>::new()
         );
     }
 
-    /// 截断边界：窗口首条是 tool_result（配对 assistant 被丢弃）→ 孤儿剔除。
+    /// Cut boundary: a window whose first message is a tool_result (its paired
+    /// assistant dropped) -> orphan dropped.
     #[tokio::test]
     async fn compact_drops_orphan_at_cut_boundary() {
         let mut history = vec![
-            user_text("开头"),
+            user_text("start"),
             tool_use("t9"),
-            tool_result("t9", false), // keep_recent=2 时它会成为窗口首条
-            assistant_text("结尾"),
+            tool_result("t9", false), // Becomes the window head at keep_recent=2.
+            assistant_text("end"),
         ];
-        history.extend_from_slice(&[user_text("最后")]);
+        history.extend_from_slice(&[user_text("final")]);
         let model = Arc::new(MockModel {
             scripts: vec![scripted_summary()],
             calls: Mutex::new(0),
@@ -836,25 +886,26 @@ crates/shop/src/cart.rs（已创建）；crates/shop/src/order.rs（已修改）
             summary_max_tokens: 777,
             ..Default::default()
         };
-        // 窗口 = [tool_result("t9"), assistant_text("结尾")]——首条孤儿
+        // Window = [tool_result("t9"), assistant_text("end")] — orphaned head.
         let outcome = compact_history(&history[..4], &strategy, &cfg)
             .await
             .unwrap();
         assert_eq!(
             find_pairing_violations(&outcome.messages),
             Vec::<String>::new(),
-            "压缩后历史不得有孤儿: {:?}",
+            "compacted history must have no orphans: {:?}",
             outcome.messages
         );
         assert!(
             !outcome.messages.iter().any(|m| m.content.iter().any(
                 |b| matches!(b, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "t9")
             )),
-            "孤儿 tool_result 应被剔除"
+            "orphan tool_result should be dropped"
         );
     }
 
-    /// 摘要模型空响应 → EmptySummary 错误（不得静默以空摘要替换历史）。
+    /// An empty summary-model response is an EmptySummary error (never silently
+    /// swap history for an empty summary).
     #[tokio::test]
     async fn empty_summary_is_an_error() {
         let model = Arc::new(MockModel {

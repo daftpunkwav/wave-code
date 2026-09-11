@@ -230,9 +230,10 @@ mod tests {
 
     #[test]
     fn truncation_respects_char_boundaries() {
-        // Four CJK characters: byte cut would split one, char cut will not.
-        let cut = truncate_to_budget("甲乙丙丁戊", 4);
-        assert_eq!(cut, "甲乙丙丁...[truncated]");
+        // Five multibyte characters: a byte cut would split one, a char cut
+        // will not.
+        let cut = truncate_to_budget("äääää", 4);
+        assert_eq!(cut, "ääää...[truncated]");
         assert_eq!(truncate_to_budget("short", 10), "short");
     }
 

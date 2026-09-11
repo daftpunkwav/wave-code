@@ -5,12 +5,15 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-# PermissionMode / ApprovalKind 是 protocol 线型（SPEC §3 矩阵已补录此边）
+# PermissionMode / ApprovalKind are protocol types (the SPEC section 3 matrix
+# already records this edge).
 wavecode-protocol = { path = "../../foundation/protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-# 工具名分类锁定测试对照 tools 内置集（capabilities 生产边互不依赖，无法
-# 编译期绑定工具名——以 dev-dep 测试锁定，工具改名/新增时测试失败）
+# The tool-name classification lock test mirrors the tools builtin set
+# (capabilities production sides do not depend on each other, so tool names
+# cannot be bound at compile time — locked by a dev-dep test instead, which
+# fails when a tool is renamed or added).
 wavecode-tools = { path = "../tools" }

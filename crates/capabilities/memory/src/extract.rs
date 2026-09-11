@@ -1,25 +1,30 @@
-//! 自动提取产出的解析（SPEC §7.2 简化首版）。
+//! Auto-extract output parsing (SPEC section 7.2, simplified first version).
 //!
-//! 提取子代理被要求按下面的线格式输出候选条目（见 core 侧的提取
-//! preamble）；本模块把输出解析回 `(类别, 内容)` 列表，纯函数可单测。
-//! 模型输出不可信：未知标签、空条目、标签前的闲聊一律丢弃——提取是
-//! 尽力而为的后台任务，解析不出即不写入（core 侧失败静默记 warning）。
+//! Extracting subagents are asked to emit candidate entries in the line format
+//! below (see the core-side extraction preamble); this module parses that
+//! output back into a `(category, content)` list as a pure, unit-testable
+//! function. Model output is untrusted: unknown tags, empty entries, and
+//! chatter before the tags are all dropped — extraction is a best-effort
+//! background task, and unparseable output simply means nothing is written
+//! (the core side logs a silent warning on failure).
 //!
 //! ```text
-//! [user] 偏好紧凑回复
-//! [project] 仓库用 pnpm 管理
-//! 多行内容直到下一个 [category] 标签或 EOF
+//! [user] prefers compact replies
+//! [project] repo uses pnpm
+//! multi-line content runs until the next [category] tag or EOF
 //! ```
 
 use crate::store::MemoryCategory;
 
-/// 解析提取产出：`[user]` / `[feedback]` / `[project]` / `[reference]`
-/// 标签行开始一个条目（标签与内容可同行，也可独占一行），后续行至
-/// 下一标签或 EOF 为条目内容；标签前的内容忽略。`NONE` / 空输出 /
-/// 无合法标签 → 空列表。
+/// Parse extraction output: a `[user]` / `[feedback]` / `[project]` /
+/// `[reference]` tag line starts an entry (tag and content may share one line,
+/// or the tag may stand alone); following lines up to the next tag or EOF form
+/// the entry body. Content before the tags is ignored. `NONE` / empty output /
+/// no valid tags -> empty list.
 ///
-/// 已知边界：末条标签之后的闲聊会并入末条条目（与多行内容无法区分）——
-/// 提取 preamble 要求子代理只输出条目行，见 core 侧提取流程。
+/// Known limitation: chatter after the last tag merges into the last entry
+/// (indistinguishable from multi-line content) — the extraction preamble asks
+/// subagents to emit entry lines only; see the core-side extraction flow.
 pub fn parse_extracted_entries(text: &str) -> Vec<(MemoryCategory, String)> {
     let mut entries = Vec::new();
     let mut current: Option<(MemoryCategory, String)> = None;
@@ -29,7 +34,8 @@ pub fn parse_extracted_entries(text: &str) -> Vec<(MemoryCategory, String)> {
                 if let Some((cat, content)) = current.take() {
                     push_entry(&mut entries, cat, &content);
                 }
-                // 同行内容先占首行（带换行，与后续续行保持分隔一致）。
+                // Same-line content takes the first row (with a newline, keeping
+                // the same separation as following continuation rows).
                 let initial = if inline.is_empty() {
                     String::new()
                 } else {
@@ -51,7 +57,8 @@ pub fn parse_extracted_entries(text: &str) -> Vec<(MemoryCategory, String)> {
     entries
 }
 
-/// 条目落库前的统一闸门：去首尾空白，空内容丢弃。
+/// Single gate before persisting an entry: trim surrounding whitespace and
+/// drop empty content.
 fn push_entry(
     entries: &mut Vec<(MemoryCategory, String)>,
     category: MemoryCategory,
@@ -63,8 +70,9 @@ fn push_entry(
     }
 }
 
-/// 解析标签行：`[category]` 起始，返回（类别， 标签后同行的内容）。
-/// 标签后须为行尾或空白（防 `[userx]` 误命中）；非标签行返回 None。
+/// Parse a tag line: starts with `[category]`, returns (category, same-line
+/// content after the tag). The tag must be followed by end-of-line or
+/// whitespace (so `[userx]` never matches); non-tag lines return None.
 fn parse_tag_line(line: &str) -> Option<(MemoryCategory, &str)> {
     let trimmed = line.trim_start();
     for category in MemoryCategory::ALL {
@@ -82,31 +90,37 @@ fn parse_tag_line(line: &str) -> Option<(MemoryCategory, &str)> {
 mod tests {
     use super::*;
 
-    /// 基本解析：多类别、标签同行内容、续行内容、标签前闲聊忽略。
+    /// Basic parsing: multiple categories, same-line and continuation content,
+    /// pre-tag chatter ignored.
     #[test]
     fn parses_tagged_entries() {
-        let output = "好的，以下是我提炼的记忆：\n[user] 偏好紧凑回复\n[project] 仓库用 pnpm 管理\n不要引入 yarn\n[feedback] 不要重构未坏代码";
+        let output = "Sure, here are the memories I distilled:\n[user] prefers compact replies\n[project] repo uses pnpm\nnever introduce yarn\n[feedback] do not refactor working code";
         let entries = parse_extracted_entries(output);
         assert_eq!(
             entries,
             vec![
-                (MemoryCategory::User, "偏好紧凑回复".to_owned()),
+                (MemoryCategory::User, "prefers compact replies".to_owned()),
                 (
                     MemoryCategory::Project,
-                    "仓库用 pnpm 管理\n不要引入 yarn".to_owned()
+                    "repo uses pnpm\nnever introduce yarn".to_owned()
                 ),
-                (MemoryCategory::Feedback, "不要重构未坏代码".to_owned()),
+                (
+                    MemoryCategory::Feedback,
+                    "do not refactor working code".to_owned()
+                ),
             ]
         );
     }
 
-    /// 空输出 / NONE / 无合法标签 / 空条目 → 空列表（不写入）。
+    /// Empty output / NONE / no valid tags / empty entries -> empty list
+    /// (nothing written).
     #[test]
     fn no_entries_for_none_or_garbage() {
         assert!(parse_extracted_entries("").is_empty());
         assert!(parse_extracted_entries("NONE").is_empty());
-        assert!(parse_extracted_entries("没什么值得记的。").is_empty());
-        // 空条目（标签后无内容）丢弃；未知标签不是条目起始。
+        assert!(parse_extracted_entries("nothing worth remembering.").is_empty());
+        // Empty entries (no content after the tag) are dropped; unknown tags
+        // never start an entry.
         assert!(parse_extracted_entries("[user]\n[project]  ").is_empty());
         assert!(parse_extracted_entries("[unknown] x").is_empty());
     }

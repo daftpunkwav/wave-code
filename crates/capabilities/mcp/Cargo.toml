@@ -5,8 +5,9 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-# P9 接口边界：无 workspace 内依赖（SPEC §3 矩阵 mcp 行为空）；
-# 真实 stdio/http transport（rmcp）留待后续迭代引入。
+# P9 interface boundary: no workspace-internal dependencies (the SPEC section 3
+# matrix leaves the mcp row empty); real stdio/http transports (rmcp) arrive in
+# a later iteration.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

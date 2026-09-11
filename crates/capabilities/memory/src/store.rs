@@ -1,34 +1,37 @@
-//! 持久记忆存储（SPEC §7.2）：`~/.wavecode/memories/` 下的 `MEMORY.md`
-//! 索引 + 四类条目文件，Markdown 条目式（`- ` 列表项）。
+//! Persistent memory storage (SPEC section 7.2): a `MEMORY.md` index plus
+//! four category entry files under `~/.wavecode/memories/`, in Markdown
+//! bullet form (`- ` list items).
 //!
-//! 纯逻辑、同步 IO：写入是单条追加（小文件），由 core 的 `memory_write`
-//! 工具经 `spawn_blocking` 调用；读取发生在启动装配（一次性）。全部内容
-//! 对用户透明可见、可直接编辑——本模块只做追加，不做整合（SPEC 的 24h+5
-//! 会话门控整合为首版简化，见 crate 级文档）。
+//! Pure logic with sync IO: writes are single-entry appends (small files),
+//! called by core's `memory_write` tool via `spawn_blocking`; reads happen
+//! once at startup assembly. Everything is transparent to the user and
+//! directly editable — this module only appends and never consolidates (the
+//! SPEC 24h+5-session gated consolidation is a first-version simplification,
+//! see the crate-level docs).
 
 use std::path::{Path, PathBuf};
 
-/// 索引文件名（记忆目录根下）。
+/// Index filename (at the memory root).
 pub const INDEX_FILE: &str = "MEMORY.md";
 
-/// 记忆类别（SPEC §7.2 四类）。
+/// Memory category (SPEC section 7.2, four kinds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryCategory {
-    /// 用户画像（偏好、习惯、角色）。
+    /// User profile (preferences, habits, role).
     User,
-    /// 反馈与纠正（用户明确的"以后这样做/不要这样做"）。
+    /// Feedback and corrections (the user's explicit "do this / never do that").
     Feedback,
-    /// 项目知识（仓库约定、架构决策、环境事实）。
+    /// Project knowledge (repo conventions, architecture decisions, env facts).
     Project,
-    /// 外部参考（文档链接、外部系统要点）。
+    /// External references (doc links, external-system notes).
     Reference,
 }
 
 impl MemoryCategory {
-    /// 全部类别（序固定，索引分组与测试遍历用）。
+    /// All categories (fixed order, used for index grouping and test traversal).
     pub const ALL: [Self; 4] = [Self::User, Self::Feedback, Self::Project, Self::Reference];
 
-    /// 类别名（`memory_write` 工具参数 / 提取产出的标签词）。
+    /// Category name (the `memory_write` tool parameter / extraction tag word).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -38,7 +41,8 @@ impl MemoryCategory {
         }
     }
 
-    /// 解析类别名；非法值返回 None（调用方转业务失败输出）。
+    /// Parse a category name; invalid values return None (callers turn them
+    /// into business-failure output).
     /// Surrounding whitespace is trimmed before matching, so raw tool
     /// input like `" user "` still resolves (model output is untrusted).
     pub fn parse(raw: &str) -> Option<Self> {
@@ -46,7 +50,7 @@ impl MemoryCategory {
         Self::ALL.into_iter().find(|c| c.as_str() == normalized)
     }
 
-    /// 类别条目文件名。
+    /// Category entry filename.
     pub fn file_name(self) -> &'static str {
         match self {
             Self::User => "user.md",
@@ -57,32 +61,35 @@ impl MemoryCategory {
     }
 }
 
-/// 持久记忆存储：根目录下的索引 + 类别文件。根目录可注入（测试用
-/// tempfile；生产为 `~/.wavecode/memories/`）。
+/// Persistent memory store: an index plus category files under a root. The root
+/// is injectable (tests use tempfile; production uses `~/.wavecode/memories/`).
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
     root: PathBuf,
 }
 
 impl MemoryStore {
-    /// 以指定根目录构造（不创建目录，首次写入时创建）。
+    /// Build with an explicit root (directories are created on first write,
+    /// not here).
     pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
-    /// 默认根目录：`<home>/.wavecode/memories`。
+    /// Default root: `<home>/.wavecode/memories`.
     pub fn default_root(home: &Path) -> PathBuf {
         home.join(".wavecode").join("memories")
     }
 
-    /// 存储根目录。
+    /// Storage root.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// 追加一条记忆：条目写入类别文件（`- ` 列表项，多行内容缩进续行
-    /// 保持在同一列表项内），索引追加一行 `- [category] 摘要`。
-    /// 摘要取内容首行，截断 80 字符——索引是导航，正文在类别文件。
+    /// Append one memory: the entry goes to the category file (a `- ` list
+    /// item; multi-line content keeps continuation lines indented inside the
+    /// same item), and the index gains one `- [category] summary` row.
+    /// The summary is the content's first line truncated to 80 chars — the
+    /// index is for navigation, the body lives in the category file.
     /// Blank content is rejected with an `InvalidInput` error before any
     /// directory or file is created, so junk `- ` bullets never pollute
     /// the category file or the index.
@@ -100,15 +107,15 @@ impl MemoryStore {
         append_line(
             &self.root.join(INDEX_FILE),
             &format!(
-                "- [{}] {summary}（详见 {}）",
+                "- [{}] {summary} (see {})",
                 category.as_str(),
                 category.file_name()
             ),
         )
     }
 
-    /// 读取索引全文；索引不存在返回空串（首次使用无记忆是正常形态，
-    /// 不作为错误）。
+    /// Read the whole index; a missing index returns an empty string (first
+    /// use with no memories is a normal state, not an error).
     pub fn read_index(&self) -> std::io::Result<String> {
         match std::fs::read_to_string(self.root.join(INDEX_FILE)) {
             Ok(content) => Ok(content),
@@ -117,7 +124,8 @@ impl MemoryStore {
         }
     }
 
-    /// 读取某类别条目全文（按需加载；不存在返回空串，语义同上）。
+    /// Read one category's entries (loaded on demand; missing files return an
+    /// empty string, same semantics as above).
     pub fn read_category(&self, category: MemoryCategory) -> std::io::Result<String> {
         match std::fs::read_to_string(self.root.join(category.file_name())) {
             Ok(content) => Ok(content),
@@ -127,15 +135,16 @@ impl MemoryStore {
     }
 }
 
-/// 条目格式化：`- ` 列表项；多行内容的后续行缩进两格，保持在同一
-/// Markdown 列表项内。
+/// Entry formatting: a `- ` list item; continuation lines of multi-line
+/// content are indented two spaces to stay inside the same Markdown item.
 fn format_entry(content: &str) -> String {
     let mut out = String::from("- ");
     out.push_str(&content.trim().replace('\n', "\n  "));
     out
 }
 
-/// 索引摘要：内容首行，按字符截断 80（截断处补省略号）。
+/// Index summary: the content's first line, truncated to 80 chars by character
+/// count (an ellipsis marks the cut).
 fn summarize(content: &str) -> String {
     let first_line = content.trim().lines().next().unwrap_or_default();
     const MAX: usize = 80;
@@ -148,7 +157,7 @@ fn summarize(content: &str) -> String {
     }
 }
 
-/// 追加一行到文件末尾（文件不存在则创建）。
+/// Append one line at the end of a file (creating the file if needed).
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -162,50 +171,53 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// 追加 → 类别文件与索引同步更新；二次追加累加（跨会话召回的
-    /// 存储侧基础）。
+    /// Append -> category file and index update together; a second append
+    /// accumulates (the storage-side basis for cross-session recall).
     #[test]
     fn append_updates_category_file_and_index() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memories"));
 
-        store.append(MemoryCategory::User, "偏好紧凑回复").unwrap();
-        store
-            .append(MemoryCategory::Project, "仓库用 pnpm 管理")
-            .unwrap();
-        store.append(MemoryCategory::User, "长期使用 Rust").unwrap();
+        store.append(MemoryCategory::User, "prefers compact replies").unwrap();
+        store.append(MemoryCategory::Project, "repo uses pnpm").unwrap();
+        store.append(MemoryCategory::User, "long-time Rust user").unwrap();
 
         let user = store.read_category(MemoryCategory::User).unwrap();
-        assert_eq!(user, "- 偏好紧凑回复\n- 长期使用 Rust\n");
+        assert_eq!(user, "- prefers compact replies\n- long-time Rust user\n");
         let project = store.read_category(MemoryCategory::Project).unwrap();
-        assert_eq!(project, "- 仓库用 pnpm 管理\n");
+        assert_eq!(project, "- repo uses pnpm\n");
 
         let index = store.read_index().unwrap();
         let lines: Vec<&str> = index.lines().collect();
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "- [user] 偏好紧凑回复（详见 user.md）");
-        assert_eq!(lines[1], "- [project] 仓库用 pnpm 管理（详见 project.md）");
-        assert_eq!(lines[2], "- [user] 长期使用 Rust（详见 user.md）");
+        assert_eq!(lines[0], "- [user] prefers compact replies (see user.md)");
+        assert_eq!(lines[1], "- [project] repo uses pnpm (see project.md)");
+        assert_eq!(lines[2], "- [user] long-time Rust user (see user.md)");
     }
 
-    /// 多行内容：续行缩进保持在同一列表项；索引摘要只取首行。
+    /// Multi-line content: continuation lines stay indented in the same item;
+    /// the index summary takes only the first line.
     #[test]
     fn multiline_entry_stays_in_one_bullet() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().to_path_buf());
         store
-            .append(MemoryCategory::Feedback, "不要重构未坏代码\n除非被要求")
+            .append(
+                MemoryCategory::Feedback,
+                "do not refactor working code\nunless asked to",
+            )
             .unwrap();
         assert_eq!(
             store.read_category(MemoryCategory::Feedback).unwrap(),
-            "- 不要重构未坏代码\n  除非被要求\n"
+            "- do not refactor working code\n  unless asked to\n"
         );
         let index = store.read_index().unwrap();
-        assert!(index.contains("- [feedback] 不要重构未坏代码（详见 feedback.md）"));
-        assert!(!index.contains("除非被要求"), "索引摘要只取首行");
+        assert!(index.contains("- [feedback] do not refactor working code (see feedback.md)"));
+        assert!(!index.contains("unless asked to"), "index summary takes only the first line");
     }
 
-    /// 空存储：索引 / 类别文件读取返回空串而非错误（首次使用形态）。
+    /// Empty store: index / category reads return empty strings, not errors
+    /// (the first-use shape).
     #[test]
     fn empty_store_reads_as_empty_string() {
         let dir = tempfile::tempdir().unwrap();
@@ -214,7 +226,7 @@ mod tests {
         assert_eq!(store.read_category(MemoryCategory::Reference).unwrap(), "");
     }
 
-    /// 类别名解析 roundtrip；非法值拒绝。
+    /// Category-name parsing roundtrip; invalid values rejected.
     #[test]
     fn category_parse_roundtrip() {
         for c in MemoryCategory::ALL {
@@ -255,28 +267,30 @@ mod tests {
         );
 
         // The guard only intercepts blanks; valid writes still work.
-        store.append(MemoryCategory::User, "偏好紧凑回复").unwrap();
+        store.append(MemoryCategory::User, "prefers compact replies").unwrap();
         assert_eq!(
             store.read_category(MemoryCategory::User).unwrap(),
-            "- 偏好紧凑回复\n"
+            "- prefers compact replies\n"
         );
     }
 
-    /// 长首行摘要截断 80 字符并补省略号。
+    /// A long first line is truncated to 80 chars with an ellipsis.
     #[test]
     fn long_summary_truncated() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().to_path_buf());
-        let long = "长".repeat(200);
+        let long = "x".repeat(200);
         store.append(MemoryCategory::User, &long).unwrap();
         let index = store.read_index().unwrap();
         let line = index.trim_end();
-        // 摘要截断 80 字符（79 + 省略号），后接类别文件指引。
-        assert!(line.contains('…'), "截断处应补省略号: {line}");
-        assert!(line.ends_with("（详见 user.md）"));
+        // Summary truncated to 80 chars (79 + ellipsis), followed by the
+        // category-file pointer.
+        assert!(line.contains('…'), "cut should add an ellipsis: {line}");
+        assert!(line.ends_with("(see user.md)"));
         let summary = line
             .trim_start_matches("- [user] ")
-            .trim_end_matches("（详见 user.md）");
+            .trim_end_matches("(see user.md)")
+            .trim_end();
         assert_eq!(summary.chars().count(), 80);
     }
 }

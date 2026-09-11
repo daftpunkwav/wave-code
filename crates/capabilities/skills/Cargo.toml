@@ -6,8 +6,9 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
-# frontmatter 是 YAML（SPEC §8.1），引入 serde_yaml 而非手写解析；
-# 版本在 workspace 根统一（SPEC §3 纪律）。
+# Frontmatter is YAML (SPEC section 8.1), so use serde_yaml instead of a
+# hand-rolled parser; the version is unified at the workspace root
+# (SPEC section 3 discipline).
 serde_yaml.workspace = true
 thiserror.workspace = true
 

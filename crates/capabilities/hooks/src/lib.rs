@@ -1,68 +1,80 @@
-//! wavecode-hooks — 生命周期 hooks 系统（SPEC §9，P7 落地 command 类型）。
+//! wavecode-hooks — lifecycle hooks system (SPEC section 9; P7 lands the command type).
 //!
-//! 事件点：PreToolUse / PostToolUse / UserPromptSubmit / SessionStart /
-//! SessionEnd / Stop / PreCompact / PostCompact（SPEC §9 表；Notification
-//! 事件点本版不实现，留占位）。
+//! Event points: PreToolUse / PostToolUse / UserPromptSubmit / SessionStart /
+//! SessionEnd / Stop / PreCompact / PostCompact (the SPEC section 9 table; the
+//! Notification point is not implemented in this version, left as a placeholder).
 //!
-//! hook 类型：
-//! - `command`（本版实现）：配置 `[hooks.<EventPoint>]` 表（或表数组），
-//!   字段 matcher / command / timeout_ms / once；经平台 shell 执行
-//!   （Windows `cmd /C`、Unix `sh -c`，`WAVECODE_SHELL` 可覆盖——与 shell
-//!   工具同一启发式），事件载荷以 JSON 写 stdin；
-//! - `prompt`（SPEC 定为 M4 后）：以模板调用模型裁决放行/阻塞，本版
-//!   **不实现**，留占位（见 [`HookDef`] 注释）。
+//! Hook types:
+//! - `command` (implemented in this version): a `[hooks.<EventPoint>]` table
+//!   (or table array) config with matcher / command / timeout_ms / once
+//!   fields, executed via the platform shell (Windows `cmd /C`, Unix `sh -c`,
+//!   overridable with `WAVECODE_SHELL` — the same heuristic as the shell
+//!   tool), with the event payload written to stdin as JSON;
+//! - `prompt` (SPEC schedules it post-M4): asks a model to rule allow/block
+//!   from a template; **not implemented** in this version, left as a
+//!   placeholder (see the [`HookDef`] notes).
 //!
-//! 阻塞语义（SPEC §9）：退出码 0 放行；2 阻塞且 stderr 回传模型（仅
-//! 可阻塞事件点：PreToolUse / UserPromptSubmit / Stop；其余事件点退出码 2
-//! 降级为警告放行）；其他非零 = 警告放行；超时强制 kill 记 warning。
+//! Blocking semantics (SPEC section 9): exit code 0 allows; 2 blocks with
+//! stderr fed back to the model (only on blockable points: PreToolUse /
+//! UserPromptSubmit / Stop; exit code 2 on other points degrades to an
+//! allow-with-warning); any other nonzero code allows with a warning; timeouts
+//! force-kill and log a warning.
 //!
-//! 信任边界（与 shell 工具不同）：hook 命令来自用户自己的配置文件，
-//! 属已授权配置而非模型产出，故不做环境变量剔除 / 路径约束。
-//! 配置诊断：[`HookEngine::validate`] 以静态方式指出永不生效的条目
-//! （空命令、空白 matcher、非工具事件点上的 matcher），装配层应在启动期
-//! 浮现一次；[`HookDef::effective_timeout`] 把 `timeout_ms == 0` 归一为
-//! [`DEFAULT_TIMEOUT_MS`]（"未设置"，而非"零等待"）。
+//! Trust boundary (unlike the shell tool): hook commands come from the user's
+//! own config file, so they are authorized configuration rather than
+//! model-produced output — no env-var stripping / path constraints apply.
+//! Config diagnostics: [`HookEngine::validate`] statically flags entries that
+//! can never take effect (empty commands, blank matchers, matchers on
+//! non-tool points); the assembly layer should surface them once at startup.
+//! [`HookDef::effective_timeout`] normalizes `timeout_ms == 0` to
+//! [`DEFAULT_TIMEOUT_MS`] ("unset", not "zero wait").
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// 锁中毒的统一恢复策略（本 crate 单点决策）：once 已触发集合的临界区
-/// 是单次 insert，持锁期间 panic 不会留下半截不变量——中毒时取回守卫
-/// 继续执行（panic 已沿原线程传播），不做二次 panic 级联。
+/// Unified lock-poisoning recovery policy (single decision point for this
+/// crate): the once-fired set's critical section is a single insert, so a
+/// panic while holding the lock leaves no half-written invariant — recover the
+/// guard from the poison and carry on (the panic already propagated on its own
+/// thread), never cascade into a second panic.
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 默认超时（SPEC §9 配置示例）：10s。
+/// Default timeout (SPEC section 9 config example): 10s.
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
-/// 事件点（SPEC §9 表；config 的 `[hooks.<EventPoint>]` 表名与
-/// [`HookEventPoint::parse`] 的合法值一致）。
+/// Event point (SPEC section 9 table; the config `[hooks.<EventPoint>]` table
+/// names match the legal values of [`HookEventPoint::parse`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookEventPoint {
-    /// 工具执行前（可阻塞）：命令审计、前置检查。
+    /// Before tool execution (blockable): command audit, pre-flight checks.
     PreToolUse,
-    /// 工具执行后（不可阻塞）：lint / 格式化回写、通知。
+    /// After tool execution (not blockable): lint / format write-backs,
+    /// notifications.
     PostToolUse,
-    /// 用户输入进入 turn 前（可阻塞）：注入额外上下文、敏感词拦截。
+    /// Before user input enters the turn (blockable): inject extra context,
+    /// sensitive-word interception.
     UserPromptSubmit,
-    /// 会话启动（不可阻塞）：环境初始化。
+    /// Session start (not blockable): environment setup.
     SessionStart,
-    /// 会话结束（不可阻塞）：清理。
+    /// Session end (not blockable): cleanup.
     SessionEnd,
-    /// turn 收尾前（可阻塞）：goal 模式未达成时阻止结束。
+    /// Before the turn winds down (blockable): refuse to finish while goal
+    /// mode is unsatisfied.
     Stop,
-    /// 压缩前（不可阻塞）：留档。
+    /// Before compaction (not blockable): archival.
     PreCompact,
-    /// 压缩后（不可阻塞）：留档。
+    /// After compaction (not blockable): archival.
     PostCompact,
-    // TODO(SPEC §9 表外)：Notification 事件点（系统通知转发）本版不实现。
+    // TODO(SPEC section 9, off-table): the Notification point (system
+    // notification forwarding) is not implemented in this version.
 }
 
 impl HookEventPoint {
-    /// 全部事件点（文档 / 校验用，固定序）。
+    /// All event points (for docs / validation, fixed order).
     pub const ALL: [HookEventPoint; 8] = [
         Self::PreToolUse,
         Self::PostToolUse,
@@ -74,12 +86,13 @@ impl HookEventPoint {
         Self::PostCompact,
     ];
 
-    /// 解析事件点名（config `[hooks.<EventPoint>]` 表名）。
+    /// Parse an event point name (a config `[hooks.<EventPoint>]` table name).
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.as_str() == name)
     }
 
-    /// 事件点名（配置表名 / 载荷与诊断文本共用）。
+    /// Event point name (shared by config table names / payload and
+    /// diagnostics text).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PreToolUse => "PreToolUse",
@@ -93,28 +106,32 @@ impl HookEventPoint {
         }
     }
 
-    /// 是否可阻塞（SPEC §9 表）：可阻塞事件点的退出码 2 阻塞并回传
-    /// stderr；不可阻塞事件点的退出码 2 降级为警告放行。
+    /// Whether blockable (SPEC section 9 table): exit code 2 on a blockable
+    /// point blocks and feeds back stderr; on a non-blockable point it
+    /// degrades to an allow-with-warning.
     pub fn blockable(self) -> bool {
         matches!(self, Self::PreToolUse | Self::UserPromptSubmit | Self::Stop)
     }
 }
 
-/// 单条 hook 定义（`[hooks.<EventPoint>]` 表的一行）。
+/// One hook definition (one row of a `[hooks.<EventPoint>]` table).
 ///
-/// 首版仅 command 类型：本结构即 command hook；prompt 类型（SPEC §9，
-/// 以模板调用模型裁决，M4 后）落地时预期改为带 tag 的枚举
-/// （`type = "command" | "prompt"`），届时 config 线型同步演进。
+/// First version is command-type only: this struct is the command hook; when
+/// the prompt type lands (SPEC section 9, model ruling from a template, post
+/// M4) this is expected to become a tagged enum (`type = "command" |
+/// "prompt"`), with the config surface evolving in step.
 #[derive(Debug, Clone)]
 pub struct HookDef {
-    /// 工具名匹配器（仅工具类事件点有意义）：`|` 分隔多值，`*` 匹配全部；
-    /// None = 不过滤。非工具事件点配了 matcher 的条目永不触发。
+    /// Tool-name matcher (only meaningful on tool-ish points): `|`-separated
+    /// alternatives, `*` matches everything; None = no filtering. Entries
+    /// with a matcher on non-tool points never fire.
     pub matcher: Option<String>,
-    /// shell 命令串（经平台 shell 执行）。
+    /// Shell command string (executed via the platform shell).
     pub command: String,
-    /// 超时（毫秒），超时强制 kill 记 warning。
+    /// Timeout in milliseconds; a timeout force-kills and logs a warning.
     pub timeout_ms: u64,
-    /// 每个会话只触发一次（触发指"实际执行"，matcher 未命中不消耗）。
+    /// Fire at most once per session (firing means "actually executed" — a
+    /// matcher miss does not consume the quota).
     pub once: bool,
 }
 
@@ -134,50 +151,53 @@ impl HookDef {
     }
 }
 
-/// 一次 hook 触发的事件载荷。
+/// An event payload for one hook firing.
 #[derive(Debug, Clone, Copy)]
 pub struct HookInput<'a> {
-    /// hook 进程的工作目录（会话 cwd）。
+    /// Working directory of the hook process (the session cwd).
     pub cwd: &'a Path,
-    /// 工具名（PreToolUse / PostToolUse；其余事件点为 None）。
+    /// Tool name (PreToolUse / PostToolUse; None on all other points).
     pub tool_name: Option<&'a str>,
-    /// 工具输入（PreToolUse / PostToolUse）。
+    /// Tool input (PreToolUse / PostToolUse).
     pub tool_input: Option<&'a serde_json::Value>,
-    /// 工具输出摘要（PostToolUse；其余为 None）。
+    /// Tool output summary (PostToolUse; None elsewhere).
     pub tool_output: Option<&'a str>,
 }
 
-/// hook 执行的裁决。
+/// A hook run's ruling.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum HookVerdict {
-    /// 放行（含无 hook / 全部成功 / 仅警告）。
+    /// Allow (incl. no hooks / all succeeded / warnings only).
     #[default]
     Allow,
-    /// 阻塞：负载为回传模型的 stderr（仅可阻塞事件点产生）。
+    /// Block: payload is the model-facing stderr (only blockable points
+    /// produce this).
     Block(String),
 }
 
-/// 一个事件点的执行报告：裁决 + 警告（非零退出码 / 超时 / spawn 失败）。
+/// An execution report for one event point: the ruling plus warnings (nonzero
+/// exit codes / timeouts / spawn failures).
 #[derive(Debug, Clone, Default)]
 pub struct HookReport {
-    /// 裁决（Allow / Block）。
+    /// Ruling (Allow / Block).
     pub verdict: HookVerdict,
-    /// 警告清单（调用方转 Warning 事件 / 日志）。
+    /// Warning list (callers turn these into Warning events / log lines).
     pub warnings: Vec<String>,
 }
 
-/// hook 引擎：配置表 + once 触发记录。
+/// Hook engine: the config tables plus the once-fired record.
 ///
-/// once 的"每会话一次"以引擎实例为界——会话装配一个引擎（SessionConfig
-/// 持有 `Arc<HookEngine>`），跨会话重建即重置。
+/// Per-session "once" is scoped to the engine instance — a session assembles
+/// one engine (SessionConfig holds an `Arc<HookEngine>`), and rebuilding
+/// across sessions resets it.
 pub struct HookEngine {
     defs: HashMap<HookEventPoint, Vec<HookDef>>,
-    /// 已触发的 once 条目（事件点, 条目序号）。
+    /// Fired once-entries: (point, entry index).
     fired: Mutex<HashSet<(HookEventPoint, usize)>>,
 }
 
 impl HookEngine {
-    /// 以事件点 → 条目表构造。
+    /// Build from point -> entry tables.
     pub fn new(defs: HashMap<HookEventPoint, Vec<HookDef>>) -> Self {
         Self {
             defs,
@@ -185,12 +205,14 @@ impl HookEngine {
         }
     }
 
-    /// 空引擎（任何事件点都无条目）——装配层据此省略挂接。
+    /// Empty engine (no entries on any point) — the assembly layer skips
+    /// wiring when this holds.
     pub fn is_empty(&self) -> bool {
         self.defs.values().all(Vec::is_empty)
     }
 
-    /// 某事件点是否有条目（无条目的点短路，不构造载荷）。
+    /// Whether a point has entries (points without entries short-circuit
+    /// without building a payload).
     pub fn has_hooks(&self, point: HookEventPoint) -> bool {
         self.defs.get(&point).is_some_and(|d| !d.is_empty())
     }
@@ -241,16 +263,18 @@ impl HookEngine {
         out
     }
 
-    /// 触发一个事件点：按配置序逐条执行，汇总警告；可阻塞事件点的首个
-    /// 退出码 2 短路返回 Block（后续条目不再执行——阻塞即终局）。
+    /// Fire one event point: execute entries in config order, collecting
+    /// warnings; the first exit code 2 on a blockable point short-circuits to
+    /// Block (later entries no longer run — a block is final).
     pub async fn run(&self, point: HookEventPoint, input: &HookInput<'_>) -> HookReport {
         let mut report = HookReport::default();
         let Some(defs) = self.defs.get(&point) else {
             return report;
         };
         for (idx, def) in defs.iter().enumerate() {
-            // matcher 过滤：仅工具类事件点可命中；非工具事件点配 matcher
-            // 的条目永不触发（启动期经 [`HookEngine::validate`] 浮现）。
+            // Matcher filtering: only tool-ish points can match; an entry
+            // with a matcher on a non-tool point never fires (surfaced at
+            // startup via [`HookEngine::validate`]).
             if let Some(matcher) = &def.matcher {
                 match input.tool_name {
                     Some(tool) if matcher_matches(matcher, tool) => {}
@@ -268,7 +292,7 @@ impl HookEngine {
                 ));
                 continue;
             }
-            // once：matcher 命中后的"实际执行"才消耗额度。
+            // once: only an "actual execution" past the matcher consumes quota.
             if def.once && !lock(&self.fired).insert((point, idx)) {
                 continue;
             }
@@ -277,17 +301,17 @@ impl HookEngine {
                 ExecOutcome::Blocked(stderr) => {
                     if point.blockable() {
                         report.verdict = HookVerdict::Block(stderr);
-                        return report; // 首个阻塞即短路（阻塞即终局）
+                        return report; // First block short-circuits (a block is final).
                     }
                     report.warnings.push(format!(
-                        "[{}] hook `{}` 退出码 2，但该事件点不可阻塞（按警告放行）",
+                        "[{}] hook `{}` exited with code 2, but this point is not blockable (allowed with warning)",
                         point.as_str(),
                         def.command
                     ));
                 }
                 ExecOutcome::NonZero(code, stderr) => {
                     report.warnings.push(format!(
-                        "[{}] hook `{}` 退出码 {code}（警告放行）: {}",
+                        "[{}] hook `{}` exited with code {code} (allowed with warning): {}",
                         point.as_str(),
                         def.command,
                         one_line(&stderr)
@@ -295,21 +319,23 @@ impl HookEngine {
                 }
                 ExecOutcome::Timeout => {
                     report.warnings.push(format!(
-                        "[{}] hook `{}` 超时（{}ms）已强制终止（kill，按警告放行）",
+                        "[{}] hook `{}` timed out ({}ms), force-killed (allowed with warning)",
                         point.as_str(),
                         def.command,
                         def.effective_timeout().as_millis()
                     ));
                 }
                 ExecOutcome::SpawnFailed(reason) => {
-                    // 进程从未启动 = hook 未实际执行：返还 once 额度，
-                    // 修正配置后本会话内该条目仍可触发（超时视为已执行，
-                    // 额度照常消耗——进程确实跑过）。
+                    // A process that never started means the hook never ran:
+                    // refund the once quota so the entry can still fire later
+                    // this session once the config is fixed (a timeout counts
+                    // as executed — the process really ran — so its quota
+                    // stays consumed).
                     if def.once {
                         lock(&self.fired).remove(&(point, idx));
                     }
                     report.warnings.push(format!(
-                        "[{}] hook `{}` 启动失败（按警告放行）: {reason}",
+                        "[{}] hook `{}` failed to spawn (allowed with warning): {reason}",
                         point.as_str(),
                         def.command
                     ));
@@ -330,7 +356,8 @@ fn is_tool_point(point: HookEventPoint) -> bool {
     )
 }
 
-/// matcher 匹配：`|` 分隔多值（任一命中），`*` 匹配全部，其余精确相等。
+/// Matcher matching: `|`-separated alternatives (any hit), `*` matches
+/// everything, anything else compares exactly.
 fn matcher_matches(matcher: &str, tool: &str) -> bool {
     matcher
         .split('|')
@@ -338,23 +365,24 @@ fn matcher_matches(matcher: &str, tool: &str) -> bool {
         .any(|alt| alt == "*" || alt == tool)
 }
 
-/// 单次执行的结果（内部）。
+/// One execution's result (internal).
 enum ExecOutcome {
-    /// 退出码 0。
+    /// Exit code 0.
     Success,
-    /// 退出码 2：负载 stderr（回传模型的阻塞原因）。
+    /// Exit code 2: payload is the stderr (the model-facing block reason).
     Blocked(String),
-    /// 其他非零退出码：负载 stderr 摘要。
+    /// Other nonzero exit codes: payload is a stderr excerpt.
     NonZero(i32, String),
-    /// 超时已 kill。
+    /// Timed out and killed.
     Timeout,
-    /// spawn 失败（命令不存在等）。
+    /// Spawn failed (missing command, …).
     SpawnFailed(String),
 }
 
-/// 选定 shell 程序与"执行命令串"参数（与 tools 的 shell 工具同一启发式）：
-/// Windows `cmd /C`、Unix `sh -c`；`WAVECODE_SHELL` 覆盖（值含 `cmd` 按
-/// `/C` 处理，否则按 `-c`）。
+/// Pick the shell program and its "run this command string" flag (the same
+/// heuristic as the tools shell tool): Windows `cmd /C`, Unix `sh -c`;
+/// `WAVECODE_SHELL` overrides (a value containing `cmd` uses `/C`, otherwise
+/// `-c`).
 fn shell_invocation() -> (String, &'static str) {
     if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
         if custom.to_lowercase().contains("cmd") {
@@ -369,11 +397,12 @@ fn shell_invocation() -> (String, &'static str) {
     }
 }
 
-/// 执行一条 command hook：平台 shell + stdin 载荷 JSON + 超时 kill。
+/// Run one command hook: platform shell + stdin payload JSON + timeout kill.
 ///
-/// 超时 kill 依赖 `kill_on_drop`：超时分支 drop 掉 `wait_with_output`
-/// future 即 drop child，tokio 发 kill；孙进程回收的已知限制与 shell
-/// 工具相同（进程组级回收待 M2，见 tools/shell_tool.rs 注释）。
+/// Timeout killing relies on `kill_on_drop`: the timeout branch drops the
+/// `wait_with_output` future, which drops the child, and tokio sends the kill;
+/// the known grandchild-reaping limitation matches the shell tool (process-
+/// group-level reaping is M2 work, see the tools/shell_tool.rs notes).
 async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>) -> ExecOutcome {
     let payload = serde_json::json!({
         "event": point.as_str(),
@@ -395,11 +424,14 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         Ok(child) => child,
         Err(e) => return ExecOutcome::SpawnFailed(e.to_string()),
     };
-    // stdin 写载荷后关闭（hook 读 stdin 的场景能见到 EOF）；写失败
-    //（命令不读 stdin 提前退出）不算错误，继续等退出码。
-    // 写入与等待整体纳入超时：write_all 在载荷超过管道缓冲而 hook 进程
-    // 不读 stdin 时会无限阻塞，放在 timeout 之外等于超时保护失效（整个
-    // turn 挂死）。超时 drop future 即 drop child，kill_on_drop 发 kill。
+    // Write the payload to stdin, then close it (hooks that read stdin see
+    // EOF); a write failure (the command exited early without reading stdin)
+    // is not an error — still wait for the exit code.
+    // Writing and waiting are both inside the timeout: write_all can block
+    // forever when the payload exceeds the pipe buffer and the hook process
+    // never reads stdin, so leaving it outside the timeout would void the
+    // timeout guarantee (hanging the whole turn). A timeout drops the future,
+    // which drops the child, and kill_on_drop sends the kill.
     let waited = tokio::time::timeout(def.effective_timeout(), async {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
@@ -410,7 +442,7 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
     })
     .await;
     match waited {
-        Err(_) => ExecOutcome::Timeout, // future drop → kill_on_drop 杀进程
+        Err(_) => ExecOutcome::Timeout, // future dropped -> kill_on_drop kills the process
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -418,14 +450,15 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
                 Some(0) => ExecOutcome::Success,
                 Some(2) => ExecOutcome::Blocked(stderr),
                 Some(code) => ExecOutcome::NonZero(code, stderr),
-                // 被信号终止（无退出码）：按非零警告放行。
+                // Killed by a signal (no exit code): allow with a nonzero warning.
                 None => ExecOutcome::NonZero(-1, stderr),
             }
         }
     }
 }
 
-/// 警告文本的单行化（stderr 可能多行，取首行防刷屏）。
+/// Single-line a warning text (stderr may be multi-line; take the first line
+/// to avoid flooding).
 fn one_line(text: &str) -> String {
     text.lines()
         .next()
@@ -465,8 +498,9 @@ mod tests {
         }
     }
 
-    /// 平台无关的命令构造：cmd 与 sh 都认 `exit N`；stderr 输出需要
-    /// 分平台写法（cmd 用 `1>&2`，sh 同形但连接符不同）。
+    /// Platform-independent command construction: both cmd and sh understand
+    /// `exit N`; stderr output needs per-platform spelling (cmd uses `1>&2`,
+    /// sh the same shape with a different joiner).
     fn exit_cmd(code: u32, stderr: &str) -> String {
         if stderr.is_empty() {
             format!("exit {code}")
@@ -477,7 +511,7 @@ mod tests {
         }
     }
 
-    /// 超时测试的"睡眠"命令（cmd 无 sleep，用 ping 占位）。
+    /// The "sleep" command for timeout tests (cmd has no sleep; ping stands in).
     fn sleep_cmd() -> String {
         if cfg!(windows) {
             "ping -n 10 127.0.0.1 >nul".to_owned()
@@ -488,14 +522,15 @@ mod tests {
 
     // —— matcher ——
 
-    /// SPEC §9 验收：matcher 匹配（精确 / 多值 / 通配 / 未命中跳过）。
+    /// SPEC section 9 acceptance: matcher matching (exact / multi-value /
+    /// wildcard / misses skipped).
     #[test]
     fn matcher_semantics() {
         assert!(matcher_matches("shell", "shell"));
         assert!(matcher_matches("shell | write_file", "write_file"));
         assert!(matcher_matches("*", "anything"));
         assert!(!matcher_matches("shell", "write_file"));
-        assert!(matcher_matches(" shell ", "shell")); // 分隔值前后空格 trim 后命中
+        assert!(matcher_matches(" shell ", "shell")); // surrounding spaces in alternatives match after trim
     }
 
     #[tokio::test]
@@ -507,13 +542,13 @@ mod tests {
                 ..def(&exit_cmd(2, "blocked-stderr"))
             },
         )]);
-        // 工具名不匹配：hook 不执行，无阻塞无警告。
+        // Tool name misses: the hook does not run — no block, no warnings.
         let report = e
             .run(HookEventPoint::PreToolUse, &input(Some("write_file")))
             .await;
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert!(report.warnings.is_empty());
-        // 匹配：阻塞。
+        // Match: blocked.
         let report = e
             .run(HookEventPoint::PreToolUse, &input(Some("shell")))
             .await;
@@ -523,10 +558,10 @@ mod tests {
         );
     }
 
-    // —— 阻塞语义 ——
+    // —— blocking semantics ——
 
-    /// SPEC §9 验收：退出码 0 放行；2 阻塞且 stderr 进入 Block 负载；
-    /// 其他非零警告放行。
+    /// SPEC section 9 acceptance: exit code 0 allows; 2 blocks with stderr in
+    /// the Block payload; other nonzero codes allow with a warning.
     #[tokio::test]
     async fn exit_code_semantics() {
         let ok = engine(&[(HookEventPoint::PreToolUse, def(&exit_cmd(0, "")))]);
@@ -536,8 +571,9 @@ mod tests {
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert!(report.warnings.is_empty());
 
-        // stderr 断言用 ASCII：Windows cmd 按 GBK 输出非 ASCII 字节，
-        // UTF-8 有损解码会替换（非 ASCII 阻塞原因的保真受平台代码页限制）。
+        // stderr assertions use ASCII: on Windows cmd emits non-ASCII bytes in
+        // GBK, and UTF-8 lossy decoding replaces them (fidelity of non-ASCII
+        // block reasons is limited by the platform code page).
         let blocker = engine(&[(
             HookEventPoint::PreToolUse,
             def(&exit_cmd(2, "no-writes-today")),
@@ -554,13 +590,14 @@ mod tests {
         let report = failing
             .run(HookEventPoint::PreToolUse, &input(Some("shell")))
             .await;
-        assert_eq!(report.verdict, HookVerdict::Allow, "退出码 1 警告放行");
+        assert_eq!(report.verdict, HookVerdict::Allow, "exit code 1 allows with warning");
         assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("退出码 1"));
+        assert!(report.warnings[0].contains("exited with code 1"));
         assert!(report.warnings[0].contains("oops"));
     }
 
-    /// 不可阻塞事件点的退出码 2：降级为警告放行（SPEC §9 表"可阻塞"列）。
+    /// Exit code 2 on a non-blockable point: degrades to allow-with-warning
+    /// (the SPEC section 9 table's "blockable" column).
     #[tokio::test]
     async fn exit_2_on_non_blockable_point_degrades_to_warning() {
         let e = engine(&[(HookEventPoint::PostToolUse, def(&exit_cmd(2, "ignored")))]);
@@ -569,10 +606,11 @@ mod tests {
             .await;
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("不可阻塞"));
+        assert!(report.warnings[0].contains("not blockable"));
     }
 
-    /// 多条 hook 顺序执行；可阻塞事件点首个退出码 2 短路后续条目。
+    /// Multiple hooks run in order; the first exit code 2 on a blockable
+    /// point short-circuits later entries.
     #[tokio::test]
     async fn first_block_short_circuits() {
         let e = engine(&[
@@ -583,14 +621,15 @@ mod tests {
         assert_eq!(report.verdict, HookVerdict::Block("first".to_owned()));
         assert!(
             report.warnings.is_empty(),
-            "后续条目不执行: {:?}",
+            "later entries do not run: {:?}",
             report.warnings
         );
     }
 
-    // —— 超时 ——
+    // —— timeouts ——
 
-    /// SPEC §9 验收：超时强制 kill 记 warning（kill_on_drop 杀进程）。
+    /// SPEC section 9 acceptance: a timeout force-kills and logs a warning
+    /// (kill_on_drop kills the process).
     #[tokio::test]
     async fn timeout_kills_and_warns() {
         let e = engine(&[(
@@ -606,17 +645,18 @@ mod tests {
             .await;
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert_eq!(report.warnings.len(), 1);
-        assert!(report.warnings[0].contains("超时"));
+        assert!(report.warnings[0].contains("timed out"));
         assert!(
             start.elapsed() < Duration::from_secs(5),
-            "超时应立即返回而不是等命令跑完: {:?}",
+            "timeouts should return promptly instead of waiting out the command: {:?}",
             start.elapsed()
         );
     }
 
     // —— once ——
 
-    /// once：同一会话（引擎实例）只执行一次；matcher 未命中不消耗额度。
+    /// once: fires only once per session (engine instance); matcher misses do
+    /// not consume quota.
     #[tokio::test]
     async fn once_fires_only_first_time() {
         let e = engine(&[(
@@ -627,17 +667,17 @@ mod tests {
                 ..def(&exit_cmd(2, "once-block"))
             },
         )]);
-        // matcher 未命中：不消耗 once。
+        // Matcher miss: once quota untouched.
         let r = e
             .run(HookEventPoint::PreToolUse, &input(Some("grep")))
             .await;
         assert_eq!(r.verdict, HookVerdict::Allow);
-        // 第一次命中：阻塞。
+        // First hit: blocked.
         let r = e
             .run(HookEventPoint::PreToolUse, &input(Some("shell")))
             .await;
         assert_eq!(r.verdict, HookVerdict::Block("once-block".to_owned()));
-        // 第二次：once 已消耗，不再执行。
+        // Second time: once consumed, no longer runs.
         let r = e
             .run(HookEventPoint::PreToolUse, &input(Some("shell")))
             .await;
@@ -645,7 +685,7 @@ mod tests {
         assert!(r.warnings.is_empty());
     }
 
-    /// 事件点解析：合法名一一对应，非法名 None。
+    /// Point parsing: every legal name maps one-to-one, illegal names give None.
     #[test]
     fn event_point_parse_roundtrip() {
         for point in HookEventPoint::ALL {
@@ -655,9 +695,10 @@ mod tests {
         assert_eq!(HookEventPoint::parse("Notification"), None);
     }
 
-    // —— timeout 归一 / 空命令 / 静态校验 ——
+    // —— timeout normalization / empty commands / static validation ——
 
-    /// `timeout_ms == 0` 视为"未设置"：回落到 DEFAULT 而非立即超时。
+    /// `timeout_ms == 0` means "unset": falls back to DEFAULT instead of
+    /// timing out immediately.
     #[test]
     fn effective_timeout_maps_zero_to_default() {
         assert_eq!(
@@ -678,8 +719,9 @@ mod tests {
         );
     }
 
-    /// 运行时证明：`timeout_ms == 0` 的快速成功命令仍放行无警告
-    /// （回落前此处必报超时）。
+    /// Runtime proof: a fast succeeding command with `timeout_ms == 0` still
+    /// allows with no warnings (before the fallback this always reported a
+    /// timeout).
     #[tokio::test]
     async fn zero_timeout_falls_back_to_default_at_runtime() {
         let e = engine(&[(
@@ -696,8 +738,9 @@ mod tests {
         assert!(report.warnings.is_empty());
     }
 
-    /// 空命令：警告后跳过，不真正 spawn，且不消耗 `once` 额度
-    /// （连续两次都有警告——若第一次消耗了额度，第二次将静默跳过）。
+    /// Empty commands: warn and skip without really spawning, and without
+    /// consuming the `once` quota (both of two consecutive runs warn — had the
+    /// first consumed the quota, the second would skip silently).
     #[tokio::test]
     async fn empty_command_skips_with_warning_without_consuming_once() {
         let e = engine(&[(
@@ -717,7 +760,8 @@ mod tests {
         }
     }
 
-    /// 静态校验：不执行任何命令即指出永不生效的条目；干净配置零诊断。
+    /// Static validation: flags never-effective entries without running any
+    /// command; a clean config yields zero diagnostics.
     #[test]
     fn validate_flags_dead_entries() {
         let e = engine(&[

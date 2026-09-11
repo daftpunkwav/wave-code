@@ -1,51 +1,63 @@
-//! wavecode-skills — skills 系统（SPEC §8，P7 落地）。
+//! wavecode-skills — skills system (SPEC section 8, landed in P7).
 //!
-//! SKILL.md（YAML frontmatter + Markdown 正文）的发现、解析与清单注入：
-//! - 发现：`<root>/skills/<name>/SKILL.md`，来源按优先级（低→高，同名覆盖）
-//!   builtin < `~/.wavecode/skills` < `.wavecode/skills`（MCP 暴露的 skill
-//!   为 SPEC §8.1 的第四来源，随 P9 MCP 落地，本版留占位）；
-//! - frontmatter 字段取 SPEC §8.1 表交集：`description`（必填）/ `when_to_use` /
-//!   `allowed-tools` / `context: inline | fork` / `user-invocable` /
-//!   `argument-hint` / `paths`；
-//! - 清单注入：[`SkillSet::catalog`] 渲染 name + description + when_to_use
-//!   清单，预算（上下文窗口 1%）由调用方（core）以字符额度传入，超限降级
-//!   截断（先去 when_to_use，再截断描述）；
-//! - 执行展开：[`Skill::expand`] 替换 `$ARGUMENTS` 占位与
-//!   `${WAVECODE_SKILL_DIR}` 变量；inline / fork 的执行编排在 core
-//!   （本 crate 无 workspace 内依赖，SPEC §3 矩阵）。
+//! SKILL.md (YAML frontmatter + Markdown body) discovery, parsing, and catalog
+//! injection:
+//! - Discovery: `<root>/skills/<name>/SKILL.md`, with sources in ascending
+//!   priority (same names overridden) builtin < `~/.wavecode/skills` <
+//!   `.wavecode/skills` (skills exposed over MCP are the fourth SPEC section
+//!   8.1 source, landing with P9 MCP — a placeholder in this version);
+//! - Frontmatter fields take the SPEC section 8.1 table intersection:
+//!   `description` (required) / `when_to_use` / `allowed-tools` /
+//!   `context: inline | fork` / `user-invocable` / `argument-hint` / `paths`;
+//! - Catalog injection: [`SkillSet::catalog`] renders the name + description +
+//!   when_to_use catalog; the budget (1% of the context window) arrives from
+//!   the caller (core) as a character quota, with downgraded truncation past
+//!   the limit (drop when_to_use first, then truncate descriptions);
+//! - Execution expansion: [`Skill::expand`] substitutes the `$ARGUMENTS`
+//!   placeholder and the `${WAVECODE_SKILL_DIR}` variable; inline / fork
+//!   execution orchestration lives in core (this crate has no
+//!   workspace-internal dependencies, SPEC section 3 matrix).
 //!
-//! **frontmatter 解析取舍**：引入 `serde_yaml` 而非手写最小解析——frontmatter
-//! 是 YAML（字段值可含冒号、列表、多行串），手写解析的边界 case（引号、
-//! 缩进列表）会无声劣化；serde_yaml 已加进 workspace 根 `[workspace.dependencies]`
-//! 统一版本（SPEC §3 纪律）。SPEC §8.1 表内字段命名混用 kebab-case
-//! （`allowed-tools`）与 snake_case（`when_to_use`），解析面两种拼写都接受
-//! （serde alias），写出侧不做约束。
+//! **Frontmatter parsing tradeoff**: `serde_yaml` instead of a hand-rolled
+//! minimal parser — frontmatter is YAML (field values may hold colons, lists,
+//! multi-line strings), and a hand-rolled parser's edge cases (quotes,
+//! indented lists) would silently degrade; serde_yaml is already in the
+//! workspace-root `[workspace.dependencies]` at a unified version (SPEC
+//! section 3 discipline). The SPEC section 8.1 table mixes kebab-case
+//! (`allowed-tools`) with snake_case (`when_to_use`) field names, so the
+//! parsing surface accepts both spellings (serde aliases) and constrains
+//! neither on the write side.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// `$ARGUMENTS` 占位符（inline 展开时替换为调用参数）。
+/// The `$ARGUMENTS` placeholder (replaced with the call arguments on inline
+/// expansion).
 const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";
-/// skill 目录变量（展开为 SKILL.md 所在目录的绝对路径）。
+/// The skill-dir variable (expands to the absolute path of the SKILL.md
+/// directory).
 const SKILL_DIR_VARIABLE: &str = "${WAVECODE_SKILL_DIR}";
 
-/// skill 来源（优先级低→高；同名 skill 高优先级来源覆盖低优先级）。
+/// Skill source (ascending priority; same-named skills from a higher-priority
+/// source override lower-priority ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillSource {
-    /// 随二进制分发的内置技能集。
+    /// Builtin skill set shipped with the binary.
     Builtin,
-    /// 用户级 `~/.wavecode/skills`。
+    /// User-level `~/.wavecode/skills`.
     User,
-    /// 项目级 `<cwd>/.wavecode/skills`。
+    /// Project-level `<cwd>/.wavecode/skills`.
     Project,
-    /// MCP server 暴露的 prompt 转换的 inline skill（SPEC §8.1 第四来源 /
-    /// §10，优先级最高）。P9 仅落地枚举占位；真实转换需 `prompts/get`
-    /// 拉取内容，随 MCP 真实 transport 在 core 侧接线。
+    /// Inline skills converted from prompts an MCP server exposes (SPEC
+    /// section 8.1 fourth source / section 10, highest priority). P9 lands
+    /// only the enum placeholder; real conversion fetches content via
+    /// `prompts/get` and wires up on the core side with the real MCP
+    /// transport.
     Mcp,
 }
 
 impl SkillSource {
-    /// 来源名（诊断 / 警告文本用）。
+    /// Source name (for diagnostics / warning text).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
@@ -56,75 +68,79 @@ impl SkillSource {
     }
 }
 
-/// 执行模式（frontmatter `context` 字段，SPEC §8.1）：inline 展开进当前
-/// 会话；fork 以独立 subagent 运行。缺省 inline。
+/// Execution mode (the frontmatter `context` field, SPEC section 8.1): inline
+/// expands into the current session; fork runs in a dedicated subagent.
+/// Defaults to inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SkillContext {
-    /// 正文展开为 user 消息进入当前会话。
+    /// Body expands into the current session as a user message.
     #[default]
     Inline,
-    /// 以 skill 正文为指令派生独立 subagent。
+    /// A dedicated subagent is derived with the skill body as its instructions.
     Fork,
 }
 
-/// SKILL.md frontmatter（SPEC §8.1 字段交集）。
+/// SKILL.md frontmatter (the SPEC section 8.1 field intersection).
 ///
-/// 字段命名混用 kebab / snake（SPEC 表原文如此），两种拼写均接受；
-/// 未知字段忽略（向前兼容，新增字段不炸旧版本）。
+/// Field names mix kebab / snake spellings (as in the SPEC table verbatim);
+/// both spellings are accepted; unknown fields are ignored (forward
+/// compatible — new fields never break old versions).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct SkillMeta {
-    /// 一句话能力描述（必填），进入清单注入。
+    /// One-line capability description (required), injected into the catalog.
     pub description: String,
-    /// 模型自动触发判断依据，进入清单注入。
+    /// The model's auto-trigger evidence, injected into the catalog.
     #[serde(alias = "when-to-use")]
     pub when_to_use: Option<String>,
-    /// 限定 skill 激活期间可用的工具名白名单（空 = 不限）。
+    /// Tool-name allowlist while the skill is active (empty = unlimited).
     #[serde(rename = "allowed-tools", alias = "allowed_tools", default)]
     pub allowed_tools: Vec<String>,
-    /// 执行模式（inline / fork）。
+    /// Execution mode (inline / fork).
     #[serde(default)]
     pub context: SkillContext,
-    /// 是否允许 `/name` 直调（默认 true）。
+    /// Whether `/name` direct invocation is allowed (default true).
     #[serde(
         rename = "user-invocable",
         alias = "user_invocable",
         default = "default_true"
     )]
     pub user_invocable: bool,
-    /// 参数提示（补全用）。
+    /// Parameter hint (for completion).
     #[serde(rename = "argument-hint", alias = "argument_hint")]
     pub argument_hint: Option<String>,
-    /// 命中文件操作时条件激活的 glob 列表（首版仅记录，不参与触发）。
+    /// Glob list for conditional activation on file operations (recorded only
+    /// in the first version; plays no part in triggering).
     #[serde(default)]
     pub paths: Vec<String>,
 }
 
-/// `user_invocable` 的 serde 默认值（SPEC：默认 true）。
+/// The serde default for `user_invocable` (SPEC: defaults to true).
 fn default_true() -> bool {
     true
 }
 
-/// 一个已解析的 skill：目录名 + frontmatter + 正文。
+/// One parsed skill: directory name + frontmatter + body.
 #[derive(Debug, Clone)]
 pub struct Skill {
-    /// skill 名（SKILL.md 所在目录名）。
+    /// Skill name (the SKILL.md directory name).
     pub name: String,
-    /// SKILL.md 所在目录（`${WAVECODE_SKILL_DIR}` 展开目标）。
+    /// The SKILL.md directory (the `${WAVECODE_SKILL_DIR}` expansion target).
     pub dir: PathBuf,
-    /// 来源（决定覆盖优先级）。
+    /// Source (decides override priority).
     pub source: SkillSource,
-    /// frontmatter。
+    /// Frontmatter.
     pub meta: SkillMeta,
-    /// Markdown 正文（frontmatter 之后的全部内容，去首尾空白）。
+    /// Markdown body (everything after the frontmatter, trimmed).
     pub body: String,
 }
 
 impl Skill {
-    /// 解析一个 skill 目录（`<dir>/SKILL.md`）。
+    /// Parse one skill directory (`<dir>/SKILL.md`).
     ///
-    /// SKILL.md 缺失 / 读取失败 / frontmatter 非法（含缺 `description`）均
-    /// 返回 Err——调用方（[`discover`]）转为警告跳过，单点坏文件不炸发现。
+    /// A missing / unreadable SKILL.md or invalid frontmatter (including a
+    /// missing `description`) all return Err — the caller ([`discover`]) turns
+    /// them into warnings and skips, so one bad file never breaks discovery.
     pub fn parse(dir: &Path, source: SkillSource) -> Result<Self, SkillError> {
         let path = dir.join("SKILL.md");
         let raw = std::fs::read_to_string(&path).map_err(|e| SkillError::Read {
@@ -133,7 +149,7 @@ impl Skill {
         })?;
         let (frontmatter, body) = split_frontmatter(&raw).ok_or_else(|| SkillError::Parse {
             path: path.clone(),
-            reason: "缺少 YAML frontmatter（以 --- 分隔的头部块）".to_owned(),
+            reason: "missing YAML frontmatter (a header block delimited by ---)".to_owned(),
         })?;
         let meta: SkillMeta = serde_yaml::from_str(frontmatter).map_err(|e| SkillError::Parse {
             path: path.clone(),
@@ -142,7 +158,7 @@ impl Skill {
         if meta.description.trim().is_empty() {
             return Err(SkillError::Parse {
                 path: path.clone(),
-                reason: "description 为必填字段且不得为空".to_owned(),
+                reason: "description is required and must not be empty".to_owned(),
             });
         }
         let name = dir
@@ -150,7 +166,7 @@ impl Skill {
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| SkillError::Parse {
                 path: path.clone(),
-                reason: "无法从目录路径取 skill 名".to_owned(),
+                reason: "cannot derive the skill name from the directory path".to_owned(),
             })?;
         Ok(Self {
             name,
@@ -161,11 +177,12 @@ impl Skill {
         })
     }
 
-    /// inline 展开（SPEC §8.2）：`$ARGUMENTS` 替换为调用参数，
-    /// `${WAVECODE_SKILL_DIR}` 替换为 skill 目录路径。
+    /// Inline expansion (SPEC section 8.2): `$ARGUMENTS` is replaced with the
+    /// call arguments, `${WAVECODE_SKILL_DIR}` with the skill directory path.
     ///
-    /// 正文无 `$ARGUMENTS` 占位而调用方给了参数时，参数追加在正文末尾
-    /// （对齐 Claude Code 行为：占位缺失不等于丢弃参数）。
+    /// When the body has no `$ARGUMENTS` placeholder but the caller passed
+    /// arguments, the arguments are appended at the end of the body (matching
+    /// Claude Code behavior: a missing placeholder does not drop arguments).
     pub fn expand(&self, args: &str) -> String {
         let args = args.trim();
         let mut out = self
@@ -181,12 +198,15 @@ impl Skill {
     }
 }
 
-/// 拆分 frontmatter 与正文：文件以 `---` 行起首、下一个独占一行的 `---`
-/// 收尾，之间为 YAML frontmatter，其余为正文。返回 None = 无合法 frontmatter。
+/// Split frontmatter from body: the file starts with a `---` line and the next
+/// line holding only `---` closes it; the YAML frontmatter sits between, the
+/// rest is the body. None means no valid frontmatter.
 ///
-/// 收尾行只允许 `---` + 行尾空白；`---` 后跟同行内容（如 `--- junk`）不是
-/// 合法收尾（继续向后找下一个候选，找不到则 None）——否则畸形收尾会无声地
-/// 污染正文（同行残留混入 body）。
+/// A closing line allows only `---` plus end-of-line whitespace; `---`
+/// followed by same-line content (e.g. `--- junk`) is not a legal close (the
+/// search continues to the next candidate, else None) — otherwise a malformed
+/// close would silently pollute the body (its same-line remainder leaking into
+/// it).
 fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
     let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
     let mut lines = raw.splitn(2, '\n');
@@ -210,44 +230,46 @@ fn split_frontmatter(raw: &str) -> Option<(&str, &str)> {
                 .unwrap_or(tail);
             return Some((frontmatter, body));
         }
-        // 非独占行：不是合法收尾，从该换行之后继续找下一个候选。
+        // Not a standalone line: not a legal close; keep searching for the
+        // next candidate after this newline.
         base = end + 1;
         search = &rest[base..];
     }
 }
 
-/// skill 解析 / 读取错误（发现阶段转为警告）。
+/// Skill parse / read errors (turned into warnings at discovery).
 #[derive(Debug, thiserror::Error)]
 pub enum SkillError {
-    /// SKILL.md 读取失败。
-    #[error("无法读取 {}: {reason}", .path.display())]
+    /// SKILL.md read failure.
+    #[error("failed to read {}: {reason}", .path.display())]
     Read {
-        /// 出错文件。
+        /// The offending file.
         path: PathBuf,
-        /// 底层原因。
+        /// The underlying reason.
         reason: String,
     },
-    /// frontmatter 解析失败（含缺必填字段）。
-    #[error("解析 {} 失败: {reason}", .path.display())]
+    /// Frontmatter parse failure (including missing required fields).
+    #[error("failed to parse {}: {reason}", .path.display())]
     Parse {
-        /// 出错文件。
+        /// The offending file.
         path: PathBuf,
-        /// 底层原因。
+        /// The underlying reason.
         reason: String,
     },
 }
 
-/// 一个发现根：来源 + 目录（`<dir>/<name>/SKILL.md`）。
+/// One discovery root: a source plus a directory (`<dir>/<name>/SKILL.md`).
 #[derive(Debug, Clone)]
 pub struct SkillRoot {
-    /// 来源（优先级）。
+    /// Source (priority).
     pub source: SkillSource,
-    /// skills 根目录（其下每个含 SKILL.md 的子目录是一个 skill）。
+    /// Skills root directory (each subdirectory holding a SKILL.md is one
+    /// skill).
     pub dir: PathBuf,
 }
 
-/// 标准发现根（SPEC §8.1 优先级，低→高）：builtin（若有）<
-/// `~/.wavecode/skills` < `<cwd>/.wavecode/skills`。
+/// Standard discovery roots (SPEC section 8.1 priority, low to high): builtin
+/// (if any) < `~/.wavecode/skills` < `<cwd>/.wavecode/skills`.
 pub fn standard_roots(builtin: Option<PathBuf>, home: Option<&Path>, cwd: &Path) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
     if let Some(dir) = builtin {
@@ -269,24 +291,27 @@ pub fn standard_roots(builtin: Option<PathBuf>, home: Option<&Path>, cwd: &Path)
     roots
 }
 
-/// 发现产物：技能集 + 警告（坏文件逐个警告跳过，不炸整体发现）。
+/// Discovery product: the skill set plus warnings (each bad file warns and
+/// skips without breaking overall discovery).
 #[derive(Debug, Default)]
 pub struct Discovery {
-    /// 覆盖消解后的技能集。
+    /// The override-resolved skill set.
     pub set: SkillSet,
-    /// 发现期警告（读取 / 解析失败）。
+    /// Discovery-time warnings (read / parse failures).
     pub warnings: Vec<String>,
 }
 
-/// 按优先级顺序发现全部 skill：`roots` 须按优先级低→高传入，同名 skill
-/// 后者覆盖前者（SPEC §8.1）。根目录不存在 / 不可读静默跳过（无该来源是
-/// 正常形态）；单个 skill 坏文件记警告继续。
+/// Discover every skill in priority order: `roots` must arrive low-priority
+/// first, and same-named skills from later (higher-priority) roots override
+/// earlier ones (SPEC section 8.1). Missing / unreadable root dirs are skipped
+/// silently (a missing source is a normal shape); individual bad skill files
+/// warn and continue.
 pub fn discover(roots: &[SkillRoot]) -> Discovery {
     let mut discovery = Discovery::default();
     for root in roots {
         let entries = match std::fs::read_dir(&root.dir) {
             Ok(entries) => entries,
-            // 根目录不存在 / 不可读：该来源缺席，非错误。
+            // Missing / unreadable root dir: the source is absent, not an error.
             Err(_) => continue,
         };
         for entry in entries.flatten() {
@@ -296,13 +321,14 @@ pub fn discover(roots: &[SkillRoot]) -> Discovery {
             }
             match Skill::parse(&dir, root.source) {
                 Ok(skill) => {
-                    // 同名覆盖：高优先级来源（后处理）替换低优先级。
+                    // Same-name override: the higher-priority source (handled
+                    // later) replaces the lower-priority one.
                     discovery.set.skills.insert(skill.name.clone(), skill);
                 }
                 Err(e) => {
                     discovery
                         .warnings
-                        .push(format!("[{}] skill 跳过: {e}", root.source.as_str()));
+                        .push(format!("[{}] skill skipped: {e}", root.source.as_str()));
                 }
             }
         }
@@ -310,53 +336,58 @@ pub fn discover(roots: &[SkillRoot]) -> Discovery {
     discovery
 }
 
-/// 覆盖消解后的技能集（按名有序，迭代输出稳定）。
+/// The override-resolved skill set (ordered by name, so iteration output is
+/// stable).
 #[derive(Debug, Default)]
 pub struct SkillSet {
     skills: BTreeMap<String, Skill>,
 }
 
 impl SkillSet {
-    /// 直接插入一个 skill（同名覆盖）。发现管线之外的注入点：单测构造、
-    /// 后续 MCP 暴露 skill 的并入（P9）。
+    /// Insert one skill directly (same names override). The injection point
+    /// outside the discovery pipeline: unit-test construction, and merging
+    /// MCP-exposed skills later (P9).
     pub fn add(&mut self, skill: Skill) {
         self.skills.insert(skill.name.clone(), skill);
     }
 
-    /// 按名查找。
+    /// Look up by name.
     pub fn get(&self, name: &str) -> Option<&Skill> {
         self.skills.get(name)
     }
 
-    /// 迭代（按名字典序）。
+    /// Iterate (in name dictionary order).
     pub fn iter(&self) -> impl Iterator<Item = &Skill> {
         self.skills.values()
     }
 
-    /// skill 数。
+    /// Skill count.
     pub fn len(&self) -> usize {
         self.skills.len()
     }
 
-    /// 是否为空。
+    /// Whether empty.
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
 
-    /// 渲染清单注入文本（SPEC §8.2：name + description + when_to_use；
-    /// `max_chars` 为字符额度——预算 = 上下文窗口 1%，由 core 换算传入）。
+    /// Render the catalog injection text (SPEC section 8.2: name +
+    /// description + when_to_use; `max_chars` is a character quota — the
+    /// budget = 1% of the context window, converted by core).
     ///
-    /// 超限降级策略（逐级）：全量（含 when_to_use）→ 去掉 when_to_use →
-    /// 描述按均摊额度截断（`…` 结尾）→ 硬截断保总额。额度为 0 或无 skill
-    /// 返回空串（调用方省略注入槽位）。
+    /// Downgrade policy past the limit (stepwise): full (with when_to_use) ->
+    /// without when_to_use -> descriptions truncated to a per-entry quota
+    /// (ending in `…`) -> a hard cut guarding the total. A zero quota or no
+    /// skills returns an empty string (the caller drops the injection slot).
     pub fn catalog(&self, max_chars: usize) -> String {
         if self.skills.is_empty() || max_chars == 0 {
             return String::new();
         }
         let full = self.render(true, None);
-        // 预算按字符口径比较（与 max_chars 的"字符额度"约定一致）：
-        // String::len 是字节数，中文描述每字符 3 字节，按字节比较会
-        // 提前两到三倍地触发降级截断。
+        // Budgets compare by character count (matching max_chars' "character
+        // quota" contract): String::len is bytes, and CJK descriptions take 3
+        // bytes per char — comparing by bytes would trigger downgrade
+        // truncation two to three times too early.
         if full.chars().count() <= max_chars {
             return full;
         }
@@ -364,15 +395,18 @@ impl SkillSet {
         if no_when.chars().count() <= max_chars {
             return no_when;
         }
-        // 均摊额度：每条目 "- : \n" 约 8 字符开销；下限 16 防过度截断。
+        // Per-entry quota: each entry costs ~8 chars of "- : \n" overhead;
+        // floor at 16 against over-truncation.
         let per_entry = (max_chars / self.skills.len()).saturating_sub(8).max(16);
         let truncated = self.render(false, Some(per_entry));
         if truncated.chars().count() <= max_chars {
             return truncated;
         }
-        // 终兜底硬截断：按字符口径裁剪并保证结果不超 `max_chars`
-        // （字节下标会把 CJK 文本砍短数倍；固定后缀本身约 28 字符，
-        // 极小额度下直接无后缀截断，否则后缀自己就会超预算）。
+        // Final hard-cut fallback: clip by character count and guarantee the
+        // result fits `max_chars` (byte indices would chop CJK text several
+        // times too short; the fixed suffix itself runs ~28 chars, so tiny
+        // quotas cut with no suffix — otherwise the suffix alone would exceed
+        // the budget).
         const TRUNC_SUFFIX: &str = "\n…(skills catalog truncated)";
         let suffix_len = TRUNC_SUFFIX.chars().count();
         if max_chars <= suffix_len {
@@ -382,8 +416,9 @@ impl SkillSet {
         format!("{kept}{TRUNC_SUFFIX}")
     }
 
-    /// 清单渲染：`include_when` 控制 when_to_use 后缀；`desc_limit` 为单条
-    /// 描述的截断额度（None 不截断）。
+    /// Catalog rendering: `include_when` toggles the when_to_use suffix;
+    /// `desc_limit` is the per-description truncation quota (None keeps full
+    /// text).
     fn render(&self, include_when: bool, desc_limit: Option<usize>) -> String {
         let mut out = String::new();
         for skill in self.skills.values() {
@@ -409,7 +444,8 @@ impl SkillSet {
     }
 }
 
-/// 按字符截断（超限去尾加 `…`；UTF-8 边界安全）。
+/// Truncate by character count (cut tail + `…` past the limit; UTF-8 boundary
+/// safe).
 fn truncate_chars(text: &str, limit: usize) -> String {
     if text.chars().count() <= limit {
         return text.to_owned();
@@ -429,7 +465,7 @@ mod tests {
         std::fs::write(dir.join("SKILL.md"), format!("{frontmatter}\n{body}")).unwrap();
     }
 
-    // —— frontmatter 解析 ——
+    // —— frontmatter parsing ——
 
     #[test]
     fn parses_full_frontmatter() {
@@ -438,8 +474,8 @@ mod tests {
             dir.path(),
             "commit",
             r#"---
-description: 创建规范 git 提交
-when_to_use: 用户要求提交代码时
+description: Create conventional git commits
+when_to_use: When the user asks to commit code
 allowed-tools:
   - shell
   - read_file
@@ -449,7 +485,7 @@ argument-hint: "[message]"
 paths:
   - "src/**"
 ---"#,
-            "正文：按规范提交。",
+            "Body: commit by the book.",
         );
         let root = SkillRoot {
             source: SkillSource::Project,
@@ -458,29 +494,30 @@ paths:
         let discovery = discover(&[root]);
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         let skill = discovery.set.get("commit").unwrap();
-        assert_eq!(skill.meta.description, "创建规范 git 提交");
+        assert_eq!(skill.meta.description, "Create conventional git commits");
         assert_eq!(
             skill.meta.when_to_use.as_deref(),
-            Some("用户要求提交代码时")
+            Some("When the user asks to commit code")
         );
         assert_eq!(skill.meta.allowed_tools, vec!["shell", "read_file"]);
         assert_eq!(skill.meta.context, SkillContext::Fork);
         assert!(!skill.meta.user_invocable);
         assert_eq!(skill.meta.argument_hint.as_deref(), Some("[message]"));
         assert_eq!(skill.meta.paths, vec!["src/**"]);
-        assert_eq!(skill.body, "正文：按规范提交。");
+        assert_eq!(skill.body, "Body: commit by the book.");
         assert_eq!(skill.source, SkillSource::Project);
     }
 
     #[test]
     fn defaults_and_alias_spellings() {
         let dir = tempfile::tempdir().unwrap();
-        // snake_case 拼写（SPEC 表混用 kebab/snake，两种都接受）+ 缺省值。
+        // snake_case spellings (the SPEC table mixes kebab/snake; both are
+        // accepted) + defaults.
         write_skill(
             dir.path(),
             "review",
-            "---\ndescription: 评审代码\nwhen-to-use: 提到评审时\nallowed_tools: [grep]\n---",
-            "评审正文",
+            "---\ndescription: Review code\nwhen-to-use: When review is mentioned\nallowed_tools: [grep]\n---",
+            "Review body",
         );
         let root = SkillRoot {
             source: SkillSource::User,
@@ -489,9 +526,9 @@ paths:
         let discovery = discover(&[root]);
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         let skill = discovery.set.get("review").unwrap();
-        assert_eq!(skill.meta.when_to_use.as_deref(), Some("提到评审时"));
+        assert_eq!(skill.meta.when_to_use.as_deref(), Some("When review is mentioned"));
         assert_eq!(skill.meta.allowed_tools, vec!["grep"]);
-        // 缺省：inline / user_invocable=true / 无 hint / 无 paths。
+        // Defaults: inline / user_invocable=true / no hint / no paths.
         assert_eq!(skill.meta.context, SkillContext::Inline);
         assert!(skill.meta.user_invocable);
         assert!(skill.meta.argument_hint.is_none());
@@ -501,12 +538,12 @@ paths:
     #[test]
     fn missing_or_empty_description_is_warning_skip() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill(dir.path(), "nodesc", "---\nwhen_to_use: x\n---", "正文");
+        write_skill(dir.path(), "nodesc", "---\nwhen_to_use: x\n---", "Body");
         write_skill(
             dir.path(),
             "emptydesc",
             "---\ndescription: \"\"\n---",
-            "正文",
+            "Body",
         );
         let root = SkillRoot {
             source: SkillSource::User,
@@ -524,7 +561,7 @@ paths:
     #[test]
     fn file_without_frontmatter_is_warning_skip() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill(dir.path(), "plain", "没有头部", "正文");
+        write_skill(dir.path(), "plain", "No header", "Body");
         let root = SkillRoot {
             source: SkillSource::User,
             dir: dir.path().to_path_buf(),
@@ -534,32 +571,32 @@ paths:
         assert_eq!(discovery.warnings.len(), 1);
     }
 
-    // —— 来源优先级 ——
+    // —— source priority ——
 
-    /// SPEC §8 验收：同名覆盖，builtin < user < project。
+    /// SPEC section 8 acceptance: same-name override, builtin < user < project.
     #[test]
     fn higher_priority_source_overrides_same_name() {
         let builtin = tempfile::tempdir().unwrap();
         let user = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         for (root, desc) in [
-            (builtin.path(), "builtin 版"),
-            (user.path(), "user 版"),
-            (project.path(), "project 版"),
+            (builtin.path(), "builtin edition"),
+            (user.path(), "user edition"),
+            (project.path(), "project edition"),
         ] {
             write_skill(
                 root,
                 "lint",
                 &format!("---\ndescription: {desc}\n---"),
-                "正文",
+                "Body",
             );
         }
-        // 只存在于低优先级来源的 skill 保留。
+        // Skills living only in a lower-priority source survive.
         write_skill(
             user.path(),
             "only-user",
-            "---\ndescription: 仅用户级\n---",
-            "正文",
+            "---\ndescription: user-level only\n---",
+            "Body",
         );
         let roots = [
             SkillRoot {
@@ -577,11 +614,11 @@ paths:
         ];
         let discovery = discover(&roots);
         let lint = discovery.set.get("lint").unwrap();
-        assert_eq!(lint.meta.description, "project 版");
+        assert_eq!(lint.meta.description, "project edition");
         assert_eq!(lint.source, SkillSource::Project);
         let only_user = discovery.set.get("only-user").unwrap();
         assert_eq!(only_user.source, SkillSource::User);
-        // 不存在的根目录静默跳过。
+        // Missing root dirs skip silently.
         let missing = discover(&[SkillRoot {
             source: SkillSource::User,
             dir: user.path().join("nope"),
@@ -589,17 +626,18 @@ paths:
         assert!(missing.set.is_empty() && missing.warnings.is_empty());
     }
 
-    // —— inline 展开 ——
+    // —— inline expansion ——
 
-    /// SPEC §8 验收：$ARGUMENTS 替换与 ${WAVECODE_SKILL_DIR} 变量。
+    /// SPEC section 8 acceptance: $ARGUMENTS substitution and the
+    /// ${WAVECODE_SKILL_DIR} variable.
     #[test]
     fn expand_replaces_arguments_and_skill_dir() {
         let dir = tempfile::tempdir().unwrap();
         write_skill(
             dir.path(),
             "fix",
-            "---\ndescription: 修问题\n---",
-            "修复 $ARGUMENTS，参考 ${WAVECODE_SKILL_DIR}/notes.md",
+            "---\ndescription: Fix issues\n---",
+            "Fix $ARGUMENTS, see ${WAVECODE_SKILL_DIR}/notes.md",
         );
         let root = SkillRoot {
             source: SkillSource::Project,
@@ -607,13 +645,13 @@ paths:
         };
         let discovery = discover(&[root]);
         let skill = discovery.set.get("fix").unwrap();
-        let expanded = skill.expand("崩溃问题");
+        let expanded = skill.expand("the crash");
         assert_eq!(
             expanded,
-            format!("修复 崩溃问题，参考 {}/notes.md", skill.dir.display())
+            format!("Fix the crash, see {}/notes.md", skill.dir.display())
         );
-        // 无参数：占位替换为空串。
-        assert!(skill.expand("").contains("修复 ，参考"));
+        // No arguments: the placeholder expands to an empty string.
+        assert!(skill.expand("").contains("Fix , see"));
     }
 
     #[test]
@@ -622,8 +660,8 @@ paths:
         write_skill(
             dir.path(),
             "plain",
-            "---\ndescription: 无占位\n---",
-            "按规范执行。",
+            "---\ndescription: No placeholder\n---",
+            "Run by the book.",
         );
         let root = SkillRoot {
             source: SkillSource::Project,
@@ -631,11 +669,11 @@ paths:
         };
         let discovery = discover(&[root]);
         let skill = discovery.set.get("plain").unwrap();
-        assert_eq!(skill.expand("额外参数"), "按规范执行。\n\n额外参数");
-        assert_eq!(skill.expand(""), "按规范执行。");
+        assert_eq!(skill.expand("extra args"), "Run by the book.\n\nextra args");
+        assert_eq!(skill.expand(""), "Run by the book.");
     }
 
-    // —— 清单注入 ——
+    // —— catalog injection ——
 
     fn catalog_set(entries: &[(&str, &str, Option<&str>)]) -> SkillSet {
         let mut skills = BTreeMap::new();
@@ -665,23 +703,23 @@ paths:
     #[test]
     fn catalog_renders_name_description_when() {
         let set = catalog_set(&[
-            ("commit", "创建提交", Some("用户要求提交时")),
-            ("review", "评审代码", None),
+            ("commit", "Create commits", Some("when the user asks to commit")),
+            ("review", "Review code", None),
         ]);
         let catalog = set.catalog(10_000);
-        assert!(catalog.contains("- commit: 创建提交 (when: 用户要求提交时)"));
-        assert!(catalog.contains("- review: 评审代码"));
-        // 空集 / 零额度 → 空串（槽位省略）。
+        assert!(catalog.contains("- commit: Create commits (when: when the user asks to commit)"));
+        assert!(catalog.contains("- review: Review code"));
+        // Empty set / zero quota -> empty string (slot dropped).
         assert!(SkillSet::default().catalog(10_000).is_empty());
         assert!(set.catalog(0).is_empty());
     }
 
-    /// SPEC §8 验收：预算超限截断——先去 when_to_use，再截断描述，
-    /// 任意额度下结果不超限。
+    /// SPEC section 8 acceptance: over-budget truncation — when_to_use goes
+    /// first, then descriptions; the result never exceeds any quota.
     #[test]
     fn catalog_truncates_to_budget() {
-        let long_desc = "这是一段很长很长的能力描述，用来撑爆注入预算。";
-        let long_when = "这段 when_to_use 同样很长，也应为预算让路。";
+        let long_desc = "A very long capability description that blows the injection budget.";
+        let long_when = "This when_to_use is likewise long and must yield to the budget.";
         let entries: Vec<(String, String, Option<String>)> = (0..20)
             .map(|i| {
                 (
@@ -697,22 +735,23 @@ paths:
             .collect();
         let set = catalog_set(&refs);
         let full = set.catalog(100_000);
-        // 预算口径是字符(见 catalog 注释):断言与预算构造同口径。
+        // Budgets count characters (see the catalog notes): assert in the same
+        // units the budget is built in.
         assert!(
             full.chars().count() > 600,
-            "全量清单应足够长以触发降级: {}",
+            "full catalog should be long enough to force downgrades: {}",
             full.chars().count()
         );
         for budget in [600usize, 400, 200] {
             let catalog = set.catalog(budget);
             assert!(
                 catalog.chars().count() <= budget,
-                "预算 {budget} 超支: {} > {budget}",
+                "budget {budget} exceeded: {} > {budget}",
                 catalog.chars().count()
             );
             assert!(!catalog.is_empty());
         }
-        // 宽裕预算下先丢 when_to_use 保描述。
+        // With a comfortable budget, when_to_use is shed before descriptions.
         let no_when_budget = set.render(false, None).chars().count() + 10;
         let catalog = set.catalog(no_when_budget);
         assert!(!catalog.contains("(when:"));
@@ -722,12 +761,13 @@ paths:
     #[test]
     fn malformed_closing_fence_is_warning_skip() {
         let dir = tempfile::tempdir().unwrap();
-        // 收尾行带同行内容：非法 frontmatter，警告跳过而非污染正文。
+        // Closing line with same-line content: invalid frontmatter — warn and
+        // skip instead of polluting the body.
         write_skill(
             dir.path(),
             "badfence",
-            "---\ndescription: 好技能\n--- junk",
-            "正文",
+            "---\ndescription: Good skill\n--- junk",
+            "Body",
         );
         let root = SkillRoot {
             source: SkillSource::User,
@@ -744,8 +784,8 @@ paths:
         write_skill(
             dir.path(),
             "ok",
-            "---\ndescription: 好技能\n---   ",
-            "正文",
+            "---\ndescription: Good skill\n---   ",
+            "Body",
         );
         let root = SkillRoot {
             source: SkillSource::User,
@@ -753,7 +793,7 @@ paths:
         };
         let discovery = discover(&[root]);
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
-        assert_eq!(discovery.set.get("ok").unwrap().body, "正文");
+        assert_eq!(discovery.set.get("ok").unwrap().body, "Body");
     }
 
     #[test]
@@ -763,7 +803,7 @@ paths:
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\r\ndescription: 好技能\r\n---\r\n正文\r\n",
+            "---\r\ndescription: Good skill\r\n---\r\nBody\r\n",
         )
         .unwrap();
         let root = SkillRoot {
@@ -772,22 +812,23 @@ paths:
         };
         let discovery = discover(&[root]);
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
-        assert_eq!(discovery.set.get("crlf").unwrap().body, "正文");
+        assert_eq!(discovery.set.get("crlf").unwrap().body, "Body");
     }
 
-    /// 硬截断兜底在任意额度（含极小额度）下都不超预算。
+    /// The hard-cut fallback never exceeds the budget at any quota (including
+    /// tiny ones).
     #[test]
     fn catalog_never_exceeds_budget_even_when_tiny() {
         let set = catalog_set(&[(
             "a-very-long-skill-name",
-            "很长很长的中文能力描述，用来撑满注入预算做测试",
-            Some("同样很长的触发条件说明文本"),
+            "A very long capability description, sized to fill the injection budget",
+            Some("An equally long trigger-condition note"),
         )]);
         for budget in [1usize, 5, 10, 27, 28, 29, 40, 60] {
             let catalog = set.catalog(budget);
             assert!(
                 catalog.chars().count() <= budget,
-                "预算 {budget} 超支: {} > {budget}",
+                "budget {budget} exceeded: {} > {budget}",
                 catalog.chars().count()
             );
             assert!(!catalog.is_empty());

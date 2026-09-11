@@ -78,15 +78,19 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
     };
     let home = wavecode_config::home_dir();
+    // Empty/whitespace-only --model values carry no model name: normalize
+    // to None so both assembly paths fall back to config.model instead of
+    // failing downstream on an empty model name.
+    let model_override = normalize_model_override(cli.model);
     // New-stack TUI path branches before the legacy assembly: interactive
     // fullscreen sessions run on the harness engine; exec, REPL, and
     // resume still use the legacy assembly during the transition.
     if cli.command.is_none() && !cli.repl && std::io::stdout().is_terminal() {
-        return run_tui_new(cli.config, cli.model, cwd, home).await;
+        return run_tui_new(cli.config, model_override, cwd, home).await;
     }
     let boot = match wavecode_core::assemble::load_boot(
         cli.config.as_deref(),
-        cli.model.as_deref(),
+        model_override.as_deref(),
         &cwd,
         home.as_deref(),
     ) {
@@ -110,7 +114,13 @@ async fn main() -> anyhow::Result<ExitCode> {
     let cfg = boot.session;
 
     match cli.command {
-        Some(Command::Exec { prompt, json }) => run_exec(cfg, &prompt, json).await,
+        Some(Command::Exec { prompt, json }) => {
+            if let Err(msg) = validate_exec_prompt(&prompt) {
+                eprintln!("Error: {msg}");
+                return Ok(ExitCode::from(2));
+            }
+            run_exec(cfg, &prompt, json).await
+        }
         // P10：会话恢复（SPEC §16）——列表 / replay 恢复后进交互界面。
         Some(Command::Resume { thread_id }) => {
             run_resume(cfg, mcp_lines, thread_id, cli.repl).await
@@ -216,6 +226,26 @@ fn format_age(modified: std::time::SystemTime) -> String {
     } else {
         format!("{} 天前", secs / 86400)
     }
+}
+
+/// Normalize `--model` overrides: empty or whitespace-only values carry no
+/// model name, so map them to `None` and let both assembly paths fall back
+/// to `config.model`. Surrounding whitespace on real names is trimmed.
+fn normalize_model_override(model: Option<String>) -> Option<String> {
+    model.and_then(|m| {
+        let trimmed = m.trim().to_owned();
+        (!trimmed.is_empty()).then_some(trimmed)
+    })
+}
+
+/// Reject empty `exec` prompts before spawning a session: an empty turn
+/// would burn one model round-trip (or hang on approval) without any user
+/// intent to act on. Mirrors the REPL's skip-empty-line discipline.
+fn validate_exec_prompt(prompt: &str) -> Result<(), &'static str> {
+    if prompt.trim().is_empty() {
+        return Err("exec prompt must not be empty");
+    }
+    Ok(())
 }
 
 /// 日志初始化：走 stderr（stdout 留给 JSONL / 渲染输出），默认级别 off
@@ -353,3 +383,45 @@ async fn run_tui_new(
 mod repl;
 
 use crate::repl::{ApprovalHandling, ConsumeOutcome, consume_turn, new_submission, run_repl};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_override_none_stays_none() {
+        assert_eq!(normalize_model_override(None), None);
+    }
+
+    #[test]
+    fn model_override_empty_and_blank_become_none() {
+        assert_eq!(normalize_model_override(Some(String::new())), None);
+        assert_eq!(normalize_model_override(Some("   ".to_owned())), None);
+        assert_eq!(normalize_model_override(Some("\t \n".to_owned())), None);
+    }
+
+    #[test]
+    fn model_override_keeps_names_and_trims() {
+        assert_eq!(
+            normalize_model_override(Some("claude-sonnet-4-5".to_owned())),
+            Some("claude-sonnet-4-5".to_owned())
+        );
+        assert_eq!(
+            normalize_model_override(Some("  minimax-m3  ".to_owned())),
+            Some("minimax-m3".to_owned())
+        );
+    }
+
+    #[test]
+    fn exec_prompt_rejects_empty_and_blank() {
+        assert!(validate_exec_prompt("").is_err());
+        assert!(validate_exec_prompt("   ").is_err());
+        assert!(validate_exec_prompt(" \t\n ").is_err());
+    }
+
+    #[test]
+    fn exec_prompt_accepts_nonempty() {
+        assert!(validate_exec_prompt("fix the build").is_ok());
+        assert!(validate_exec_prompt("  x  ").is_ok());
+    }
+}

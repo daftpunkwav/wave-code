@@ -1,13 +1,13 @@
-//! wavecode-tools — 工具框架与内置工具集。
+//! wavecode-tools: tool framework and built-in tool set.
 //!
-//! 形态：[`Tool`] trait、[`Registry`] 注册表，内置文件工具
-//! （`read_file` / `write_file` / `edit_file` / `list_dir`）、检索工具
-//! （`grep` / `glob`）、`shell` 工具与 session 任务清单工具（`todo_write`，
-//! P4 deepagents planning）。文件与检索工具经 `path_guard`
-//! 把所有路径约束在 [`ToolCtx::cwd`] 之下，防 `..` 越界与绝对路径逃逸。
-//! 内置工具的 execute 均为真 async（`tokio::fs` / `tokio::process`；
-//! grep/glob 的目录遍历为同步 API，内部包 `spawn_blocking`）。后续里程碑
-//! 追加 web / 浏览器等工具，执行管道（schema 校验、hook、权限审批）由 core 编排。
+//! Shape: the [`Tool`] trait, the [`Registry`] registry, built-in file tools
+//! (`read_file` / `write_file` / `edit_file` / `list_dir`), search tools
+//! (`grep` / `glob`), the `shell` tool, and the session task-list tool (`todo_write`,
+//! P4 deepagents planning). File and search tools confine all paths
+//! under [`ToolCtx::cwd`] via `path_guard`, guarding against `..` escapes and absolute-path breakouts.
+//! Every built-in tool's execute is truly async (`tokio::fs` / `tokio::process`;
+//! grep/glob directory traversal is a sync API wrapped in `spawn_blocking` internally). Later milestones
+//! add web / browser tools; the execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
 
 mod fs;
 mod path_guard;
@@ -20,112 +20,112 @@ pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 
-/// 锁中毒的统一恢复策略（本 crate 单点决策）：这些锁保护的都是单操作
-/// 临界区（一次 insert / 赋值 / 读取），持锁期间 panic 不会留下半截
-/// 不变量——中毒时取回守卫继续执行（panic 已沿原线程传播），不做
-/// 二次 panic 级联。
+/// Unified recovery policy for poisoned locks (single decision point for this crate): these locks guard
+/// single-operation critical sections (one insert / assignment / read), and a panic while holding a lock
+/// leaves no half-broken invariant behind -- so take the guard back and keep going on poisoning
+/// (the panic already propagated on its original thread) instead of cascading into a secondary panic.
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// [`lock`] 的 RwLock 读侧同例。
+/// Read-side RwLock counterpart of [`lock`].
 pub(crate) fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
     l.read().unwrap_or_else(|e| e.into_inner())
 }
 
-/// [`lock`] 的 RwLock 写侧同例。
+/// Write-side RwLock counterpart of [`lock`].
 pub(crate) fn write<T>(l: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     l.write().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 工具执行上下文。
+/// Tool execution context.
 #[derive(Debug, Clone)]
 pub struct ToolCtx {
-    /// 工作目录（约定为绝对路径）：文件工具的所有路径都约束在其之下。
+    /// Working directory (an absolute path by convention): all file-tool paths are confined under it.
     pub cwd: std::path::PathBuf,
-    /// spawn 子进程前要剔除的环境变量名（由装配层注入 provider 的
-    /// `env_key` 等显式名单；shell 工具另按敏感后缀模式自动剔除，
-    /// 见 `shell_tool::sanitize_env`）。
+    /// Environment variable names to strip before spawning child processes (explicit lists such as the
+    /// provider's `env_key`, injected by the assembly layer; the shell tool additionally strips sensitive
+    /// suffix patterns automatically, see `shell_tool::sanitize_env`).
     pub deny_env: Vec<String>,
 }
 
-/// 工具输出。
+/// Tool output.
 ///
-/// `is_error = true` 表示业务失败（文件不存在、匹配不唯一、参数缺失等），
-/// `content` 为人类可读原因——会回灌给模型，供其自我纠正。
+/// `is_error = true` means a business failure (missing file, non-unique match, missing params, ...),
+/// and `content` is the human-readable reason, fed back to the model for self-correction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
 }
 
-/// 工具抽象。
+/// Tool abstraction.
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    /// 工具名（注入模型，全局唯一）。返回 `&str` 而非 `&'static str`：
-    /// M3 MCP 动态工具需运行时命名。
+    /// Tool name (injected into the model, globally unique). Returns `&str` rather than `&'static str`:
+    /// M3 MCP dynamic tools need runtime names.
     fn name(&self) -> &str;
-    /// 能力描述（英文，供模型消费）。
+    /// Capability description (in English, consumed by the model).
     fn description(&self) -> &str;
-    /// 参数的 JSON Schema（注入采样请求）。
+    /// JSON Schema of the parameters (injected into sampling requests).
     fn input_schema(&self) -> serde_json::Value;
-    /// 只读工具可并行执行；写入类工具需串行。
+    /// Read-only tools may run in parallel; writing tools must run serially.
     fn is_read_only(&self) -> bool;
-    /// 破坏性工具（删除、覆盖不可恢复状态等）默认需审批（SPEC §11.1；
-    /// P2 sandbox/HITL 接线，P1 仅落地 trait 面）。默认非破坏性。
+    /// Destructive tools (deleting or irreversibly overwriting state, etc.) require approval by default (SPEC §11.1;
+    /// P2 sandbox/HITL wiring, P1 only lands the trait surface). Non-destructive by default.
     fn is_destructive(&self) -> bool {
         false
     }
-    /// 执行前语义校验（JSON Schema 之外的检查，SPEC §11.1 执行管道的一环；
-    /// P2 起由 core 编排调用）。默认实现直接放行。
+    /// Pre-execution semantic check (validation beyond JSON Schema, one stage of the SPEC §11.1 execution pipeline;
+    /// invoked by core orchestration from P2 on). The default implementation passes everything through.
     async fn validate(&self, _input: &serde_json::Value) -> Result<()> {
         Ok(())
     }
-    /// 执行。`Err` 仅用于实现级故障（io 错误等）；业务失败返回
-    /// `Ok(ToolOutput { is_error: true, .. })`，不得 panic。
+    /// Execute. `Err` is only for implementation-level failures (io errors, etc.); business failures return
+    /// `Ok(ToolOutput { is_error: true, .. })` and must never panic.
     ///
-    /// 内置工具均为真 async：文件工具用 `tokio::fs`，shell 用
-    /// `tokio::process`；grep/glob 的目录遍历是 `glob` crate 同步 API，
-    /// 工具内部包 `spawn_blocking` 自理（SPEC §19.3）。
+    /// All built-in tools are truly async: file tools use `tokio::fs`, shell uses
+    /// `tokio::process`; grep/glob directory traversal is the `glob` crate's sync API,
+    /// wrapped in `spawn_blocking` inside each tool (SPEC §19.3).
     async fn execute(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput>;
 }
 
-/// tools crate 统一错误类型。
+/// Unified error type for the tools crate.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolsError {
-    /// IO 层错误。
-    #[error("IO 错误: {0}")]
+    /// IO-layer error.
+    #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    /// 输入无效（如空路径）。
-    #[error("无效输入: {message}")]
+    /// Invalid input (e.g. an empty path).
+    #[error("invalid input: {message}")]
     InvalidInput { message: String },
-    /// 路径逃逸出工作目录。
-    #[error("路径逃逸工作目录: {path}")]
+    /// Path escapes the working directory.
+    #[error("path escapes working directory: {path}")]
     PathEscape { path: String },
 }
 
-/// crate 内统一 Result 别名。
+/// Crate-wide Result alias.
 pub type Result<T> = std::result::Result<T, ToolsError>;
 
-/// 工具面白名单的共享句柄（P7 skills `allowed-tools`，SPEC §8.2）：
-/// `Some(set)` 时仅 set 内工具可执行，`None` 不限。
+/// Shared handle for the tool-surface allowlist (P7 skills `allowed-tools`, SPEC §8.2):
+/// with `Some(set)` only tools in the set may execute, `None` allows all.
 ///
-/// 与 [`TodoStore`] 同形态——由**会话配置**持有（per-session），而非
-/// [`Registry`]（只做工具索引）或 [`ToolCtx`]（每 turn 重建的纯数据快照）。
-/// core 执行管道在 PreToolUse / sandbox 判定前检查；skill 工具激活时写入。
-/// 语义为 **turn 级**：core 在每个 turn 入口清零（首版取舍，见 core::skills）。
+/// Same shape as [`TodoStore`] -- held by the **session config** (per-session), not by
+/// [`Registry`] (a pure tool index) or [`ToolCtx`] (a plain data snapshot rebuilt every turn).
+/// Checked by the core execution pipeline before PreToolUse / sandbox decisions; written when a skill tool activates.
+/// Semantics are **turn-scoped**: core clears it at each turn entry (first-version tradeoff, see core::skills).
 #[derive(Clone, Default)]
 pub struct ToolAllowlist {
     inner: Arc<Mutex<Option<HashSet<String>>>>,
 }
 
 impl ToolAllowlist {
-    /// 设置白名单（None = 解除限制）。
+    /// Set the allowlist (None = lift the restriction).
     pub fn set(&self, names: Option<HashSet<String>>) {
         *lock(&self.inner) = names;
     }
 
-    /// 工具是否可执行（无白名单 → true）。
+    /// Whether a tool may execute (no allowlist -> true).
     pub fn is_allowed(&self, name: &str) -> bool {
         lock(&self.inner)
             .as_ref()
@@ -133,10 +133,10 @@ impl ToolAllowlist {
     }
 }
 
-/// 工具注册表：按名索引，供执行管道查找与生成请求侧 `ToolSpec` 清单。
+/// Tool registry: indexed by name, used by the execution pipeline for lookup and for building the request-side `ToolSpec` list.
 ///
-/// **不含** session 级 planning / skills 状态（[`TodoStore`] / [`ToolAllowlist`]）
-/// ——那些由会话配置持有，避免 Registry 成为跨业务变化中心。
+/// Holds **no** session-level planning / skills state ([`TodoStore`] / [`ToolAllowlist`])
+/// -- those live in the session config so the registry does not become a cross-concern change hub.
 ///
 /// The map is interior-mutable: late tools (registered after the registry
 /// is already shared, e.g. once child services exist) become visible to
@@ -146,10 +146,10 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// 注册内置工具（文件 / 检索 / shell），**不含** `todo_write`。
+    /// Register the built-in tools (file / search / shell), **excluding** `todo_write`.
     ///
-    /// `todo_write` 须由调用方经 [`Registry::with_todo_write`] 注入，并与
-    /// 会话配置中的 [`TodoStore`] 共享同一句柄。
+    /// `todo_write` must be injected by the caller via [`Registry::with_todo_write`], sharing the same handle
+    /// as the [`TodoStore`] in the session config.
     pub fn builtin() -> Self {
         let reg = Self {
             tools: Mutex::new(HashMap::new()),
@@ -164,22 +164,22 @@ impl Registry {
         reg
     }
 
-    /// 注册 `todo_write`，与会话级 [`TodoStore`] 共享状态。
+    /// Register `todo_write`, sharing state with the session-level [`TodoStore`].
     pub fn with_todo_write(self, todos: TodoStore) -> Self {
         self.register(Arc::new(TodoWrite::new(todos)));
         self
     }
 
-    /// 完整内置集（含 `todo_write`）与配套 [`TodoStore`]——会话装配应
-    /// 把返回的 store 写入会话配置，保证工具与 steering 同源。
+    /// Full built-in set (including `todo_write`) with its companion [`TodoStore`] -- session assembly should
+    /// store the returned store in the session config so tools and steering share one source.
     pub fn builtin_with_todos() -> (Self, TodoStore) {
         let todos = TodoStore::default();
         (Self::builtin().with_todo_write(todos.clone()), todos)
     }
 
-    /// 派生按名白名单子集注册表（P7 skill fork 的 `allowed-tools` 工具面）：
-    /// 仅保留名单内的工具（未知名静默略过——名单来自用户 frontmatter，
-    /// 拼错的代价是该工具不可用，影响面局限于该 skill）。
+    /// Derive a by-name allowlist subset registry (the `allowed-tools` tool surface of a P7 skill fork):
+    /// keep only listed tools (unknown names are silently skipped -- the list comes from user frontmatter,
+    /// so a typo only costs that tool's availability, scoped to that skill).
     pub fn name_subset(&self, names: &[String]) -> Self {
         let reg = Self {
             tools: Mutex::new(HashMap::new()),
@@ -192,8 +192,8 @@ impl Registry {
         reg
     }
 
-    /// 派生只读子集注册表（P5 explore 类型子代理的工具面）：仅保留
-    /// `is_read_only()` 的工具（`todo_write` 非只读，不会进入子集）。
+    /// Derive a read-only subset registry (tool surface for P5 explore-type subagents): keep only
+    /// `is_read_only()` tools (`todo_write` is not read-only and never enters the subset).
     pub fn read_only_subset(&self) -> Self {
         let reg = Self {
             tools: Mutex::new(HashMap::new()),
@@ -206,13 +206,13 @@ impl Registry {
         reg
     }
 
-    /// 注册工具（M3 起 MCP 等动态工具也经此注册），`&self` 接收以支持
-    /// 装配后期的 late registration（见结构体文档）。
+    /// Register a tool (from M3 on, MCP and other dynamic tools register here too); takes `&self` to support
+    /// late registration during late assembly (see the struct docs).
     pub fn register(&self, tool: Arc<dyn Tool>) {
         lock(&self.tools).insert(tool.name().to_owned(), tool);
     }
 
-    /// 全部工具的 `ToolSpec`，按 name 排序，输出稳定。
+    /// `ToolSpec` for every tool, sorted by name for stable output.
     pub fn specs(&self) -> Vec<wavecode_llm::ToolSpec> {
         let guard = lock(&self.tools);
         let mut tools: Vec<&Arc<dyn Tool>> = guard.values().collect();
@@ -227,7 +227,7 @@ impl Registry {
             .collect()
     }
 
-    /// 按名查找工具。
+    /// Look up a tool by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         lock(&self.tools).get(name).cloned()
     }
@@ -237,7 +237,7 @@ impl Registry {
 mod tests {
     use super::*;
 
-    /// P7：白名单默认不限；set 后仅名单内可执行；解除后恢复。
+    /// P7: the allowlist is unrestricted by default; after set() only listed tools run; clearing restores access.
     #[test]
     fn allowlist_gating() {
         let allowlist = ToolAllowlist::default();
@@ -249,7 +249,7 @@ mod tests {
         assert!(allowlist.is_allowed("shell"));
     }
 
-    /// P7：name_subset 按名过滤；未知名静默略过；只读/写工具按名单保留。
+    /// P7: name_subset filters by name; unknown names are silently skipped; read/write tools are kept per the list.
     #[test]
     fn name_subset_filters_by_name() {
         let (reg, _todos) = Registry::builtin_with_todos();
@@ -258,21 +258,21 @@ mod tests {
         assert!(sub.get("grep").is_some());
         assert!(sub.get("write_file").is_none());
         assert!(sub.get("shell").is_none());
-        assert!(sub.get("todo_write").is_none(), "未列入名单即不可用");
-        // specs 输出稳定（按名排序）。
+        assert!(sub.get("todo_write").is_none(), "unlisted tools are unavailable");
+        // specs output is stable (sorted by name).
         let names: Vec<String> = sub.specs().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["grep", "read_file"]);
     }
 
-    /// 会话装配契约：`name_subset`（skill fork 工具面派生）保留同一
-    /// `todo_write` 实例——经子集工具写入的状态必须对会话配置持有的
-    /// [`TodoStore`] 可见（同 Arc 句柄），否则 todo_write 与 steering /
-    /// 上下文注入各写各读、静默失配。
+    /// Session-assembly contract: `name_subset` (skill-fork tool-surface derivation) keeps the same
+    /// `todo_write` instance -- state written through the subset tool must be visible to the session config's
+    /// [`TodoStore`] (same Arc handle); otherwise todo_write, steering, and
+    /// context injection would each write/read their own copy and silently diverge.
     #[tokio::test]
     async fn todo_write_via_name_subset_shares_session_store() {
         let (reg, todos) = Registry::builtin_with_todos();
         let sub = reg.name_subset(&["todo_write".to_owned()]);
-        let tool = sub.get("todo_write").expect("名单内 todo_write 应保留");
+        let tool = sub.get("todo_write").expect("listed todo_write should be kept");
         let ctx = ToolCtx {
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
@@ -285,7 +285,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error);
-        assert_eq!(todos.snapshot().len(), 1, "子集工具与会话 store 须同句柄");
+        assert_eq!(todos.snapshot().len(), 1, "subset tool and session store must share one handle");
     }
 
     /// Late registration reaches already-shared handles: tools appended

@@ -1,8 +1,8 @@
-//! 搜索工具（阶段 3 拆分自 search_tools.rs）。
+//! Search tools (split from search_tools.rs in phase 3).
 
 use super::*;
 
-/// 路径模式匹配（只读；返回相对 cwd 的匹配路径列表，按名排序）。
+/// Path pattern matching (read-only; returns cwd-relative match paths, sorted by name).
 pub struct Glob;
 
 #[async_trait::async_trait]
@@ -44,7 +44,7 @@ impl Tool for Glob {
         }
         let pattern = pattern.to_owned();
         let cwd = ctx.cwd.clone();
-        // 同 grep：glob 遍历为阻塞 IO，包 spawn_blocking。
+        // Same as grep: glob traversal is blocking IO, wrapped in spawn_blocking.
         match tokio::task::spawn_blocking(move || glob_search(&pattern, &cwd)).await {
             Ok(content) => Ok(content),
             Err(e) => Ok(err_output(format!("glob failed: {e}"))),
@@ -52,7 +52,7 @@ impl Tool for Glob {
     }
 }
 
-/// glob 的阻塞主体：以 cwd 为根展开模式，逐条复核后输出相对路径列表。
+/// glob's blocking core: expand the pattern rooted at cwd, re-check each hit, then output relative paths.
 fn glob_search(pattern: &str, cwd: &Path) -> ToolOutput {
     let cwd_canon = match cwd.canonicalize() {
         Ok(c) => c,

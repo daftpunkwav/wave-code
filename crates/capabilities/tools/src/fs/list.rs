@@ -1,4 +1,4 @@
-//! 文件工具（阶段 3 拆分自 fs_tools.rs）。
+//! File tools (split from fs_tools.rs in phase 3).
 
 use super::*;
 
@@ -41,8 +41,9 @@ impl Tool for ListDir {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
-        // 先取 metadata：文件/目录错配显式分流为业务输出，不猜 ErrorKind
-        // （Windows 上对文件 read_dir 落 os error 267，kind 不稳定）。
+        // Stat metadata first: file/directory mismatches branch explicitly into business
+        // output without guessing ErrorKind (on Windows, read_dir on a file yields
+        // os error 267 with an unstable kind).
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -61,7 +62,7 @@ impl Tool for ListDir {
         }
         let mut read_dir = match tokio::fs::read_dir(&path).await {
             Ok(r) => r,
-            // metadata 与 read_dir 之间存在 TOCTOU 窗口，保留 NotFound 分流
+            // A TOCTOU window exists between metadata and read_dir, so keep the NotFound branch.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(err_output(format!(
                     "directory not found: {}",

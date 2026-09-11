@@ -1,34 +1,35 @@
-//! 路径防逃逸：把模型给出的路径解析到 `ToolCtx::cwd` 之下。
+//! Path escape guard: resolve model-provided paths under `ToolCtx::cwd`.
 //!
-//! 安全校验一律在 canonicalize 后的真实路径上进行（Windows 上 canonicalize
-//! 带 `\\?\` 前缀，比较两侧必须同态才可比）；返回的则是以（未 canonicalize
-//! 的）cwd 锚定的词法规范化路径，便于调用方展示与比较。
+//! All safety checks run on the canonicalized real path (on Windows canonicalize
+//! adds a `\\?\` prefix, so both sides must be in the same form before comparing);
+//! what is returned is a lexically normalized path anchored at the (non-canonicalized)
+//! cwd, convenient for callers to display and compare.
 //!
-//! TOCTOU 假设：校验与实际使用（read/write）之间，路径上的 symlink 可能被
-//! 替换，本模块无法防护该竞态；M1 威胁模型接受这一窗口，后续里程碑再考虑
-//! fd 锚定（openat 语义）等强化手段。
+//! TOCTOU assumption: symlinks on the path may be swapped between the check and the actual
+//! use (read/write), and this module cannot guard that race; the M1 threat model accepts
+//! this window, with stronger measures such as fd-anchored (openat-style) access left to later milestones.
 
 use std::path::{Component, Path, PathBuf};
 
 use crate::{Result, ToolsError};
 
-/// 把用户给出的 path 解析到 ctx.cwd 之下；逃逸（.. 越界、绝对路径到他盘/他目录）返回 PathEscape
+/// Resolve a user-provided path under ctx.cwd; escapes (.. breakout, absolute paths to another drive/directory) return PathEscape.
 pub(crate) fn resolve(ctx: &crate::ToolCtx, path: &str) -> Result<PathBuf> {
     if path.is_empty() {
         return Err(ToolsError::InvalidInput {
-            message: "path 不能为空".to_owned(),
+            message: "path must not be empty".to_owned(),
         });
     }
-    // join 时绝对路径整体替换 cwd，相对路径拼到 cwd 之下；先做词法规范化消除 `.` / `..`。
+    // On join, an absolute path replaces cwd wholesale while a relative path lands under cwd; normalize lexically first to drop `.` / `..`.
     let joined = ctx.cwd.join(path);
     let normalized = normalize_lexically(&joined);
     let cwd_canon = ctx.cwd.canonicalize().map_err(ToolsError::Io)?;
 
-    // 用 symlink_metadata 判断存在性：symlink 自身算“存在”，断链 symlink 会落在
-    // 已存在分支并在 canonicalize 处报错，避免顺着断链把文件写到 cwd 之外。
+    // Use symlink_metadata for existence: a symlink itself counts as "existing", and a dangling symlink falls into
+    // the exists-branch and errors at canonicalize, so writes never follow a dangling link outside cwd.
     match std::fs::symlink_metadata(&normalized) {
         Ok(_) => {
-            // 已存在：解开 symlink 后的真实路径必须在 cwd 真实路径之下。
+            // Exists: the real path after resolving symlinks must stay under the real path of cwd.
             let canon = normalized.canonicalize().map_err(ToolsError::Io)?;
             if canon.starts_with(&cwd_canon) {
                 Ok(normalized)
@@ -37,15 +38,15 @@ pub(crate) fn resolve(ctx: &crate::ToolCtx, path: &str) -> Result<PathBuf> {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // 不存在（write_file 场景）：锚定最近的已存在祖先，canonicalize 后拼接剩余
-            // 部分再做前缀校验；通过则返回词法规范化路径（以未 canonicalize 的 cwd 开头）。
+            // Missing (the write_file case): anchor at the nearest existing ancestor, append the remaining
+            // segments after canonicalizing, then re-check the prefix; on success return the lexically normalized path (starting with the non-canonicalized cwd).
             let anchor = normalized
                 .ancestors()
                 .find(|a| a.symlink_metadata().is_ok())
                 .ok_or_else(|| escape(path))?;
             let rest = normalized
                 .strip_prefix(anchor)
-                .expect("anchor 必为 normalized 的前缀");
+                .expect("anchor must be a prefix of normalized");
             let anchor_canon = anchor.canonicalize().map_err(ToolsError::Io)?;
             let candidate = normalize_lexically(&anchor_canon.join(rest));
             if candidate.starts_with(&cwd_canon) {
@@ -58,15 +59,15 @@ pub(crate) fn resolve(ctx: &crate::ToolCtx, path: &str) -> Result<PathBuf> {
     }
 }
 
-/// 构造 PathEscape 错误，记录用户原始输入便于排查。
+/// Build a PathEscape error, recording the user's raw input for debugging.
 fn escape(path: &str) -> ToolsError {
     ToolsError::PathEscape {
         path: path.to_owned(),
     }
 }
 
-/// 纯词法规范化：消除 `.`；`..` 能弹出上一级普通目录则弹出，
-/// 已到根无法弹出的保留原样——后续 starts_with 校验会拒绝这类结果。
+/// Purely lexical normalization: drop `.`; pop the parent normal directory for `..` when possible,
+/// and keep unpoppable `..` at the root as-is -- a later starts_with check rejects such results.
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
@@ -81,7 +82,7 @@ fn normalize_lexically(path: &Path) -> PathBuf {
                     out.push("..");
                 }
             }
-            // Prefix / RootDir 原样保留
+            // Prefix / RootDir are kept as-is.
             other => out.push(other.as_os_str()),
         }
     }
@@ -104,7 +105,7 @@ mod tests {
         );
         assert!(super::resolve(&ctx, "../escape.txt").is_err());
         assert!(super::resolve(&ctx, "../../escape.txt").is_err());
-        // 绝对路径到他盘/他目录：选各平台上几乎必然存在、且必不在 tempdir 下的路径
+        // Absolute path to another drive/directory: pick a path that almost surely exists on each platform yet never lives under the tempdir.
         #[cfg(windows)]
         assert!(super::resolve(&ctx, "C:/Windows/evil.txt").is_err());
         #[cfg(unix)]
@@ -113,7 +114,7 @@ mod tests {
 
     #[test]
     fn resolves_nonexistent_file_under_cwd() {
-        // write_file 场景：目标不存在，但锚定已存在祖先后仍在 cwd 内
+        // write_file case: the target is missing, but anchoring at an existing ancestor keeps it inside cwd.
         let dir = tempfile::tempdir().unwrap();
         let ctx = crate::ToolCtx {
             cwd: dir.path().to_path_buf(),
@@ -123,8 +124,8 @@ mod tests {
         assert!(p.starts_with(dir.path()));
     }
 
-    /// symlink/junction 指向 cwd 之外：read_file / write_file 均须拒绝且外部零污染。
-    /// 创建失败（权限或平台策略）时打印提示并跳过，不作为失败。
+    /// symlink/junction pointing outside cwd: read_file / write_file must both reject with zero pollution outside.
+    /// When creation fails (permissions or platform policy), print a notice and skip instead of failing.
     #[tokio::test]
     async fn symlink_escape_is_rejected() {
         use crate::Tool;
@@ -137,7 +138,7 @@ mod tests {
         };
         let link = dir.path().join("link");
 
-        // Windows 用 junction（mklink /J 为 cmd 内建命令，tempdir 内无需提权）
+        // On Windows use a junction (mklink /J is a cmd builtin, no elevation needed inside a tempdir).
         #[cfg(windows)]
         let made = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
@@ -151,7 +152,7 @@ mod tests {
         #[cfg(not(any(windows, unix)))]
         let made = false;
         if !made || link.symlink_metadata().is_err() {
-            eprintln!("无法创建 symlink/junction（权限或平台策略），跳过 symlink 逃逸测试");
+            eprintln!("cannot create symlink/junction (permissions or platform policy), skipping symlink escape test");
             return;
         }
 
@@ -168,12 +169,12 @@ mod tests {
             .await
             .unwrap();
         assert!(r.is_error);
-        // 外部目录零污染
+        // Zero pollution of the outside directory.
         assert!(!outside.path().join("evil.txt").exists());
     }
 
-    /// 兄弟目录前缀混淆：纯字符串 starts_with 会把 abd 误判在 abc 之内，
-    /// component 级比较必须拒绝。
+    /// Sibling-directory prefix confusion: a plain string starts_with would mistake abd as inside abc;
+    /// component-level comparison must reject it.
     #[test]
     fn rejects_sibling_prefix_confusion() {
         let root = tempfile::tempdir().unwrap();

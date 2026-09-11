@@ -1,4 +1,4 @@
-//! 文件工具（阶段 3 拆分自 fs_tools.rs）。
+//! File tools (split from fs_tools.rs in phase 3).
 
 use super::*;
 
@@ -45,7 +45,7 @@ impl Tool for WriteFile {
             Ok(c) => c,
             Err(out) => return Ok(out),
         };
-        // 写入侧护栏：超限不创建/覆盖文件。
+        // Write-side guard: oversized content neither creates nor overwrites the file.
         if content.len() > MAX_WRITE_BYTES {
             return Ok(err_output(format!(
                 "content too large ({} bytes, max {MAX_WRITE_BYTES})",
@@ -57,8 +57,9 @@ impl Tool for WriteFile {
             Err(out) => return Ok(out),
         };
         if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
-            // 目录路径返回可自我纠正的业务文案(与 read_file / edit_file
-            // 分流同形态);tokio::fs::write 对目录返回的是实现级 Err。
+            // A directory path returns a self-correctable business message (same branching
+            // shape as read_file / edit_file); tokio::fs::write on a directory returns an
+            // implementation-level Err.
             return Ok(err_output(format!(
                 "path is a directory, cannot write: {}",
                 path.display()
@@ -67,7 +68,7 @@ impl Tool for WriteFile {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        // 原子写：写中途失败不破坏既有文件（temp+rename，见 atomic_write）。
+        // Atomic write: a mid-write failure leaves the existing file intact (temp+rename, see atomic_write).
         super::atomic_write(&path, content).await?;
         Ok(ok_output(format!(
             "wrote {} bytes to {}",

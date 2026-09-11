@@ -1,4 +1,4 @@
-//! 文件工具（阶段 3 拆分自 fs_tools.rs）。
+//! File tools (split from fs_tools.rs in phase 3).
 
 use super::*;
 
@@ -49,7 +49,7 @@ impl Tool for ReadFile {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
-        // 先取 metadata：目录/文件错配与超大文件显式分流为业务输出，不猜 ErrorKind。
+        // Stat metadata first: directory/file mismatches and oversized files branch explicitly into business output without guessing ErrorKind.
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -63,7 +63,7 @@ impl Tool for ReadFile {
                 path.display()
             )));
         }
-        // 输入侧护栏：超过 4 MB 不整读，提示模型分页。
+        // Input guard: files over 4 MB are not read wholesale; tell the model to page through them.
         if meta.len() > MAX_READ_BYTES {
             return Ok(err_output(format!(
                 "file too large ({} bytes), use offset/limit to read parts: {}",
@@ -73,7 +73,7 @@ impl Tool for ReadFile {
         }
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
-            // metadata 与 read 之间存在 TOCTOU 窗口，保留 NotFound 分流
+            // A TOCTOU window exists between metadata and read, so keep the NotFound branch.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(err_output(format!("file not found: {}", path.display())));
             }
@@ -102,14 +102,14 @@ impl Tool for ReadFile {
         }
         let limit = limit.min(MAX_LINES);
         let total = text.lines().count();
-        // 越界守卫：空文件 + offset>0 也在此分流为业务失败，杜绝下游 usize 下溢。
+        // Bounds guard: an empty file with offset>0 also branches into a business failure here, ruling out a downstream usize underflow.
         if offset > 0 && offset >= total {
             return Ok(err_output(format!(
                 "offset {offset} is beyond end of file ({total} lines)"
             )));
         }
         let end = offset.saturating_add(limit).min(total);
-        // 无切片时原样返回，保留原始换行与结尾；有切片时按 \n 重新拼接。
+        // Without slicing return the text as-is, preserving original newlines and the ending; with slicing rejoin lines with \n.
         let mut content = if offset == 0 && end == total {
             text
         } else {

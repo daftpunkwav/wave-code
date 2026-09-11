@@ -1,4 +1,4 @@
-//! 文件工具（阶段 3 拆分自 fs_tools.rs）。
+//! File tools (split from fs_tools.rs in phase 3).
 
 use super::*;
 
@@ -60,8 +60,8 @@ impl Tool for EditFile {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
-        // 输入侧护栏：与 read_file 对称，超过 4 MB 不整读（edit 需要全文匹配，
-        // 大文件改用分段重写策略）。
+        // Input guard: symmetric with read_file, files over 4 MB are not read wholesale
+        // (edit needs full-text matching; large files should use a chunked rewrite strategy).
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -70,8 +70,9 @@ impl Tool for EditFile {
             Err(e) => return Err(e.into()),
         };
         if meta.is_dir() {
-            // 与 read_file 同形态的业务分流:目录路径返回可自我纠正的
-            // 错误文案,而不是实现级 Err(读目录的 io 错误非 NotFound)。
+            // Business-level branch mirroring read_file: a directory path returns a
+            // self-correctable error message instead of an implementation-level Err
+            // (reading a directory yields a non-NotFound io error).
             return Ok(err_output(format!(
                 "path is a directory, cannot edit: {}",
                 path.display()
@@ -107,7 +108,7 @@ impl Tool for EditFile {
             ))),
             1 => {
                 let updated = text.replacen(old_string, new_string, 1);
-                // 原子写：读成功写失败时原文件保持完整（temp+rename）。
+                // Atomic write: the original file stays intact when the read succeeds but the write fails (temp+rename).
                 super::atomic_write(&path, &updated).await?;
                 Ok(ok_output(format!(
                     "replaced 1 occurrence in {}",

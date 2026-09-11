@@ -1,4 +1,4 @@
-//! 搜索工具（阶段 3 拆分自 search_tools.rs）。
+//! Search tools (split from search_tools.rs in phase 3).
 
 use super::*;
 
@@ -81,8 +81,8 @@ impl Tool for Grep {
             Some(_) => return Ok(err_output("invalid parameter 'glob' (string required)")),
         };
         let cwd = ctx.cwd.clone();
-        // 遍历 + 读文件 + 正则扫描为阻塞 IO，整体移出 executor 线程；
-        // JoinError 仅在本模块 bug（panic）时触发，转为业务输出不中断 turn。
+        // Traversal + file reads + regex scanning are blocking IO, moved off the executor thread;
+        // JoinError only fires on a bug (panic) in this module, converted to business output without interrupting the turn.
         match tokio::task::spawn_blocking(move || {
             grep_search(&regex, &root, filter.as_deref(), &cwd)
         })
@@ -94,14 +94,14 @@ impl Tool for Grep {
     }
 }
 
-/// grep 的阻塞主体：展开候选文件 → 逐文件扫描。返回完整输出（含统计尾行）。
+/// grep's blocking core: expand candidate files, then scan file by file. Returns the full output (including the stats footer).
 fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Path) -> ToolOutput {
     let cwd_canon = match cwd.canonicalize() {
         Ok(c) => c,
         Err(e) => return err_output(format!("failed to canonicalize working directory: {e}")),
     };
-    // 候选文件清单：根为文件则只扫它；根为目录则经 glob 模式 `root/**/{filter}`
-    // 展开（`**` 匹配任意深度，含根目录本身一层）。排序保证输出稳定。
+    // Candidate file list: when the root is a file scan only it; when it is a directory expand via the glob pattern `root/**/{filter}`
+    // (`**` matches any depth, including the root directory's own level). Sorted for stable output.
     let files = if root.is_file() {
         vec![root.to_path_buf()]
     } else if root.is_dir() {
@@ -123,11 +123,11 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
     let mut matched_files = 0usize;
     let mut hit_cap = false;
     'files: for file in &files {
-        // 逐条复核：junction/symlink 指向 cwd 之外的路径直接跳过
+        // Re-check each path: skip junction/symlink targets pointing outside cwd.
         if !under_cwd(file, &cwd_canon) {
             continue;
         }
-        // 输入侧护栏对齐 read_file：超过 4 MB 不整读（跳过，不算匹配）
+        // Input guard aligned with read_file: files over 4 MB are not read wholesale (skipped, not counted as matches).
         let meta = match std::fs::metadata(file) {
             Ok(m) => m,
             Err(_) => continue,
@@ -135,7 +135,7 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
         if meta.len() > MAX_FILE_BYTES {
             continue;
         }
-        // 读失败 / 非 UTF-8（二进制）静默跳过：grep 语义是搜文本
+        // Silently skip read failures / non-UTF-8 (binary) files: grep semantics search text.
         let Ok(bytes) = std::fs::read(file) else {
             continue;
         };
@@ -161,8 +161,8 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
             lines.push(format!("{rel}:{}:{line}", idx + 1));
             if lines.len() >= MAX_MATCHES {
                 hit_cap = true;
-                // 达上限跳出前当前文件已命中:计入文件数再退出,
-                // 否则统计尾行少算一个文件。
+                // The current file already matched before breaking at the cap: count it before exiting,
+                // otherwise the stats footer undercounts by one file.
                 if file_had_match {
                     matched_files += 1;
                 }

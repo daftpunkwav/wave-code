@@ -712,8 +712,7 @@ fn goal_status_display() -> String {
 /// objective head, or a hint when no goal exists yet. Never fails, so
 /// `/goal` display stays total.
 fn render_goal_file(home: Option<&std::path::Path>) -> String {
-    const EMPTY: &str =
-        "(no durable goal yet; ask the agent to set one with the goal_set tool)";
+    const EMPTY: &str = "(no durable goal yet; ask the agent to set one with the goal_set tool)";
     let Some(home) = home else {
         return format!("{EMPTY}\n{GOAL_USAGE}");
     };
@@ -727,8 +726,7 @@ fn render_goal_file(home: Option<&std::path::Path>) -> String {
 
 /// Usage line shared by every `/goal` rendering: setting and ticking run
 /// through the model tools, never through the slash command.
-const GOAL_USAGE: &str =
-    "usage: /goal (status display only; the model sets the goal with goal_set and ticks it with goal_tick once per round)";
+const GOAL_USAGE: &str = "usage: /goal (status display only; the model sets the goal with goal_set and ticks it with goal_tick once per round)";
 
 /// Lenient rendering of raw goal file content (exposed for tests; the
 /// file shape is owned by the goal state crate).
@@ -746,14 +744,8 @@ fn render_goal_text(text: &str) -> String {
         .get("status")
         .and_then(|v| v.as_str())
         .unwrap_or("active");
-    let version = value
-        .get("version")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let round = value
-        .get("round")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+    let round = value.get("round").and_then(|v| v.as_u64()).unwrap_or(0);
     let mut out = format!("goal status: {status} (version {version}, round {round})");
     match value.get("objective").and_then(|v| v.as_str()) {
         Some(body) if !body.trim().is_empty() => {

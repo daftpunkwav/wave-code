@@ -462,7 +462,11 @@ mod tests {
         let out = status.execute(serde_json::json!({}), &ctx).await.unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("paused"), "{}", out.content);
-        assert!(out.content.contains("ship the milestone"), "{}", out.content);
+        assert!(
+            out.content.contains("ship the milestone"),
+            "{}",
+            out.content
+        );
         // Resume in the same home reopens the persisted goal.
         let resumed = store_in(home.path());
         let out = GoalStatusTool::new(resumed)
@@ -490,7 +494,11 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
-        assert!(out.content.contains("expected version 999"), "{}", out.content);
+        assert!(
+            out.content.contains("expected version 999"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("found version 1"), "{}", out.content);
         // Unknown status names fail openly without mutating.
         let out = GoalUpdateTool::new(store.clone())

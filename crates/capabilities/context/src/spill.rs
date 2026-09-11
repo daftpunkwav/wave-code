@@ -50,7 +50,11 @@ fn parse_manifest(raw: &str) -> Vec<ManifestEntry> {
             if validate_spill_id(&id).is_err() {
                 return None;
             }
-            Some(ManifestEntry { id, bytes, created_at })
+            Some(ManifestEntry {
+                id,
+                bytes,
+                created_at,
+            })
         })
         .collect()
 }
@@ -194,8 +198,8 @@ impl SpillStore {
     /// Read a spilled output by `spill://` URI.
     pub fn read(&self, uri: &str) -> std::result::Result<String, SpillError> {
         let id = parse_spill_uri(uri)?;
-        let raw = std::fs::read(self.entry_path(&id))
-            .map_err(|_| SpillError::Unknown(uri.to_owned()))?;
+        let raw =
+            std::fs::read(self.entry_path(&id)).map_err(|_| SpillError::Unknown(uri.to_owned()))?;
         String::from_utf8(raw).map_err(|_| SpillError::Unknown(uri.to_owned()))
     }
 
@@ -203,12 +207,7 @@ impl SpillStore {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        format!(
-            "{:x}-{}-{}",
-            now_secs(),
-            std::process::id(),
-            n
-        )
+        format!("{:x}-{}-{}", now_secs(), std::process::id(), n)
     }
 
     /// Drop oldest entries until the total fits the cap (files and manifest
@@ -227,11 +226,7 @@ impl SpillStore {
 /// untouched; larger ones spill to `store` and the caller sees
 /// [`PRUNE_MARKER`] plus the `spill://` URI, the total char count, and a head
 /// excerpt of [`PRUNE_HEAD_CHARS`] chars.
-pub fn prune_tool_output(
-    content: &str,
-    store: &SpillStore,
-    threshold_chars: usize,
-) -> String {
+pub fn prune_tool_output(content: &str, store: &SpillStore, threshold_chars: usize) -> String {
     let total = content.chars().count();
     if total <= threshold_chars {
         return content.to_owned();

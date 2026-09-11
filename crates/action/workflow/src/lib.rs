@@ -157,9 +157,7 @@ pub struct RalphReport {
 
 /// True when any summary line is exactly the done marker.
 pub fn contains_done_marker(summary: &str) -> bool {
-    summary
-        .lines()
-        .any(|line| line.trim() == RALPH_DONE_MARKER)
+    summary.lines().any(|line| line.trim() == RALPH_DONE_MARKER)
 }
 
 /// Validate step ids and edges: duplicates, blanks, unknown deps, cycles.
@@ -167,7 +165,9 @@ pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
     let mut seen = std::collections::HashSet::new();
     for step in &spec.steps {
         if step.id.trim().is_empty() {
-            return Err(WorkflowError::InvalidSpec("step id must not be blank".to_string()));
+            return Err(WorkflowError::InvalidSpec(
+                "step id must not be blank".to_string(),
+            ));
         }
         if !seen.insert(step.id.clone()) {
             return Err(WorkflowError::DuplicateStep(step.id.clone()));
@@ -236,9 +236,7 @@ fn step_inputs(step: &WorkflowStep) -> Result<Vec<String>, WorkflowError> {
     match step.kind {
         StepKind::Task => Ok(vec![render_input(&step.input)]),
         StepKind::Fanout => match &step.input {
-            serde_json::Value::Array(items) => {
-                Ok(items.iter().map(render_input).collect())
-            }
+            serde_json::Value::Array(items) => Ok(items.iter().map(render_input).collect()),
             _ => Err(WorkflowError::InvalidSpec(format!(
                 "fanout step '{}' needs an input array",
                 step.id
@@ -328,7 +326,10 @@ async fn run_step(
             summaries.into_iter().next().unwrap_or_default(),
         )),
         StepKind::Fanout => Ok(serde_json::Value::Array(
-            summaries.into_iter().map(serde_json::Value::String).collect(),
+            summaries
+                .into_iter()
+                .map(serde_json::Value::String)
+                .collect(),
         )),
     }
 }
@@ -351,10 +352,7 @@ pub async fn run_workflow(
             .iter()
             .filter(|step| {
                 !done.contains_key(&step.id)
-                    && step
-                        .depends_on
-                        .iter()
-                        .all(|dep| done.contains_key(dep))
+                    && step.depends_on.iter().all(|dep| done.contains_key(dep))
             })
             .collect();
         if ready.is_empty() {
@@ -515,10 +513,7 @@ mod tests {
             merged.get("a"),
             Some(&serde_json::Value::String("alpha".to_string()))
         );
-        assert_eq!(
-            merged.get("b"),
-            Some(&serde_json::json!(["x", "y", "z"]))
-        );
+        assert_eq!(merged.get("b"), Some(&serde_json::json!(["x", "y", "z"])));
         // Dependency order holds: the lone task spawns before fan-out items.
         let inputs: Vec<String> = service
             .spawned()

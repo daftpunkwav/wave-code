@@ -68,12 +68,7 @@ pub fn endpoint_allowed(endpoint: &str) -> bool {
             .next()
             .unwrap_or("")
             .strip_suffix('.')
-            .unwrap_or(
-                authority
-                    .split(':')
-                    .next()
-                    .unwrap_or(""),
-            )
+            .unwrap_or(authority.split(':').next().unwrap_or(""))
             .to_owned()
     };
     match scheme.to_lowercase().as_str() {
@@ -219,10 +214,7 @@ impl Tool for RemoteShell {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let code = body
-            .get("exit_code")
-            .and_then(Value::as_i64)
-            .unwrap_or(0) as i32;
+        let code = body.get("exit_code").and_then(Value::as_i64).unwrap_or(0) as i32;
         let mut content = format!("exit code: {code}");
         if !stdout.is_empty() {
             content.push_str(&format!("\n--- stdout ---\n{stdout}"));
@@ -269,22 +261,22 @@ mod tests {
 
     #[test]
     fn stdout_aliases_cover_worker_shapes() {
-        assert_eq!(
-            worker_stdout(&json!({"stdout": "a"})),
-            "a".to_owned()
-        );
+        assert_eq!(worker_stdout(&json!({"stdout": "a"})), "a".to_owned());
         assert_eq!(worker_stdout(&json!({"output": "b"})), "b".to_owned());
-        assert_eq!(
-            worker_stdout(&json!({"content": "c"})),
-            "c".to_owned()
-        );
+        assert_eq!(worker_stdout(&json!({"content": "c"})), "c".to_owned());
         assert_eq!(worker_stdout(&json!({})), "".to_owned());
     }
 
     /// Hand-rolled hermetic stub: one connection, canned bytes, loopback only.
-    fn stub_once(response: Vec<u8>, hold: Option<Duration>) -> (String, std::thread::JoinHandle<Vec<u8>>) {
+    fn stub_once(
+        response: Vec<u8>,
+        hold: Option<Duration>,
+    ) -> (String, std::thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-        let endpoint = format!("http://127.0.0.1:{}/run", listener.local_addr().unwrap().port());
+        let endpoint = format!(
+            "http://127.0.0.1:{}/run",
+            listener.local_addr().unwrap().port()
+        );
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("one connection");
             stream
@@ -356,7 +348,10 @@ mod tests {
             .unwrap();
         let raw = handle.join().expect("stub thread");
         let request = String::from_utf8_lossy(&raw);
-        assert!(request.contains("\"cmd\":\"echo hi\""), "worker protocol body: {request}");
+        assert!(
+            request.contains("\"cmd\":\"echo hi\""),
+            "worker protocol body: {request}"
+        );
         assert!(!out.is_error, "stub success: {}", out.content);
         assert!(out.content.contains("hi-remote"));
     }
@@ -366,14 +361,17 @@ mod tests {
         let body = r#"{"stdout":"ok","exit_code":0}"#;
         // The stub answers 200 only when the bearer header is present.
         let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
-        let endpoint = format!("http://127.0.0.1:{}/run", listener.local_addr().unwrap().port());
+        let endpoint = format!(
+            "http://127.0.0.1:{}/run",
+            listener.local_addr().unwrap().port()
+        );
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("one connection");
             let mut buf = [0u8; 8192];
             let mut raw = Vec::new();
-            while !find_crlf2(&raw).is_some_and(|pos| {
-                raw.len() >= pos + content_length(&raw[..pos])
-            }) {
+            while !find_crlf2(&raw)
+                .is_some_and(|pos| raw.len() >= pos + content_length(&raw[..pos]))
+            {
                 match stream.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => raw.extend_from_slice(&buf[..n]),
@@ -410,7 +408,11 @@ mod tests {
             .unwrap();
         handle.join().expect("stub thread");
         assert!(out.is_error);
-        assert!(out.content.contains("500"), "status surfaces: {}", out.content);
+        assert!(
+            out.content.contains("500"),
+            "status surfaces: {}",
+            out.content
+        );
     }
 
     #[tokio::test]
@@ -445,6 +447,10 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
-        assert!(out.content.contains("HTTPS"), "policy message: {}", out.content);
+        assert!(
+            out.content.contains("HTTPS"),
+            "policy message: {}",
+            out.content
+        );
     }
 }

@@ -140,8 +140,11 @@ impl Scheduler {
         };
         match serde_json::from_str::<ScheduleFile>(&text) {
             Ok(stored) => {
-                let pending_fire_ids =
-                    stored.entries.iter().map(|entry| entry.id.clone()).collect::<Vec<_>>();
+                let pending_fire_ids = stored
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id.clone())
+                    .collect::<Vec<_>>();
                 let catchup = pending_fire_ids.len() as u64;
                 (
                     Self {

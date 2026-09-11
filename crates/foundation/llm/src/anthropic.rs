@@ -8,8 +8,8 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 
 use crate::{
-    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role,
-    SseParser, StreamEvent, validate_image,
+    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role, SseParser,
+    StreamEvent, validate_image,
 };
 
 /// Anthropic Messages API streaming client.
@@ -764,7 +764,12 @@ mod image_translation_tests {
         }]);
         let block = &out[0]["content"][0];
         assert_eq!(block["type"], "text");
-        assert!(block["text"].as_str().unwrap().contains("unsupported image mime"));
+        assert!(
+            block["text"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported image mime")
+        );
     }
 
     #[test]

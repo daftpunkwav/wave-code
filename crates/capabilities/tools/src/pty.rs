@@ -315,7 +315,10 @@ fn interact(
         guard.size = size;
         let _ = guard.master.resize(size);
     }
-    let marker = format!("{SENTINEL_PREFIX}{}__", SENTINEL_COUNTER.fetch_add(1, Ordering::Relaxed));
+    let marker = format!(
+        "{SENTINEL_PREFIX}{}__",
+        SENTINEL_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
     guard
         .writer
         .write_all(command.as_bytes())
@@ -387,9 +390,7 @@ fn find_marker(raw: &[u8], marker: &[u8]) -> Option<Option<i32>> {
             if let Some(end_pos) = find_subslice(rest, end) {
                 let code_text = String::from_utf8_lossy(&rest[..end_pos]);
                 let code_text = code_text.trim();
-                if !code_text.is_empty()
-                    && code_text.bytes().all(|b| b.is_ascii_digit())
-                {
+                if !code_text.is_empty() && code_text.bytes().all(|b| b.is_ascii_digit()) {
                     return Some(code_text.parse::<i32>().ok());
                 }
                 // Marker-like but not the shell's reply (the echoed
@@ -405,9 +406,7 @@ fn find_marker(raw: &[u8], marker: &[u8]) -> Option<Option<i32>> {
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 /// Remove the sentinel echo line and the marker line from captured text.
@@ -496,7 +495,9 @@ fn drain_available(reader: &mut Box<dyn Read + Send>, raw: &mut Vec<u8>) {
     // fcntl, but portable-pty exposes only blocking reads, so poll with a
     // helper thread is overkill — one extra blocking read is bounded by the
     // already-exited child closing the master (EOF).
-    let _ = reader.read(&mut chunk).map(|n| raw.extend_from_slice(&chunk[..n]));
+    let _ = reader
+        .read(&mut chunk)
+        .map(|n| raw.extend_from_slice(&chunk[..n]));
 }
 
 fn parse_timeout(input: &serde_json::Value) -> std::result::Result<u64, ToolOutput> {
@@ -580,10 +581,14 @@ impl Tool for PtyShell {
         let rows = input.get("rows").and_then(|v| v.as_u64());
         let cols = input.get("cols").and_then(|v| v.as_u64());
         if input.get("rows").is_some_and(|v| v.as_u64().is_none()) {
-            return Ok(err_output("invalid parameter 'rows' (non-negative integer required)"));
+            return Ok(err_output(
+                "invalid parameter 'rows' (non-negative integer required)",
+            ));
         }
         if input.get("cols").is_some_and(|v| v.as_u64().is_none()) {
-            return Ok(err_output("invalid parameter 'cols' (non-negative integer required)"));
+            return Ok(err_output(
+                "invalid parameter 'cols' (non-negative integer required)",
+            ));
         }
         let session = input
             .get("session")
@@ -591,7 +596,9 @@ impl Tool for PtyShell {
             .map(|s| s.to_owned());
         if let Some(name) = session {
             if name.is_empty() {
-                return Ok(err_output("invalid parameter 'session' (non-empty string required)"));
+                return Ok(err_output(
+                    "invalid parameter 'session' (non-empty string required)",
+                ));
             }
             let size = pty_size(rows, cols);
             let entry = match get_or_create(&name, ctx, size) {
@@ -608,21 +615,18 @@ impl Tool for PtyShell {
             // unblock the reader thread (which holds the session lock).
             let killer = entry.killer.clone();
             let label = command.clone();
-            let run = tokio::task::spawn_blocking(move || interact(&entry, &command, size_opt, timeout));
-            let (output, code) = match tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                run,
-            )
-            .await
-            {
-                Ok(Ok(Ok(pair))) => pair,
-                Ok(Ok(Err(reason))) => return Ok(err_output(reason)),
-                Ok(Err(_join)) => return Ok(err_output("pty session task failed")),
-                Err(_) => {
-                    let _ = killer.lock().unwrap_or_else(|e| e.into_inner()).kill();
-                    return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
-                }
-            };
+            let run =
+                tokio::task::spawn_blocking(move || interact(&entry, &command, size_opt, timeout));
+            let (output, code) =
+                match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+                    Ok(Ok(Ok(pair))) => pair,
+                    Ok(Ok(Err(reason))) => return Ok(err_output(reason)),
+                    Ok(Err(_join)) => return Ok(err_output("pty session task failed")),
+                    Err(_) => {
+                        let _ = killer.lock().unwrap_or_else(|e| e.into_inner()).kill();
+                        return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
+                    }
+                };
             let body = truncate_output(output.as_bytes());
             Ok(ToolOutput {
                 content: format!("exit code: {code}\n{body}"),
@@ -636,19 +640,15 @@ impl Tool for PtyShell {
             let run = tokio::task::spawn_blocking(move || {
                 run_one_shot(&command, &ctx_owned, size, timeout)
             });
-            let (output, code) = match tokio::time::timeout(
-                Duration::from_millis(timeout_ms),
-                run,
-            )
-            .await
-            {
-                Ok(Ok(Ok(pair))) => pair,
-                Ok(Ok(Err(reason))) => return Ok(err_output(reason)),
-                Ok(Err(_join)) => return Ok(err_output("pty task failed")),
-                Err(_) => {
-                    return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
-                }
-            };
+            let (output, code) =
+                match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+                    Ok(Ok(Ok(pair))) => pair,
+                    Ok(Ok(Err(reason))) => return Ok(err_output(reason)),
+                    Ok(Err(_join)) => return Ok(err_output("pty task failed")),
+                    Err(_) => {
+                        return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
+                    }
+                };
             let body = truncate_output(output.as_bytes());
             Ok(ToolOutput {
                 content: format!("exit code: {code}\n{body}"),
@@ -848,7 +848,10 @@ mod tests {
         let (_d, c) = ctx();
         let name = unique_session("reset");
         let _ = PtyShell
-            .execute(serde_json::json!({"command": "exit", "session": name, "timeout_ms": 15000}), &c)
+            .execute(
+                serde_json::json!({"command": "exit", "session": name, "timeout_ms": 15000}),
+                &c,
+            )
             .await
             .unwrap();
         let out = PtyShell
@@ -872,7 +875,10 @@ mod tests {
         for i in 0..(MAX_SESSIONS + 1) {
             let name = unique_session(&format!("evict{i}"));
             let out = PtyShell
-                .execute(serde_json::json!({"command": "echo hi", "session": name, "timeout_ms": 15000}), &c)
+                .execute(
+                    serde_json::json!({"command": "echo hi", "session": name, "timeout_ms": 15000}),
+                    &c,
+                )
                 .await
                 .unwrap();
             assert!(!out.is_error, "session {name} must start: {}", out.content);

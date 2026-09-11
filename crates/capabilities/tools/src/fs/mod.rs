@@ -251,8 +251,17 @@ mod tests {
         // builtins (pty, websearch, spill, image, present, ...); the stable
         // contract is sorted specs, object schemas, and per-tool presence.
         assert!(specs.len() >= 14);
-        for name in ["read_file", "read_image", "present", "web_search", "spill_read"] {
-            assert!(specs.iter().any(|s| s.name == name), "{name} must be registered");
+        for name in [
+            "read_file",
+            "read_image",
+            "present",
+            "web_search",
+            "spill_read",
+        ] {
+            assert!(
+                specs.iter().any(|s| s.name == name),
+                "{name} must be registered"
+            );
         }
         let names: Vec<_> = specs.iter().map(|s| s.name.as_str()).collect();
         let mut sorted = names.clone();

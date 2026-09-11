@@ -209,11 +209,12 @@ fn decode_one_entity(entity: &str) -> Option<String> {
         _ => {
             let inner = entity.strip_prefix('&')?.strip_suffix(';')?;
             if let Some(num) = inner.strip_prefix('#') {
-                let code = if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
-                    u32::from_str_radix(hex, 16).ok()?
-                } else {
-                    num.parse().ok()?
-                };
+                let code =
+                    if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()?
+                    } else {
+                        num.parse().ok()?
+                    };
                 Some(char::from_u32(code)?.to_string())
             } else {
                 None
@@ -266,10 +267,9 @@ pub fn parse_ddg_html(html: &str, count: usize) -> Vec<SearchResult> {
         r#"<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#,
     )
     .expect("link regex compiles");
-    let snippet_re = regex::Regex::new(
-        r#"<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#,
-    )
-    .expect("snippet regex compiles");
+    let snippet_re =
+        regex::Regex::new(r#"<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#)
+            .expect("snippet regex compiles");
     let snippets: Vec<String> = snippet_re
         .captures_iter(html)
         .map(|c| decode_entities(strip_tags(c[1].trim()).trim()))
@@ -397,7 +397,9 @@ impl Tool for WebSearch {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|q| !q.is_empty())
-            .ok_or_else(|| err_output("missing or invalid parameter 'query' (non-empty string required)"));
+            .ok_or_else(|| {
+                err_output("missing or invalid parameter 'query' (non-empty string required)")
+            });
         let query = match query {
             Ok(q) => q,
             Err(out) => return Ok(out),
@@ -576,11 +578,7 @@ mod tests {
                     .timeout(timeout)
                     .build()
                     .unwrap();
-                match client
-                    .get(format!("{}/hang", self.base_url))
-                    .send()
-                    .await
-                {
+                match client.get(format!("{}/hang", self.base_url)).send().await {
                     Ok(_) => Ok(Vec::new()),
                     Err(e) => Err(format!("search request failed: {e}")),
                 }
@@ -602,7 +600,17 @@ mod tests {
         let (_d, c) = ctx();
         let tool = WebSearch::new();
         assert!(tool.execute(json!({}), &c).await.unwrap().is_error);
-        assert!(tool.execute(json!({"query": "  "}), &c).await.unwrap().is_error);
-        assert!(tool.execute(json!({"query": "x", "count": 99}), &c).await.unwrap().is_error);
+        assert!(
+            tool.execute(json!({"query": "  "}), &c)
+                .await
+                .unwrap()
+                .is_error
+        );
+        assert!(
+            tool.execute(json!({"query": "x", "count": 99}), &c)
+                .await
+                .unwrap()
+                .is_error
+        );
     }
 }

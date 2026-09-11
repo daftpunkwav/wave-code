@@ -36,8 +36,7 @@ pub enum Role {
 pub const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
 
 /// Allowlisted image MIME types for attachments.
-pub const IMAGE_ALLOWED_MIMES: &[&str] =
-    &["image/png", "image/jpeg", "image/webp", "image/gif"];
+pub const IMAGE_ALLOWED_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 /// Binary image attachment (validated, base64-encoded).
 ///

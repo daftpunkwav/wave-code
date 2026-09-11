@@ -89,7 +89,10 @@ impl ServiceMap {
     /// Insert an already-erased service, keyed by its own `service_id()`.
     pub fn insert_erased(&mut self, service: Arc<dyn AnyService>) {
         let id = service.service_id();
-        eprintln!("DBG insert id={id:?} dyn-obj={:?}", TypeId::of::<dyn AnyService>());
+        eprintln!(
+            "DBG insert id={id:?} dyn-obj={:?}",
+            TypeId::of::<dyn AnyService>()
+        );
         self.inner.insert(id, service);
     }
 
@@ -266,7 +269,13 @@ impl Registry {
         let mut names: Vec<&String> = self.entries.keys().collect();
         names.sort();
         for name in names {
-            visit(name.as_str(), &self.entries, &mut state, &mut stack, &mut order)?;
+            visit(
+                name.as_str(),
+                &self.entries,
+                &mut state,
+                &mut stack,
+                &mut order,
+            )?;
         }
         Ok(order)
     }
@@ -402,7 +411,9 @@ pub fn discover(home: Option<&Path>, warnings: &mut Vec<String>) -> Vec<Discover
         let file: ManifestFile = match toml::from_str(&text) {
             Ok(file) => file,
             Err(e) => {
-                warnings.push(format!("runtime plugin {label:?} skipped: invalid manifest: {e}"));
+                warnings.push(format!(
+                    "runtime plugin {label:?} skipped: invalid manifest: {e}"
+                ));
                 continue;
             }
         };

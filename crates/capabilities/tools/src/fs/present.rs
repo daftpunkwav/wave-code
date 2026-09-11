@@ -109,7 +109,8 @@ impl Tool for Present {
             Some(a) => a,
             None => {
                 return Ok(ToolOutput {
-                    content: "missing or invalid parameter 'paths' (array of strings required)".to_owned(),
+                    content: "missing or invalid parameter 'paths' (array of strings required)"
+                        .to_owned(),
                     is_error: true,
                 });
             }
@@ -126,7 +127,8 @@ impl Tool for Present {
                 Some(s) => s,
                 None => {
                     return Ok(ToolOutput {
-                        content: "invalid parameter 'paths' (every entry must be a string)".to_owned(),
+                        content: "invalid parameter 'paths' (every entry must be a string)"
+                            .to_owned(),
                         is_error: true,
                     });
                 }
@@ -184,7 +186,12 @@ mod tests {
     async fn present_rejects_escape_and_empty() {
         let (_d, c) = ctx();
         let tool = Present::new(PresentStore::default());
-        assert!(tool.execute(json!({"paths": []}), &c).await.unwrap().is_error);
+        assert!(
+            tool.execute(json!({"paths": []}), &c)
+                .await
+                .unwrap()
+                .is_error
+        );
         assert!(tool.execute(json!({}), &c).await.unwrap().is_error);
         let out = tool
             .execute(json!({"paths": ["../evil.txt"]}), &c)

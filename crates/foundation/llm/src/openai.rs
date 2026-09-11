@@ -216,7 +216,9 @@ fn image_part(mime: &str, base64_data: &str) -> serde_json::Value {
             "type": "image_url",
             "image_url": {"url": format!("data:{mime};base64,{base64_data}")},
         }),
-        Err(reason) => serde_json::json!({"type": "text", "text": format!("[invalid image: {reason}]")}),
+        Err(reason) => {
+            serde_json::json!({"type": "text", "text": format!("[invalid image: {reason}]")})
+        }
     }
 }
 
@@ -1158,8 +1160,14 @@ mod image_translation_tests {
             &[Message {
                 role: Role::User,
                 content: vec![
-                    ContentBlock::Text { text: "see this".to_string() },
-                    ContentBlock::Image { id: None, mime: "image/png".to_string(), base64: b64.clone() },
+                    ContentBlock::Text {
+                        text: "see this".to_string(),
+                    },
+                    ContentBlock::Image {
+                        id: None,
+                        mime: "image/png".to_string(),
+                        base64: b64.clone(),
+                    },
                 ],
             }],
         );
@@ -1180,7 +1188,9 @@ mod image_translation_tests {
             "",
             &[Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text { text: "hi".to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: "hi".to_string(),
+                }],
             }],
         );
         assert!(messages[0]["content"].is_string());
@@ -1201,7 +1211,12 @@ mod image_translation_tests {
         );
         let parts = messages[0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["type"], "text");
-        assert!(parts[0]["text"].as_str().unwrap().contains("unsupported image mime"));
+        assert!(
+            parts[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("unsupported image mime")
+        );
     }
 
     #[test]

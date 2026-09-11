@@ -23,10 +23,10 @@ mod todo_tool;
 mod webfetch;
 mod websearch;
 
-pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 pub use fs::{Present, PresentStore, ReadImage};
 pub use lsp::{DocumentSymbols, FindReferences, GotoDefinition, Hover, LspProviders};
 pub use spill_tool::SpillRead;
+pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 pub use websearch::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};
 
 use std::collections::{HashMap, HashSet};

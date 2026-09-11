@@ -857,14 +857,24 @@ paths:
     #[test]
     fn refresh_picks_up_new_skill_files() {
         let dir = tempfile::tempdir().unwrap();
-        write_skill(dir.path(), "first", "---\ndescription: First skill\n---", "Body one");
+        write_skill(
+            dir.path(),
+            "first",
+            "---\ndescription: First skill\n---",
+            "Body one",
+        );
         let root = SkillRoot {
             source: SkillSource::Project,
             dir: dir.path().to_path_buf(),
         };
         let mut discovery = discover(&[root]);
         assert_eq!(discovery.set.len(), 1);
-        write_skill(dir.path(), "second", "---\ndescription: Second skill\n---", "Body two");
+        write_skill(
+            dir.path(),
+            "second",
+            "---\ndescription: Second skill\n---",
+            "Body two",
+        );
         discovery.refresh();
         assert_eq!(discovery.set.len(), 2);
         assert!(discovery.set.get("second").is_some());

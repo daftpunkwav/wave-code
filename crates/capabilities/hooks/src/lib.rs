@@ -498,12 +498,7 @@ impl HookEngine {
     /// Handlers run after config hooks, in registration order. This never
     /// affects [`HookEngine::run`]: config entries execute exactly as
     /// before, with or without plugin handlers present.
-    pub fn register_plugin_hook(
-        &self,
-        source: &str,
-        point: HookEventPoint,
-        handler: PluginHookFn,
-    ) {
+    pub fn register_plugin_hook(&self, source: &str, point: HookEventPoint, handler: PluginHookFn) {
         lock(&self.plugin_hooks)
             .entry(point)
             .or_default()
@@ -939,21 +934,10 @@ mod tests {
     fn plugin_hook_none_drops_the_event() {
         use std::sync::Arc;
         let engine = HookEngine::new(HashMap::new());
-        engine.register_plugin_hook(
-            "dropper",
-            HookEventPoint::Stop,
-            Arc::new(|_| None),
-        );
-        engine.register_plugin_hook(
-            "unreached",
-            HookEventPoint::Stop,
-            Arc::new(Some),
-        );
+        engine.register_plugin_hook("dropper", HookEventPoint::Stop, Arc::new(|_| None));
+        engine.register_plugin_hook("unreached", HookEventPoint::Stop, Arc::new(Some));
         assert_eq!(
-            engine.run_plugin_hooks(
-                HookEventPoint::Stop,
-                serde_json::json!({"stop": true})
-            ),
+            engine.run_plugin_hooks(HookEventPoint::Stop, serde_json::json!({"stop": true})),
             None
         );
     }

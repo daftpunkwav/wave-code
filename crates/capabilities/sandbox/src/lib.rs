@@ -51,10 +51,10 @@ pub mod chain;
 pub mod os;
 pub mod seatbelt;
 pub mod windows;
-#[cfg(target_os = "linux")]
-pub use os::LinuxLandlockBackend;
 pub use bwrap::BwrapBackend;
 pub use chain::{PROBE_ORDER, first_available, status_line, unavailable};
+#[cfg(target_os = "linux")]
+pub use os::LinuxLandlockBackend;
 pub use os::{
     ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError, UnavailableBackend,
     detect_backend,

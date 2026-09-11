@@ -19,7 +19,7 @@
 
 use serde_json::{Value, json};
 
-use super::{resolve_path, req_str};
+use super::{req_str, resolve_path};
 use crate::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Maximum image file bytes (mirrors the llm attachment cap; no downscaling).

@@ -76,7 +76,11 @@ impl Tool for SpillRead {
     async fn execute(&self, input: Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
         let uri = match input.get("uri").and_then(Value::as_str) {
             Some(u) => u,
-            None => return Ok(err_output("missing or invalid parameter 'uri' (string required)")),
+            None => {
+                return Ok(err_output(
+                    "missing or invalid parameter 'uri' (string required)",
+                ));
+            }
         };
         match self.store.read(uri) {
             Ok(content) => Ok(ToolOutput {

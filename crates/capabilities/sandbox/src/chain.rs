@@ -133,8 +133,7 @@ mod tests {
         let end = unavailable();
         assert!(!end.is_available());
         let mut cmd = tokio::process::Command::new("sh");
-        let profile =
-            ConfinementProfile::for_shell(std::path::Path::new("/work"));
+        let profile = ConfinementProfile::for_shell(std::path::Path::new("/work"));
         assert!(end.spawn_confined(&mut cmd, &profile).is_err());
     }
 

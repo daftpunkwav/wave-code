@@ -273,11 +273,7 @@ impl GoalState {
 
     /// Resume progress: Paused or Blocked -> Active.
     pub fn resume(&mut self) -> Result<(), GoalError> {
-        self.move_to(
-            "resume",
-            GoalStatus::Active,
-            "paused, blocked, or active",
-        )
+        self.move_to("resume", GoalStatus::Active, "paused, blocked, or active")
     }
 
     /// Mark the goal blocked: Active or Paused -> Blocked.
@@ -340,10 +336,7 @@ pub fn validate_session_id(id: &str) -> Result<(), GoalError> {
 }
 
 /// Goal file for one session: `<goals_root>/<session_id>.json`.
-pub fn goal_path_for_session(
-    goals_root: &Path,
-    session_id: &str,
-) -> Result<PathBuf, GoalError> {
+pub fn goal_path_for_session(goals_root: &Path, session_id: &str) -> Result<PathBuf, GoalError> {
     validate_session_id(session_id)?;
     Ok(goals_root.join(format!("{session_id}.json")))
 }
@@ -499,8 +492,7 @@ mod tests {
             goal.resume().unwrap_err().to_string(),
             goal.block().unwrap_err().to_string(),
             goal.round_tick().unwrap_err().to_string(),
-            goal
-                .update(goal.version, None, Some(GoalStatus::Active))
+            goal.update(goal.version, None, Some(GoalStatus::Active))
                 .unwrap_err()
                 .to_string(),
         ] {

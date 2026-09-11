@@ -686,7 +686,17 @@ async fn run_lsp_call(
     };
     let ext = extension_of(path);
     let result = match providers
-        .pooled_call(&ext, RequestTarget { uri: &uri, line, character }, timeout, method, call)
+        .pooled_call(
+            &ext,
+            RequestTarget {
+                uri: &uri,
+                line,
+                character,
+            },
+            timeout,
+            method,
+            call,
+        )
         .await
     {
         Ok(v) => v,
@@ -934,9 +944,14 @@ impl Tool for Hover {
     }
 
     async fn execute(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutput> {
-        run_lsp_call(&input, ctx, self.providers.as_ref(), true, "hover", async |c, uri, line, ch, t| {
-            c.hover(uri, line, ch, t).await
-        })
+        run_lsp_call(
+            &input,
+            ctx,
+            self.providers.as_ref(),
+            true,
+            "hover",
+            async |c, uri, line, ch, t| c.hover(uri, line, ch, t).await,
+        )
         .await
     }
 }
@@ -1222,9 +1237,7 @@ mod tests {
     }
 
     /// Counting fake: answers initialize + documentSymbol, counts symbol requests.
-    fn counting_server(
-        hits: Arc<std::sync::atomic::AtomicU64>,
-    ) -> tokio::io::DuplexStream {
+    fn counting_server(hits: Arc<std::sync::atomic::AtomicU64>) -> tokio::io::DuplexStream {
         let (client_end, server_end) = tokio::io::duplex(64 * 1024);
         tokio::spawn(async move {
             let mut io = tokio::io::BufReader::new(server_end);
@@ -1290,10 +1303,9 @@ mod tests {
         let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
         providers.register("py", "fake-server (injected)".to_owned());
         // Handshake the injected client, then install it as the pooled entry.
-        let mut ready =
-            LspClient::new(AnyTransport(Box::new(DuplexLsp::new(counting_server(
-                hits.clone(),
-            )))));
+        let mut ready = LspClient::new(AnyTransport(Box::new(DuplexLsp::new(counting_server(
+            hits.clone(),
+        )))));
         ready
             .initialize("file:///work", Duration::from_secs(10))
             .await
@@ -1326,7 +1338,11 @@ mod tests {
         ] {
             let out = tool.execute(pos.clone(), &ctx).await.unwrap();
             assert!(!out.is_error, "pooled call failed: {}", out.content);
-            assert!(out.content.contains(marker), "unexpected body: {}", out.content);
+            assert!(
+                out.content.contains(marker),
+                "unexpected body: {}",
+                out.content
+            );
         }
         // All calls rode one pooled connection (no real spawn, five requests).
         assert_eq!(providers.spawn_count(), 0);

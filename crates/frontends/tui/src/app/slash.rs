@@ -267,14 +267,8 @@ impl App {
             .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("active");
-        let version = value
-            .get("version")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let round = value
-            .get("round")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
+        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+        let round = value.get("round").and_then(|v| v.as_u64()).unwrap_or(0);
         let mut out = format!("goal status: {status} (version {version}, round {round})");
         match value.get("objective").and_then(|v| v.as_str()) {
             Some(body) if !body.trim().is_empty() => {

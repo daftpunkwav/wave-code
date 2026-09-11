@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Assemble sessions from config and arguments.
  * - Stream turns to stdout with progress on stderr.
+ * - Prompt for parked approvals interactively in the REPL.
  * - Map terminal outcomes to process exit codes.
  *
  * This binary is the first frontend on the new stack. Interactive
@@ -123,12 +124,11 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             None
         }
         EventMsg::ApprovalRequested { call_id, kind, .. } => {
-            let what = match kind {
-                operations_wire::ApprovalKind::Exec => "execute a command",
-                operations_wire::ApprovalKind::Write => "modify files",
-            };
+            // Neutral line: exec leaves the denial to the headless gate
+            // while the REPL answers below via an inline prompt.
             stderr.push_str(&format!(
-                "[approval] {call_id} denied: non-interactive session (wanted to {what})\n"
+                "[approval] {call_id} wants to {}\n",
+                approval_what(kind)
             ));
             None
         }
@@ -177,13 +177,16 @@ async fn main() -> anyhow::Result<()> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
+    // Only headless exec denies approvals openly: the REPL parks them on
+    // the gate and answers inline, which needs parking enabled here.
+    let headless = matches!(args.command, Command::Exec { .. });
     let mut handle = assemble_session(AssembleOptions {
         config_path: args.config,
         model_override: args.model,
         cwd,
         home: home.clone(),
         identity: DEFAULT_IDENTITY.to_string(),
-        headless: true,
+        headless,
         initial_history: Vec::new(),
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
@@ -255,7 +258,9 @@ async fn run_resume(thread_id: Option<String>, home: Option<PathBuf>) -> anyhow:
         cwd,
         home: Some(home),
         identity: DEFAULT_IDENTITY.to_string(),
-        headless: true,
+        // Resumed sessions continue interactively: park approvals for
+        // inline answers instead of denying them openly.
+        headless: false,
         initial_history: history,
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
@@ -456,7 +461,7 @@ async fn run_repl(
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
-                drain_turn(client).await?;
+                drain_turn(client, &mut editor).await?;
             }
             Slash::Text(text) => {
                 turn += 1;
@@ -467,15 +472,70 @@ async fn run_repl(
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
-                drain_turn(client).await?;
+                drain_turn(client, &mut editor).await?;
             }
         }
     }
     Ok(())
 }
 
+/// Human phrase for an approval kind, shared by progress lines and prompts.
+fn approval_what(kind: &operations_wire::ApprovalKind) -> &'static str {
+    match kind {
+        operations_wire::ApprovalKind::Exec => "execute a command",
+        operations_wire::ApprovalKind::Write => "modify files",
+    }
+}
+
+/// Map one approval answer line to a wire decision: y/yes approves once,
+/// anything else (including an empty line) denies without a reason.
+fn decide_approval(line: &str) -> operations_wire::WireDecision {
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => operations_wire::WireDecision::AllowOnce,
+        _ => operations_wire::WireDecision::Deny {
+            reason: String::new(),
+        },
+    }
+}
+
+/// Ask the user about one parked approval on the REPL editor.
+///
+/// Ctrl-C / Ctrl-D deny without a reason so no wait is left parked; other
+/// input errors deny the same way after noting them. Blocking here is
+/// safe: the actor parks on the gate with no polling of its own.
+fn prompt_approval(
+    editor: &mut rustyline::DefaultEditor,
+    call_id: &str,
+    what: &str,
+) -> anyhow::Result<operations_wire::WireDecision> {
+    use rustyline::error::ReadlineError;
+    println!("allow {what} ({call_id})? [y/N] ");
+    match editor.readline("> ") {
+        Ok(line) => Ok(decide_approval(&line)),
+        Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+            Ok(operations_wire::WireDecision::Deny {
+                reason: String::new(),
+            })
+        }
+        Err(e) => {
+            eprintln!("[approval] input error, denying: {e}");
+            Ok(operations_wire::WireDecision::Deny {
+                reason: String::new(),
+            })
+        }
+    }
+}
+
 /// Drain events until the turn ends, rendering as they arrive.
-async fn drain_turn(client: &mut ActorClient) -> anyhow::Result<()> {
+///
+/// Parked approvals are answered inline on the REPL editor: the gate holds
+/// the turn until this submits a decision, so REPL sessions must assemble
+/// with parking enabled (exec keeps the headless gate and never calls this
+/// with a live turn expecting answers).
+async fn drain_turn(
+    client: &mut ActorClient,
+    editor: &mut rustyline::DefaultEditor,
+) -> anyhow::Result<()> {
     let mut stdout_text = String::new();
     let mut stderr_text = String::new();
     loop {
@@ -484,6 +544,20 @@ async fn drain_turn(client: &mut ActorClient) -> anyhow::Result<()> {
                 let Some(event) = event else { break };
                 if render_event(&event.msg, &mut stdout_text, &mut stderr_text).is_some() {
                     break;
+                }
+                if let EventMsg::ApprovalRequested { call_id, kind, .. } = &event.msg {
+                    let decision =
+                        prompt_approval(editor, call_id, approval_what(kind))?;
+                    client
+                        .submit(Submission {
+                            id: format!("approval-{call_id}"),
+                            op: Op::ExecApproval {
+                                call_id: call_id.clone(),
+                                decision,
+                            },
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -661,6 +735,33 @@ mod tests {
             Some(Outcome::Interrupted)
         );
         assert_eq!(Outcome::Interrupted.exit_code(), 130);
+    }
+
+    #[test]
+    fn approval_answers_map_to_wire_decisions() {
+        use operations_wire::WireDecision;
+        assert_eq!(decide_approval("y"), WireDecision::AllowOnce);
+        assert_eq!(decide_approval("YES"), WireDecision::AllowOnce);
+        assert_eq!(
+            decide_approval(""),
+            WireDecision::Deny {
+                reason: String::new()
+            }
+        );
+        assert_eq!(
+            decide_approval("no"),
+            WireDecision::Deny {
+                reason: String::new()
+            }
+        );
+        assert_eq!(
+            approval_what(&operations_wire::ApprovalKind::Exec),
+            "execute a command"
+        );
+        assert_eq!(
+            approval_what(&operations_wire::ApprovalKind::Write),
+            "modify files"
+        );
     }
 }
 

@@ -149,6 +149,13 @@ pub enum EventMsg {
         /// Token estimate of the summary message.
         summary_tokens: u64,
     },
+    /// A reviewed plan was proposed and awaits approval (display routing).
+    PlanProposed {
+        /// Proposed plan text for transcript rendering.
+        text: String,
+    },
+    /// A reviewed plan was approved.
+    PlanApproved,
     /// Non-fatal condition worth surfacing.
     Warning {
         /// Human-readable warning text.
@@ -259,6 +266,13 @@ mod tests {
                 EventMsg::CompactCompleted { summary_tokens: 10 },
                 "compact_completed",
             ),
+            (
+                EventMsg::PlanProposed {
+                    text: "x".to_string(),
+                },
+                "plan_proposed",
+            ),
+            (EventMsg::PlanApproved, "plan_approved"),
             (
                 EventMsg::Warning {
                     message: "w".to_string(),

@@ -65,6 +65,17 @@ impl App {
                     dim(),
                 ));
             }
+            // Reviewed plan display: proposal text plus approval notice
+            // (both render locally; no Op involved).
+            M::PlanProposed { text } => {
+                self.flush_message();
+                let text = sanitize_terminal(text).into_owned();
+                self.push_item(Item::plain(format!("Plan proposed:\n{text}"), dim()));
+            }
+            M::PlanApproved => {
+                self.flush_message();
+                self.push_item(Item::plain("Plan approved".into(), dim()));
+            }
             // Approval request: yellow notice line + inline popup
             // (decisions are handled on keys).
             M::ApprovalRequested {

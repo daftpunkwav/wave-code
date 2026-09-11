@@ -31,6 +31,7 @@ pub mod memory_tool;
 pub mod model_adapter;
 pub mod native;
 pub mod plan_adapter;
+pub mod plan_tools;
 pub mod policy_adapter;
 pub mod session;
 pub mod skill_tool;
@@ -48,6 +49,10 @@ pub use memory_tool::MemoryWrite;
 pub use model_adapter::ModelAdapter;
 pub use native::{NativeExecutor, NativeTool};
 pub use plan_adapter::TodoPlanTracker;
+pub use plan_tools::{
+    DEFAULT_PLAN_SESSION_ID, PlanApproveTool, PlanFeedbackTool, PlanProposeTool, PlanStatusTool,
+    PlanStore, load_for_session as load_plan_for_session, render_status as render_plan_status,
+};
 pub use policy_adapter::PolicyAdapter;
 pub use session::{
     APPROVAL_TIMEOUT, AssembleOptions, DEFAULT_IDENTITY, DEFAULT_MAX_TOOL_ROUNDS, SessionError,

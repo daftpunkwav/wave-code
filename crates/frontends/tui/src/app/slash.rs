@@ -15,6 +15,7 @@ const BUILTIN_COMMANDS: &[&str] = &[
     "compact",
     "memory",
     "mcp",
+    "plan",
     "snapshots",
     "rewind",
     "permissions",
@@ -100,6 +101,7 @@ impl App {
             // carries turns, not inspection reads.
             "memory" => self.show_memory(),
             "mcp" => self.show_mcp(),
+            "plan" => self.show_plan(),
             "snapshots" => self.show_snapshots(),
             "rewind" => self.show_rewind(args),
             "permissions" => self.cycle_permission_mode(),
@@ -165,6 +167,64 @@ impl App {
                 self.push_item(Item::plain(sanitize_terminal(line).into_owned(), dim()));
             }
         }
+    }
+
+    /// `/plan`: show reviewed-plan status (local display only, mirroring
+    /// `/mcp`; the tui cannot depend on the plan crate, so the
+    /// `<home>/.wavecode/plans/default.json` convention is spelled out
+    /// here. Proposing and approving run through the model tools.)
+    fn show_plan(&mut self) {
+        match Self::plan_status_text() {
+            Some(text) => self.push_item(Item::plain(
+                sanitize_terminal(&text).into_owned(),
+                dim(),
+            )),
+            None => self.push_item(Item::plain(
+                "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)".into(),
+                dim(),
+            )),
+        }
+    }
+
+    /// Read and leniently render the reviewed-plan file. `None` means no
+    /// proposal exists yet (missing file or empty text); corrupt content
+    /// reports itself instead of failing the display.
+    fn plan_status_text() -> Option<String> {
+        const HEAD_CHARS: usize = 500;
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))?;
+        let text = std::fs::read_to_string(
+            PathBuf::from(home).join(".wavecode").join("plans").join("default.json"),
+        )
+        .ok()?;
+        let value: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => {
+                return Some(
+                    "(reviewed plan file unreadable; delete <home>/.wavecode/plans/default.json to start over)".to_string(),
+                );
+            }
+        };
+        let status = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("draft");
+        let round = value
+            .get("updated_round")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut out = format!("plan status: {status} (updated round {round})");
+        match value.get("plan_text").and_then(|v| v.as_str()) {
+            Some(body) if !body.trim().is_empty() => {
+                let head: String = body.chars().take(HEAD_CHARS).collect();
+                out.push_str(&format!("\nplan:\n{head}"));
+                if body.chars().count() > HEAD_CHARS {
+                    out.push_str("\n(truncated; ask the agent for the full plan)");
+                }
+            }
+            _ => return None,
+        }
+        Some(out)
     }
 
     /// `/snapshots`: list file-content snapshot labels (local display,

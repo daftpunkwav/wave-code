@@ -382,6 +382,37 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     registry.register(Arc::new(
         wavecode_tools::snapshot::RestoreTool::new(snapshot_root),
     ));
+    // Reviewed plan mode (explore -> present -> approve -> execute) rides
+    // the same late handle: the store path derives from home
+    // (`<home>/.wavecode/plans/<session>.json`) so resume in the same home
+    // reopens the same plan. Corrupt content warns and starts empty, never
+    // a hard stop. The mutating tools are not read-only, but they are not
+    // destructive either (they touch plan state, not the repo), so they
+    // never park on an approval gate.
+    let (plan_state, plan_warning) = crate::plan_tools::load_for_session(
+        home.as_deref(),
+        crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
+    );
+    if let Some(warning) = plan_warning {
+        warnings.push(warning);
+    }
+    let plan_store = Arc::new(crate::plan_tools::PlanStore::new(
+        plan_state,
+        home.as_deref(),
+        crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
+    ));
+    registry.register(Arc::new(crate::plan_tools::PlanProposeTool::new(
+        plan_store.clone(),
+    )));
+    registry.register(Arc::new(crate::plan_tools::PlanApproveTool::new(
+        plan_store.clone(),
+    )));
+    registry.register(Arc::new(crate::plan_tools::PlanFeedbackTool::new(
+        plan_store.clone(),
+    )));
+    registry.register(Arc::new(crate::plan_tools::PlanStatusTool::new(
+        plan_store,
+    )));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     let tool_names: Vec<String> = registry

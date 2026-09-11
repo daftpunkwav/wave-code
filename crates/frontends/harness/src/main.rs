@@ -179,6 +179,14 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             stderr.push_str(&format!("[compact completed: {summary_tokens} tokens]\n"));
             None
         }
+        EventMsg::PlanProposed { text } => {
+            stderr.push_str(&format!("[plan proposed]\n{text}\n"));
+            None
+        }
+        EventMsg::PlanApproved => {
+            stderr.push_str("[plan approved]\n");
+            None
+        }
         EventMsg::Warning { message } => {
             stderr.push_str(&format!("[warn] {message}\n"));
             None
@@ -503,6 +511,8 @@ enum Slash {
     Memory,
     /// List configured MCP servers.
     Mcp,
+    /// Show reviewed-plan status (local display only, mirrors /mcp).
+    Plan(String),
     /// List file-content snapshot labels (local display).
     Snapshots,
     /// Show one file-content snapshot (local display; the rewind itself
@@ -530,6 +540,7 @@ fn parse_slash(line: &str) -> Slash {
             "compact" => Slash::Compact,
             "memory" => Slash::Memory,
             "mcp" => Slash::Mcp,
+            "plan" => Slash::Plan(args),
             "snapshots" => Slash::Snapshots,
             "rewind" => Slash::Rewind(args),
             "permissions" => Slash::Permissions,
@@ -544,7 +555,7 @@ fn parse_slash(line: &str) -> Slash {
 }
 
 /// REPL help text printed for `/help` and unknown commands.
-const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /snapshots (list snapshots), /rewind <label> (show snapshot), /permissions (cycle approval mode), /quit (end session), /help";
+const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /plan (show reviewed-plan status), /snapshots (list snapshots), /rewind <label> (show snapshot), /permissions (cycle approval mode), /quit (end session), /help";
 
 /// Guided turn text routing a slash-invoked skill through the model.
 ///
@@ -560,6 +571,74 @@ fn skill_request(name: &str, args: &str) -> String {
             args.trim()
         )
     }
+}
+
+/// Render the reviewed-plan status for `/plan` from the home-derived
+/// plan file (`<home>/.wavecode/plans/default.json`).
+///
+/// Local display only, mirroring `/mcp`: the TUI spells out the same
+/// convention, and neither frontend depends on the plan crate.
+fn plan_status_display() -> String {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    render_plan_file(home.as_deref())
+}
+
+/// Lenient rendering of one home directory's plan file: status plus the
+/// plan head, or a hint when no proposal exists yet. Never fails, so
+/// `/plan` display stays total.
+fn render_plan_file(home: Option<&std::path::Path>) -> String {
+    const EMPTY: &str = "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)";
+    let Some(home) = home else {
+        return format!("{EMPTY}\n{PLAN_USAGE}");
+    };
+    let path = home.join(".wavecode").join("plans").join("default.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) => return format!("{EMPTY}\n{PLAN_USAGE}"),
+    };
+    render_plan_text(&text)
+}
+
+/// Usage line shared by every `/plan` rendering: proposing and approving
+/// run through the model tools, never through the slash command.
+const PLAN_USAGE: &str =
+    "usage: /plan (status display only; proposing runs through the plan_propose tool)";
+
+/// Lenient rendering of raw plan file content (exposed for tests; the
+/// file shape is owned by the plan state crate).
+fn render_plan_text(text: &str) -> String {
+    const HEAD_CHARS: usize = 500;
+    let value: serde_json::Value = match serde_json::from_str(text) {
+        Ok(value) => value,
+        Err(_) => {
+            return format!(
+                "(reviewed plan file unreadable; delete <home>/.wavecode/plans/default.json to start over)\n{PLAN_USAGE}"
+            );
+        }
+    };
+    let status = value
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("draft");
+    let round = value
+        .get("updated_round")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let mut out = format!("plan status: {status} (updated round {round})");
+    match value.get("plan_text").and_then(|v| v.as_str()) {
+        Some(body) if !body.trim().is_empty() => {
+            let head: String = body.chars().take(HEAD_CHARS).collect();
+            out.push_str(&format!("\nplan:\n{head}"));
+            if body.chars().count() > HEAD_CHARS {
+                out.push_str("\n(truncated; ask the agent for the full plan)");
+            }
+        }
+        _ => out.push_str("\n(no plan text yet)"),
+    }
+    out.push_str(&format!("\n{PLAN_USAGE}"));
+    out
 }
 
 /// Permission modes in `/permissions` cycle order (wire names).
@@ -752,6 +831,13 @@ async fn run_repl(
                         println!("- {server}");
                     }
                 }
+            }
+            // Reviewed plan mode is local display only (mirrors /mcp):
+            // the plan file lives under `<home>/.wavecode/plans/` and the
+            // model mutates it through the plan_* tools, so the REPL only
+            // renders status plus usage, never writes.
+            Slash::Plan(_) => {
+                println!("{}", plan_status_display());
             }
             // File-content snapshots (no git dependence): `/snapshots`
             // lists labels, `/rewind <label>` shows one snapshot.
@@ -1014,6 +1100,11 @@ mod tests {
         assert_eq!(parse_slash("  /compact  "), Slash::Compact);
         assert_eq!(parse_slash("/memory"), Slash::Memory);
         assert_eq!(parse_slash("/mcp"), Slash::Mcp);
+        assert_eq!(parse_slash("/plan"), Slash::Plan(String::new()));
+        assert_eq!(
+            parse_slash("  /plan  "),
+            Slash::Plan(String::new())
+        );
         assert_eq!(parse_slash("/snapshots"), Slash::Snapshots);
         assert_eq!(
             parse_slash("/rewind before-refactor"),
@@ -1051,6 +1142,37 @@ mod tests {
                 args: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn plan_renders_status_head_and_hints() {
+        // Missing home and missing files hint instead of failing.
+        assert!(render_plan_file(None).contains("no reviewed plan"));
+        let dir = std::env::temp_dir().join("wavecode-plan-missing-home");
+        assert!(render_plan_file(Some(dir.as_path())).contains("no reviewed plan"));
+        // A proposed plan renders status, text head, and usage.
+        let text = serde_json::json!({
+            "status": "proposed",
+            "plan_text": "migrate the store",
+            "updated_round": 1,
+            "history": [[1, "proposed"]],
+        })
+        .to_string();
+        let rendered = render_plan_text(&text);
+        assert!(rendered.contains("proposed"), "{rendered}");
+        assert!(rendered.contains("migrate the store"), "{rendered}");
+        assert!(rendered.contains("plan_propose"), "{rendered}");
+        // Empty text and corrupt content stay total.
+        let empty = serde_json::json!({"status": "draft"}).to_string();
+        assert!(render_plan_text(&empty).contains("no plan text yet"));
+        assert!(render_plan_text("{not json}").contains("unreadable"));
+        // Long plans truncate to a display head.
+        let long = serde_json::json!({
+            "status": "proposed",
+            "plan_text": "x".repeat(600),
+        })
+        .to_string();
+        assert!(render_plan_text(&long).contains("truncated"));
     }
 
     #[test]

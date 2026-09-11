@@ -504,6 +504,32 @@ mod tests {
         assert!(has_hint);
     }
 
+    /// /plan: locally render reviewed-plan status (no Op); hint when no
+    /// proposal exists yet. The file read hits the real home directory,
+    /// so the test accepts either rendering, never an Op.
+    #[test]
+    fn plan_shows_status_locally() {
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/plan");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty(), "/plan renders locally");
+        let has_row = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| {
+                s.content.contains("plan status:")
+                    || s.content.contains("no reviewed plan")
+                    || s.content.contains("plan file unreadable")
+            });
+        assert!(has_row);
+        // Completion offers the new builtin.
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/p");
+        assert!(app.slash_candidates().contains(&"/plan".to_string()));
+    }
+
     /// /snapshots: locally list labels (no Op); empty stores hint at the
     /// snapshot tool instead of failing.
     #[test]

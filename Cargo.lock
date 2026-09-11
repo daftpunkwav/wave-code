@@ -1123,6 +1123,7 @@ dependencies = [
  "runtime-runner",
  "safety-gate",
  "serde_json",
+ "state-plan",
  "state-store",
  "tempfile",
  "thiserror",
@@ -1892,6 +1893,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "wavecode-llm",
+]
+
+[[package]]
+name = "state-plan"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

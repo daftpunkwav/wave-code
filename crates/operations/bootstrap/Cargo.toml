@@ -9,6 +9,7 @@ runtime-runner = { path = "../../runtime/runner" }
 runtime-child = { path = "../../runtime/child" }
 runtime-prompt = { path = "../../runtime/prompt" }
 state-store = { path = "../../state/store" }
+state-plan = { path = "../../state/plan" }
 action-tasks = { path = "../../action/tasks" }
 action-jobs = { path = "../../action/jobs" }
 infrastructure-base = { path = "../../infrastructure/base" }

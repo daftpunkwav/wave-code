@@ -65,8 +65,12 @@ pub enum RuleError {
 }
 
 impl Rule {
-    /// 解析规则条目：`Scope(pattern)`，Scope ∈ {`Bash`, `File`}，pattern 非空。
+    /// Parse a rule entry: `Scope(pattern)` with Scope in {`Bash`, `File`} and
+    /// a non-empty pattern. Surrounding whitespace around the entry is ignored
+    /// (config lists often carry it); whitespace inside the parentheses is part
+    /// of the pattern and preserved.
     pub fn parse(entry: &str) -> Result<Self, RuleError> {
+        let entry = entry.trim();
         let invalid = || RuleError::Invalid(entry.to_owned());
         let open = entry.find('(').ok_or_else(invalid)?;
         let pattern = entry
@@ -97,6 +101,21 @@ impl Rule {
             pattern: pattern.into(),
             exact: true,
         }
+    }
+
+    /// Rule scope (`Bash` matches `command`, `File` matches `path`).
+    pub fn scope(&self) -> RuleScope {
+        self.scope
+    }
+
+    /// Raw match pattern (wildcard unless built via [`Rule::exact`]).
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+
+    /// Whether the rule compares literally instead of wildcard matching.
+    pub fn is_exact(&self) -> bool {
+        self.exact
     }
 
     /// 规则是否命中本次调用：按作用域从输入取候选文本
@@ -500,6 +519,39 @@ mod tests {
         ] {
             assert!(Rule::parse(bad).is_err(), "应拒绝: {bad:?}");
         }
+    }
+
+    // Surrounding whitespace is config noise, not part of the rule: it must be
+    // accepted, while whitespace inside the parentheses stays significant.
+    #[test]
+    fn rule_parse_trims_surrounding_whitespace() {
+        let rule = Rule::parse("  Bash(git *)  ").unwrap();
+        assert_eq!(rule.scope(), RuleScope::Bash);
+        assert_eq!(rule.pattern(), "git *");
+        let rule = Rule::parse("File(src/**)\n").unwrap();
+        assert_eq!(rule.scope(), RuleScope::File);
+        assert_eq!(rule.pattern(), "src/**");
+        // Interior whitespace is preserved verbatim.
+        let rule = Rule::parse("Bash( git *)").unwrap();
+        assert_eq!(rule.pattern(), " git *");
+        // Whitespace-only entries carry no rule and are still rejected.
+        for bad in ["", "   ", "\n\t "] {
+            assert!(Rule::parse(bad).is_err(), "should reject: {bad:?}");
+        }
+    }
+
+    // External callers receive Rules from allow_always but cannot see the
+    // private fields: accessors must expose scope / pattern / exactness.
+    #[test]
+    fn rule_accessors_expose_scope_pattern_exactness() {
+        let parsed = Rule::parse("Bash(git *)").unwrap();
+        assert_eq!(parsed.scope(), RuleScope::Bash);
+        assert_eq!(parsed.pattern(), "git *");
+        assert!(!parsed.is_exact());
+        let exact = Rule::exact(RuleScope::File, "src/main.rs");
+        assert_eq!(exact.scope(), RuleScope::File);
+        assert_eq!(exact.pattern(), "src/main.rs");
+        assert!(exact.is_exact());
     }
 
     // —— 通配匹配 ——

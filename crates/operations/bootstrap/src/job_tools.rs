@@ -45,7 +45,10 @@ fn lookup(
 
 /// Shared timeout helper: absent means `default_ms`, present must be a
 /// non-negative integer. Business errors, never panics.
-fn parse_timeout(input: &serde_json::Value, default_ms: u64) -> std::result::Result<u64, ToolOutput> {
+fn parse_timeout(
+    input: &serde_json::Value,
+    default_ms: u64,
+) -> std::result::Result<u64, ToolOutput> {
     match input.get("timeout_ms") {
         None | Some(serde_json::Value::Null) => Ok(default_ms),
         Some(value) => match value.as_u64() {
@@ -77,7 +80,10 @@ fn render(snapshot: &action_jobs::JobSnapshot) -> ToolOutput {
 }
 
 /// Required string field helper: missing or blank becomes a business error.
-fn required_str<'a>(input: &'a serde_json::Value, field: &str) -> std::result::Result<&'a str, ToolOutput> {
+fn required_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> std::result::Result<&'a str, ToolOutput> {
     match input.get(field).and_then(|v| v.as_str()) {
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => Err(ToolOutput {
@@ -382,7 +388,9 @@ mod tests {
     }
 
     fn jobs() -> Arc<JobService> {
-        Arc::new(JobService::new(Arc::new(runtime_child::ChildRuntime::new())))
+        Arc::new(JobService::new(
+            Arc::new(runtime_child::ChildRuntime::new()),
+        ))
     }
 
     #[tokio::test]
@@ -420,7 +428,10 @@ mod tests {
         let held = ctx();
         let spawn = JobSpawnTool::new(jobs.clone());
         let out = spawn
-            .execute(serde_json::json!({"command": "echo wavecode-job-ok"}), &held.ctx)
+            .execute(
+                serde_json::json!({"command": "echo wavecode-job-ok"}),
+                &held.ctx,
+            )
             .await
             .unwrap();
         assert!(!out.is_error);
@@ -428,7 +439,10 @@ mod tests {
         let wait = JobWaitTool::new(jobs.clone());
         assert!(wait.is_read_only());
         let waited = wait
-            .execute(serde_json::json!({"id": "job-1", "timeout_ms": 10_000}), &held.ctx)
+            .execute(
+                serde_json::json!({"id": "job-1", "timeout_ms": 10_000}),
+                &held.ctx,
+            )
             .await
             .unwrap();
         assert!(!waited.is_error);

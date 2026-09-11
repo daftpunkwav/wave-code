@@ -30,11 +30,7 @@ pub const FIRST_REQUEST_ID: u64 = 1;
 /// Advance a request id without panicking on overflow and without reusing 0.
 fn next_id_after(current: u64) -> u64 {
     let next = current.wrapping_add(1);
-    if next == 0 {
-        FIRST_REQUEST_ID
-    } else {
-        next
-    }
+    if next == 0 { FIRST_REQUEST_ID } else { next }
 }
 
 /// Read timeout for one response line in seconds.
@@ -305,9 +301,10 @@ mod tests {
 
     #[test]
     fn decode_accepts_error_frames_and_rejects_bad_shapes() {
-        let response =
-            decode_response("{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":0,\"message\":\"x\"}}")
-                .unwrap();
+        let response = decode_response(
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"error\":{\"code\":0,\"message\":\"x\"}}",
+        )
+        .unwrap();
         assert_eq!(response.id, 4);
         assert_eq!(
             response.payload,

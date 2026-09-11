@@ -592,10 +592,13 @@ mod tests {
     #[tokio::test]
     async fn spawn_at_max_depth_still_runs() {
         let rt = ChildRuntime::new();
-        let id = rt.spawn_background(child_spec("edge", MAX_CHILD_DEPTH, None), |ticket| async move {
-            assert_eq!(ticket.depth, MAX_CHILD_DEPTH);
-            TaskResult::completed("done", 0)
-        });
+        let id = rt.spawn_background(
+            child_spec("edge", MAX_CHILD_DEPTH, None),
+            |ticket| async move {
+                assert_eq!(ticket.depth, MAX_CHILD_DEPTH);
+                TaskResult::completed("done", 0)
+            },
+        );
         wait_until_finished(&rt, &id).await;
         assert_eq!(
             rt.query(&id).unwrap().result.unwrap().status,
@@ -611,19 +614,16 @@ mod tests {
         });
         wait_until_finished(&rt, &root).await;
         let root_id = root.clone();
-        let middle = rt.spawn_background(
-            child_spec("middle", 1, Some(&root)),
-            |ticket| async move {
+        let middle =
+            rt.spawn_background(child_spec("middle", 1, Some(&root)), |ticket| async move {
                 assert_eq!(ticket.depth, 1);
                 assert_eq!(ticket.parent, Some(root_id.clone()));
                 TaskResult::completed("middle done", 0)
-            },
-        );
+            });
         wait_until_finished(&rt, &middle).await;
-        let leaf = rt.spawn_background(
-            child_spec("leaf", 2, Some(&middle)),
-            |_ticket| async { TaskResult::completed("leaf done", 0) },
-        );
+        let leaf = rt.spawn_background(child_spec("leaf", 2, Some(&middle)), |_ticket| async {
+            TaskResult::completed("leaf done", 0)
+        });
         wait_until_finished(&rt, &leaf).await;
         assert_eq!(rt.query(&root).unwrap().lineage, vec![root.clone()]);
         assert_eq!(

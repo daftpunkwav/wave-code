@@ -152,7 +152,9 @@ mod tests {
         #[cfg(not(any(windows, unix)))]
         let made = false;
         if !made || link.symlink_metadata().is_err() {
-            eprintln!("cannot create symlink/junction (permissions or platform policy), skipping symlink escape test");
+            eprintln!(
+                "cannot create symlink/junction (permissions or platform policy), skipping symlink escape test"
+            );
             return;
         }
 

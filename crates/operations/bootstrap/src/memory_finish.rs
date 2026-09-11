@@ -194,13 +194,7 @@ mod tests {
         }
     }
 
-    fn finisher(
-        output: &str,
-    ) -> (
-        MemoryFinisher,
-        tempfile::TempDir,
-        Arc<ScriptedModel>,
-    ) {
+    fn finisher(output: &str) -> (MemoryFinisher, tempfile::TempDir, Arc<ScriptedModel>) {
         let dir = tempfile::tempdir().unwrap();
         let model = Arc::new(ScriptedModel {
             scripts: std::sync::Mutex::new([output.to_string()].into_iter().collect()),
@@ -218,34 +212,28 @@ mod tests {
 
     #[tokio::test]
     async fn distilled_lines_store_by_category() {
-        let (finisher, dir, _) = finisher("[user] prefers tabs\n[project] uses trunk-based flow\nnoise without a tag\n");
+        let (finisher, dir, _) =
+            finisher("[user] prefers tabs\n[project] uses trunk-based flow\nnoise without a tag\n");
         let stored = finisher
             .finish(&["user: remember my tabs".to_string()])
             .await
             .unwrap();
         assert_eq!(stored, 2);
         let store = MemoryStore::new(dir.path().to_path_buf());
-        assert!(store
-            .read_index()
-            .unwrap()
-            .contains("[user]"));
-        assert!(store
-            .read_category(wavecode_memory::MemoryCategory::Project)
-            .unwrap()
-            .contains("trunk-based"));
+        assert!(store.read_index().unwrap().contains("[user]"));
+        assert!(
+            store
+                .read_category(wavecode_memory::MemoryCategory::Project)
+                .unwrap()
+                .contains("trunk-based")
+        );
     }
 
     #[tokio::test]
     async fn empty_transcripts_skip_the_model_call() {
         let (finisher, _dir, model) = finisher("[user] should never be consumed");
         assert_eq!(finisher.finish(&[]).await.unwrap(), 0);
-        assert_eq!(
-            finisher
-                .finish(&["   ".to_string()])
-                .await
-                .unwrap(),
-            0
-        );
+        assert_eq!(finisher.finish(&["   ".to_string()]).await.unwrap(), 0);
         // Nothing stored, and the script is unconsumed (no call happened).
         assert_eq!(model.scripts.lock().unwrap().len(), 1);
     }

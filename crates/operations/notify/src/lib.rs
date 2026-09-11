@@ -175,7 +175,10 @@ mod tests {
         bus.subscribe(
             "turns",
             Box::new(move |notice: &Notice| {
-                seen2.lock().unwrap().push(format!("second:{}", notice.title));
+                seen2
+                    .lock()
+                    .unwrap()
+                    .push(format!("second:{}", notice.title));
             }),
         );
         let notice = |title: &str| Notice {

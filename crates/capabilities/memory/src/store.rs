@@ -178,9 +178,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memories"));
 
-        store.append(MemoryCategory::User, "prefers compact replies").unwrap();
-        store.append(MemoryCategory::Project, "repo uses pnpm").unwrap();
-        store.append(MemoryCategory::User, "long-time Rust user").unwrap();
+        store
+            .append(MemoryCategory::User, "prefers compact replies")
+            .unwrap();
+        store
+            .append(MemoryCategory::Project, "repo uses pnpm")
+            .unwrap();
+        store
+            .append(MemoryCategory::User, "long-time Rust user")
+            .unwrap();
 
         let user = store.read_category(MemoryCategory::User).unwrap();
         assert_eq!(user, "- prefers compact replies\n- long-time Rust user\n");
@@ -213,7 +219,10 @@ mod tests {
         );
         let index = store.read_index().unwrap();
         assert!(index.contains("- [feedback] do not refactor working code (see feedback.md)"));
-        assert!(!index.contains("unless asked to"), "index summary takes only the first line");
+        assert!(
+            !index.contains("unless asked to"),
+            "index summary takes only the first line"
+        );
     }
 
     /// Empty store: index / category reads return empty strings, not errors
@@ -267,7 +276,9 @@ mod tests {
         );
 
         // The guard only intercepts blanks; valid writes still work.
-        store.append(MemoryCategory::User, "prefers compact replies").unwrap();
+        store
+            .append(MemoryCategory::User, "prefers compact replies")
+            .unwrap();
         assert_eq!(
             store.read_category(MemoryCategory::User).unwrap(),
             "- prefers compact replies\n"

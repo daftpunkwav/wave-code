@@ -297,7 +297,10 @@ mod tests {
         ));
         let text = draw_app(&mut app, 80, 24);
         assert!(text.contains("Decline reason"), "reason mode: {text}");
-        assert!(text.contains("Enter confirm decline"), "reason hints: {text}");
+        assert!(
+            text.contains("Enter confirm decline"),
+            "reason hints: {text}"
+        );
     }
 
     /// Slash completion popup: `/c` filters to /compact and /commit

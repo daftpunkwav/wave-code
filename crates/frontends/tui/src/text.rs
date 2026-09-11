@@ -87,7 +87,10 @@ mod tests {
         let s = "normal text🦀\nnewline\ttab";
         let sanitized = sanitize_terminal(s);
         assert_eq!(sanitized, s);
-        assert!(matches!(sanitized, Cow::Borrowed(_)), "should borrow without copying");
+        assert!(
+            matches!(sanitized, Cow::Borrowed(_)),
+            "should borrow without copying"
+        );
     }
 
     /// Zero/one budgets: max 0 holds nothing (not even the marker);

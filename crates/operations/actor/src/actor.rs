@@ -34,8 +34,8 @@ use tokio::sync::mpsc;
 
 use crate::client::ActorClient;
 use crate::durable::{
-    checkpoint_turn, render_snapshot, resume_checkpoint, turn_label, DurabilityConfig,
-    TurnDurability,
+    DurabilityConfig, TurnDurability, checkpoint_turn, render_snapshot, resume_checkpoint,
+    turn_label,
 };
 
 /// Synthetic correlation id for session lifecycle warnings, which belong
@@ -72,9 +72,7 @@ where
         interrupt: InterruptHandle,
         system: String,
     ) -> ActorClient {
-        Self::spawn_inner(
-            driver, conv, children, approvals, interrupt, system, None,
-        )
+        Self::spawn_inner(driver, conv, children, approvals, interrupt, system, None)
     }
 
     /// Spawn with durable turn checkpoints.
@@ -193,9 +191,9 @@ where
                     turn_seq += 1;
                     let label = turn_label(turn_seq);
                     let snapshot = render_snapshot(&conv);
-                    let checkpoint_on = durability.as_ref().is_some_and(|dur| {
-                        dur.policy.checkpoint_before_model_request
-                    });
+                    let checkpoint_on = durability
+                        .as_ref()
+                        .is_some_and(|dur| dur.policy.checkpoint_before_model_request);
                     let warn_id = sub.id.clone();
                     let warn_tx = event_tx.clone();
                     checkpoint_turn(
@@ -470,11 +468,7 @@ fn queue_or_reject(
 ///
 /// Decisions are one-shot slots, so dropping is safe; staying silent is
 /// not: without this, a stale or mistyped call id fails invisibly.
-fn warn_late_approval(
-    event_tx: &mpsc::UnboundedSender<Event>,
-    id: &str,
-    call_id: &str,
-) {
+fn warn_late_approval(event_tx: &mpsc::UnboundedSender<Event>, id: &str, call_id: &str) {
     tracing::warn!(%call_id, "late approval with no parked waiter; dropped");
     let _ = event_tx.send(Event {
         id: id.to_string(),
@@ -883,14 +877,15 @@ mod tests {
             InterruptHandle::new(),
             "sys".to_string(),
         );
-        client.submit(user_input("s1", "remember the sky")).await.unwrap();
+        client
+            .submit(user_input("s1", "remember the sky"))
+            .await
+            .unwrap();
         // Drain through the turn end, then shut down and drain to close.
-        while let Some(event) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.next_event(),
-        )
-        .await
-        .unwrap()
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+                .await
+                .unwrap()
         {
             if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
                 break;
@@ -910,7 +905,11 @@ mod tests {
         {}
         let ended = ended.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(ended.len(), 1);
-        assert!(ended[0].iter().any(|line| line.contains("remember the sky")));
+        assert!(
+            ended[0]
+                .iter()
+                .any(|line| line.contains("remember the sky"))
+        );
         assert!(ended[0].iter().any(|line| line.starts_with("user: ")));
     }
 
@@ -964,12 +963,10 @@ mod tests {
         let mut client = spawn_durable(&root);
         // Empty roots offer no resume, so the first event is the turn.
         client.submit(user_input("s1", "hello")).await.unwrap();
-        while let Some(event) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.next_event(),
-        )
-        .await
-        .unwrap()
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+                .await
+                .unwrap()
         {
             if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
                 break;
@@ -1002,12 +999,10 @@ mod tests {
             },
         );
         client.submit(user_input("s1", "hello")).await.unwrap();
-        while let Some(event) = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.next_event(),
-        )
-        .await
-        .unwrap()
+        while let Some(event) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+                .await
+                .unwrap()
         {
             if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
                 break;

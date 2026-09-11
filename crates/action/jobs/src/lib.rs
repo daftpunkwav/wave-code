@@ -416,12 +416,7 @@ async fn drive_job(
     for drain in drains {
         let _ = drain.await;
     }
-    finish(
-        &id,
-        &slot,
-        &notifications,
-        status.and_then(|s| s.code()),
-    );
+    finish(&id, &slot, &notifications, status.and_then(|s| s.code()));
 }
 
 /// Record the terminal status, wake waiters, and file the shared notice.
@@ -431,10 +426,7 @@ fn finish(
     notifications: &Arc<ChildRuntime>,
     exit_code: Option<i32>,
 ) {
-    *slot
-        .exit_code
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = exit_code;
+    *slot.exit_code.lock().unwrap_or_else(|e| e.into_inner()) = exit_code;
     *slot.lock_state() = JobState::Finished;
     slot.done.notify_waiters();
     notifications.notify_completion(format!("{id} finished"));
@@ -605,7 +597,10 @@ mod tests {
         // and exactly one completion notice exists for this job.
         let notes = runtime.drain_notifications();
         assert_eq!(
-            notes.iter().filter(|n| *n == &format!("{id} finished")).count(),
+            notes
+                .iter()
+                .filter(|n| *n == &format!("{id} finished"))
+                .count(),
             1
         );
     }

@@ -29,10 +29,7 @@ pub const DEFAULT_PLAN_SESSION_ID: &str = "default";
 /// warning instead of failing assembly on corrupt content.
 ///
 /// Returns the state plus an optional startup warning for assembly.
-pub fn load_for_session(
-    home: Option<&Path>,
-    session_id: &str,
-) -> (PlanState, Option<String>) {
+pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (PlanState, Option<String>) {
     match state_plan::load_for_session(home, session_id) {
         Ok(state) => (state, None),
         Err(e) => (
@@ -73,7 +70,11 @@ impl PlanStore {
 
     /// Persist a snapshot taken under the lock (runs on the blocking
     /// pool; IO failures feed back to the model as business errors).
-    async fn persist(&self, snapshot: PlanState, file: Option<PathBuf>) -> std::result::Result<(), String> {
+    async fn persist(
+        &self,
+        snapshot: PlanState,
+        file: Option<PathBuf>,
+    ) -> std::result::Result<(), String> {
         let Some(path) = file else {
             return Ok(());
         };
@@ -136,7 +137,9 @@ async fn apply_transition(
             content: rendered,
             is_error: false,
         },
-        Err(reason) => err_output(format!("plan {action} applied but persistence failed: {reason}")),
+        Err(reason) => err_output(format!(
+            "plan {action} applied but persistence failed: {reason}"
+        )),
     }
 }
 

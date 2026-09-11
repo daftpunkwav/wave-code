@@ -176,7 +176,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "no temp files should remain: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "no temp files should remain: {leftovers:?}"
+        );
     }
 
     #[tokio::test]

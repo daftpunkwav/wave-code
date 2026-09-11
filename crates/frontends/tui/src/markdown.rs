@@ -295,7 +295,10 @@ mod tests {
         let text = plain(&lines);
         assert!(text.contains("Title"));
         assert!(text.contains("Body bold code"));
-        assert!(text.contains("│ fn main() {}"), "code block border: {text:?}");
+        assert!(
+            text.contains("│ fn main() {}"),
+            "code block border: {text:?}"
+        );
         assert!(text.contains("- A"));
         assert!(text.contains("│ quote"), "quote border: {text:?}");
         // Style assertions: bright cyan bold headings; yellow inline code; bold stacked.
@@ -320,7 +323,10 @@ mod tests {
         assert!(text.contains("1. one"));
         assert!(text.contains("2. two"));
         assert!(!text.ends_with('\n'));
-        assert!(!text.contains("\n\n\n"), "at most one blank line between blocks: {text:?}");
+        assert!(
+            !text.contains("\n\n\n"),
+            "at most one blank line between blocks: {text:?}"
+        );
     }
 
     /// Links show text without URL; strikethrough modifier applies.

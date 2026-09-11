@@ -190,10 +190,7 @@ mod tests {
 
     #[test]
     fn empty_values_rejected_at_construction() {
-        assert!(matches!(
-            Credential::api_key(""),
-            Err(AuthError::Empty(_))
-        ));
+        assert!(matches!(Credential::api_key(""), Err(AuthError::Empty(_))));
         assert!(matches!(Credential::bearer(""), Err(AuthError::Empty(_))));
         assert!(Credential::api_key("k").unwrap().expose() == "k");
     }

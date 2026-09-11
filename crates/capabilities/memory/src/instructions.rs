@@ -165,7 +165,7 @@ fn expand_at_refs(
                     })
                 } else {
                     None // Out of bounds (incl. link escape) / over depth /
-                        // already expanded (cycle): keep literal.
+                    // already expanded (cycle): keep literal.
                 };
                 match expanded {
                     Some(text) => {
@@ -301,9 +301,15 @@ mod tests {
             "reference should expand:\n{}",
             mem.combined
         );
-        assert!(!mem.combined.contains("@docs/extra.md"), "marker should be replaced");
+        assert!(
+            !mem.combined.contains("@docs/extra.md"),
+            "marker should be replaced"
+        );
         // References to missing files stay literal (honest display).
-        write(&root.join("WAVECODE.md"), "see @docs/missing.md for details");
+        write(
+            &root.join("WAVECODE.md"),
+            "see @docs/missing.md for details",
+        );
         let mem = collect(None, &root);
         assert!(mem.combined.contains("@docs/missing.md"));
     }
@@ -327,7 +333,10 @@ mod tests {
         assert!(!mem.combined.contains("SECRET-CONTENT"), "{}", mem.combined);
         assert!(mem.combined.contains("@D:/secret.md"));
         assert!(mem.combined.contains("@../secret.md"));
-        assert!(mem.combined.contains("EXTRA-CONTENT"), "./ relative refs should expand");
+        assert!(
+            mem.combined.contains("EXTRA-CONTENT"),
+            "./ relative refs should expand"
+        );
     }
 
     /// Symlink boundary (unix): the lexical check cannot stop link
@@ -400,7 +409,10 @@ mod tests {
             "capped references stay literal:\n{}",
             mem.combined
         );
-        assert!(!mem.combined.contains("LV5"), "depth-6 content must not appear");
+        assert!(
+            !mem.combined.contains("LV5"),
+            "depth-6 content must not appear"
+        );
     }
 
     /// @-reference cycle guard (P6 acceptance): mutual a <-> b references must
@@ -439,8 +451,15 @@ mod tests {
             mem.combined.find("RULE-TEST").unwrap(),
             mem.combined.find("RULE-STYLE").unwrap(),
         );
-        assert!(t < s, "rules should merge sorted by filename:\n{}", mem.combined);
-        assert!(!mem.combined.contains("NOT-MD"), "non-.md files do not merge");
+        assert!(
+            t < s,
+            "rules should merge sorted by filename:\n{}",
+            mem.combined
+        );
+        assert!(
+            !mem.combined.contains("NOT-MD"),
+            "non-.md files do not merge"
+        );
         // Sources: WAVECODE.md plus two rules files.
         assert_eq!(mem.sources.len(), 3);
     }

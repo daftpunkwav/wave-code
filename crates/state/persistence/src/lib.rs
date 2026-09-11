@@ -33,8 +33,7 @@ pub const JOURNAL_FORMAT_V0: u32 = 0;
 /// Headers carry a numeric `format` field and never carry `run_id`, so a
 /// v0 record can never be mistaken for one.
 fn is_header_value(value: &serde_json::Value) -> bool {
-    value.get("format").and_then(|v| v.as_u64()).is_some()
-        && value.get("run_id").is_none()
+    value.get("format").and_then(|v| v.as_u64()).is_some() && value.get("run_id").is_none()
 }
 
 /// Migrate one v0 record value into the current [`TurnRecord`] shape.
@@ -165,7 +164,7 @@ impl JsonlJournal {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(JOURNAL_FORMAT_VERSION)
+                return Ok(JOURNAL_FORMAT_VERSION);
             }
             Err(e) => return Err(JournalError::Io(e)),
         };
@@ -354,10 +353,7 @@ mod tests {
         assert_eq!(migrated.input, "ask");
         assert_eq!(
             migrated.history,
-            vec![
-                (true, "answer".to_string()),
-                (false, String::new()),
-            ]
+            vec![(true, "answer".to_string()), (false, String::new()),]
         );
         // Missing outcome degrades to empty, never to an error.
         assert_eq!(migrated.outcome, String::new());

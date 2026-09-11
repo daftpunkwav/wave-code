@@ -528,7 +528,10 @@ paths:
         let discovery = discover(&[root]);
         assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
         let skill = discovery.set.get("review").unwrap();
-        assert_eq!(skill.meta.when_to_use.as_deref(), Some("When review is mentioned"));
+        assert_eq!(
+            skill.meta.when_to_use.as_deref(),
+            Some("When review is mentioned")
+        );
         assert_eq!(skill.meta.allowed_tools, vec!["grep"]);
         // Defaults: inline / user_invocable=true / no hint / no paths.
         assert_eq!(skill.meta.context, SkillContext::Inline);
@@ -705,7 +708,11 @@ paths:
     #[test]
     fn catalog_renders_name_description_when() {
         let set = catalog_set(&[
-            ("commit", "Create commits", Some("when the user asks to commit")),
+            (
+                "commit",
+                "Create commits",
+                Some("when the user asks to commit"),
+            ),
             ("review", "Review code", None),
         ]);
         let catalog = set.catalog(10_000);

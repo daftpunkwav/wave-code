@@ -436,7 +436,11 @@ mod tests {
             month: 1,
             weekday: 3,
         };
-        let february = CivilTime { month: 2, weekday: 6, ..january };
+        let february = CivilTime {
+            month: 2,
+            weekday: 6,
+            ..january
+        };
         assert!(daemon.tick(january));
         assert!(!daemon.tick(january));
         // Same day/hour/minute in another month is another minute.

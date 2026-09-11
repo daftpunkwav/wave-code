@@ -632,7 +632,8 @@ fn plan_status_display() -> String {
 /// plan head, or a hint when no proposal exists yet. Never fails, so
 /// `/plan` display stays total.
 fn render_plan_file(home: Option<&std::path::Path>) -> String {
-    const EMPTY: &str = "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)";
+    const EMPTY: &str =
+        "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)";
     let Some(home) = home else {
         return format!("{EMPTY}\n{PLAN_USAGE}");
     };
@@ -762,19 +763,14 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
         .flatten()
     {
         if json {
-            json_lines.push_str(
-                &serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()),
-            );
+            json_lines
+                .push_str(&serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()));
             json_lines.push('\n');
         } else {
             render_event(&event.msg, &mut stdout_text, &mut stderr_text);
         }
     }
-    let end = if failed {
-        Outcome::Failed
-    } else {
-        outcome
-    };
+    let end = if failed { Outcome::Failed } else { outcome };
     let broken = if json {
         flush_buffers(&json_lines, &stderr_text)?
     } else {
@@ -1057,8 +1053,8 @@ mod tests {
 
     #[test]
     fn global_permission_mode_flag_parses() {
-        let args = Args::try_parse_from(["wavecode", "--permission-mode", "plan", "exec", "hi"])
-            .unwrap();
+        let args =
+            Args::try_parse_from(["wavecode", "--permission-mode", "plan", "exec", "hi"]).unwrap();
         assert_eq!(args.permission_mode.as_deref(), Some("plan"));
         let args = Args::try_parse_from(["wavecode", "repl"]).unwrap();
         assert_eq!(args.permission_mode, None);
@@ -1150,19 +1146,13 @@ mod tests {
         assert_eq!(parse_slash("/memory"), Slash::Memory);
         assert_eq!(parse_slash("/mcp"), Slash::Mcp);
         assert_eq!(parse_slash("/plan"), Slash::Plan(String::new()));
-        assert_eq!(
-            parse_slash("  /plan  "),
-            Slash::Plan(String::new())
-        );
+        assert_eq!(parse_slash("  /plan  "), Slash::Plan(String::new()));
         assert_eq!(parse_slash("/snapshots"), Slash::Snapshots);
         assert_eq!(
             parse_slash("/rewind before-refactor"),
             Slash::Rewind("before-refactor".to_string())
         );
-        assert_eq!(
-            parse_slash("  /rewind  "),
-            Slash::Rewind(String::new())
-        );
+        assert_eq!(parse_slash("  /rewind  "), Slash::Rewind(String::new()));
         assert_eq!(parse_slash("/permissions"), Slash::Permissions);
         assert_eq!(parse_slash("/help"), Slash::Help);
         assert_eq!(
@@ -1404,4 +1394,3 @@ mod tests {
         assert_eq!(tui_permission_mode("typo"), PermissionMode::Default);
     }
 }
-

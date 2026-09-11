@@ -476,8 +476,7 @@ mod tests {
     fn mcp_lists_configured_servers_locally() {
         let mut app = App::new(TuiContext {
             mcp_server_lines: vec![
-                "playwright (stdio: npx @playwright/mcp@latest) — connected (3 tools)"
-                    .into(),
+                "playwright (stdio: npx @playwright/mcp@latest) — connected (3 tools)".into(),
             ],
             ..ctx()
         });

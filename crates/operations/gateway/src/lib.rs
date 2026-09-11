@@ -401,7 +401,14 @@ mod tests {
         };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if gateway.client.lock().await.submit(probe.clone()).await.is_err() {
+            if gateway
+                .client
+                .lock()
+                .await
+                .submit(probe.clone())
+                .await
+                .is_err()
+            {
                 break;
             }
             assert!(

@@ -114,9 +114,7 @@ impl App {
                     let request = if args.is_empty() {
                         format!("Please use the '{name}' skill for this request.")
                     } else {
-                        format!(
-                            "Please use the '{name}' skill for this request. Arguments: {args}"
-                        )
+                        format!("Please use the '{name}' skill for this request. Arguments: {args}")
                     };
                     self.outbox.push(Op::UserInput { text: request });
                 } else {
@@ -156,7 +154,8 @@ impl App {
     fn show_mcp(&mut self) {
         if self.ctx.mcp_server_lines.is_empty() {
             self.push_item(Item::plain(
-                "(No MCP servers configured; add a [mcp_servers.<name>] section in config.toml)".into(),
+                "(No MCP servers configured; add a [mcp_servers.<name>] section in config.toml)"
+                    .into(),
                 dim(),
             ));
         } else {
@@ -175,12 +174,10 @@ impl App {
     /// here. Proposing and approving run through the model tools.)
     fn show_plan(&mut self) {
         match Self::plan_status_text() {
-            Some(text) => self.push_item(Item::plain(
-                sanitize_terminal(&text).into_owned(),
-                dim(),
-            )),
+            Some(text) => self.push_item(Item::plain(sanitize_terminal(&text).into_owned(), dim())),
             None => self.push_item(Item::plain(
-                "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)".into(),
+                "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)"
+                    .into(),
                 dim(),
             )),
         }
@@ -191,10 +188,12 @@ impl App {
     /// reports itself instead of failing the display.
     fn plan_status_text() -> Option<String> {
         const HEAD_CHARS: usize = 500;
-        let home = std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))?;
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
         let text = std::fs::read_to_string(
-            PathBuf::from(home).join(".wavecode").join("plans").join("default.json"),
+            PathBuf::from(home)
+                .join(".wavecode")
+                .join("plans")
+                .join("default.json"),
         )
         .ok()?;
         let value: serde_json::Value = match serde_json::from_str(&text) {
@@ -254,10 +253,7 @@ impl App {
             self.push_item(Item::plain(EMPTY_HINT.into(), dim()));
         } else {
             for label in labels {
-                self.push_item(Item::plain(
-                    sanitize_terminal(&label).into_owned(),
-                    dim(),
-                ));
+                self.push_item(Item::plain(sanitize_terminal(&label).into_owned(), dim()));
             }
         }
     }
@@ -322,7 +318,9 @@ impl App {
             mode: next.as_str().to_string(),
         });
         self.push_item(Item::plain(
-            format!("Permission mode switched to {next} (approval policy for write/exec tools follows)"),
+            format!(
+                "Permission mode switched to {next} (approval policy for write/exec tools follows)"
+            ),
             dim(),
         ));
     }

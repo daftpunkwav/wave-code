@@ -42,7 +42,11 @@ impl UserProfile {
             out.push_str(&format!("Name: {}\n", self.name.trim()));
             wrote = true;
         }
-        if let Some(email) = self.email.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        if let Some(email) = self
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
         {
             out.push_str(&format!("Email: {email}\n"));
             wrote = true;
@@ -127,11 +131,15 @@ mod tests {
             ..UserProfile::default()
         };
         profile.preferences.insert("".to_string(), "v".to_string());
-        profile.preferences.insert("k".to_string(), "   ".to_string());
+        profile
+            .preferences
+            .insert("k".to_string(), "   ".to_string());
         // Only blanks: renders empty like an anonymous profile.
         assert!(profile.prompt_block().is_empty());
         // One real entry revives the block without the blanks.
-        profile.preferences.insert("lang".to_string(), "zh".to_string());
+        profile
+            .preferences
+            .insert("lang".to_string(), "zh".to_string());
         let block = profile.prompt_block();
         assert!(block.contains("lang: zh"));
         assert!(!block.contains("Email:"));

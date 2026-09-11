@@ -69,7 +69,11 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
                 let seq = trajectory.push_action(ActionKind::Note, message.clone());
                 trajectory.push_observation(seq, message.clone(), true);
             }
-            EventMsg::ApprovalRequested { call_id, kind, detail } => {
+            EventMsg::ApprovalRequested {
+                call_id,
+                kind,
+                detail,
+            } => {
                 // Approval gates are structural: dropping them hides
                 // safety-relevant pauses in the trajectory.
                 let kind_name = match kind {

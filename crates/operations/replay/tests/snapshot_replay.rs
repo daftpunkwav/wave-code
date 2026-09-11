@@ -17,7 +17,10 @@ use state_trajectory::ActionKind;
 
 /// Load one committed fixture as wire events.
 fn load_fixture(name: &str) -> Vec<Event> {
-    let path = format!("{}/../../../benchmarks/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
+    let path = format!(
+        "{}/../../../benchmarks/fixtures/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"))
 }

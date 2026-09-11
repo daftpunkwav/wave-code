@@ -133,8 +133,7 @@ impl SandboxBackend for LinuxLandlockBackend {
         // Err (which aborts the spawn) on any failure — fail-closed.
         unsafe {
             use std::os::unix::process::CommandExt;
-            cmd.as_std_mut()
-                .pre_exec(move || apply_landlock(&profile));
+            cmd.as_std_mut().pre_exec(move || apply_landlock(&profile));
         }
         Ok(())
     }
@@ -271,8 +270,7 @@ mod tests {
             }
         );
         assert!(
-            err.to_string()
-                .contains("OS confinement unavailable on"),
+            err.to_string().contains("OS confinement unavailable on"),
             "error names the failure: {err}"
         );
     }
@@ -410,8 +408,7 @@ mod tests {
         if !has_curl {
             return;
         }
-        let listener =
-            std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let port = listener.local_addr().expect("port").port();
         std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {

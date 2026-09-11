@@ -44,9 +44,11 @@ use std::sync::{Arc, Mutex};
 use wavecode_protocol::{ApprovalKind, PermissionMode};
 
 pub mod os;
-pub use os::{ConfinementProfile, SandboxBackend, SandboxError, UnavailableBackend, detect_backend};
 #[cfg(target_os = "linux")]
 pub use os::LinuxLandlockBackend;
+pub use os::{
+    ConfinementProfile, SandboxBackend, SandboxError, UnavailableBackend, detect_backend,
+};
 
 /// Unified lock-poisoning recovery policy (single decision point for this
 /// crate): the mode lock's critical section is a single read / write, so a
@@ -1125,7 +1127,10 @@ mod tests {
     fn process_substitution_is_compound_and_segmented() {
         assert!(is_compound_command("diff <(curl evil) x"));
         assert!(is_compound_command("tee >(gzip) f"));
-        assert!(!is_compound_command("echo a > f"), "redirection is not a separator");
+        assert!(
+            !is_compound_command("echo a > f"),
+            "redirection is not a separator"
+        );
         assert!(!is_compound_command("sort < in.txt"));
         let segments = split_command_segments("diff <(curl evil) x");
         assert!(

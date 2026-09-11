@@ -81,8 +81,7 @@ impl Tool for SkillTool {
             .unwrap_or("")
             .trim();
         let Some(skill) = self.set.get(name) else {
-            let available: Vec<&str> =
-                self.set.iter().map(|s| s.name.as_str()).collect();
+            let available: Vec<&str> = self.set.iter().map(|s| s.name.as_str()).collect();
             return Ok(ToolOutput {
                 content: format!(
                     "unknown skill: {name} (available: {})",
@@ -95,10 +94,7 @@ impl Tool for SkillTool {
                 is_error: true,
             });
         };
-        let args = input
-            .get("args")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let args = input.get("args").and_then(|v| v.as_str()).unwrap_or("");
         let expanded = skill.expand(args);
         match skill.meta.context {
             SkillContext::Inline => Ok(ToolOutput {
@@ -133,7 +129,7 @@ impl Tool for SkillTool {
 mod tests {
     use super::*;
     use action_tasks::TaskInfo;
-    use wavecode_skills::{Skill, SkillMeta, SkillSource, SkillContext};
+    use wavecode_skills::{Skill, SkillContext, SkillMeta, SkillSource};
 
     struct FakeTasks {
         spawned: std::sync::Mutex<Vec<TaskRequest>>,
@@ -204,10 +200,7 @@ mod tests {
         let tasks = Arc::new(FakeTasks {
             spawned: std::sync::Mutex::new(Vec::new()),
         });
-        (
-            SkillTool::new(Arc::new(set), tasks.clone()),
-            tasks,
-        )
+        (SkillTool::new(Arc::new(set), tasks.clone()), tasks)
     }
 
     fn ctx() -> ToolCtx {

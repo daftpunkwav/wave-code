@@ -71,10 +71,7 @@ impl Tool for MemoryWrite {
     }
 
     async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let category = input
-            .get("category")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let category = input.get("category").and_then(|v| v.as_str()).unwrap_or("");
         let Some(category) = MemoryCategory::parse(category) else {
             return Ok(ToolOutput {
                 content: format!(
@@ -83,10 +80,7 @@ impl Tool for MemoryWrite {
                 is_error: true,
             });
         };
-        let content = input
-            .get("content")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
         // Small synchronous writes: bridge out of async explicitly rather
         // than blocking the executor on filesystem IO.
         let store = self.store.clone();
@@ -129,10 +123,12 @@ mod tests {
             .unwrap();
         assert!(!output.is_error);
         let store = MemoryStore::new(root.path().to_path_buf());
-        assert!(store
-            .read_category(MemoryCategory::User)
-            .unwrap()
-            .contains("prefers tabs"));
+        assert!(
+            store
+                .read_category(MemoryCategory::User)
+                .unwrap()
+                .contains("prefers tabs")
+        );
         assert!(store.read_index().unwrap().contains("[user]"));
     }
 

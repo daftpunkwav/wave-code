@@ -281,9 +281,7 @@ async fn continuation_micro_bench() {
             "bench input",
             "bench system",
             &|event| {
-                seen.lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(event);
+                seen.lock().unwrap_or_else(|e| e.into_inner()).push(event);
             },
         )
         .await;
@@ -314,7 +312,10 @@ async fn continuation_micro_bench() {
         .map(|entry| entry.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(history.contains("bench-done"), "final answer lands in history");
+    assert!(
+        history.contains("bench-done"),
+        "final answer lands in history"
+    );
     let tokens = summed_output_tokens(&events);
     assert!(tokens > 0, "token usage is reported");
     assert!(
@@ -351,9 +352,7 @@ async fn session_open_bench() {
                 &input,
                 "bench system",
                 &|event| {
-                    seen.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .push(event);
+                    seen.lock().unwrap_or_else(|e| e.into_inner()).push(event);
                 },
             )
             .await;

@@ -354,12 +354,7 @@ async fn new_session<W, F>(
             in_flight: None,
         },
     );
-    write_success(
-        writer,
-        id,
-        serde_json::json!({ "sessionId": session_id }),
-    )
-    .await;
+    write_success(writer, id, serde_json::json!({ "sessionId": session_id })).await;
 }
 
 /// Queue one turn; the JSON-RPC reply is deferred until the turn ends.
@@ -734,7 +729,10 @@ where
         EventMsg::TurnCompleted { interrupted } => Some(TurnEnd::Done {
             interrupted: *interrupted,
         }),
-        EventMsg::Error { message, recoverable } => {
+        EventMsg::Error {
+            message,
+            recoverable,
+        } => {
             if *recoverable {
                 None
             } else {
@@ -848,9 +846,7 @@ api_key = "k-inline"
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
                 .unwrap_or_else(done_script);
-            Ok(Box::pin(futures::stream::iter(
-                script.into_iter().map(Ok),
-            )))
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
     }
 
@@ -925,8 +921,7 @@ api_key = "k-inline"
                 .config_path
                 .clone()
                 .unwrap_or_else(|| self.fallback_config.clone());
-            let config =
-                wavecode_config::Config::load_from(&path).map_err(SessionError::Config)?;
+            let config = wavecode_config::Config::load_from(&path).map_err(SessionError::Config)?;
             let model_name = options
                 .model_override
                 .clone()
@@ -992,11 +987,7 @@ api_key = "k-inline"
 
         /// Request/response with notifications skipped; dedicated tests
         /// assert on notifications via `next_line`/`run_prompt` instead.
-        async fn request(
-            &mut self,
-            method: &str,
-            params: serde_json::Value,
-        ) -> serde_json::Value {
+        async fn request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
             let id = self.next_id;
             self.next_id += 1;
             self.send(&serde_json::json!({
@@ -1056,10 +1047,7 @@ api_key = "k-inline"
         scripts: Vec<Vec<StreamEvent>>,
         gate: Option<Arc<tokio::sync::Notify>>,
         config_path: Option<PathBuf>,
-    ) -> (
-        Harness,
-        tokio::task::JoinHandle<std::io::Result<()>>,
-    ) {
+    ) -> (Harness, tokio::task::JoinHandle<std::io::Result<()>>) {
         let tmp = tempfile::tempdir().unwrap();
         let fallback = tmp.path().join("config.toml");
         std::fs::write(&fallback, CONFIG).unwrap();
@@ -1100,10 +1088,7 @@ api_key = "k-inline"
 
     async fn spawn_server(
         scripts: Vec<Vec<StreamEvent>>,
-    ) -> (
-        Harness,
-        tokio::task::JoinHandle<std::io::Result<()>>,
-    ) {
+    ) -> (Harness, tokio::task::JoinHandle<std::io::Result<()>>) {
         spawn_full(scripts, None, None).await
     }
 
@@ -1141,7 +1126,8 @@ api_key = "k-inline"
         let chunks: Vec<&str> = notes
             .iter()
             .filter(|n| {
-                n.pointer("/params/update/sessionUpdate").and_then(|v| v.as_str())
+                n.pointer("/params/update/sessionUpdate")
+                    .and_then(|v| v.as_str())
                     == Some("agent_message_chunk")
             })
             .filter_map(|n| {
@@ -1168,7 +1154,8 @@ api_key = "k-inline"
         let begin = notes
             .iter()
             .find(|n| {
-                n.pointer("/params/update/sessionUpdate").and_then(|v| v.as_str())
+                n.pointer("/params/update/sessionUpdate")
+                    .and_then(|v| v.as_str())
                     == Some("tool_call")
             })
             .expect("a tool_call notification must stream");
@@ -1179,26 +1166,27 @@ api_key = "k-inline"
             Some("c1")
         );
         assert_eq!(
-            begin.pointer("/params/update/title").and_then(|v| v.as_str()),
+            begin
+                .pointer("/params/update/title")
+                .and_then(|v| v.as_str()),
             Some("write_file")
         );
         let end = notes
             .iter()
             .find(|n| {
-                n.pointer("/params/update/sessionUpdate").and_then(|v| v.as_str())
+                n.pointer("/params/update/sessionUpdate")
+                    .and_then(|v| v.as_str())
                     == Some("tool_call_update")
             })
             .expect("a tool_call_update notification must stream");
         assert_eq!(
-            end.pointer("/params/update/status").and_then(|v| v.as_str()),
+            end.pointer("/params/update/status")
+                .and_then(|v| v.as_str()),
             Some("completed")
         );
         // The tool really ran: content landed in the session cwd.
         let root = h._tmp.path().join("hello.txt");
-        assert_eq!(
-            std::fs::read_to_string(&root).unwrap(),
-            "wavecode-acp-ok"
-        );
+        assert_eq!(std::fs::read_to_string(&root).unwrap(), "wavecode-acp-ok");
     }
 
     #[tokio::test]
@@ -1225,11 +1213,7 @@ api_key = "k-inline"
             )
             .await;
         assert!(reply.get("result").is_some());
-        let idle = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            h.next_line(),
-        )
-        .await;
+        let idle = tokio::time::timeout(std::time::Duration::from_millis(50), h.next_line()).await;
         assert!(idle.is_err(), "notification produced a reply");
     }
 

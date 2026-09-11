@@ -76,9 +76,7 @@ impl std::fmt::Display for PermissionMode {
 /// (new harness stack) or `wavecode_protocol::ApprovalKind` (legacy
 /// stack) instead; this alias disappears in a later breaking-change
 /// window.
-#[deprecated(
-    note = "use operations_wire::ApprovalKind or wavecode_protocol::ApprovalKind instead"
-)]
+#[deprecated(note = "use operations_wire::ApprovalKind or wavecode_protocol::ApprovalKind instead")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalKind {
     /// Arbitrary command execution.

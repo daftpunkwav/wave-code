@@ -282,10 +282,15 @@ mod tests {
             Duration::from_millis(30),
         );
         let mut s = Box::pin(s);
-        assert!(s.next().await.is_some(), "the first byte chunk should pass through");
+        assert!(
+            s.next().await.is_some(),
+            "the first byte chunk should pass through"
+        );
         let started = std::time::Instant::now();
         let second = s.next().await;
-        let err = second.expect("a stall should yield an Err item, not end the stream").unwrap_err();
+        let err = second
+            .expect("a stall should yield an Err item, not end the stream")
+            .unwrap_err();
         assert!(err.to_string().contains("idle timeout"), "{err}");
         assert!(
             started.elapsed() >= Duration::from_millis(30)
@@ -304,7 +309,11 @@ mod tests {
         ];
         let s = stall_guard(futures::stream::iter(chunks), Duration::from_millis(30));
         let events: Vec<_> = Box::pin(s).collect().await;
-        assert_eq!(events.len(), 2, "a clean EOF produces no stall Err: {events:?}");
+        assert_eq!(
+            events.len(),
+            2,
+            "a clean EOF produces no stall Err: {events:?}"
+        );
         assert!(events.iter().all(|r| r.is_ok()));
     }
 
@@ -430,12 +439,15 @@ mod tests {
         };
         let v = build_request_body(&req);
         let messages = v["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 2, "adjacent user messages should merge into one");
+        assert_eq!(
+            messages.len(),
+            2,
+            "adjacent user messages should merge into one"
+        );
         assert_eq!(messages[0]["role"], "user");
         let text = messages[0]["content"][0]["text"].as_str().unwrap();
         assert_eq!(
-            text,
-            "first\nsecond",
+            text, "first\nsecond",
             "adjacent Text blocks get a newline separator so they cannot glue together"
         );
         assert_eq!(messages[1]["role"], "assistant");
@@ -544,7 +556,11 @@ mod tests {
         let chunk = || Ok::<_, LlmError>(bytes::Bytes::from_static(b"data: no-boundary-here\n"));
         let byte_stream = futures::stream::iter([chunk(), chunk(), chunk()]);
         let results: Vec<_> = decode_event_stream(byte_stream, 32).collect().await;
-        assert_eq!(results.len(), 1, "the stream should terminate right after exceeding the cap: {results:?}");
+        assert_eq!(
+            results.len(),
+            1,
+            "the stream should terminate right after exceeding the cap: {results:?}"
+        );
         assert!(
             matches!(&results[0], Err(LlmError::Sse(msg)) if msg.contains("cap")),
             "should report the buffer-over-cap error: {:?}",

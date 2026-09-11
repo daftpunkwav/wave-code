@@ -322,7 +322,13 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        assert!(service.query(&id).expect("task must be tracked").outcome.is_some());
+        assert!(
+            service
+                .query(&id)
+                .expect("task must be tracked")
+                .outcome
+                .is_some()
+        );
         // Teardown releases the restriction: no entry outlives the run.
         assert!(allowlist.is_allowed(&id, "read_file"));
         assert!(allowlist.is_allowed(&id, "shell"));

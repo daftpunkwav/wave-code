@@ -269,7 +269,10 @@ mod tests {
         assert!(sub.get("grep").is_some());
         assert!(sub.get("write_file").is_none());
         assert!(sub.get("shell").is_none());
-        assert!(sub.get("todo_write").is_none(), "unlisted tools are unavailable");
+        assert!(
+            sub.get("todo_write").is_none(),
+            "unlisted tools are unavailable"
+        );
         // specs output is stable (sorted by name).
         let names: Vec<String> = sub.specs().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["grep", "read_file"]);
@@ -283,7 +286,9 @@ mod tests {
     async fn todo_write_via_name_subset_shares_session_store() {
         let (reg, todos) = Registry::builtin_with_todos();
         let sub = reg.name_subset(&["todo_write".to_owned()]);
-        let tool = sub.get("todo_write").expect("listed todo_write should be kept");
+        let tool = sub
+            .get("todo_write")
+            .expect("listed todo_write should be kept");
         let ctx = ToolCtx {
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
@@ -296,7 +301,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error);
-        assert_eq!(todos.snapshot().len(), 1, "subset tool and session store must share one handle");
+        assert_eq!(
+            todos.snapshot().len(),
+            1,
+            "subset tool and session store must share one handle"
+        );
     }
 
     /// Late registration reaches already-shared handles: tools appended

@@ -196,13 +196,9 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     // the provider client, then delegates everything below.
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
     let model: Arc<dyn wavecode_llm::ChatModel> = match provider.kind {
-        wavecode_config::ProviderKind::OpenAiCompatible => {
-            Arc::new(wavecode_llm::OpenAIClient::new(
-                provider.base_url.clone(),
-                api_key,
-                model_name.clone(),
-            ))
-        }
+        wavecode_config::ProviderKind::OpenAiCompatible => Arc::new(
+            wavecode_llm::OpenAIClient::new(provider.base_url.clone(), api_key, model_name.clone()),
+        ),
         wavecode_config::ProviderKind::Anthropic => Arc::new(wavecode_llm::AnthropicClient::new(
             provider.base_url.clone(),
             api_key,
@@ -310,9 +306,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // memory at all (same gate as `assemble_memory` below).
     if let Some(home) = home.as_deref() {
         registry.register(Arc::new(MemoryWrite::new(
-            wavecode_memory::MemoryStore::new(wavecode_memory::MemoryStore::default_root(
-                home,
-            )),
+            wavecode_memory::MemoryStore::new(wavecode_memory::MemoryStore::default_root(home)),
         )));
     }
     let registry = Arc::new(registry);
@@ -404,9 +398,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             MemoryFinisher::new(
                 model.clone(),
                 model_name.clone(),
-                wavecode_memory::MemoryStore::new(
-                    wavecode_memory::MemoryStore::default_root(root),
-                ),
+                wavecode_memory::MemoryStore::new(wavecode_memory::MemoryStore::default_root(root)),
             )
         });
         Arc::new(SessionMemory::new(worker, finisher))
@@ -428,10 +420,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // `task_output` / `task_stop` ride the same handle so the model can
     // observe and stop what skills forked.
     let task_service = tasks.clone() as Arc<dyn action_tasks::TaskService>;
-    registry.register(Arc::new(SkillTool::new(
-        skill_set,
-        task_service.clone(),
-    )));
+    registry.register(Arc::new(SkillTool::new(skill_set, task_service.clone())));
     registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
     registry.register(Arc::new(TaskStopTool::new(task_service)));
     // Background shell jobs for long work that must not block the turn.
@@ -448,15 +437,17 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // derives from the session memory root (`<home>/.wavecode/memories`
     // -> `<home>/.wavecode/snapshots`) so injected roots stay hermetic.
     // `snapshot` is read-only; `restore` is destructive (approval-gated).
-    let snapshot_memory_root = home.as_deref().map(wavecode_memory::MemoryStore::default_root);
+    let snapshot_memory_root = home
+        .as_deref()
+        .map(wavecode_memory::MemoryStore::default_root);
     let snapshot_root =
         wavecode_tools::snapshot::snapshot_store_root_for_session(snapshot_memory_root.as_deref());
     registry.register(Arc::new(wavecode_tools::snapshot::SnapshotTool::new(
         snapshot_root.clone(),
     )));
-    registry.register(Arc::new(
-        wavecode_tools::snapshot::RestoreTool::new(snapshot_root),
-    ));
+    registry.register(Arc::new(wavecode_tools::snapshot::RestoreTool::new(
+        snapshot_root,
+    )));
     // Reviewed plan mode (explore -> present -> approve -> execute) rides
     // the same late handle: the store path derives from home
     // (`<home>/.wavecode/plans/<session>.json`) so resume in the same home
@@ -485,9 +476,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     registry.register(Arc::new(crate::plan_tools::PlanFeedbackTool::new(
         plan_store.clone(),
     )));
-    registry.register(Arc::new(crate::plan_tools::PlanStatusTool::new(
-        plan_store,
-    )));
+    registry.register(Arc::new(crate::plan_tools::PlanStatusTool::new(plan_store)));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     let tool_names: Vec<String> = registry
@@ -528,11 +517,8 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         system_for_actor,
     );
 
-    let mut mcp_pending: Vec<(String, wavecode_config::McpServerRaw)> = config
-        .mcp_servers
-        .clone()
-        .into_iter()
-        .collect();
+    let mut mcp_pending: Vec<(String, wavecode_config::McpServerRaw)> =
+        config.mcp_servers.clone().into_iter().collect();
     mcp_pending.sort_by(|a, b| a.0.cmp(&b.0));
 
     SessionHandle {
@@ -862,9 +848,7 @@ api_key = "k-inline"
                         },
                     }]
                 });
-            Ok(Box::pin(futures::stream::iter(
-                script.into_iter().map(Ok),
-            )))
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
         }
     }
 
@@ -878,8 +862,7 @@ api_key = "k-inline"
                 name: "write_file".to_string(),
             },
             StreamEvent::ToolUseInputDelta {
-                partial_json: r#"{"path":"hello.txt","content":"wavecode-smoke-ok"}"#
-                    .to_string(),
+                partial_json: r#"{"path":"hello.txt","content":"wavecode-smoke-ok"}"#.to_string(),
             },
             StreamEvent::BlockEnd,
             StreamEvent::MessageComplete {
@@ -944,12 +927,8 @@ api_key = "k-inline"
                 [write_turn_script(), done_script()].into_iter().collect(),
             ),
         });
-        let adapter = ModelAdapter::new(
-            model.clone(),
-            "scripted".to_string(),
-            100,
-            registry.clone(),
-        );
+        let adapter =
+            ModelAdapter::new(model.clone(), "scripted".to_string(), 100, registry.clone());
         let plans = TodoPlanTracker::new(todos);
         let compactor = ContextCompactor::new(model.clone(), "scripted".to_string());
         let interrupt = infrastructure_base::InterruptHandle::new();
@@ -1020,10 +999,7 @@ api_key = "k-inline"
                 .count(),
             2
         );
-        assert_eq!(
-            kinds.iter().filter(|k| *k == "tool_call_begin").count(),
-            1
-        );
+        assert_eq!(kinds.iter().filter(|k| *k == "tool_call_begin").count(), 1);
         assert_eq!(kinds.iter().filter(|k| *k == "tool_call_end").count(), 1);
     }
 }

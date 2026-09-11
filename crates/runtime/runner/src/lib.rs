@@ -529,9 +529,7 @@ impl RunAllowlist {
 
     /// True when the run may execute the tool (no entry means unrestricted).
     pub fn is_allowed(&self, run_id: &str, tool: &str) -> bool {
-        self.lock()
-            .get(run_id)
-            .is_none_or(|set| set.contains(tool))
+        self.lock().get(run_id).is_none_or(|set| set.contains(tool))
     }
 
     /// Drop one run's restriction (child teardown).
@@ -897,9 +895,7 @@ where
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
-            let results = self
-                .execute_calls(&ctx.run_id, &calls, &emit_msg)
-                .await;
+            let results = self.execute_calls(&ctx.run_id, &calls, &emit_msg).await;
             conv.push(Role::User, format_tool_results(&results));
             state.bump_tool_round();
         }
@@ -1039,10 +1035,7 @@ where
                     call.call_id.clone(),
                     ToolResult {
                         call_id: call.call_id.clone(),
-                        content: format!(
-                            "tool {:?} is not in this run's allowed tools",
-                            call.name
-                        ),
+                        content: format!("tool {:?} is not in this run's allowed tools", call.name),
                         is_error: true,
                     },
                 );

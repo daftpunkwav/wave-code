@@ -116,7 +116,8 @@ impl CostTracker {
         if price_in_per_1k < 0.0 || price_out_per_1k < 0.0 {
             return Err(RoutingError::InvalidPrice(model));
         }
-        self.prices.insert(model, (price_in_per_1k, price_out_per_1k));
+        self.prices
+            .insert(model, (price_in_per_1k, price_out_per_1k));
         Ok(())
     }
 

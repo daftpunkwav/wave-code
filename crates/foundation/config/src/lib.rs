@@ -51,7 +51,9 @@ pub fn home_dir() -> Option<PathBuf> {
 
 pub use hooks::{ConfigError, HookRule, HookRuleSet};
 pub use mcp::McpServerRaw;
-pub use provider::{DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, ProviderConfig, ProviderKind};
+pub use provider::{
+    DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, ProviderConfig, ProviderKind,
+};
 
 impl Config {
     /// Loads the user-level `~/.wavecode/config.toml`; returns [`ConfigError::NotFound`] when absent.
@@ -405,8 +407,14 @@ headers = {{ Authorization = "Bearer t" }}
         let dbg_provider = format!("{:?}", cfg.model_providers["minimax"]);
         let dbg_config = format!("{cfg:?}");
         for output in [&dbg_provider, &dbg_config] {
-            assert!(!output.contains(REAL_KEY), "Debug leaked the api key: {output}");
-            assert!(output.contains("***"), "Debug should carry the redaction marker: {output}");
+            assert!(
+                !output.contains(REAL_KEY),
+                "Debug leaked the api key: {output}"
+            );
+            assert!(
+                output.contains("***"),
+                "Debug should carry the redaction marker: {output}"
+            );
         }
         // All other fields render normally.
         assert!(dbg_provider.contains("https://api.minimaxi.com/anthropic"));

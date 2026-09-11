@@ -133,7 +133,8 @@ pub(crate) fn checkpoint_turn(
     let Some(dur) = durability.as_mut() else {
         return;
     };
-    if let Some(Err(cause)) = persist_checkpoint(&mut dur.store, &dur.root, enabled, label, snapshot)
+    if let Some(Err(cause)) =
+        persist_checkpoint(&mut dur.store, &dur.root, enabled, label, snapshot)
     {
         on_warn(format!(
             "durable checkpoint {label} failed ({cause}); turn proceeds without a new recovery point"
@@ -172,9 +173,7 @@ mod tests {
 
     impl CheckpointSink for FakeSink {
         fn save_checkpoint(&mut self, label: &str, data: &str) -> u64 {
-            self.log
-                .borrow_mut()
-                .push(format!("save:{label}:{data}"));
+            self.log.borrow_mut().push(format!("save:{label}:{data}"));
             self.log.borrow().len() as u64
         }
     }
@@ -186,17 +185,10 @@ mod tests {
         let log: Rc<RefCell<Vec<String>>> = Rc::default();
         let mut sink = FakeSink { log: log.clone() };
         let act_log = log.clone();
-        let (acted, durable) = persist_then_act(
-            &mut sink,
-            &root,
-            true,
-            "turn-1",
-            "snap",
-            || {
-                act_log.borrow_mut().push("act".to_string());
-                42
-            },
-        );
+        let (acted, durable) = persist_then_act(&mut sink, &root, true, "turn-1", "snap", || {
+            act_log.borrow_mut().push("act".to_string());
+            42
+        });
         assert_eq!(acted, 42);
         assert!(durable.expect("enabled policy checkpoints").is_ok());
         assert_eq!(
@@ -220,14 +212,8 @@ mod tests {
         let root = dir.path().join("never-created");
         let log: Rc<RefCell<Vec<String>>> = Rc::default();
         let mut sink = FakeSink { log: log.clone() };
-        let (acted, durable) = persist_then_act(
-            &mut sink,
-            &root,
-            false,
-            "turn-1",
-            "snap",
-            || "done",
-        );
+        let (acted, durable) =
+            persist_then_act(&mut sink, &root, false, "turn-1", "snap", || "done");
         assert_eq!(acted, "done");
         assert!(durable.is_none());
         assert!(log.borrow().is_empty(), "the sink is never contacted");

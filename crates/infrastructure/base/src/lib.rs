@@ -114,7 +114,10 @@ mod tests {
 
     #[test]
     fn truncation_cuts_on_char_boundaries() {
-        assert_eq!(truncate("\u{65e5}\u{672c}\u{8a9e}", 2), "\u{65e5}\u{672c}...");
+        assert_eq!(
+            truncate("\u{65e5}\u{672c}\u{8a9e}", 2),
+            "\u{65e5}\u{672c}..."
+        );
         assert_eq!(truncate("a\u{1f642}b", 2), "a\u{1f642}...");
     }
 }

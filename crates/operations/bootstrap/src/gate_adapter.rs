@@ -66,7 +66,7 @@ impl ApprovalSource for GateApprovalSource {
                         self.timeout.as_secs()
                     ),
                 }
-            },
+            }
         }
     }
 

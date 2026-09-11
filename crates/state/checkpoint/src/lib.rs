@@ -330,8 +330,8 @@ const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules", ".venv"];
 const BINARY_EXTENSIONS: &[&str] = &[
     "exe", "dll", "so", "dylib", "o", "a", "lib", "class", "pyc", "pyo", "wasm", "node", "pdb",
     "bin", "dat", "db", "sqlite", "sqlite3", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp",
-    "pdf", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "mp3", "mp4", "mov", "avi", "mkv",
-    "woff", "woff2", "ttf", "otf", "eot",
+    "pdf", "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "mp3", "mp4", "mov", "avi", "mkv", "woff",
+    "woff2", "ttf", "otf", "eot",
 ];
 
 /// Bytes of file head scanned for NUL when deciding binary vs text.
@@ -618,7 +618,8 @@ impl SnapshotStore {
         label: &str,
         caps: SnapshotCaps,
     ) -> SnapshotResult<SnapshotCreateReport> {
-        validate_snapshot_label(label).map_err(|message| SnapshotError::InvalidInput { message })?;
+        validate_snapshot_label(label)
+            .map_err(|message| SnapshotError::InvalidInput { message })?;
         let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
         let mut total_bytes: u64 = 0;
         let mut skipped_binary = 0usize;
@@ -684,7 +685,11 @@ impl SnapshotStore {
                     .path()
                     .extension()
                     .and_then(|e| e.to_str())
-                    .is_some_and(|ext| BINARY_EXTENSIONS.iter().any(|b| b.eq_ignore_ascii_case(ext)))
+                    .is_some_and(|ext| {
+                        BINARY_EXTENSIONS
+                            .iter()
+                            .any(|b| b.eq_ignore_ascii_case(ext))
+                    })
                 {
                     skipped_binary += 1;
                     continue;
@@ -766,7 +771,8 @@ impl SnapshotStore {
         label: &str,
         force: bool,
     ) -> SnapshotResult<SnapshotRestoreReport> {
-        validate_snapshot_label(label).map_err(|message| SnapshotError::InvalidInput { message })?;
+        validate_snapshot_label(label)
+            .map_err(|message| SnapshotError::InvalidInput { message })?;
         let dir = self.snapshot_dir(label);
         let manifest_text = match tokio::fs::read_to_string(dir.join(MANIFEST_FILE)).await {
             Ok(text) => text,
@@ -777,11 +783,10 @@ impl SnapshotStore {
             }
             Err(e) => return Err(e.into()),
         };
-        let manifest: serde_json::Value = serde_json::from_str(&manifest_text).map_err(|_| {
-            SnapshotError::InvalidInput {
+        let manifest: serde_json::Value =
+            serde_json::from_str(&manifest_text).map_err(|_| SnapshotError::InvalidInput {
                 message: format!("snapshot {label:?} manifest is corrupt"),
-            }
-        })?;
+            })?;
         let entries = manifest
             .get("files")
             .and_then(serde_json::Value::as_array)
@@ -861,7 +866,8 @@ impl SnapshotStore {
 
     /// Delete a label; returns true when a snapshot was removed.
     pub fn drop_label(&self, label: &str) -> SnapshotResult<bool> {
-        validate_snapshot_label(label).map_err(|message| SnapshotError::InvalidInput { message })?;
+        validate_snapshot_label(label)
+            .map_err(|message| SnapshotError::InvalidInput { message })?;
         match std::fs::remove_dir_all(self.snapshot_dir(label)) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -871,9 +877,10 @@ impl SnapshotStore {
 
     /// Load stored metadata for local display (slash commands).
     pub fn load_info(&self, label: &str) -> SnapshotResult<SnapshotInfo> {
-        validate_snapshot_label(label).map_err(|message| SnapshotError::InvalidInput { message })?;
-        let text = std::fs::read_to_string(self.snapshot_dir(label).join(MANIFEST_FILE)).map_err(
-            |e| {
+        validate_snapshot_label(label)
+            .map_err(|message| SnapshotError::InvalidInput { message })?;
+        let text =
+            std::fs::read_to_string(self.snapshot_dir(label).join(MANIFEST_FILE)).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     SnapshotError::InvalidInput {
                         message: format!("unknown snapshot label {label:?}"),
@@ -881,8 +888,7 @@ impl SnapshotStore {
                 } else {
                     SnapshotError::Io(e)
                 }
-            },
-        )?;
+            })?;
         let manifest: serde_json::Value =
             serde_json::from_str(&text).map_err(|_| SnapshotError::InvalidInput {
                 message: format!("snapshot {label:?} manifest is corrupt"),
@@ -948,7 +954,10 @@ mod snapshot_tests {
         assert!(validate_snapshot_label("../evil").is_err());
         assert!(validate_snapshot_label("a/b").is_err());
         assert!(validate_snapshot_label("has space").is_err());
-        assert!(validate_snapshot_label(".staging-x").is_err(), "dots are rejected");
+        assert!(
+            validate_snapshot_label(".staging-x").is_err(),
+            "dots are rejected"
+        );
     }
 
     /// Round trip: capture, modify, restore refuses without force and
@@ -1077,7 +1086,10 @@ mod snapshot_tests {
         assert!(!store.drop_label("one").unwrap());
         assert_eq!(store.list_labels(), vec!["two".to_owned()]);
 
-        let err = store.restore(cwd.path(), "missing", false).await.unwrap_err();
+        let err = store
+            .restore(cwd.path(), "missing", false)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, SnapshotError::InvalidInput { .. }),
             "unknown labels fail explicitly: {err}"
@@ -1126,7 +1138,10 @@ mod durability_tests {
         assert!(resume_checkpoint(&dir).is_empty());
         durable_save(&dir, "turn-1", "state-one").unwrap();
         durable_save(&dir, "turn-2", "state-two").unwrap();
-        assert_eq!(durable_load(&dir, "turn-1").unwrap().as_deref(), Some("state-one"));
+        assert_eq!(
+            durable_load(&dir, "turn-1").unwrap().as_deref(),
+            Some("state-one")
+        );
         assert_eq!(durable_load(&dir, "missing").unwrap(), None);
         // Oldest first, newest last: the tail is the resume candidate.
         let labels = resume_checkpoint(&dir);

@@ -205,10 +205,7 @@ mod tests {
             BrowserError::UnknownTab("tab-999".to_string())
         );
         assert_eq!(
-            browser
-                .fill("tab-999", "input.q", "hi")
-                .await
-                .unwrap_err(),
+            browser.fill("tab-999", "input.q", "hi").await.unwrap_err(),
             BrowserError::UnknownTab("tab-999".to_string())
         );
         assert_eq!(

@@ -590,7 +590,11 @@ mod tests {
         let report = failing
             .run(HookEventPoint::PreToolUse, &input(Some("shell")))
             .await;
-        assert_eq!(report.verdict, HookVerdict::Allow, "exit code 1 allows with warning");
+        assert_eq!(
+            report.verdict,
+            HookVerdict::Allow,
+            "exit code 1 allows with warning"
+        );
         assert_eq!(report.warnings.len(), 1);
         assert!(report.warnings[0].contains("exited with code 1"));
         assert!(report.warnings[0].contains("oops"));

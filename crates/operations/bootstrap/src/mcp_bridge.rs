@@ -111,7 +111,12 @@ fn parse_tool_result(payload: &serde_json::Value) -> std::result::Result<McpTool
         let mut parts = Vec::with_capacity(content.len());
         for block in content {
             if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-                parts.push(block.get("text").and_then(|v| v.as_str()).unwrap_or_default());
+                parts.push(
+                    block
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                );
             } else {
                 parts.push("[non-text content omitted]");
             }
@@ -393,9 +398,10 @@ impl McpToolBridge {
     pub fn new(server: &str, def: &McpToolDef, client: Arc<dyn McpClient>) -> Option<Self> {
         Some(Self {
             name: def.qualified_name(server)?,
-            description: def.description.clone().unwrap_or_else(|| {
-                format!("MCP tool {} from server {server}", def.name)
-            }),
+            description: def
+                .description
+                .clone()
+                .unwrap_or_else(|| format!("MCP tool {} from server {server}", def.name)),
             input_schema: def.input_schema.clone(),
             read_only: def.read_only_hint,
             client,
@@ -542,7 +548,10 @@ async fn connect_one(
                 ),
                 Ok(Err(error)) => {
                     let reason = format!("MCP server {name:?} failed: {error}; tools skipped");
-                    (format!("{name} ({summary}) — unavailable ({error})"), Some(reason))
+                    (
+                        format!("{name} ({summary}) — unavailable ({error})"),
+                        Some(reason),
+                    )
                 }
                 Err(_) => {
                     let reason = format!(
@@ -577,7 +586,10 @@ async fn connect_one(
                 ),
                 Ok(Err(error)) => {
                     let reason = format!("MCP server {name:?} failed: {error}; tools skipped");
-                    (format!("{name} ({summary}) — unavailable ({error})"), Some(reason))
+                    (
+                        format!("{name} ({summary}) — unavailable ({error})"),
+                        Some(reason),
+                    )
                 }
                 Err(_) => {
                     let reason = format!(
@@ -624,8 +636,7 @@ async fn connect_http(
     oauth: Option<transport_mcp::http::OAuthClientCredentials>,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> std::result::Result<usize, McpError> {
-    let client: Arc<dyn McpClient> =
-        Arc::new(HttpMcpClient::connect(url, headers, oauth).await?);
+    let client: Arc<dyn McpClient> = Arc::new(HttpMcpClient::connect(url, headers, oauth).await?);
     let tools = client.list_tools().await?;
     let mut count = 0;
     for def in &tools {
@@ -670,10 +681,7 @@ mod tests {
             name: &str,
             input: serde_json::Value,
         ) -> std::result::Result<McpToolOutput, McpError> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((name.to_string(), input));
+            self.calls.lock().unwrap().push((name.to_string(), input));
             if self.fail_calls {
                 return Err(McpError::Transport("pipe broken".to_string()));
             }
@@ -727,8 +735,7 @@ mod tests {
         // Missing inputSchema defaults to a plain object schema.
         assert_eq!(defs[1].input_schema, serde_json::json!({"type": "object"}));
         assert_eq!(cursor.as_deref(), Some("page2"));
-        let (defs, cursor) =
-            parse_tools_list(&serde_json::json!({"tools": []})).unwrap();
+        let (defs, cursor) = parse_tools_list(&serde_json::json!({"tools": []})).unwrap();
         assert!(defs.is_empty());
         assert_eq!(cursor, None);
         assert!(parse_tools_list(&serde_json::json!({"tools": {}})).is_err());
@@ -758,7 +765,9 @@ mod tests {
         .unwrap();
         assert!(out.content.contains("non-text"));
         // JSON-RPC error shape (preserved verbatim by the decoder).
-        assert!(parse_tool_result(&serde_json::json!({"code": -32601, "message": "nope"})).is_err());
+        assert!(
+            parse_tool_result(&serde_json::json!({"code": -32601, "message": "nope"})).is_err()
+        );
         assert!(parse_tool_result(&serde_json::json!({"unexpected": 1})).is_err());
     }
 
@@ -777,10 +786,7 @@ mod tests {
         assert!(!out.is_error);
         assert!(out.content.contains("ran click"));
         // Server-side raw name (no prefix) reaches the client.
-        assert_eq!(
-            client.calls.lock().unwrap()[0].0,
-            "click".to_string()
-        );
+        assert_eq!(client.calls.lock().unwrap()[0].0, "click".to_string());
     }
 
     #[tokio::test]
@@ -790,12 +796,8 @@ mod tests {
             calls: std::sync::Mutex::new(Vec::new()),
             fail_calls: true,
         });
-        let bridge =
-            McpToolBridge::new("srv", &def("go"), client).expect("valid name");
-        let out = bridge
-            .execute(serde_json::json!({}), &ctx())
-            .await
-            .unwrap();
+        let bridge = McpToolBridge::new("srv", &def("go"), client).expect("valid name");
+        let out = bridge.execute(serde_json::json!({}), &ctx()).await.unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("mcp__srv__go"));
     }
@@ -812,10 +814,7 @@ mod tests {
         assert!(bridge.description().contains("srv"));
     }
 
-    fn raw(
-        command: Option<&str>,
-        url: Option<&str>,
-    ) -> wavecode_config::McpServerRaw {
+    fn raw(command: Option<&str>, url: Option<&str>) -> wavecode_config::McpServerRaw {
         wavecode_config::McpServerRaw {
             command: command.map(|s| s.to_string()),
             args: Vec::new(),
@@ -837,13 +836,21 @@ mod tests {
                 ("bad__name".to_string(), raw(Some("cmd"), None)),
                 ("both".to_string(), raw(Some("cmd"), Some("http://x"))),
                 ("neither".to_string(), raw(None, None)),
-                ("web".to_string(), raw(None, Some("https://mcp.example.com"))),
+                (
+                    "web".to_string(),
+                    raw(None, Some("https://mcp.example.com")),
+                ),
             ],
             &registry,
         )
         .await;
         assert_eq!(report.lines.len(), 4);
-        assert!(report.lines.iter().all(|l| l.contains("skipped") || l.contains("unavailable")));
+        assert!(
+            report
+                .lines
+                .iter()
+                .all(|l| l.contains("skipped") || l.contains("unavailable"))
+        );
         assert!(report.warnings.len() == 4);
         assert!(registry.get("mcp__bad__name__x").is_none());
     }
@@ -856,4 +863,3 @@ mod tests {
         assert!(report.warnings.is_empty());
     }
 }
-

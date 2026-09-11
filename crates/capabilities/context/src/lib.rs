@@ -502,7 +502,9 @@ pub fn find_pairing_violations(history: &[Message]) -> Vec<String> {
                         )
                     });
                     if !paired {
-                        violations.push(format!("message[{i}] tool_use({id}) has no paired tool_result"));
+                        violations.push(format!(
+                            "message[{i}] tool_use({id}) has no paired tool_result"
+                        ));
                     }
                 }
             }
@@ -590,7 +592,11 @@ mod tests {
         let history = vec![user_text(&"x".repeat(400))];
         let est4 = estimate_tokens(&history, 4);
         let est2 = estimate_tokens(&history, 2);
-        assert_eq!(est4, 100 + 4, "400 chars / 4 + one message of structural overhead");
+        assert_eq!(
+            est4,
+            100 + 4,
+            "400 chars / 4 + one message of structural overhead"
+        );
         assert_eq!(est2, 200 + 4);
         assert_eq!(estimate_tokens(&[], 4), 0);
         // Zero-proof ratio: treated as 1, never panics.
@@ -723,7 +729,11 @@ mod tests {
         ];
         let out = normalize_history(&history);
         assert!(find_pairing_violations(&out).is_empty());
-        assert_eq!(out.len(), 2, "wholly orphaned messages removed, mixed ones keep only text");
+        assert_eq!(
+            out.len(),
+            2,
+            "wholly orphaned messages removed, mixed ones keep only text"
+        );
         assert!(matches!(&out[0].content[0], ContentBlock::Text { text } if text == "kept text"));
     }
 
@@ -736,7 +746,10 @@ mod tests {
             assistant_text("done reading"),
         ];
         let out = normalize_history(&history);
-        assert_eq!(out, history, "fully paired history passes through untouched");
+        assert_eq!(
+            out, history,
+            "fully paired history passes through untouched"
+        );
         assert!(find_pairing_violations(&out).is_empty());
     }
 
@@ -845,8 +858,17 @@ Concurrent stock-deduction test; settlement ledger integration.";
             panic!("first message should be the summary text message")
         };
         assert!(text.starts_with(SUMMARY_MESSAGE_PREFIX));
-        for element in ["Goal", "Progress", "Key decisions", "File inventory", "Todo"] {
-            assert!(text.contains(element), "summary missing element \"{element}\": {text}");
+        for element in [
+            "Goal",
+            "Progress",
+            "Key decisions",
+            "File inventory",
+            "Todo",
+        ] {
+            assert!(
+                text.contains(element),
+                "summary missing element \"{element}\": {text}"
+            );
         }
 
         // The most recent 4 verbatim messages survive intact (message by

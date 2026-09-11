@@ -230,17 +230,14 @@ impl TaskService for ScriptedTaskService {
         let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
         *next += 1;
         let id = format!("task-{next}");
-        self.tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                id.clone(),
-                TaskInfo {
-                    state: TaskState::Running,
-                    outcome: None,
-                    lineage: Vec::new(),
-                },
-            );
+        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            id.clone(),
+            TaskInfo {
+                state: TaskState::Running,
+                outcome: None,
+                lineage: Vec::new(),
+            },
+        );
         self.requests
             .lock()
             .unwrap_or_else(|e| e.into_inner())

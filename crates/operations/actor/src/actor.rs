@@ -113,6 +113,7 @@ where
             let Some(sub) = sub else {
                 // All clients dropped: end the session best-effort.
                 finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
+                end_session(&driver, &conv).await;
                 return;
             };
             match sub.op {
@@ -144,6 +145,7 @@ where
                     .await
                     {
                         finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
+                        end_session(&driver, &conv).await;
                         return;
                     }
                 }
@@ -195,6 +197,7 @@ where
                 Op::Shutdown => {
                     interrupt.trigger();
                     finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
+                    end_session(&driver, &conv).await;
                     return;
                 }
                 Op::SetPermissionMode { mode } => {
@@ -229,6 +232,25 @@ async fn finish_lifecycle<D: TurnDriver>(
             });
         })
         .await;
+}
+
+/// Best-effort session teardown work (memory extraction) on the final
+/// transcript, one `role: text` line per entry. Runs after the SessionEnd
+/// hooks at every teardown exit; failures are impossible by contract (the
+/// default is a no-op and overrides must never fail shutdown).
+async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
+    let transcript: Vec<String> = conv
+        .snapshot()
+        .iter()
+        .map(|entry| {
+            let role = match entry.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+            };
+            format!("{role}: {}", entry.text)
+        })
+        .collect();
+    driver.end_session(&transcript).await;
 }
 
 /// Forwarding sink over the unbounded event channel.
@@ -387,6 +409,7 @@ mod tests {
         inputs: Mutex<Vec<String>>,
         hold: bool,
         release: Arc<Notify>,
+        ended: Mutex<Vec<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
@@ -444,6 +467,13 @@ mod tests {
         ) -> bool {
             true
         }
+
+        async fn end_session(&self, transcript: &[String]) {
+            self.ended
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(transcript.to_vec());
+        }
     }
 
     fn spawn_actor(hold: bool) -> (ActorClient, Arc<Notify>) {
@@ -452,6 +482,7 @@ mod tests {
             inputs: Mutex::new(Vec::new()),
             hold,
             release: release.clone(),
+            ended: Mutex::new(Vec::new()),
         };
         let client = SessionActor::spawn(
             driver,
@@ -591,6 +622,7 @@ mod tests {
             inputs: Mutex::new(Vec::new()),
             hold: false,
             release: Arc::new(Notify::new()),
+            ended: Mutex::new(Vec::new()),
         };
         let client = SessionActor::spawn(
             driver,
@@ -679,5 +711,96 @@ mod tests {
         }
         let warning = warning.expect("expected a late-approval warning mid-turn");
         assert_eq!(warning.id, "s-late");
+    }
+
+    #[tokio::test]
+    async fn shutdown_delivers_final_transcript_to_end_session() {
+        let ended: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        struct RecordingDriver {
+            ended: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+        #[async_trait::async_trait]
+        impl TurnDriver for RecordingDriver {
+            async fn drive_turn(
+                &self,
+                _ctx: &RunContext,
+                conv: &mut Conversation,
+                input: &str,
+                _system: &str,
+                on_event: &(dyn Fn(Event) + Send + Sync),
+            ) -> StopReason {
+                conv.push(Role::User, input.to_string());
+                conv.push(Role::Assistant, "noted".to_string());
+                on_event(Event {
+                    id: "s1".to_string(),
+                    msg: EventMsg::TurnCompleted { interrupted: false },
+                });
+                StopReason::Completed
+            }
+
+            async fn drive_compact(
+                &self,
+                _conv: &mut Conversation,
+                _trigger: CompactTrigger,
+                _on_event: &(dyn Fn(Event) + Send + Sync),
+            ) -> Result<(), String> {
+                Ok(())
+            }
+
+            async fn drive_hook(
+                &self,
+                _point: HookPoint,
+                _payload: &str,
+                _on_event: &(dyn Fn(Event) + Send + Sync),
+            ) -> bool {
+                true
+            }
+
+            async fn end_session(&self, transcript: &[String]) {
+                self.ended
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(transcript.to_vec());
+            }
+        }
+        let mut client = SessionActor::spawn(
+            RecordingDriver {
+                ended: ended.clone(),
+            },
+            Conversation::new(),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+        );
+        client.submit(user_input("s1", "remember the sky")).await.unwrap();
+        // Drain through the turn end, then shut down and drain to close.
+        while let Some(event) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.next_event(),
+        )
+        .await
+        .unwrap()
+        {
+            if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
+                break;
+            }
+        }
+        client
+            .submit(Submission {
+                id: "s2".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+        while tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        let ended = ended.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(ended.len(), 1);
+        assert!(ended[0].iter().any(|line| line.contains("remember the sky")));
+        assert!(ended[0].iter().any(|line| line.starts_with("user: ")));
     }
 }

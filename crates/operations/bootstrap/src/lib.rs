@@ -18,6 +18,7 @@
 //! concrete legacy crate. Policy stays in the legacy crates; mapping stays
 //! here, so neither side names the other directly.
 
+pub mod acp;
 pub mod child_service;
 pub mod compactor;
 pub mod composite;

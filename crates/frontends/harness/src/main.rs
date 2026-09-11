@@ -81,6 +81,11 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Drive sessions over ACP stdio (JSON-RPC).
+    ///
+    /// Each `session/new` assembles a headless session from config, so
+    /// this surface needs provider credentials like `exec`.
+    Acp,
 }
 
 /// MCP surfaces on the new stack.
@@ -268,6 +273,21 @@ async fn main() -> anyhow::Result<()> {
         run_plugin_list(home);
         std::process::exit(Outcome::Completed.exit_code())
     }
+    // ACP serves headless sessions over stdio until EOF. Sessions
+    // assemble lazily per `session/new`, so this returns before the
+    // shared assembly below (which would build a throwaway session).
+    // Like `exec`, it needs provider credentials from config.
+    if matches!(args.command, Some(Command::Acp)) {
+        run_acp(
+            args.config.clone(),
+            args.model.clone(),
+            args.permission_mode.clone(),
+            cwd.clone(),
+            home.clone(),
+        )
+        .await?;
+        std::process::exit(Outcome::Completed.exit_code())
+    }
     // Only headless exec denies approvals openly: the REPL parks them on
     // the gate and answers inline, which needs parking enabled here.
     let headless = matches!(args.command, Some(Command::Exec { .. }));
@@ -306,9 +326,9 @@ async fn main() -> anyhow::Result<()> {
             run_resume(thread_id, args.permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        // Mcp/Plugin return before assembly above.
-        Some(Command::Mcp { .. }) | Some(Command::Plugin { .. }) => {
-            unreachable!("credential-free surfaces return before assembly")
+        // Mcp/Plugin/Acp return before assembly above.
+        Some(Command::Mcp { .. }) | Some(Command::Plugin { .. }) | Some(Command::Acp) => {
+            unreachable!("early-return surfaces never reach assembly")
         }
         None => unreachable!("bare invocation returns above"),
     }
@@ -384,6 +404,29 @@ async fn run_mcp_serve(cwd: PathBuf) -> anyhow::Result<()> {
     )
     .await
     .map_err(|e| anyhow::anyhow!("mcp server failed: {e}"))
+}
+
+/// Drive ACP sessions over stdio until EOF.
+///
+/// Like `exec`, sessions assemble headless from config, so provider
+/// credentials are required; unlike `exec`, turns arrive as
+/// `session/prompt` requests instead of CLI arguments.
+async fn run_acp(
+    config: Option<PathBuf>,
+    model: Option<String>,
+    permission_mode: Option<String>,
+    cwd: PathBuf,
+    home: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    operations_bootstrap::acp::run_stdio_server(operations_bootstrap::acp::AcpServerOptions {
+        config_path: config,
+        model_override: model,
+        permission_override: permission_mode,
+        cwd,
+        home,
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("acp server failed: {e}"))
 }
 
 /// List installed plugin packs with skill/MCP/hook counts.
@@ -1075,6 +1118,12 @@ mod tests {
         // Existing surfaces keep parsing.
         let args = Args::try_parse_from(["wavecode", "repl"]).unwrap();
         assert!(matches!(args.command, Some(Command::Repl)));
+    }
+
+    #[test]
+    fn cli_routes_acp() {
+        let args = Args::try_parse_from(["wavecode", "acp"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Acp)));
     }
 
     #[test]

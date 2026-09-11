@@ -190,7 +190,10 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         ));
     }
 
-    // 2. Shared model channel and registries.
+    // 2. Provider model client; the model-independent remainder lives in
+    // `assemble_session_with_model` so tests can inject a stub model.
+    // Production behavior is unchanged: this resolves config and builds
+    // the provider client, then delegates everything below.
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
     let model: Arc<dyn wavecode_llm::ChatModel> = match provider.kind {
         wavecode_config::ProviderKind::OpenAiCompatible => {
@@ -205,6 +208,102 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
             api_key,
         )),
     };
+    let deny_env = provider
+        .env_key
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .map(|name| vec![name.to_owned()])
+        .unwrap_or_default();
+    // Effective model limits: explicit config wins; OpenAI-compatible
+    // providers without explicit limits consult the capability table so
+    // DeepSeek-class models sample with their real window instead of the
+    // Anthropic-shaped default.
+    let (context_window, max_output_tokens) = match provider.kind {
+        wavecode_config::ProviderKind::OpenAiCompatible
+            if provider.context_window.is_none() && provider.max_output_tokens.is_none() =>
+        {
+            let caps = wavecode_llm::ModelCapabilities::resolve_or(
+                &model_name,
+                provider.context_window(),
+                provider.max_output_tokens(),
+            );
+            (caps.context_window, caps.max_output_tokens)
+        }
+        _ => (provider.context_window(), provider.max_output_tokens()),
+    };
+    Ok(assemble_session_with_model(WithModel {
+        config,
+        model,
+        model_name,
+        deny_env,
+        context_window,
+        max_output_tokens,
+        permission_override,
+        cwd,
+        home,
+        identity,
+        headless,
+        initial_history,
+        warnings,
+    }))
+}
+
+/// Model-independent half of session assembly (test seam carrier).
+///
+/// Production fills this from config plus the provider-built client in
+/// [`assemble_session`]; tests fill it directly around a stub model so
+/// prompt paths run hermetically. Changing these fields must not change
+/// what production assembles for the same inputs.
+pub(crate) struct WithModel {
+    /// Full config for hooks, permission mode, and MCP descriptions.
+    pub config: wavecode_config::Config,
+    /// Chat model: the provider client in production, a stub in tests.
+    pub model: Arc<dyn wavecode_llm::ChatModel>,
+    /// Effective model name for status displays and sampling.
+    pub model_name: String,
+    /// Env names hidden from tools, resolved from the provider.
+    pub deny_env: Vec<String>,
+    /// Effective context window, resolved from the provider.
+    pub context_window: u64,
+    /// Effective output cap, resolved from the provider.
+    pub max_output_tokens: u32,
+    /// `--permission-mode` override winning over the configured mode.
+    pub permission_override: Option<String>,
+    /// Working directory for tools and relative paths.
+    pub cwd: PathBuf,
+    /// Home directory; `None` degrades memory without failing.
+    pub home: Option<PathBuf>,
+    /// Identity block prepended to the system prompt.
+    pub identity: String,
+    /// True for non-interactive drivers: approvals deny openly.
+    pub headless: bool,
+    /// Seed history as (from_model, text) pairs.
+    pub initial_history: Vec<(bool, String)>,
+    /// Warnings accumulated before the model-independent half.
+    pub warnings: Vec<String>,
+}
+
+/// Assemble the model-independent remainder: registries to live client.
+///
+/// Must be called inside a tokio runtime (the actor task spawns here).
+/// Shares its body with [`assemble_session`]; the split is purely a
+/// seam for hermetic tests, never a behavior fork.
+pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
+    let WithModel {
+        config,
+        model,
+        model_name,
+        deny_env,
+        context_window,
+        max_output_tokens,
+        permission_override,
+        cwd,
+        home,
+        identity,
+        headless,
+        initial_history,
+        mut warnings,
+    } = parts;
     let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
     // `memory_write` shares the prompt index root so model-written entries
     // surface in the next session without a restart. No home means no
@@ -217,12 +316,6 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         )));
     }
     let registry = Arc::new(registry);
-    let deny_env = provider
-        .env_key
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .map(|name| vec![name.to_owned()])
-        .unwrap_or_default();
 
     // 3. Policy: permission mode with explicit fallback, rules unconfigured.
     let permission_mode = resolve_permission_mode(
@@ -247,24 +340,6 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         assemble_skills(home.as_deref(), &cwd, &mut warnings);
     let hooks = assemble_hooks(&config, &mut warnings);
     let mcp_servers = describe_mcp_servers(&config);
-
-    // Effective model limits: explicit config wins; OpenAI-compatible
-    // providers without explicit limits consult the capability table so
-    // DeepSeek-class models sample with their real window instead of the
-    // Anthropic-shaped default.
-    let (context_window, max_output_tokens) = match provider.kind {
-        wavecode_config::ProviderKind::OpenAiCompatible
-            if provider.context_window.is_none() && provider.max_output_tokens.is_none() =>
-        {
-            let caps = wavecode_llm::ModelCapabilities::resolve_or(
-                &model_name,
-                provider.context_window(),
-                provider.max_output_tokens(),
-            );
-            (caps.context_window, caps.max_output_tokens)
-        }
-        _ => (provider.context_window(), provider.max_output_tokens()),
-    };
 
     // 5. Seam adapters (pure wiring, no policy inside).
     let tools = ToolAdapter::new(
@@ -460,7 +535,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         .collect();
     mcp_pending.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(SessionHandle {
+    SessionHandle {
         client,
         approvals,
         interrupt,
@@ -473,7 +548,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         warnings,
         tools_registry: registry.clone(),
         mcp_pending,
-    })
+    }
 }
 
 /// Register child task tools against a task service.

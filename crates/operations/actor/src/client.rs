@@ -14,6 +14,7 @@
 
 use infrastructure_base::InterruptHandle;
 use operations_wire::{Event, Submission};
+use runtime_runner::{InboxHandle, SteerTarget};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -26,10 +27,19 @@ pub enum SubmitError {
 }
 
 /// In-process client: submit submissions, receive events.
+///
+/// Mid-turn steering call path (no wire involved): [`ActorClient::steer`] /
+/// [`ActorClient::inject`] / [`ActorClient::cancel_inbox`] write directly
+/// to the [`InboxHandle`] the actor captured from
+/// `TurnDriver::inbox_handle` at spawn; the driven run loop drains that
+/// handle at its loop head (`NextTurn`) and before each sample (`NextStep`
+/// plus injections). Drivers without an inbox make these a no-op
+/// (`steer`/`inject` return false, `cancel_inbox` returns 0).
 pub struct ActorClient {
     submit_tx: mpsc::Sender<Submission>,
     event_rx: mpsc::UnboundedReceiver<Event>,
     interrupt: InterruptHandle,
+    inbox: Option<InboxHandle>,
     handle: JoinHandle<()>,
 }
 
@@ -39,12 +49,14 @@ impl ActorClient {
         submit_tx: mpsc::Sender<Submission>,
         event_rx: mpsc::UnboundedReceiver<Event>,
         interrupt: InterruptHandle,
+        inbox: Option<InboxHandle>,
         handle: JoinHandle<()>,
     ) -> Self {
         Self {
             submit_tx,
             event_rx,
             interrupt,
+            inbox,
             handle,
         }
     }
@@ -55,6 +67,45 @@ impl ActorClient {
             .send(sub)
             .await
             .map_err(|_| SubmitError::ActorExited)
+    }
+
+    /// Queue a steering message for the running turn; false when the
+    /// driver exposes no inbox (or the text is empty).
+    pub fn steer(&self, text: &str, target: SteerTarget) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        match &self.inbox {
+            Some(inbox) => {
+                inbox.steer(text.to_string(), target);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Queue a user message for the running turn's next sample; false when
+    /// the driver exposes no inbox (or the text is empty).
+    pub fn inject(&self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        match &self.inbox {
+            Some(inbox) => {
+                inbox.inject(text.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Drop queued inbox items, returning the dropped count (0 without an
+    /// inbox). With `keep_next_turn`, next-turn steering survives.
+    pub fn cancel_inbox(&self, keep_next_turn: bool) -> usize {
+        self.inbox
+            .as_ref()
+            .map(|inbox| inbox.cancel(keep_next_turn))
+            .unwrap_or(0)
     }
 
     /// Receive the next event; `None` once the actor exited and drained.

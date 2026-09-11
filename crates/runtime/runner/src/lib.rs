@@ -17,7 +17,7 @@
 //! the traits defined here by the composition root (bootstrap). This crate
 //! only carries data transfer objects so the dependency graph stays acyclic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -364,6 +364,104 @@ pub trait ModelGateway: Send + Sync {
     }
 }
 
+/// Target selecting which checkpoint consumes a steered message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerTarget {
+    /// Applied at the next loop head (the next tool-round iteration).
+    NextTurn,
+    /// Applied immediately before the next model sample.
+    NextStep,
+}
+
+/// Mid-turn message inbox behind a shared, cloneable handle.
+///
+/// Steering and injection ride normal history as user messages, so budget
+/// checks, compaction, and pairing logic treat them like any other user
+/// input. Frontends reach the loop through [`TurnDriver::inbox_handle`]
+/// (the actor stores that handle on its client); direct holders of the
+/// loop use [`RunLoop::steer`] / [`RunLoop::inject`].
+#[derive(Debug, Clone, Default)]
+pub struct InboxHandle {
+    inner: Arc<Mutex<InboxQueue>>,
+}
+
+#[derive(Debug, Default)]
+struct InboxQueue {
+    next_turn: VecDeque<String>,
+    next_step: VecDeque<String>,
+    inject: VecDeque<String>,
+}
+
+impl InboxHandle {
+    /// Create an empty inbox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a steering message for `target`.
+    pub fn steer(&self, text: String, target: SteerTarget) {
+        let mut inbox = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match target {
+            SteerTarget::NextTurn => inbox.next_turn.push_back(text),
+            SteerTarget::NextStep => inbox.next_step.push_back(text),
+        }
+    }
+
+    /// Queue a user message for the upcoming sample.
+    pub fn inject(&self, text: String) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inject
+            .push_back(text);
+    }
+
+    /// Drop queued (not yet applied) items and return the dropped count.
+    /// With `keep_next_turn`, items aimed at the next turn survive while
+    /// current-turn items drop; otherwise everything pending is dropped.
+    pub fn cancel(&self, keep_next_turn: bool) -> usize {
+        let mut inbox = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut dropped = inbox.next_step.len() + inbox.inject.len();
+        inbox.next_step.clear();
+        inbox.inject.clear();
+        if !keep_next_turn {
+            dropped += inbox.next_turn.len();
+            inbox.next_turn.clear();
+        }
+        dropped
+    }
+
+    /// Drain items aimed at the loop head.
+    fn take_next_turn(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_turn
+            .drain(..)
+            .collect()
+    }
+
+    /// Drain items aimed at the next sample.
+    fn take_next_step(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .next_step
+            .drain(..)
+            .collect()
+    }
+
+    /// Drain directly injected messages.
+    fn take_inject(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inject
+            .drain(..)
+            .collect()
+    }
+}
+
 /// Dispatch tool calls with read-only parallelism and serial mutation.
 ///
 /// Calls whose executor reports read-only and non-destructive run
@@ -555,6 +653,7 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     cfg: RunConfig,
     interrupt: InterruptHandle,
     run_allowlist: RunAllowlist,
+    inbox: InboxHandle,
 }
 
 impl<E, P, H, M, A, T, C> RunLoop<E, P, H, M, A, T, C>
@@ -591,12 +690,40 @@ where
             cfg,
             interrupt,
             run_allowlist: RunAllowlist::default(),
+            inbox: InboxHandle::new(),
         }
+    }
+
+    /// Queue a steering message for `target`; empty texts are dropped
+    /// because providers reject empty user messages.
+    pub fn steer(&self, text: String, target: SteerTarget) {
+        if !text.is_empty() {
+            self.inbox.steer(text, target);
+        }
+    }
+
+    /// Queue a user message for the upcoming sample; empty texts dropped.
+    pub fn inject(&self, text: String) {
+        if !text.is_empty() {
+            self.inbox.inject(text);
+        }
+    }
+
+    /// Drop queued inbox items, returning the dropped count; with
+    /// `keep_next_turn`, next-turn steering survives.
+    pub fn cancel_inbox(&self, keep_next_turn: bool) -> usize {
+        self.inbox.cancel(keep_next_turn)
     }
 
     /// Handle to this loop's per-run tool allowlist for child services.
     pub fn run_allowlist(&self) -> RunAllowlist {
         self.run_allowlist.clone()
+    }
+
+    /// Shared inbox handle; the actor stores this on its client so
+    /// frontends can steer or inject mid-turn without touching the loop.
+    pub fn inbox_handle(&self) -> InboxHandle {
+        self.inbox.clone()
     }
 
     /// Run one turn to a terminal [`StopReason`].
@@ -659,6 +786,15 @@ where
                 settle(conv, &last_input, &state, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
+            }
+
+            // Mid-turn steering (NextTurn target): queued steer messages
+            // land as user history at the loop head, ahead of the budget
+            // line and the next sample.
+            let mut applied = 0;
+            for text in self.inbox.take_next_turn() {
+                conv.push(Role::User, text);
+                applied += 1;
             }
 
             // Round ceiling stops with Completed, never with an error.
@@ -742,6 +878,24 @@ where
                         }
                     }
                 }
+            }
+
+            // Pre-sample steering (NextStep target) plus direct injections:
+            // both land as user history immediately before the next sample
+            // so they steer the upcoming call, after the budget line.
+            for text in self
+                .inbox
+                .take_next_step()
+                .into_iter()
+                .chain(self.inbox.take_inject())
+            {
+                conv.push(Role::User, text);
+                applied += 1;
+            }
+            if applied > 0 {
+                emit_msg(EventMsg::Warning {
+                    message: format!("applied {applied} steered message(s)"),
+                });
             }
 
             let request = SampleRequest {
@@ -1254,6 +1408,13 @@ pub trait TurnDriver: Send + Sync {
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
         None
     }
+
+    /// Shared mid-turn inbox of the driven loop, if it exposes one. The
+    /// actor stores this handle on its client so frontends can steer or
+    /// inject without owning the driver loop.
+    fn inbox_handle(&self) -> Option<InboxHandle> {
+        None
+    }
 }
 
 #[async_trait::async_trait]
@@ -1317,6 +1478,10 @@ where
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
         Some(self.interrupt.clone())
     }
+
+    fn inbox_handle(&self) -> Option<InboxHandle> {
+        Some(self.inbox.clone())
+    }
 }
 
 /// Forwarding implementation so shared sources erase to trait objects.
@@ -1378,6 +1543,10 @@ where
 
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
         self.as_ref().interrupt_handle()
+    }
+
+    fn inbox_handle(&self) -> Option<InboxHandle> {
+        self.as_ref().inbox_handle()
     }
 }
 
@@ -1799,25 +1968,18 @@ mod run_loop_tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_loop(
+    fn build_loop<M: ModelGateway>(
         executor: FakeExecutor,
         policy: FakePolicy,
         hooks: FakeHooks,
-        model: FakeModel,
+        model: M,
         approvals: FakeApprovals,
         plans: FakePlans,
         compactor: FakeCompactor,
         max_tool_rounds: u32,
         interrupt: InterruptHandle,
-    ) -> RunLoop<
-        FakeExecutor,
-        FakePolicy,
-        FakeHooks,
-        FakeModel,
-        FakeApprovals,
-        FakePlans,
-        FakeCompactor,
-    > {
+    ) -> RunLoop<FakeExecutor, FakePolicy, FakeHooks, M, FakeApprovals, FakePlans, FakeCompactor>
+    {
         RunLoop::new(
             executor,
             policy,
@@ -2499,5 +2661,195 @@ mod run_loop_tests {
             })
             .count();
         assert_eq!(warnings, 1);
+    }
+
+    /// Request-recording scripted model for inbox tests.
+    type SeenLog = std::sync::Arc<Mutex<Vec<Vec<LiteMessage>>>>;
+    type ReleaseGate = std::sync::Arc<tokio::sync::Notify>;
+
+    struct CaptureModel {
+        seen: SeenLog,
+        release: ReleaseGate,
+        wait_first: bool,
+    }
+
+    fn capture_model(wait_first: bool) -> (CaptureModel, SeenLog, ReleaseGate) {
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        (
+            CaptureModel {
+                seen: seen.clone(),
+                release: release.clone(),
+                wait_first,
+            },
+            seen,
+            release,
+        )
+    }
+
+    #[async_trait::async_trait]
+    impl ModelGateway for CaptureModel {
+        async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError> {
+            let count = {
+                let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+                seen.push(request.messages.clone());
+                seen.len()
+            };
+            if self.wait_first && count == 1 {
+                self.release.notified().await;
+            }
+            Ok(text_response("done"))
+        }
+    }
+
+    fn seen_texts(seen: &SeenLog, index: usize) -> Vec<String> {
+        seen.lock().unwrap_or_else(|e| e.into_inner())[index]
+            .iter()
+            .map(|m| m.text.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn inbox_targets_land_in_order_before_first_sample() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let (model, seen, _) = capture_model(false);
+        let cycle = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            4,
+            fx.interrupt.clone(),
+        );
+        cycle.steer("TURN".to_string(), SteerTarget::NextTurn);
+        cycle.steer("STEP".to_string(), SteerTarget::NextStep);
+        cycle.inject("INJECT".to_string());
+        // Empty texts never queue (providers reject empty user messages).
+        cycle.steer(String::new(), SteerTarget::NextStep);
+        cycle.inject(String::new());
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = cycle
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        // Loop-head (NextTurn) drains before pre-sample (NextStep, inject).
+        assert_eq!(seen_texts(&seen, 0), vec!["hi", "TURN", "STEP", "INJECT"]);
+        assert!(fx.event_kinds().contains(&"warning".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cancel_inbox_keep_flag_selects_survivors() {
+        // keep=false drops everything pending.
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let (model, seen, _) = capture_model(false);
+        let cycle = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            4,
+            fx.interrupt.clone(),
+        );
+        cycle.steer("TURN".to_string(), SteerTarget::NextTurn);
+        cycle.steer("STEP".to_string(), SteerTarget::NextStep);
+        assert_eq!(cycle.cancel_inbox(false), 2);
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        cycle
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(seen_texts(&seen, 0), vec!["hi"]);
+
+        // keep=true preserves next-turn steering, drops current-turn items.
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let (model, seen, _) = capture_model(false);
+        let cycle = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            4,
+            fx.interrupt.clone(),
+        );
+        cycle.steer("TURN".to_string(), SteerTarget::NextTurn);
+        cycle.steer("STEP".to_string(), SteerTarget::NextStep);
+        cycle.inject("INJECT".to_string());
+        assert_eq!(cycle.cancel_inbox(true), 2);
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        cycle
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(seen_texts(&seen, 0), vec!["hi", "TURN"]);
+    }
+
+    #[tokio::test]
+    async fn mid_turn_next_step_steer_reaches_second_sample() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, _, compactor) = default_parts();
+        // One unfinished plan item forces reminder-driven re-samples, so a
+        // mid-turn steer has a second sample to land in.
+        let plans = FakePlans { unfinished: 1 };
+        let (model, seen, release) = capture_model(true);
+        let cycle = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let handle = cycle.inbox_handle();
+        let seen_wait = seen.clone();
+        let release_wait = release.clone();
+        let steerer = tokio::spawn(async move {
+            loop {
+                let sampled = seen_wait.lock().unwrap_or_else(|e| e.into_inner()).len();
+                if sampled >= 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            handle.steer("FOLLOW-UP".to_string(), SteerTarget::NextStep);
+            release_wait.notify_one();
+        });
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            cycle.run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            }),
+        )
+        .await
+        .expect("turn must not hang on inbox steering");
+        steerer.await.unwrap();
+        assert_eq!(outcome, StopReason::Completed);
+        // The steer arrived after the first sample was taken ...
+        assert_eq!(seen_texts(&seen, 0), vec!["hi"]);
+        // ... and steered the immediately following sample.
+        assert!(seen_texts(&seen, 1).contains(&"FOLLOW-UP".to_string()));
     }
 }

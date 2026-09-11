@@ -19,7 +19,8 @@ use runtime_runner::{
     ModelGateway, SampleBlock, SampleDelta, SampleError, SampleRequest, SampleResponse, ToolRef,
 };
 use wavecode_llm::{
-    ChatModel, ChatRequest, ContentBlock, LlmError, Message, Role, StreamEvent, ToolSpec,
+    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Role, StreamEvent,
+    ToolSpec,
 };
 
 /// Samples a legacy chat model through the gateway seam.
@@ -79,6 +80,91 @@ impl ModelAdapter {
                 input_schema: tool.input_schema(),
             })
             .collect()
+    }
+}
+
+/// Build one provider client from resolved config.
+///
+/// The primary and every fallback go through this single point so wiring
+/// stays identical across the chain. `reasoning_effort` rides the
+/// OpenAI-compatible client best-effort; Anthropic has no such wire param
+/// and ignores it. Keys arrive already resolved per provider and are never
+/// shared between the clients built here.
+pub fn build_chat_model(
+    provider: &wavecode_config::ProviderConfig,
+    api_key: String,
+    model_name: &str,
+) -> Arc<dyn ChatModel> {
+    match provider.kind {
+        wavecode_config::ProviderKind::OpenAiCompatible => {
+            let client = wavecode_llm::OpenAIClient::new(
+                provider.base_url.clone(),
+                api_key,
+                model_name.to_string(),
+            );
+            match provider.reasoning_effort.as_deref() {
+                Some(effort) => Arc::new(client.with_reasoning_effort(effort.to_string())),
+                None => Arc::new(client),
+            }
+        }
+        wavecode_config::ProviderKind::Anthropic => Arc::new(wavecode_llm::AnthropicClient::new(
+            provider.base_url.clone(),
+            api_key,
+        )),
+    }
+}
+
+/// Ordered provider failover over [`ChatModel`] request establishment.
+///
+/// Tries each model in order (primary first, then fallbacks); only
+/// transport/server errors advance to the next provider. Auth errors fail
+/// fast on the spot: credentials are encapsulated inside each provider
+/// client and are never copied or retried across providers. Other
+/// non-retryable errors (4xx, [`LlmError::PromptTooLong`]) also return
+/// immediately so compaction triggers stay intact.
+///
+/// Failover covers request establishment ([`ChatModel::stream`]) only: a
+/// stream that fails mid-flight surfaces its item error unchanged instead
+/// of resuming on another provider, which could duplicate tool side
+/// effects and already-emitted deltas.
+pub struct FallbackModel {
+    models: Vec<Arc<dyn ChatModel>>,
+}
+
+impl FallbackModel {
+    /// Wrap the chain in try order; must be non-empty (the primary alone
+    /// when no fallbacks resolve).
+    pub fn new(models: Vec<Arc<dyn ChatModel>>) -> Self {
+        Self { models }
+    }
+
+    /// Number of providers in the chain (primary + resolved fallbacks).
+    pub fn len(&self) -> usize {
+        self.models.len()
+    }
+
+    /// True when the chain holds no provider.
+    pub fn is_empty(&self) -> bool {
+        self.models.is_empty()
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatModel for FallbackModel {
+    async fn stream(&self, req: ChatRequest) -> wavecode_llm::Result<EventStream> {
+        use wavecode_llm::retry::RetryPolicy;
+        let policy = RetryPolicy::default();
+        let mut last_error: Option<LlmError> = None;
+        for model in &self.models {
+            match model.stream(req.clone()).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) if policy.is_retryable(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| LlmError::Http("no providers configured".to_string())))
     }
 }
 
@@ -341,5 +427,143 @@ mod tests {
         // Empty assistant texts are dropped; empty user texts are kept.
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, Role::User);
+    }
+
+    /// Scripted ChatModel for failover tests: fails once when armed, else
+    /// answers with fixed text; counts establishment attempts.
+    struct FailoverScript {
+        error: Option<LlmError>,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailoverScript {
+        fn failing(error: LlmError) -> Self {
+            Self {
+                error: Some(error),
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn answering() -> Self {
+            Self {
+                error: None,
+                attempts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChatModel for FailoverScript {
+        async fn stream(&self, _req: ChatRequest) -> wavecode_llm::Result<EventStream> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match &self.error {
+                Some(LlmError::Http(message)) => Err(LlmError::Http(message.clone())),
+                Some(LlmError::Api { kind, message }) => Err(LlmError::Api {
+                    kind: kind.clone(),
+                    message: message.clone(),
+                }),
+                Some(LlmError::PromptTooLong { message }) => Err(LlmError::PromptTooLong {
+                    message: message.clone(),
+                }),
+                Some(other) => Err(LlmError::Http(other.to_string())),
+                None => Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::TextDelta {
+                        text: "fallback-answer".to_string(),
+                    }),
+                    Ok(StreamEvent::MessageComplete {
+                        stop_reason: "end_turn".to_string(),
+                        usage: Usage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                        },
+                    }),
+                ]))),
+            }
+        }
+    }
+
+    fn transport() -> LlmError {
+        LlmError::Http("connection reset".to_string())
+    }
+
+    fn auth_denied() -> LlmError {
+        LlmError::Api {
+            kind: "http_401".to_string(),
+            message: "invalid api key".to_string(),
+        }
+    }
+
+    async fn collect_text(model: &FallbackModel) -> String {
+        use futures::StreamExt;
+        let req = ChatRequest {
+            model: "test-model".to_string(),
+            system: String::new(),
+            messages: Arc::new(Vec::new()),
+            tools: Vec::new(),
+            max_tokens: 10,
+        };
+        let mut stream = model.stream(req).await.unwrap();
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let StreamEvent::TextDelta { text: delta } = event.unwrap() {
+                text.push_str(&delta);
+            }
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn fallback_tries_providers_in_order() {
+        let primary = Arc::new(FailoverScript::failing(transport()));
+        let fallback = Arc::new(FailoverScript::answering());
+        let chain = FallbackModel::new(vec![primary.clone(), fallback.clone()]);
+        assert_eq!(chain.len(), 2);
+        assert_eq!(collect_text(&chain).await, "fallback-answer");
+        assert_eq!(primary.attempts(), 1);
+        assert_eq!(fallback.attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn auth_errors_fail_fast_without_touching_fallbacks() {
+        let primary = Arc::new(FailoverScript::failing(auth_denied()));
+        let fallback = Arc::new(FailoverScript::answering());
+        let chain = FallbackModel::new(vec![primary.clone(), fallback.clone()]);
+        let req = ChatRequest {
+            model: "test-model".to_string(),
+            system: String::new(),
+            messages: Arc::new(Vec::new()),
+            tools: Vec::new(),
+            max_tokens: 10,
+        };
+        assert!(chain.stream(req).await.is_err());
+        assert_eq!(primary.attempts(), 1);
+        // The fallback key is never exercised after an auth failure.
+        assert_eq!(fallback.attempts(), 0);
+    }
+
+    #[tokio::test]
+    async fn overlong_prompts_fail_fast_without_touching_fallbacks() {
+        let primary = Arc::new(FailoverScript::failing(LlmError::PromptTooLong {
+            message: "too long".to_string(),
+        }));
+        let fallback = Arc::new(FailoverScript::answering());
+        let chain = FallbackModel::new(vec![primary.clone(), fallback.clone()]);
+        let req = ChatRequest {
+            model: "test-model".to_string(),
+            system: String::new(),
+            messages: Arc::new(Vec::new()),
+            tools: Vec::new(),
+            max_tokens: 10,
+        };
+        assert!(matches!(
+            chain.stream(req).await,
+            Err(LlmError::PromptTooLong { .. })
+        ));
+        assert_eq!(fallback.attempts(), 0);
     }
 }

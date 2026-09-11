@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod openai;
+pub mod retry;
 mod sse;
 
 pub use anthropic::AnthropicClient;

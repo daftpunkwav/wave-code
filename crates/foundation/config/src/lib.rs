@@ -86,10 +86,20 @@ impl Config {
     /// Resolves the current provider; api key priority: the env var pointed to by `env_key` > inline `api_key`
     /// (an env var that exists but is empty counts as unset).
     pub fn resolve_provider(&self) -> Result<(&ProviderConfig, String), ConfigError> {
+        self.resolve_named_provider(&self.model_provider.clone())
+    }
+
+    /// Resolves a named provider (fallback chain entries); same key
+    /// priority as [`Self::resolve_provider`]. Unknown names and missing
+    /// keys error so callers can warn-and-skip without touching the primary.
+    pub fn resolve_named_provider(
+        &self,
+        name: &str,
+    ) -> Result<(&ProviderConfig, String), ConfigError> {
         let provider = self
             .model_providers
-            .get(&self.model_provider)
-            .ok_or_else(|| ConfigError::MissingProvider(self.model_provider.clone()))?;
+            .get(name)
+            .ok_or_else(|| ConfigError::MissingProvider(name.to_string()))?;
 
         let key = provider
             .env_key
@@ -104,7 +114,7 @@ impl Config {
             // An inline key of only blanks is also rejected (MissingApiKey
             // instead of sending a blank key that the API would refuse).
             .filter(|k| !k.trim().is_empty())
-            .ok_or_else(|| ConfigError::MissingApiKey(self.model_provider.clone()))?;
+            .ok_or_else(|| ConfigError::MissingApiKey(name.to_string()))?;
 
         Ok((provider, key))
     }
@@ -134,6 +144,23 @@ env_key = "TEST_KEY"
         assert_eq!(prov.base_url, "https://api.minimaxi.com/anthropic");
         assert_eq!(prov.context_window(), 200_000);
         assert_eq!(prov.max_output_tokens(), 8192);
+    }
+
+    #[test]
+    fn routing_fields_default_to_no_fallback() {
+        let cfg: Config = toml::from_str(TOML_OK).unwrap();
+        let prov = &cfg.model_providers["minimax"];
+        assert!(prov.fallback_providers.is_empty());
+        assert_eq!(prov.reasoning_effort, None);
+        let routed: Config = toml::from_str(&TOML_OK.replacen(
+            "env_key = \"TEST_KEY\"",
+            "env_key = \"TEST_KEY\"\nfallback_providers = [\"backup\"]\nreasoning_effort = \"low\"",
+            1,
+        ))
+        .unwrap();
+        let prov = &routed.model_providers["minimax"];
+        assert_eq!(prov.fallback_providers, vec!["backup".to_string()]);
+        assert_eq!(prov.reasoning_effort.as_deref(), Some("low"));
     }
 
     /// permission_mode (P2): optional field - missing means None, a configured value is kept as-is

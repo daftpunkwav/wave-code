@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use infrastructure_base::InterruptHandle;
 use operations_wire::Event;
-use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
+use runtime_runner::{HookPoint, InboxHandle, RunContext, StopReason, TurnDriver};
 use state_store::{CompactTrigger, Conversation};
 use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, Message, Role};
 use wavecode_memory::{MemoryStore, parse_extracted_entries};
@@ -159,6 +159,10 @@ impl<D: TurnDriver> TurnDriver for SessionMemory<D> {
 
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
         self.inner.interrupt_handle()
+    }
+
+    fn inbox_handle(&self) -> Option<InboxHandle> {
+        self.inner.inbox_handle()
     }
 
     async fn end_session(&self, transcript: &[String]) {

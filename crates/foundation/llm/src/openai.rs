@@ -39,6 +39,9 @@ pub struct OpenAIClient {
     api_key: String,
     model: String,
     http: reqwest::Client,
+    /// Best-effort reasoning effort sent as `reasoning_effort`; `None`
+    /// omits the param so endpoints without it keep working unchanged.
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAIClient {
@@ -49,7 +52,15 @@ impl OpenAIClient {
             api_key,
             model,
             http: build_http_client(),
+            reasoning_effort: None,
         }
+    }
+
+    /// Set the best-effort reasoning effort (e.g. "low"); builder style so
+    /// existing `new(...)` call sites keep compiling unchanged.
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
     }
 }
 
@@ -78,7 +89,11 @@ impl ChatModel for OpenAIClient {
             .post(url)
             .bearer_auth(&self.api_key)
             .header("content-type", "application/json")
-            .json(&build_request_body(&req, &self.model))
+            .json(&build_request_body(
+                &req,
+                &self.model,
+                self.reasoning_effort.as_deref(),
+            ))
             .send()
             .await
             .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -127,15 +142,25 @@ fn api_error(kind: String, message: String) -> LlmError {
 
 /// Builds the Chat Completions request body (`stream` is always true;
 /// `stream_options.include_usage` asks the server to report token usage).
-pub(crate) fn build_request_body(req: &ChatRequest, model: &str) -> serde_json::Value {
-    serde_json::json!({
+/// `reasoning_effort` is best-effort: `Some` adds the top-level
+/// `reasoning_effort` param, `None` omits it entirely.
+pub(crate) fn build_request_body(
+    req: &ChatRequest,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
         "model": model,
         "messages": translate_messages(&req.system, &req.messages),
         "tools": req.tools.iter().map(translate_tool).collect::<Vec<_>>(),
         "max_tokens": req.max_tokens,
         "stream": true,
         "stream_options": {"include_usage": true},
-    })
+    });
+    if let Some(effort) = reasoning_effort {
+        body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
+    }
+    body
 }
 
 /// Translates one tool definition into `{type: function, function: {...}}` wire shape.
@@ -730,13 +755,43 @@ mod tests {
             tools: vec![tool_spec()],
             max_tokens: 100,
         };
-        let body = build_request_body(&req, "deepseek-chat");
+        let body = build_request_body(&req, "deepseek-chat", None);
         assert_eq!(body["model"], "deepseek-chat");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["max_tokens"], 100);
         assert_eq!(body["tools"][0]["function"]["name"], "read_file");
         assert_eq!(body["messages"][0]["role"], "system");
+        // No effort configured means no param at all (best-effort omit).
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn request_body_forwards_reasoning_effort_when_set() {
+        let req = ChatRequest {
+            model: "deepseek-chat".to_string(),
+            system: String::new(),
+            messages: std::sync::Arc::new(Vec::new()),
+            tools: Vec::new(),
+            max_tokens: 100,
+        };
+        let body = build_request_body(&req, "deepseek-chat", Some("low"));
+        assert_eq!(body["reasoning_effort"], "low");
+        // The builder setter is the only way the client carries effort,
+        // and `new(...)` alone keeps the omit behavior.
+        let plain = OpenAIClient::new(
+            "https://example.test".to_string(),
+            "key".to_string(),
+            "deepseek-chat".to_string(),
+        );
+        assert_eq!(plain.reasoning_effort, None);
+        let tuned = OpenAIClient::new(
+            "https://example.test".to_string(),
+            "key".to_string(),
+            "deepseek-chat".to_string(),
+        )
+        .with_reasoning_effort("low");
+        assert_eq!(tuned.reasoning_effort.as_deref(), Some("low"));
     }
 
     /// Drives the byte-level decoder over canned chunks (no network).

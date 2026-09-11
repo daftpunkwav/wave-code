@@ -24,6 +24,17 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u32>,
+    /// Ordered fallback provider names (keys of `model_providers`); empty
+    /// means no fallback. Tried in order on transport/server errors only;
+    /// auth errors fail fast and never cross providers (keys stay with the
+    /// provider they were issued for).
+    #[serde(default)]
+    pub fallback_providers: Vec<String>,
+    /// Best-effort per-step reasoning effort forwarded to OpenAI-compatible
+    /// endpoints (e.g. low / medium / high); `None` sends nothing so
+    /// providers without the param keep working unchanged.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -36,6 +47,8 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .field("context_window", &self.context_window)
             .field("max_output_tokens", &self.max_output_tokens)
+            .field("fallback_providers", &self.fallback_providers)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }

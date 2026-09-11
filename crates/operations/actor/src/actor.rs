@@ -113,6 +113,11 @@ where
         let (submit_tx, submit_rx) = mpsc::channel(CONTROL_CHANNEL_CAP);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let client_interrupt = interrupt.clone();
+        // The actor does not own the driver loop; it only holds the driver
+        // handle. Mid-turn steering rides the loop's shared inbox handle
+        // captured here (see ActorClient::steer), never the submit channel,
+        // so no wire Op is involved.
+        let inbox = driver.inbox_handle();
         let handle = tokio::spawn(
             Self {
                 driver,
@@ -128,7 +133,7 @@ where
             }
             .run(),
         );
-        ActorClient::new(submit_tx, event_rx, client_interrupt, handle)
+        ActorClient::new(submit_tx, event_rx, client_interrupt, inbox, handle)
     }
 
     /// Actor main loop: serve queued submissions first, then the channel.
@@ -504,6 +509,7 @@ fn _outcome_docs(outcome: StopReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use runtime_runner::{InboxHandle, SteerTarget};
     use state_checkpoint::{CheckpointPolicy, CheckpointStore};
     use state_store::CompactTrigger;
     use std::sync::Mutex;
@@ -514,6 +520,7 @@ mod tests {
         hold: bool,
         release: Arc<Notify>,
         ended: Mutex<Vec<Vec<String>>>,
+        inbox: InboxHandle,
     }
 
     #[async_trait::async_trait]
@@ -578,6 +585,10 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(transcript.to_vec());
         }
+
+        fn inbox_handle(&self) -> Option<InboxHandle> {
+            Some(self.inbox.clone())
+        }
     }
 
     fn spawn_actor(hold: bool) -> (ActorClient, Arc<Notify>) {
@@ -587,6 +598,7 @@ mod tests {
             hold,
             release: release.clone(),
             ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
         };
         let client = SessionActor::spawn(
             driver,
@@ -606,6 +618,22 @@ mod tests {
                 text: text.to_string(),
             },
         }
+    }
+
+    #[tokio::test]
+    async fn client_steer_inject_cancel_ride_driver_inbox() {
+        // The client carries the driver's inbox handle (captured at spawn),
+        // so steering needs no wire Op and no running turn.
+        let (client, _) = spawn_actor(false);
+        assert!(client.steer("turn-steer", SteerTarget::NextTurn));
+        assert!(client.steer("step-steer", SteerTarget::NextStep));
+        assert!(client.inject("injected"));
+        assert!(!client.steer("", SteerTarget::NextStep));
+        assert!(!client.inject(""));
+        // keep=true drops the two current-turn items, keeps next-turn.
+        assert_eq!(client.cancel_inbox(true), 2);
+        assert_eq!(client.cancel_inbox(false), 1);
+        assert_eq!(client.cancel_inbox(false), 0);
     }
 
     #[tokio::test]
@@ -727,6 +755,7 @@ mod tests {
             hold: false,
             release: Arc::new(Notify::new()),
             ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
         };
         let client = SessionActor::spawn(
             driver,
@@ -919,6 +948,7 @@ mod tests {
             hold: false,
             release: Arc::new(Notify::new()),
             ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
         }
     }
 

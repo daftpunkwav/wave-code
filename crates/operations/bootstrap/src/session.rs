@@ -195,14 +195,32 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     // Production behavior is unchanged: this resolves config and builds
     // the provider client, then delegates everything below.
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
-    let model: Arc<dyn wavecode_llm::ChatModel> = match provider.kind {
-        wavecode_config::ProviderKind::OpenAiCompatible => Arc::new(
-            wavecode_llm::OpenAIClient::new(provider.base_url.clone(), api_key, model_name.clone()),
-        ),
-        wavecode_config::ProviderKind::Anthropic => Arc::new(wavecode_llm::AnthropicClient::new(
-            provider.base_url.clone(),
-            api_key,
-        )),
+    // Primary plus ordered fallbacks share one constructor; each fallback
+    // resolves its own provider entry and key, so credentials never cross
+    // providers. Unresolvable fallbacks (unknown name, missing key) warn
+    // and skip instead of failing the session.
+    let primary: Arc<dyn wavecode_llm::ChatModel> =
+        crate::model_adapter::build_chat_model(provider, api_key, &model_name);
+    let mut chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = vec![primary];
+    for name in &provider.fallback_providers {
+        match config.resolve_named_provider(name) {
+            Ok((fallback_provider, fallback_key)) => {
+                chain.push(crate::model_adapter::build_chat_model(
+                    fallback_provider,
+                    fallback_key,
+                    &model_name,
+                ))
+            }
+            Err(error) => warnings.push(format!("skipping fallback provider {name:?}: {error}")),
+        }
+    }
+    let model: Arc<dyn wavecode_llm::ChatModel> = if chain.len() > 1 {
+        Arc::new(crate::model_adapter::FallbackModel::new(chain))
+    } else {
+        chain
+            .into_iter()
+            .next()
+            .expect("primary model always present")
     };
     let deny_env = provider
         .env_key

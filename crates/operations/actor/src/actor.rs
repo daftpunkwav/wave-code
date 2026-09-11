@@ -5,7 +5,7 @@
  * Responsibilities:
  * - Serialize UserInput turns while routing control ops immediately.
  * - Bound the pending queue with explicit, recoverable rejections.
- * - Inject child completion notices and forward approval decisions.
+ * - Inject child completion notices and forward approval decisions, warning on late ones.
  *
  * This module must not depend on: concrete tools, policy, hooks, models,
  * memory, skills, frontends, or any capability implementation.
@@ -152,8 +152,7 @@ where
                 Op::ExecApproval { call_id, decision } => {
                     if !approvals.decide(&call_id, map_decision(decision)) {
                         // No parked waiter: the turn ended or never asked.
-                        // Decisions are one-shot slots, so dropping is safe.
-                        tracing::warn!(%call_id, "late approval with no parked waiter; dropped");
+                        warn_late_approval(&event_tx, &sub.id, &call_id);
                     }
                 }
                 Op::Compact => {
@@ -299,7 +298,9 @@ fn route_extra(
             queue_or_reject(pending, sub, event_tx);
         }
         Op::ExecApproval { call_id, decision } => {
-            let _ = approvals.decide(&call_id, map_decision(decision));
+            if !approvals.decide(&call_id, map_decision(decision)) {
+                warn_late_approval(event_tx, &sub.id, &call_id);
+            }
         }
         Op::Shutdown => {
             interrupt.trigger();
@@ -332,6 +333,24 @@ fn queue_or_reject(
     } else {
         pending.push_back(sub);
     }
+}
+
+/// Warn the frontend about a late approval decision with no parked waiter.
+///
+/// Decisions are one-shot slots, so dropping is safe; staying silent is
+/// not: without this, a stale or mistyped call id fails invisibly.
+fn warn_late_approval(
+    event_tx: &mpsc::UnboundedSender<Event>,
+    id: &str,
+    call_id: &str,
+) {
+    tracing::warn!(%call_id, "late approval with no parked waiter; dropped");
+    let _ = event_tx.send(Event {
+        id: id.to_string(),
+        msg: EventMsg::Warning {
+            message: format!("late approval for {call_id}: no parked waiter; dropped"),
+        },
+    });
 }
 
 /// Map wire approval decisions onto gate decisions one to one.
@@ -597,5 +616,68 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(decision, ApprovalDecision::AllowOnce);
+    }
+
+    #[tokio::test]
+    async fn idle_late_approval_warns_with_submission_id() {
+        let (mut client, _) = spawn_actor(false);
+        client
+            .submit(Submission {
+                id: "s-late".to_string(),
+                op: Op::ExecApproval {
+                    call_id: "ghost-call".to_string(),
+                    decision: WireDecision::AllowOnce,
+                },
+            })
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.id, "s-late");
+        assert!(matches!(
+            event.msg,
+            EventMsg::Warning { ref message }
+                if message.contains("ghost-call") && message.contains("no parked waiter")
+        ));
+    }
+
+    #[tokio::test]
+    async fn mid_turn_late_approval_warns_while_turn_held() {
+        let (mut client, _) = spawn_actor(true);
+        client.submit(user_input("s0", "first")).await.unwrap();
+        // Let the first turn start and hold inside the driver.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        client
+            .submit(Submission {
+                id: "s-late".to_string(),
+                op: Op::ExecApproval {
+                    call_id: "ghost-call".to_string(),
+                    decision: WireDecision::Deny {
+                        reason: "nope".to_string(),
+                    },
+                },
+            })
+            .await
+            .unwrap();
+        // The held turn never ends, so scan events until the warning
+        // arrives; dropping the client aborts the actor afterwards.
+        let mut warning: Option<Event> = None;
+        for _ in 0..8 {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            if let EventMsg::Warning { message } = &event.msg
+                && message.contains("ghost-call")
+            {
+                warning = Some(event);
+                break;
+            }
+        }
+        let warning = warning.expect("expected a late-approval warning mid-turn");
+        assert_eq!(warning.id, "s-late");
     }
 }

@@ -100,10 +100,16 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             None
         }
         EventMsg::AgentMessageComplete { text } => {
-            if !text.is_empty() {
+            // Deltas already streamed this text; the completion repeats
+            // the full message for transcript use. Skip text already on
+            // stdout so answers are not printed twice, while still
+            // covering senders that emit a completion without deltas.
+            if !text.is_empty() && !stdout.ends_with(text.as_str()) {
                 stdout.push_str(text);
             }
-            stdout.push('\n');
+            if !stdout.is_empty() && !stdout.ends_with('\n') {
+                stdout.push('\n');
+            }
             None
         }
         EventMsg::ToolCallBegin { call_id, name, .. } => {
@@ -156,7 +162,11 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
                 Some(Outcome::Failed)
             }
         }
-        EventMsg::TurnCompleted { .. } => Some(Outcome::Completed),
+        EventMsg::TurnCompleted { interrupted } => Some(if *interrupted {
+            Outcome::Interrupted
+        } else {
+            Outcome::Completed
+        }),
     }
 }
 
@@ -589,4 +599,68 @@ mod tests {
             Some(Outcome::Completed)
         );
     }
+
+    #[test]
+    fn completed_text_is_not_printed_twice() {
+        // Deltas stream "hello", then the completion repeats the full
+        // text for transcript use: stdout must hold it exactly once.
+        let (mut out, mut err) = (String::new(), String::new());
+        for chunk in ["he", "llo"] {
+            assert!(
+                render_event(
+                    &EventMsg::AgentMessageDelta {
+                        text: chunk.to_string()
+                    },
+                    &mut out,
+                    &mut err
+                )
+                .is_none()
+            );
+        }
+        assert!(
+            render_event(
+                &EventMsg::AgentMessageComplete {
+                    text: "hello".to_string()
+                },
+                &mut out,
+                &mut err
+            )
+            .is_none()
+        );
+        assert_eq!(out, "hello\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn completion_without_deltas_still_prints() {
+        // Senders that skip deltas must not lose the message text.
+        let (mut out, mut err) = (String::new(), String::new());
+        assert!(
+            render_event(
+                &EventMsg::AgentMessageComplete {
+                    text: "hello".to_string()
+                },
+                &mut out,
+                &mut err
+            )
+            .is_none()
+        );
+        assert_eq!(out, "hello\n");
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn interrupted_turn_maps_to_interrupted_outcome() {
+        let (mut out, mut err) = (String::new(), String::new());
+        assert_eq!(
+            render_event(
+                &EventMsg::TurnCompleted { interrupted: true },
+                &mut out,
+                &mut err
+            ),
+            Some(Outcome::Interrupted)
+        );
+        assert_eq!(Outcome::Interrupted.exit_code(), 130);
+    }
 }
+

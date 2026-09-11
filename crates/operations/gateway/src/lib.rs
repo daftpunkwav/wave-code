@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Serve session/submit, session/poll, and session/shutdown methods.
  * - Echo request ids and emit standard JSON-RPC error codes.
+ * - Clamp per-poll fan-out and report shutdown delivery failures.
  * - Stay transport-shaped: any async line streams work as wires.
  *
  * This module must not depend on: concrete drivers, tools, or models.
@@ -31,6 +32,13 @@ pub const METHOD_SHUTDOWN: &str = "session/shutdown";
 
 /// Default events returned per poll call.
 pub const DEFAULT_POLL_MAX: usize = 32;
+
+/// Upper bound on events returned per poll call.
+///
+/// Poll drains the buffered backlog, so an unbounded client `max` could force
+/// a giant single response. Larger requests are clamped; clients drain the
+/// rest with follow-up polls.
+pub const MAX_POLL_MAX: usize = 1024;
 
 /// Gateway errors (transport-level; protocol errors ride as responses).
 #[derive(Debug, thiserror::Error)]
@@ -117,10 +125,12 @@ impl Gateway {
                 }
             }
             METHOD_POLL => {
-                let max = params
-                    .get("max")
-                    .and_then(|m| m.as_u64())
-                    .unwrap_or(DEFAULT_POLL_MAX as u64) as usize;
+                let max = clamp_poll_max(
+                    params
+                        .get("max")
+                        .and_then(|m| m.as_u64())
+                        .unwrap_or(DEFAULT_POLL_MAX as u64),
+                );
                 let mut events = Vec::new();
                 {
                     let mut client = self.client.lock().await;
@@ -138,12 +148,19 @@ impl Gateway {
                     id: "gateway-shutdown".to_string(),
                     op: Op::Shutdown,
                 };
-                let _ = self.client.lock().await.submit(shutdown).await;
-                (rpc_ok(&id, serde_json::json!({"ok": true})), true)
+                match self.client.lock().await.submit(shutdown).await {
+                    Ok(()) => (rpc_ok(&id, serde_json::json!({"ok": true})), true),
+                    Err(e) => (rpc_error(id, -32000, &e.to_string()), true),
+                }
             }
             _ => (rpc_error(id, -32601, "unknown method"), false),
         }
     }
+}
+
+/// Clamp a client-requested poll bound into `[0, MAX_POLL_MAX]`.
+fn clamp_poll_max(requested: u64) -> usize {
+    requested.min(MAX_POLL_MAX as u64) as usize
 }
 
 /// Build a success response echoing the request id.
@@ -327,5 +344,74 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(end.is_none());
+    }
+
+    #[test]
+    fn poll_max_clamps_to_bound() {
+        assert_eq!(clamp_poll_max(0), 0);
+        assert_eq!(clamp_poll_max(7), 7);
+        assert_eq!(clamp_poll_max(MAX_POLL_MAX as u64), MAX_POLL_MAX);
+        assert_eq!(clamp_poll_max(MAX_POLL_MAX as u64 + 1), MAX_POLL_MAX);
+        assert_eq!(clamp_poll_max(u64::MAX), MAX_POLL_MAX);
+    }
+
+    #[tokio::test]
+    async fn huge_poll_max_is_accepted_and_bounded() {
+        let (mut writer, mut reader) = gateway().await;
+        let polled = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rpc(
+                &mut writer,
+                &mut reader,
+                1,
+                METHOD_POLL,
+                serde_json::json!({"max": u64::MAX}),
+            ),
+        )
+        .await
+        .expect("poll with u64::MAX must answer promptly");
+        let events = polled["result"]["events"].as_array().unwrap();
+        assert!(events.len() <= MAX_POLL_MAX);
+    }
+
+    #[tokio::test]
+    async fn second_shutdown_reports_delivery_failure() {
+        let client = SessionActor::spawn(
+            EchoDriver,
+            Conversation::new(),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            infrastructure_base::InterruptHandle::new(),
+            "sys".to_string(),
+        );
+        let gateway = Gateway::new(client);
+        let line = |id: u64| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": id, "method": METHOD_SHUTDOWN, "params": {},
+            })
+            .to_string()
+        };
+        let (first, exit) = gateway.handle_line(&line(1)).await;
+        assert_eq!(first["result"]["ok"], true);
+        assert!(exit);
+        // Wait until the actor task exits and the submit channel closes.
+        let probe = Submission {
+            id: "probe".to_string(),
+            op: Op::Interrupt,
+        };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if gateway.client.lock().await.submit(probe.clone()).await.is_err() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "actor did not exit after shutdown"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let (second, exit_again) = gateway.handle_line(&line(2)).await;
+        assert_eq!(second["error"]["code"], -32000);
+        assert!(exit_again);
     }
 }

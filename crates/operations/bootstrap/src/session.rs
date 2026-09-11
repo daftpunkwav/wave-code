@@ -192,10 +192,19 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
 
     // 2. Shared model channel and registries.
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
-    let model: Arc<dyn wavecode_llm::ChatModel> = Arc::new(wavecode_llm::AnthropicClient::new(
-        provider.base_url.clone(),
-        api_key,
-    ));
+    let model: Arc<dyn wavecode_llm::ChatModel> = match provider.kind {
+        wavecode_config::ProviderKind::OpenAiCompatible => {
+            Arc::new(wavecode_llm::OpenAIClient::new(
+                provider.base_url.clone(),
+                api_key,
+                model_name.clone(),
+            ))
+        }
+        wavecode_config::ProviderKind::Anthropic => Arc::new(wavecode_llm::AnthropicClient::new(
+            provider.base_url.clone(),
+            api_key,
+        )),
+    };
     let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
     // `memory_write` shares the prompt index root so model-written entries
     // surface in the next session without a restart. No home means no
@@ -239,6 +248,24 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let hooks = assemble_hooks(&config, &mut warnings);
     let mcp_servers = describe_mcp_servers(&config);
 
+    // Effective model limits: explicit config wins; OpenAI-compatible
+    // providers without explicit limits consult the capability table so
+    // DeepSeek-class models sample with their real window instead of the
+    // Anthropic-shaped default.
+    let (context_window, max_output_tokens) = match provider.kind {
+        wavecode_config::ProviderKind::OpenAiCompatible
+            if provider.context_window.is_none() && provider.max_output_tokens.is_none() =>
+        {
+            let caps = wavecode_llm::ModelCapabilities::resolve_or(
+                &model_name,
+                provider.context_window(),
+                provider.max_output_tokens(),
+            );
+            (caps.context_window, caps.max_output_tokens)
+        }
+        _ => (provider.context_window(), provider.max_output_tokens()),
+    };
+
     // 5. Seam adapters (pure wiring, no policy inside).
     let tools = ToolAdapter::new(
         registry.clone(),
@@ -251,7 +278,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let model_adapter = ModelAdapter::new(
         model.clone(),
         model_name.clone(),
-        provider.max_output_tokens(),
+        max_output_tokens,
         registry.clone(),
     );
     let approvals = Arc::new(ApprovalGate::new());
@@ -280,8 +307,8 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         compactor,
         RunConfig {
             model_name: model_name.clone(),
-            context_window: provider.context_window(),
-            max_output_tokens: provider.max_output_tokens(),
+            context_window,
+            max_output_tokens,
             max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
             max_continuations: runtime_runner::MAX_CONTINUATIONS,
             max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,

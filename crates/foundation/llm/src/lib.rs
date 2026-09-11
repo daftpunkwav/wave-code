@@ -6,17 +6,19 @@
 //! - The Anthropic Messages streaming SSE parser ([`SseParser`]);
 //! - Built-in implementation: the Anthropic Messages API streaming client ([`AnthropicClient`]).
 //!
-//! The HTTP client implementation for OpenAI-compatible providers, plus token
-//! counting and the model capability table (context window, max output, etc.), land in later milestones.
+//! The OpenAI-compatible HTTP client ([`OpenAIClient`]) plus the approximate model
+//! capability table ([`ModelCapabilities`]) live in [`openai`].
 
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
+pub mod openai;
 mod sse;
 
 pub use anthropic::AnthropicClient;
+pub use openai::{ModelCapabilities, OpenAIClient};
 pub use sse::SseParser;
 
 /// Conversation role.

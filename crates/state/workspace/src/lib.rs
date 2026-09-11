@@ -69,6 +69,13 @@ pub fn list_files(root: &Path, extensions: &[&str], limit: usize) -> Vec<PathBuf
             }
             let path = entry.path();
             if path.is_dir() {
+                // Never descend into symlinked directories: link cycles
+                // (self-referential mounts, symlink forests inside
+                // node_modules) would push the same directories forever.
+                // Symlinked files still list; dangling links list nowhere.
+                if entry.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                    continue;
+                }
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
                     continue;
@@ -166,5 +173,20 @@ mod tests {
         assert_eq!(ctx.files.len(), 1);
         let full = assemble(dir.path(), &[], 100);
         assert!(!full.truncated);
+    }
+
+    /// Symlink loops terminate: linked directories never descend.
+    ///
+    /// Unix-only: Windows symlink creation needs privileges the test
+    /// runner cannot assume.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_cycles_terminate() {
+        use std::os::unix::fs::symlink;
+        let dir = fixture();
+        // A directory linking to its own ancestor: descent would loop.
+        symlink(dir.path(), dir.path().join("src/loop")).unwrap();
+        let files = list_files(dir.path(), &[], 100);
+        assert!(files.iter().all(|p| !p.to_string_lossy().contains("loop")));
     }
 }

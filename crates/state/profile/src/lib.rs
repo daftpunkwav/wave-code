@@ -31,26 +31,43 @@ pub struct UserProfile {
 
 impl UserProfile {
     /// Render the profile as a prompt block; empty when anonymous.
+    ///
+    /// Blank entries (empty names, emails, timezones, keys, values) never
+    /// render: they waste context and read as sloppy prompt furniture. A
+    /// profile holding only blanks renders empty like an anonymous one.
     pub fn prompt_block(&self) -> String {
-        if self.name.trim().is_empty() && self.preferences.is_empty() {
-            return String::new();
-        }
         let mut out = String::from("## User\n");
+        let mut wrote = false;
         if !self.name.trim().is_empty() {
             out.push_str(&format!("Name: {}\n", self.name.trim()));
+            wrote = true;
         }
-        if let Some(email) = &self.email {
+        if let Some(email) = self.email.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
             out.push_str(&format!("Email: {email}\n"));
+            wrote = true;
         }
-        if let Some(timezone) = &self.timezone {
+        if let Some(timezone) = self
+            .timezone
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             out.push_str(&format!("Timezone: {timezone}\n"));
+            wrote = true;
         }
         let mut keys: Vec<&String> = self.preferences.keys().collect();
         keys.sort();
         for key in keys {
-            out.push_str(&format!("{}: {}\n", key, self.preferences[key]));
+            let name = key.trim();
+            let value = self.preferences[key].trim();
+            if name.is_empty() || value.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("{name}: {value}\n"));
+            wrote = true;
         }
-        out
+        if wrote { out } else { String::new() }
     }
 }
 
@@ -99,6 +116,26 @@ mod tests {
     #[test]
     fn anonymous_profiles_render_nothing() {
         assert!(UserProfile::default().prompt_block().is_empty());
+    }
+
+    #[test]
+    fn blank_entries_never_render() {
+        let mut profile = UserProfile {
+            name: "   ".to_string(),
+            email: Some("".to_string()),
+            timezone: Some("  ".to_string()),
+            ..UserProfile::default()
+        };
+        profile.preferences.insert("".to_string(), "v".to_string());
+        profile.preferences.insert("k".to_string(), "   ".to_string());
+        // Only blanks: renders empty like an anonymous profile.
+        assert!(profile.prompt_block().is_empty());
+        // One real entry revives the block without the blanks.
+        profile.preferences.insert("lang".to_string(), "zh".to_string());
+        let block = profile.prompt_block();
+        assert!(block.contains("lang: zh"));
+        assert!(!block.contains("Email:"));
+        assert!(!block.contains(": v"));
     }
 
     #[test]

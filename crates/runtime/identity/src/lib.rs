@@ -60,13 +60,23 @@ impl AgentProfile {
         self.capabilities.is_empty() || self.capabilities.iter().any(|c| c == capability)
     }
 
-    /// Reject blank names and blank personas before sessions start.
+    /// Reject blank names, blank personas, and blank or duplicate
+    /// capability entries before sessions start.
     pub fn validate(&self) -> Result<(), IdentityError> {
         if self.name.trim().is_empty() {
             return Err(IdentityError::BlankName);
         }
         if self.persona.trim().is_empty() {
             return Err(IdentityError::BlankPersona);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for capability in &self.capabilities {
+            if capability.trim().is_empty() {
+                return Err(IdentityError::BlankCapability);
+            }
+            if !seen.insert(capability) {
+                return Err(IdentityError::DuplicateCapability(capability.clone()));
+            }
         }
         Ok(())
     }
@@ -81,6 +91,12 @@ pub enum IdentityError {
     /// Personas must not be blank.
     #[error("agent persona must not be blank")]
     BlankPersona,
+    /// Capability entries must not be blank.
+    #[error("agent capability entry must not be blank")]
+    BlankCapability,
+    /// Capability entries must not repeat.
+    #[error("duplicate agent capability: {0}")]
+    DuplicateCapability(String),
 }
 
 #[cfg(test)]
@@ -137,6 +153,28 @@ mod tests {
         assert_eq!(
             AgentRole::Custom("auditor".to_string()).as_str(),
             "custom:auditor"
+        );
+    }
+
+    #[test]
+    fn capability_entries_validate_for_blanks_and_dupes() {
+        assert_eq!(
+            AgentProfile {
+                capabilities: vec!["shell".to_string(), "  ".to_string()],
+                ..profile()
+            }
+            .validate()
+            .unwrap_err(),
+            IdentityError::BlankCapability
+        );
+        assert_eq!(
+            AgentProfile {
+                capabilities: vec!["shell".to_string(), "shell".to_string()],
+                ..profile()
+            }
+            .validate()
+            .unwrap_err(),
+            IdentityError::DuplicateCapability("shell".to_string())
         );
     }
 }

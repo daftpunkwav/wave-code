@@ -201,6 +201,7 @@ async fn main() -> anyhow::Result<()> {
             &mut handle.client,
             &handle.memory_index,
             &handle.mcp_servers,
+            &handle.skill_names,
         )
         .await?;
         std::process::exit(Outcome::Completed.exit_code())
@@ -232,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                 &mut handle.client,
                 &handle.memory_index,
                 &handle.mcp_servers,
+                &handle.skill_names,
             )
             .await?;
             std::process::exit(Outcome::Completed.exit_code())
@@ -377,6 +379,7 @@ async fn run_resume(thread_id: Option<String>, home: Option<PathBuf>) -> anyhow:
         &mut handle.client,
         &handle.memory_index,
         &handle.mcp_servers,
+        &handle.skill_names,
     )
     .await
 }
@@ -396,8 +399,8 @@ enum Slash {
     Permissions,
     /// Show help text.
     Help,
-    /// Unknown slash command with its name.
-    Unknown(String),
+    /// Unknown slash command with its name and trailing arguments.
+    Unknown { name: String, args: String },
     /// Plain user input for the next turn.
     Text(String),
 }
@@ -406,7 +409,9 @@ enum Slash {
 fn parse_slash(line: &str) -> Slash {
     let trimmed = line.trim();
     if let Some(command) = trimmed.strip_prefix('/') {
-        let name = command.split_whitespace().next().unwrap_or("");
+        let mut parts = command.split_whitespace();
+        let name = parts.next().unwrap_or("");
+        let args = parts.collect::<Vec<_>>().join(" ");
         return match name {
             "quit" | "exit" => Slash::Quit,
             "compact" => Slash::Compact,
@@ -414,7 +419,10 @@ fn parse_slash(line: &str) -> Slash {
             "mcp" => Slash::Mcp,
             "permissions" => Slash::Permissions,
             "help" => Slash::Help,
-            _ => Slash::Unknown(name.to_string()),
+            _ => Slash::Unknown {
+                name: name.to_string(),
+                args,
+            },
         };
     }
     Slash::Text(trimmed.to_string())
@@ -422,6 +430,22 @@ fn parse_slash(line: &str) -> Slash {
 
 /// REPL help text printed for `/help` and unknown commands.
 const REPL_HELP: &str = "commands: /compact (compress context now), /memory (show memory index), /mcp (list servers), /permissions (cycle approval mode), /quit (end session), /help";
+
+/// Guided turn text routing a slash-invoked skill through the model.
+///
+/// No wire change is needed: the skill catalog is already in context and
+/// the `skill` tool executes with proper inline/fork routing, so naming
+/// the skill plus its arguments deterministically triggers it.
+fn skill_request(name: &str, args: &str) -> String {
+    if args.trim().is_empty() {
+        format!("Please use the '{name}' skill for this request.")
+    } else {
+        format!(
+            "Please use the '{name}' skill for this request. Arguments: {}",
+            args.trim()
+        )
+    }
+}
 
 /// Permission modes in `/permissions` cycle order (wire names).
 const PERMISSION_CYCLE: &[&str] = &["default", "plan", "acceptEdits", "bypassPermissions"];
@@ -558,6 +582,7 @@ async fn run_repl(
     client: &mut ActorClient,
     memory_index: &str,
     mcp_servers: &[String],
+    skill_names: &[String],
 ) -> anyhow::Result<()> {
     use rustyline::error::ReadlineError;
 
@@ -580,7 +605,23 @@ async fn run_repl(
         match parse_slash(trimmed) {
             Slash::Quit => break,
             Slash::Help => println!("{REPL_HELP}"),
-            Slash::Unknown(name) => println!("unknown command /{name}; {REPL_HELP}"),
+            Slash::Unknown { name, args } => {
+                if skill_names.iter().any(|n| n == &name) {
+                    turn += 1;
+                    client
+                        .submit(Submission {
+                            id: format!("repl-{turn}-skill"),
+                            op: Op::UserInput {
+                                text: skill_request(&name, &args),
+                            },
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                    drain_turn(client, &mut editor).await?;
+                } else {
+                    println!("unknown command /{name}; {REPL_HELP}");
+                }
+            }
             Slash::Memory => {
                 if memory_index.trim().is_empty() {
                     println!("(memory unavailable: no index assembled)");
@@ -762,13 +803,44 @@ mod tests {
         assert_eq!(parse_slash("/mcp"), Slash::Mcp);
         assert_eq!(parse_slash("/permissions"), Slash::Permissions);
         assert_eq!(parse_slash("/help"), Slash::Help);
-        assert_eq!(parse_slash("/nope"), Slash::Unknown("nope".to_string()));
+        assert_eq!(
+            parse_slash("/nope"),
+            Slash::Unknown {
+                name: "nope".to_string(),
+                args: String::new(),
+            }
+        );
+        assert_eq!(
+            parse_slash("/review the diff"),
+            Slash::Unknown {
+                name: "review".to_string(),
+                args: "the diff".to_string(),
+            }
+        );
         assert_eq!(
             parse_slash("hello there"),
             Slash::Text("hello there".to_string())
         );
         // A leading slash with no name is unknown, not text.
-        assert_eq!(parse_slash("/"), Slash::Unknown(String::new()));
+        assert_eq!(
+            parse_slash("/"),
+            Slash::Unknown {
+                name: String::new(),
+                args: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn skill_requests_name_the_skill_and_args() {
+        assert_eq!(
+            skill_request("review", ""),
+            "Please use the 'review' skill for this request."
+        );
+        assert_eq!(
+            skill_request("review", "  the diff  "),
+            "Please use the 'review' skill for this request. Arguments: the diff"
+        );
     }
 
     #[test]

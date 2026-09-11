@@ -327,6 +327,29 @@ mod tests {
         assert_eq!(text(MAX_ITEMS - 1), format!("w{}", MAX_ITEMS * 2 - 1));
     }
 
+    /// Cap coverage: every committed item path funnels through
+    /// push_item — CompactStarted rows and /mcp server rows must drop
+    /// the oldest items too, keeping long sessions memory-bounded.
+    #[test]
+    fn items_cap_covers_compact_and_mcp_paths() {
+        let mut app = App::new(ctx());
+        for i in 0..(MAX_ITEMS + 10) {
+            app.handle_event(&ev(EventMsg::CompactStarted {
+                trigger: format!("t{i}"),
+            }));
+        }
+        assert_eq!(app.items.len(), MAX_ITEMS);
+        let mut app = App::new(TuiContext {
+            mcp_server_lines: (0..(MAX_ITEMS + 10))
+                .map(|i| format!("srv{i} — ok"))
+                .collect(),
+            ..ctx()
+        });
+        type_str(&mut app, "/mcp");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.items.len(), MAX_ITEMS);
+    }
+
     /// Paste routing: same routing as keys while a popup is open — pastes
     /// into the reason in reason mode, ignored otherwise (the main input
     /// sits hidden behind the popup, so silent writes would be invisible);

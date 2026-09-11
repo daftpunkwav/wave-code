@@ -136,9 +136,11 @@ impl App {
                 dim(),
             ));
         } else {
-            for line in &self.ctx.mcp_server_lines {
-                self.items
-                    .push(Item::plain(sanitize_terminal(line).into_owned(), dim()));
+            // Clone first: push_item takes &mut self while the lines live
+            // in self.ctx, and every committed item must pass the cap.
+            let lines = self.ctx.mcp_server_lines.clone();
+            for line in &lines {
+                self.push_item(Item::plain(sanitize_terminal(line).into_owned(), dim()));
             }
         }
     }

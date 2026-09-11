@@ -59,6 +59,10 @@ pub fn sanitize_terminal(s: &str) -> Cow<'_, str> {
 
 /// 按字符数截断（非字节，防切断 UTF-8），超长时末位替换为省略号 `…`。
 pub fn truncate_chars(s: &str, max: usize) -> String {
+    // Zero budget holds no glyph (not even the ellipsis marker).
+    if max == 0 {
+        return String::new();
+    }
     if s.chars().count() <= max {
         return s.to_string();
     }
@@ -84,6 +88,16 @@ mod tests {
         let sanitized = sanitize_terminal(s);
         assert_eq!(sanitized, s);
         assert!(matches!(sanitized, Cow::Borrowed(_)), "应零拷贝借用");
+    }
+
+    /// Zero/one budgets: max 0 holds nothing (not even the marker);
+    /// max 1 collapses any longer input to the marker alone.
+    #[test]
+    fn truncate_zero_and_one_budgets() {
+        assert_eq!(truncate_chars("hello", 0), "");
+        assert_eq!(truncate_chars("", 0), "");
+        assert_eq!(truncate_chars("hello", 1), "…");
+        assert_eq!(truncate_chars("汉a", 1), "…");
     }
 
     #[test]

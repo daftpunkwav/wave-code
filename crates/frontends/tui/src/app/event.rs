@@ -56,8 +56,7 @@ impl App {
             }
             M::CompactStarted { .. } => {
                 self.flush_message();
-                self.items
-                    .push(Item::plain("⟳ 正在压缩上下文…".into(), dim()));
+                self.push_item(Item::plain("⟳ 正在压缩上下文…".into(), dim()));
             }
             M::CompactCompleted { summary_tokens } => {
                 self.flush_message();

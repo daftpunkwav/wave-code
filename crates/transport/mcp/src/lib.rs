@@ -17,6 +17,8 @@
 //! The duplex-tested core (framing plus correlation) runs over any async
 //! byte streams; process management only spawns and kills.
 
+use std::collections::HashMap;
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Next request id seed; ids increase monotonically per transport.
@@ -133,12 +135,27 @@ impl ChildTransport {
         args: Vec<String>,
         timeout_secs: u64,
     ) -> Result<Self, TransportError> {
+        Self::spawn_with_env(command, args, &HashMap::new(), timeout_secs).await
+    }
+
+    /// Spawn with extra environment variables over the inherited set.
+    ///
+    /// The child dies with the transport (`kill_on_drop`): a failed
+    /// handshake never leaks a server process behind a dropped handle.
+    pub async fn spawn_with_env(
+        command: impl Into<String>,
+        args: Vec<String>,
+        env: &HashMap<String, String>,
+        timeout_secs: u64,
+    ) -> Result<Self, TransportError> {
         let command = command.into();
         let mut child = tokio::process::Command::new(&command)
             .args(&args)
+            .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| TransportError::Spawn {
                 command: command.clone(),
@@ -178,6 +195,27 @@ impl ChildTransport {
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
         Ok(id)
+    }
+
+    /// Send a JSON-RPC notification (no id, no response expected).
+    ///
+    /// Used for `notifications/initialized`, which the protocol requires
+    /// after `initialize` and which must not carry a request id.
+    pub async fn send_notification(
+        &mut self,
+        method: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Result<(), TransportError> {
+        let line = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method.into(),
+            "params": params,
+        })
+        .to_string();
+        self.stdin.write_all(line.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+        Ok(())
     }
 
     /// Read the next response line with the configured timeout.

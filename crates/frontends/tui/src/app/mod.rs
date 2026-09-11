@@ -476,7 +476,7 @@ mod tests {
     fn mcp_lists_configured_servers_locally() {
         let mut app = App::new(TuiContext {
             mcp_server_lines: vec![
-                "playwright — stdio: npx @playwright/mcp@latest — 未连接（transport 未实现）"
+                "playwright (stdio: npx @playwright/mcp@latest) — connected (3 tools)"
                     .into(),
             ],
             ..ctx()
@@ -489,7 +489,7 @@ mod tests {
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("playwright") && s.content.contains("未连接"));
+            .any(|s| s.content.contains("playwright") && s.content.contains("connected"));
         assert!(has_line);
         // Unconfigured: hint row.
         let mut app = App::new(ctx());

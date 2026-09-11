@@ -72,6 +72,9 @@ pub struct McpToolDef {
     pub description: Option<String>,
     /// 参数的 JSON Schema（`inputSchema`，注入采样请求）。
     pub input_schema: Value,
+    /// 服务端 `annotations.readOnlyHint`：为 true 时桥接工具标只读。
+    /// 缺省 false（未知副作用一律按写入处理，走审批面）。
+    pub read_only_hint: bool,
 }
 
 impl McpToolDef {
@@ -142,10 +145,10 @@ pub enum McpError {
 /// 方法对齐协议能力面（`tools/list` / `tools/call` / `prompts/list`）；
 /// 对象安全 + Send + Sync，桥接层以 `Arc<dyn McpClient>` 持有。
 ///
-/// **实现状态**：真实实现（stdio spawn 子进程 / streamable-http，经
-/// rmcp crate）为后续迭代；P9 的验证面是 mock 实现（见 core 侧
-/// `McpToolBridge` 的测试）。连接失败的指数退避重连（SPEC §10）属
-/// transport 实现细节，不进 trait 面。
+/// **实现状态**：stdio 实现为装配侧 `StdioMcpClient`（子进程 +
+/// `transport-mcp` 成帧）；streamable-http 仍为后续迭代。P9 的验证面是
+/// mock 实现（见装配侧 `McpToolBridge` 的测试）。连接失败的指数退避重连
+/// （SPEC §10）属 transport 实现细节，不进 trait 面。
 #[async_trait::async_trait]
 pub trait McpClient: Send + Sync {
     /// 列出 server 暴露的全部工具（`tools/list`）。
@@ -335,6 +338,7 @@ mod tests {
             name: "click".to_owned(),
             description: None,
             input_schema: serde_json::json!({}),
+            read_only_hint: false,
         };
         let qualified = def.qualified_name("playwright").expect("valid server");
         assert_eq!(parse_tool_name(&qualified), Some(("playwright", "click")));

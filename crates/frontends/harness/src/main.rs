@@ -200,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
             initial_history: Vec::new(),
         })
         .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
+        handle.connect_mcp_servers().await;
         for warning in &handle.warnings {
             eprintln!("[warn] {warning}");
         }
@@ -226,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         initial_history: Vec::new(),
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
+    handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
         eprintln!("[warn] {warning}");
     }
@@ -264,7 +266,7 @@ async fn run_tui_new(
     cwd: PathBuf,
     home: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let handle = match assemble_session(AssembleOptions {
+    let mut handle = match assemble_session(AssembleOptions {
         config_path: config,
         model_override: model,
         permission_override: permission_mode,
@@ -280,6 +282,7 @@ async fn run_tui_new(
             std::process::exit(2)
         }
     };
+    handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
         eprintln!("[warn] {warning}");
     }
@@ -386,6 +389,7 @@ async fn run_resume(
         initial_history: history,
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
+    handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
         eprintln!("[warn] {warning}");
     }

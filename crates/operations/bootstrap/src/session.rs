@@ -84,6 +84,28 @@ pub struct SessionHandle {
     pub mcp_servers: Vec<String>,
     /// Startup warnings in assembly order.
     pub warnings: Vec<String>,
+    /// Shared tool registry for late-registered tools (skills, MCP).
+    tools_registry: Arc<wavecode_tools::Registry>,
+    /// MCP servers awaiting live connection (sorted by name).
+    mcp_pending: Vec<(String, wavecode_config::McpServerRaw)>,
+}
+
+impl SessionHandle {
+    /// Live-connect pending MCP servers and bridge their tools.
+    ///
+    /// Replaces the configured-only status lines with live results and
+    /// appends degradation warnings; idempotent once connected. Run it
+    /// after assembly and before the first turn so forked tools exist
+    /// before the model samples.
+    pub async fn connect_mcp_servers(&mut self) {
+        if self.mcp_pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.mcp_pending);
+        let report = crate::mcp_bridge::connect_all(&pending, &self.tools_registry).await;
+        self.mcp_servers = report.lines;
+        self.warnings.extend(report.warnings);
+    }
 }
 
 /// Assembly inputs, all caller-owned.
@@ -350,6 +372,13 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         system_for_actor,
     );
 
+    let mut mcp_pending: Vec<(String, wavecode_config::McpServerRaw)> = config
+        .mcp_servers
+        .clone()
+        .into_iter()
+        .collect();
+    mcp_pending.sort_by(|a, b| a.0.cmp(&b.0));
+
     Ok(SessionHandle {
         client,
         approvals,
@@ -361,6 +390,8 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         memory_index,
         mcp_servers,
         warnings,
+        tools_registry: registry.clone(),
+        mcp_pending,
     })
 }
 

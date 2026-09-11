@@ -22,6 +22,8 @@ wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-config = { path = "../../foundation/config" }
 wavecode-memory = { path = "../../capabilities/memory" }
 wavecode-skills = { path = "../../capabilities/skills" }
+wavecode-mcp = { path = "../../capabilities/mcp" }
+transport-mcp = { path = "../../transport/mcp" }
 wavecode-context = { path = "../../capabilities/context" }
 serde_json.workspace = true
 thiserror.workspace = true

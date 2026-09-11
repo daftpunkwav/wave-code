@@ -62,7 +62,7 @@ impl ToolExecutor for ToolAdapter {
 
     /// Unknown names stay destructive so dispatch stays serial and safe.
     fn is_destructive(&self, tool: &str) -> bool {
-        self.registry.get(tool).is_some_and(|t| t.is_destructive())
+        self.registry.get(tool).is_none_or(|t| t.is_destructive())
     }
 
     /// Advertise exactly the registered tools.
@@ -169,6 +169,15 @@ mod tests {
         let out = adapter().execute(call("nope")).await;
         assert!(out.is_error);
         assert!(out.content.contains("unknown tool"));
+    }
+
+    #[test]
+    fn unknown_tools_stay_destructive() {
+        let adapter = adapter();
+        // Unknown names take the cautious path (serial dispatch), matching
+        // the native and composite executors plus the policy adapter.
+        assert!(adapter.is_destructive("nope"));
+        assert!(!adapter.is_read_only("nope"));
     }
 
     #[tokio::test]

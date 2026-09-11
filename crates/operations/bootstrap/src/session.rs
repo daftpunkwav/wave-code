@@ -454,8 +454,11 @@ fn describe_mcp_servers(config: &wavecode_config::Config) -> Vec<String> {
 
 /// True for http URLs outside loopback hosts (credentials at risk).
 fn is_insecure_http_url(base_url: &str) -> bool {
-    let Some(rest) = base_url.strip_prefix("http://") else {
-        return false;
+    // URL schemes are case-insensitive (RFC 3986); match `http://` in any
+    // casing so `HTTP://evil.example.com` cannot bypass the warning.
+    let rest = match base_url.get(.."http://".len()) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("http://") => &base_url["http://".len()..],
+        _ => return false,
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = match authority
@@ -529,5 +532,9 @@ api_key = "k-inline"
         assert!(!is_insecure_http_url("http://localhost:3000/v1"));
         assert!(!is_insecure_http_url("http://[::1]:9000"));
         assert!(is_insecure_http_url("http://127.0.0.1.evil.example.com"));
+        // URL schemes are case-insensitive: uppercase HTTP must warn too.
+        assert!(is_insecure_http_url("HTTP://api.example.com"));
+        assert!(is_insecure_http_url("Http://api.example.com"));
+        assert!(!is_insecure_http_url("HTTP://localhost:3000/v1"));
     }
 }

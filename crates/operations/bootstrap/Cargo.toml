@@ -13,6 +13,7 @@ action-tasks = { path = "../../action/tasks" }
 infrastructure-base = { path = "../../infrastructure/base" }
 safety-gate = { path = "../../safety/gate" }
 operations-actor = { path = "../actor" }
+operations-wire = { path = "../wire" }
 wavecode-tools = { path = "../../capabilities/tools" }
 wavecode-sandbox = { path = "../../capabilities/sandbox" }
 wavecode-hooks = { path = "../../capabilities/hooks" }
@@ -31,4 +32,3 @@ futures.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 tempfile.workspace = true
-operations-wire = { path = "../wire" }

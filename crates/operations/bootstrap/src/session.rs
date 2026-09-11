@@ -37,6 +37,8 @@ use crate::compactor::ContextCompactor;
 use crate::composite::CompositeExecutor;
 use crate::gate_adapter::GateApprovalSource;
 use crate::hook_adapter::HookAdapter;
+use crate::memory_finish::{MemoryFinisher, SessionMemory};
+use crate::memory_tool::MemoryWrite;
 use crate::model_adapter::ModelAdapter;
 use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
@@ -138,7 +140,17 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         provider.base_url.clone(),
         api_key,
     ));
-    let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
+    let (mut registry, todos) = wavecode_tools::Registry::builtin_with_todos();
+    // `memory_write` shares the prompt index root so model-written entries
+    // surface in the next session without a restart. No home means no
+    // memory at all (same gate as `assemble_memory` below).
+    if let Some(home) = home.as_deref() {
+        registry.register(Arc::new(MemoryWrite::new(
+            wavecode_memory::MemoryStore::new(wavecode_memory::MemoryStore::default_root(
+                home,
+            )),
+        )));
+    }
     let registry = Arc::new(registry);
     let deny_env = provider
         .env_key
@@ -228,12 +240,27 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         },
         interrupt.clone(),
     ));
-    let driver: Arc<dyn runtime_runner::TurnDriver> = worker.clone();
+    let driver = {
+        // Session-end memory extraction rides the driver seam: the actor
+        // calls `end_session` with the final transcript on teardown. No
+        // home means no memory at all (same gate as the write tool above
+        // and `assemble_memory` below).
+        let finisher = home.as_deref().map(|root| {
+            MemoryFinisher::new(
+                model.clone(),
+                model_name.clone(),
+                wavecode_memory::MemoryStore::new(
+                    wavecode_memory::MemoryStore::default_root(root),
+                ),
+            )
+        });
+        Arc::new(SessionMemory::new(worker, finisher))
+    };
 
     // 7. Child task tools register against the built driver (phase two).
     let children = Arc::new(ChildRuntime::new());
     let tasks = Arc::new(TurnChildService::new(
-        driver,
+        driver.clone() as Arc<dyn runtime_runner::TurnDriver>,
         children.clone(),
         String::new(),
     ));
@@ -270,7 +297,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         );
     }
     let client = SessionActor::spawn(
-        worker,
+        driver,
         conv,
         children,
         approvals.clone(),

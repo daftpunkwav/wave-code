@@ -194,6 +194,9 @@ pub struct HookEngine {
     defs: HashMap<HookEventPoint, Vec<HookDef>>,
     /// Fired once-entries: (point, entry index).
     fired: Mutex<HashSet<(HookEventPoint, usize)>>,
+    /// Runtime plugin middleware per event point (registration order is run
+    /// order; empty unless `register_plugin_hook` was called).
+    plugin_hooks: Mutex<HashMap<HookEventPoint, Vec<PluginHook>>>,
 }
 
 impl HookEngine {
@@ -202,6 +205,7 @@ impl HookEngine {
         Self {
             defs,
             fired: Mutex::new(HashSet::new()),
+            plugin_hooks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -466,6 +470,78 @@ fn one_line(text: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+// ---- Runtime plugin middleware (in-session lifecycle) ----
+//
+// Ordering contract: config hooks run first via [`HookEngine::run`];
+// plugin middleware runs after via [`HookEngine::run_plugin_hooks`], in
+// registration order. Registering a plugin hook never changes config hook
+// behavior: with no plugin hooks registered the chain is the identity.
+
+/// Plugin middleware handler: maps the current event JSON to the next event
+/// JSON, or `None` to drop the event (short-circuits the chain).
+pub type PluginHookFn =
+    std::sync::Arc<dyn Fn(serde_json::Value) -> Option<serde_json::Value> + Send + Sync>;
+
+/// One registered plugin middleware entry (registration order is run order).
+pub struct PluginHook {
+    /// Plugin name that registered the handler (for diagnostics).
+    pub source: String,
+    /// Event transform for the chain.
+    pub handler: PluginHookFn,
+}
+
+impl HookEngine {
+    /// Register a plugin middleware handler for one event point.
+    ///
+    /// Handlers run after config hooks, in registration order. This never
+    /// affects [`HookEngine::run`]: config entries execute exactly as
+    /// before, with or without plugin handlers present.
+    pub fn register_plugin_hook(
+        &self,
+        source: &str,
+        point: HookEventPoint,
+        handler: PluginHookFn,
+    ) {
+        lock(&self.plugin_hooks)
+            .entry(point)
+            .or_default()
+            .push(PluginHook {
+                source: source.to_owned(),
+                handler,
+            });
+    }
+
+    /// Number of plugin handlers registered on one point (diagnostics/tests).
+    pub fn plugin_hook_count(&self, point: HookEventPoint) -> usize {
+        lock(&self.plugin_hooks)
+            .get(&point)
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+
+    /// Run the plugin middleware chain for one point: each handler observes
+    /// the current event and returns the next one; `None` short-circuits the
+    /// chain to `None` (dropped). With no handlers the event passes through
+    /// unchanged (`Some(event)`).
+    pub fn run_plugin_hooks(
+        &self,
+        point: HookEventPoint,
+        event: serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        // Clone the handlers out of the lock so user code never runs under
+        // the mutex (a handler registering another handler must not deadlock).
+        let handlers: Vec<PluginHookFn> = lock(&self.plugin_hooks)
+            .get(&point)
+            .map(|entries| entries.iter().map(|entry| entry.handler.clone()).collect())
+            .unwrap_or_default();
+        let mut current = event;
+        for handler in handlers {
+            current = handler(current)?;
+        }
+        Some(current)
+    }
 }
 
 #[cfg(test)]
@@ -815,5 +891,70 @@ mod tests {
 
         let clean = engine(&[(HookEventPoint::PreToolUse, def(&exit_cmd(0, "")))]);
         assert!(clean.validate().is_empty());
+    }
+
+    // -- plugin middleware --
+
+    /// Plugin middleware runs in registration order after config hooks: each
+    /// handler observes the previous output, and `None` drops the event.
+    #[test]
+    fn plugin_hooks_run_in_registration_order_after_config() {
+        use std::sync::Arc;
+        let engine = HookEngine::new(HashMap::new());
+        let event = serde_json::json!({"n": 1});
+        // No handlers: identity pass-through (config behavior unchanged).
+        assert_eq!(
+            engine.run_plugin_hooks(HookEventPoint::PreToolUse, event.clone()),
+            Some(event.clone())
+        );
+        engine.register_plugin_hook(
+            "first",
+            HookEventPoint::PreToolUse,
+            Arc::new(|mut event| {
+                let n = event.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
+                event["n"] = serde_json::json!(n + 1);
+                Some(event)
+            }),
+        );
+        engine.register_plugin_hook(
+            "second",
+            HookEventPoint::PreToolUse,
+            Arc::new(|mut event| {
+                let n = event.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
+                event["n"] = serde_json::json!(n * 10);
+                Some(event)
+            }),
+        );
+        assert_eq!(engine.plugin_hook_count(HookEventPoint::PreToolUse), 2);
+        assert_eq!(engine.plugin_hook_count(HookEventPoint::PostToolUse), 0);
+        // (1 + 1) * 10 proves registration order, not config order.
+        assert_eq!(
+            engine.run_plugin_hooks(HookEventPoint::PreToolUse, event),
+            Some(serde_json::json!({"n": 20}))
+        );
+    }
+
+    /// A `None` return short-circuits the chain (dropped event).
+    #[test]
+    fn plugin_hook_none_drops_the_event() {
+        use std::sync::Arc;
+        let engine = HookEngine::new(HashMap::new());
+        engine.register_plugin_hook(
+            "dropper",
+            HookEventPoint::Stop,
+            Arc::new(|_| None),
+        );
+        engine.register_plugin_hook(
+            "unreached",
+            HookEventPoint::Stop,
+            Arc::new(Some),
+        );
+        assert_eq!(
+            engine.run_plugin_hooks(
+                HookEventPoint::Stop,
+                serde_json::json!({"stop": true})
+            ),
+            None
+        );
     }
 }

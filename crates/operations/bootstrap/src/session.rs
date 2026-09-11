@@ -412,6 +412,9 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         String::new(),
         run_allowlist,
     ));
+    // Runtime plugins (service injection + middleware lifecycle): manifest
+    // discovery warns-and-skips invalid plugins and never fails assembly.
+    let _runtime_plugins = runtime_plugin::load_and_start(home.as_deref(), &mut warnings);
     register_child_tools(&native, tasks.clone());
 
     // The `skill` model tool needs the child service, which only exists

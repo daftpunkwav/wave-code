@@ -67,16 +67,16 @@ impl TaskService for TurnChildService {
     fn spawn(&self, request: TaskRequest) -> String {
         let driver = self.driver.clone();
         let system = self.system.clone();
-        let input = request.input.clone();
-        let parent_run_id = request.parent_run_id.clone();
         let turn_interrupt = driver.interrupt_handle();
         let done = Arc::new(AtomicBool::new(false));
         let watcher_done = done.clone();
         self.runtime.spawn_background(
             ChildSpec {
                 kind: Self::profile(request.kind),
+                // Moved, not cloned: the factory reads both back off the
+                // ticket, so the service holds no second copy.
                 input: request.input,
-                parent_run_id,
+                parent_run_id: request.parent_run_id,
             },
             move |ticket| async move {
                 // Stop bridge: poll the ticket flag into the driver's turn
@@ -99,11 +99,11 @@ impl TaskService for TurnChildService {
                 let ctx = RunContext {
                     run_id: ticket.task_id.clone(),
                     submission_id: ticket.task_id.clone(),
-                    input: input.clone(),
+                    input: ticket.input.clone(),
                 };
                 let mut conv = Conversation::new();
                 let outcome = driver
-                    .drive_turn(&ctx, &mut conv, &input, &system, &|_| {})
+                    .drive_turn(&ctx, &mut conv, &ticket.input, &system, &|_| {})
                     .await;
                 done.store(true, Ordering::SeqCst);
                 runtime_child::TaskResult {

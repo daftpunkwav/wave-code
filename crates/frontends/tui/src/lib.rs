@@ -120,7 +120,7 @@ struct TerminalGuard {
 
 impl TerminalGuard {
     fn enter() -> anyhow::Result<Self> {
-        enable_raw_mode().context("enable_raw_mode 失败")?;
+        enable_raw_mode().context("enable_raw_mode failed")?;
         let mut out = std::io::stdout();
         crossterm::execute!(
             out,
@@ -128,7 +128,7 @@ impl TerminalGuard {
             EnableMouseCapture,
             EnableBracketedPaste
         )
-        .context("进入交替屏幕失败")?;
+        .context("enter alternate screen failed")?;
         let terminal = Terminal::new(CrosstermBackend::new(out))?;
         Ok(Self { terminal })
     }
@@ -212,7 +212,7 @@ mod tests {
         let mut app = App::new(ctx());
         let text = draw_app(&mut app, 80, 24);
         assert!(text.contains("WaveCode TUI"), "welcome row: {text}");
-        assert!(text.contains("∿ 输入"), "input title: {text}");
+        assert!(text.contains("∿ Input"), "input title: {text}");
         assert!(text.contains("claude-sonnet-4-5"), "model name: {text}");
         assert!(text.contains("default"), "permission mode: {text}");
         assert!(text.contains("tokens —"), "tokens slot: {text}");
@@ -231,7 +231,7 @@ mod tests {
     fn snapshot_message_flow_and_status() {
         let mut app = App::new(ctx());
         app.handle_key(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('你'),
+            crossterm::event::KeyCode::Char('x'),
             crossterm::event::KeyModifiers::NONE,
         ));
         app.handle_key(crossterm::event::KeyEvent::new(
@@ -241,10 +241,10 @@ mod tests {
         use operations_wire::EventMsg as M;
         app.handle_event(&ev(M::TurnStarted));
         app.handle_event(&ev(M::AgentMessageDelta {
-            text: "**好的**\n".into(),
+            text: "**ok**\n".into(),
         }));
         app.handle_event(&ev(M::AgentMessageComplete {
-            text: "**好的**\n".into(),
+            text: "**ok**\n".into(),
         }));
         app.handle_event(&ev(M::ToolCallBegin {
             call_id: "c1".into(),
@@ -261,8 +261,8 @@ mod tests {
         }));
         app.handle_event(&ev(M::TurnCompleted { interrupted: false }));
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("> 你"), "user row: {text}");
-        assert!(text.contains("好的"), "assistant message: {text}");
+        assert!(text.contains("> x"), "user row: {text}");
+        assert!(text.contains("ok"), "assistant message: {text}");
         assert!(!text.contains("**"), "markdown markers render away: {text}");
         assert!(text.contains("▸ read_file"), "tool row: {text}");
         assert!(text.contains("✗ c1"), "failure row: {text}");
@@ -284,20 +284,20 @@ mod tests {
         }));
         let text = draw_app(&mut app, 80, 24);
         assert!(
-            text.contains("⚠ 审批请求"),
+            text.contains("⚠ Approval requested"),
             "notice row/popup title: {text}"
         );
-        assert!(text.contains("执行命令"), "kind: {text}");
+        assert!(text.contains("Execute command"), "kind: {text}");
         assert!(text.contains("shell: rm -rf build/"), "detail: {text}");
-        assert!(text.contains("y 放行"), "selection hints: {text}");
+        assert!(text.contains("y allow"), "selection hints: {text}");
         // n → reason mode.
         app.handle_key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('n'),
             crossterm::event::KeyModifiers::NONE,
         ));
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("拒绝原因"), "reason mode: {text}");
-        assert!(text.contains("Enter 确认拒绝"), "reason hints: {text}");
+        assert!(text.contains("Decline reason"), "reason mode: {text}");
+        assert!(text.contains("Enter confirm decline"), "reason hints: {text}");
     }
 
     /// Slash completion popup: `/c` filters to /compact and /commit
@@ -312,7 +312,7 @@ mod tests {
             ));
         }
         let text = draw_app(&mut app, 80, 24);
-        assert!(text.contains("命令"), "popup title: {text}");
+        assert!(text.contains("Commands"), "popup title: {text}");
         assert!(text.contains("▸ /compact"), "selected item: {text}");
         assert!(text.contains("/commit"), "skill candidate: {text}");
         assert!(!text.contains("/memory"), "prefix filter: {text}");

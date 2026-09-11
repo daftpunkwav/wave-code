@@ -107,7 +107,7 @@ impl App {
                 } else {
                     self.push_item(Item::plain(
                         format!(
-                            "未知命令：/{name}（内置：{}；其余 / 前缀为 skill 名）",
+                            "Unknown command: /{name} (builtins: {}; other / prefixes are skill names)",
                             BUILTIN_COMMANDS
                                 .iter()
                                 .map(|c| format!("/{c}"))
@@ -125,7 +125,7 @@ impl App {
     fn show_memory(&mut self) {
         if self.ctx.memory_index.trim().is_empty() {
             self.push_item(Item::plain(
-                "记忆能力不可用（会话未启用记忆装配）".into(),
+                "Memory unavailable (session has no memory attached)".into(),
                 warn(),
             ));
         } else {
@@ -141,7 +141,7 @@ impl App {
     fn show_mcp(&mut self) {
         if self.ctx.mcp_server_lines.is_empty() {
             self.push_item(Item::plain(
-                "（未配置 MCP server；在 config.toml 添加 [mcp_servers.<name>] 段）".into(),
+                "(No MCP servers configured; add a [mcp_servers.<name>] section in config.toml)".into(),
                 dim(),
             ));
         } else {
@@ -163,7 +163,7 @@ impl App {
             mode: next.as_str().to_string(),
         });
         self.push_item(Item::plain(
-            format!("权限模式切换为 {next}（写 / 执行工具的审批策略随之变化）"),
+            format!("Permission mode switched to {next} (approval policy for write/exec tools follows)"),
             dim(),
         ));
     }

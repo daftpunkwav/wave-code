@@ -1,21 +1,21 @@
-//! 终端文本工具：控制字符净化与按字符截断（双前端单一事实源）。
+//! Terminal text utilities: control-character sanitizing and char-based truncation (single source for both frontends).
 //!
-//! cli 经 SPEC §3 矩阵允许的 cli→tui 单向边复用本模块（2026-09 收口；
-//! 此前为两份手工同步的镜像复制，已并入此处删除 cli 侧副本）。模型 /
-//! 工具来源文本必须过 [`sanitize_terminal`] 才能进终端：防 ANSI / OSC
-//! 注入擦除痕迹。
+//! The cli reuses this module through the SPEC section 3 matrix cli-to-tui edge (settled 2026-09;
+//! previously two hand-synced mirror copies, now merged here with the cli copy removed). Model /
+//! tool-sourced text must pass [`sanitize_terminal`] before reaching the terminal: guards against ANSI / OSC
+//! injection wiping the scrollback.
 
 use std::borrow::Cow;
 
-/// 是否为需剥离的控制字符：C0（保留 `\n` / `\t`）、DEL、C1（U+0080–U+009F）。
+/// Whether this is a control character to strip: C0 (keeping `\n` / `\t`), DEL, C1 (U+0080-U+009F).
 fn is_control(c: char) -> bool {
     matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'..='\u{9f}')
 }
 
-/// 终端输出净化：剥离 C0/C1 控制字符与 ESC 序列（保留 `\n`、`\t`）。
-/// 无控制字符时零拷贝返回借用。
+/// Sanitize terminal output: strip C0/C1 control characters and ESC sequences (keeping `\n`, `\t`).
+/// Return a borrow with zero copy when no control characters exist.
 pub fn sanitize_terminal(s: &str) -> Cow<'_, str> {
-    // 快路径：无需剥离的字符直接借用。
+    // Fast path: borrow directly when nothing needs stripping.
     if !s.chars().any(is_control) {
         return Cow::Borrowed(s);
     }
@@ -23,8 +23,8 @@ pub fn sanitize_terminal(s: &str) -> Cow<'_, str> {
     let mut it = s.chars();
     while let Some(c) = it.next() {
         if c == '\x1b' {
-            // ESC 序列整体跳过：CSI（ESC [ … 终字节 0x40–0x7E）、
-            // OSC（ESC ] … 终止于 BEL 或 ESC \）、其余按 ESC+单字符。
+            // Skip ESC sequences wholesale: CSI (ESC [ ... final byte 0x40-0x7E),
+            // OSC (ESC ] ... terminated by BEL or ESC \), the rest as ESC plus one char.
             match it.next() {
                 Some('[') => {
                     for c in it.by_ref() {
@@ -39,13 +39,13 @@ pub fn sanitize_terminal(s: &str) -> Cow<'_, str> {
                             break;
                         }
                         if c == '\x1b' {
-                            // 假定 ST（ESC \）：多吞一字符。
+                            // Assume ST (ESC \): swallow one more char.
                             it.next();
                             break;
                         }
                     }
                 }
-                // ESC+单字符序列（含孤立 ESC \）：跳过的字符已消费。
+                // ESC-plus-one-char sequences (including lone ESC \): the skipped char is consumed.
                 _ => {}
             }
             continue;
@@ -57,7 +57,7 @@ pub fn sanitize_terminal(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// 按字符数截断（非字节，防切断 UTF-8），超长时末位替换为省略号 `…`。
+/// Truncate by character count (not bytes, never splitting UTF-8); overlong input ends with an ellipsis `…`.
 pub fn truncate_chars(s: &str, max: usize) -> String {
     // Zero budget holds no glyph (not even the ellipsis marker).
     if max == 0 {
@@ -75,19 +75,19 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    /// 净化语义锁定用例（cli 侧复用同一实现，无需重复用例）。
+    /// Lock sanitizing semantics (the cli side reuses this impl, no duplicate cases needed).
     #[test]
     fn sanitize_strips_control_sequences() {
         assert_eq!(sanitize_terminal("a\x1b[2Jb"), "ab");
-        assert_eq!(sanitize_terminal("\x1b[1;31m红\x1b[0m"), "红");
+        assert_eq!(sanitize_terminal("\x1b[1;31mred\x1b[0m"), "red");
         assert_eq!(sanitize_terminal("x\x1b]52;;cGF5bG9hZA==\x07y"), "xy");
         assert_eq!(sanitize_terminal("x\x1b]0;title\x1b\\y"), "xy");
         assert_eq!(sanitize_terminal("p\x07q\x08r"), "pqr");
         assert_eq!(sanitize_terminal("a\u{9b}1;31mb"), "a1;31mb");
-        let s = "正常中文🦀\n换行\t制表符";
+        let s = "normal text🦀\nnewline\ttab";
         let sanitized = sanitize_terminal(s);
         assert_eq!(sanitized, s);
-        assert!(matches!(sanitized, Cow::Borrowed(_)), "应零拷贝借用");
+        assert!(matches!(sanitized, Cow::Borrowed(_)), "should borrow without copying");
     }
 
     /// Zero/one budgets: max 0 holds nothing (not even the marker);
@@ -97,14 +97,14 @@ mod tests {
         assert_eq!(truncate_chars("hello", 0), "");
         assert_eq!(truncate_chars("", 0), "");
         assert_eq!(truncate_chars("hello", 1), "…");
-        assert_eq!(truncate_chars("汉a", 1), "…");
+        assert_eq!(truncate_chars("éa", 1), "…");
     }
 
     #[test]
     fn truncate_multibyte_utf8_by_chars() {
-        let t = truncate_chars(&"汉".repeat(200), 80);
+        let t = truncate_chars(&"é".repeat(200), 80);
         assert_eq!(t.chars().count(), 80);
         assert!(t.ends_with('…'));
-        assert_eq!(truncate_chars("短", 80), "短");
+        assert_eq!(truncate_chars("s", 80), "s");
     }
 }

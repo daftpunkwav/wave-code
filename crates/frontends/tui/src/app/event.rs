@@ -56,12 +56,12 @@ impl App {
             }
             M::CompactStarted { .. } => {
                 self.flush_message();
-                self.push_item(Item::plain("⟳ 正在压缩上下文…".into(), dim()));
+                self.push_item(Item::plain("⟳ Compacting context...".into(), dim()));
             }
             M::CompactCompleted { summary_tokens } => {
                 self.flush_message();
                 self.push_item(Item::plain(
-                    format!("✓ 上下文已压缩（摘要 {summary_tokens} tokens）"),
+                    format!("✓ Context compacted (summary {summary_tokens} tokens)"),
                     dim(),
                 ));
             }
@@ -74,12 +74,12 @@ impl App {
             } => {
                 self.flush_message();
                 let kind_label = match kind {
-                    ApprovalKind::Exec => "执行命令",
-                    ApprovalKind::Write => "写入文件",
+                    ApprovalKind::Exec => "Execute command",
+                    ApprovalKind::Write => "Write file",
                 };
                 let detail = sanitize_terminal(detail).into_owned();
                 self.push_item(Item::plain(
-                    format!("⚠ 审批请求（{kind_label}）：{detail}"),
+                    format!("⚠ Approval requested ({kind_label}): {detail}"),
                     warn(),
                 ));
                 self.approval = Some(ApprovalPopup {
@@ -103,7 +103,7 @@ impl App {
             M::TurnCompleted { interrupted } => {
                 self.flush_message(); // leftover buffer on interrupt paths
                 if *interrupted {
-                    self.push_item(Item::plain("（已中断）".into(), warn()));
+                    self.push_item(Item::plain("(interrupted)".into(), warn()));
                 }
                 self.in_turn = false;
             }
@@ -143,7 +143,7 @@ impl App {
                     .and_then(|s| s.as_str())
                     .unwrap_or("pending");
                 let transition = match self.last_todos.iter().find(|(c, _)| c == content) {
-                    Some((_, old)) if old != status => format!("（{old} → {status}）"),
+                    Some((_, old)) if old != status => format!("({old} -> {status})"),
                     _ => String::new(),
                 };
                 lines.push(Line::from(vec![

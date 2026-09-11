@@ -312,11 +312,11 @@ fn tui_permission_mode(wire: &str) -> wavecode_tui::PermissionMode {
 
 /// Print a config error with creation guidance on missing files.
 fn print_config_error(err: &wavecode_config::ConfigError) {
-    eprintln!("错误：{err}");
+    eprintln!("Error: {err}");
     if let wavecode_config::ConfigError::NotFound(path) = err {
         eprintln!(
             r#"
-请创建配置文件 {}，内容示例：
+Please create config file {}, example contents:
 
 model = "claude-sonnet-4-5"
 model_provider = "anthropic"
@@ -324,10 +324,10 @@ model_provider = "anthropic"
 [model_providers.anthropic]
 type = "anthropic"
 base_url = "https://api.anthropic.com"
-# api key 二选一（env_key 优先）：
-# 方式一（推荐）：env_key 指向环境变量名，运行时从该变量读取 key
+# api key, choose one (env_key wins):
+# Option 1 (recommended): env_key names an env var, read at runtime
 env_key = "ANTHROPIC_API_KEY"
-# 方式二：内联 api_key（注意保密，勿提交版本库）
+# Option 2: inline api_key (keep secret, do not commit)
 # api_key = "sk-ant-..."
 "#,
             path.display()

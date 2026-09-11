@@ -90,7 +90,7 @@ impl App {
             last_todos: Vec::new(),
         };
         app.push_item(Item::plain(
-            "WaveCode TUI — Enter 提交 · / 命令补全 · Esc 中断 · Ctrl-C 退出".into(),
+            "WaveCode TUI — Enter submit · / completion · Esc interrupt · Ctrl-C quit".into(),
             dim(),
         ));
         app
@@ -142,7 +142,7 @@ impl App {
     /// Event stream ended early (actor exited): red notice, then quit.
     pub fn actor_died(&mut self) {
         self.push_item(Item::plain(
-            "会话已终止（agent 引擎意外退出）".into(),
+            "Session terminated (agent engine exited unexpectedly)".into(),
             err(),
         ));
         self.quit = true;
@@ -189,11 +189,11 @@ mod tests {
     #[test]
     fn typing_and_enter_submits_user_input() {
         let mut app = App::new(ctx());
-        type_str(&mut app, "你好");
+        type_str(&mut app, "hello");
         app.handle_key(key(KeyCode::Enter));
         let ops = app.take_ops();
         assert!(
-            matches!(&ops[..], [Op::UserInput { text }] if text == "你好"),
+            matches!(&ops[..], [Op::UserInput { text }] if text == "hello"),
             "should emit UserInput: {ops:?}"
         );
         assert!(app.input.is_empty() && app.cursor == 0);
@@ -202,7 +202,7 @@ mod tests {
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("> 你好"));
+            .any(|s| s.content.contains("> hello"));
         assert!(user, "user line should enter the stream");
     }
 
@@ -254,11 +254,11 @@ mod tests {
         app.handle_event(&req("c2"));
         app.handle_key(key(KeyCode::Char('n')));
         assert!(app.approval.as_ref().is_some_and(|p| p.reason_mode));
-        type_str(&mut app, "危险");
+        type_str(&mut app, "dangerous");
         app.handle_key(key(KeyCode::Enter));
         let ops = app.take_ops();
         assert!(
-            matches!(&ops[..], [Op::ExecApproval { call_id, decision: WireDecision::Deny { reason } }] if call_id == "c2" && reason == "危险"),
+            matches!(&ops[..], [Op::ExecApproval { call_id, decision: WireDecision::Deny { reason } }] if call_id == "c2" && reason == "dangerous"),
             "n + reason should deny: {ops:?}"
         );
         // Esc denies directly (empty reason, no parked hang)
@@ -357,8 +357,8 @@ mod tests {
     #[test]
     fn paste_routes_to_approval_popup_when_open() {
         let mut app = App::new(ctx());
-        app.paste("主输入");
-        assert_eq!(app.input, "主输入");
+        app.paste("main input");
+        assert_eq!(app.input, "main input");
         app.handle_event(&ev(EventMsg::ApprovalRequested {
             call_id: "c1".into(),
             kind: ApprovalKind::Exec,
@@ -366,13 +366,13 @@ mod tests {
         }));
         app.paste("xyz");
         assert_eq!(
-            app.input, "主输入",
+            app.input, "main input",
             "pastes must be ignored outside reason mode"
         );
         app.handle_key(key(KeyCode::Char('n')));
-        app.paste("非常危险\n的第二行");
+        app.paste("very dangerous\nsecond line");
         let popup = app.approval.as_ref().unwrap();
-        assert_eq!(popup.reason, "非常危险\n的第二行");
+        assert_eq!(popup.reason, "very dangerous\nsecond line");
     }
 
     /// Slash completion state machine: prefix filtering, Up/Down
@@ -409,7 +409,7 @@ mod tests {
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("尚未接入"));
+            .any(|s| s.content.contains("Unknown command"));
         assert!(!has_warn, "skill routing no longer warns");
     }
 
@@ -458,7 +458,7 @@ mod tests {
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("未知命令：/nope"));
+            .any(|s| s.content.contains("Unknown command: /nope"));
         assert!(has_warn);
     }
 
@@ -483,7 +483,7 @@ mod tests {
         });
         type_str(&mut app, "/mcp");
         app.handle_key(key(KeyCode::Enter));
-        assert!(app.take_ops().is_empty(), "/mcp 为本地展示面");
+        assert!(app.take_ops().is_empty(), "/mcp renders locally");
         let has_line = app
             .items
             .iter()
@@ -500,7 +500,7 @@ mod tests {
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("未配置 MCP server"));
+            .any(|s| s.content.contains("No MCP servers configured"));
         assert!(has_hint);
     }
 
@@ -514,7 +514,7 @@ mod tests {
         app.handle_event(&ev(M::TurnStarted));
         assert!(app.in_turn);
         app.handle_event(&ev(M::AgentMessageDelta {
-            text: "**好**".into(),
+            text: "**ok**".into(),
         }));
         assert!(app.items.len() == 1, "deltas must not enter items directly");
         app.handle_event(&ev(M::TokenCount {
@@ -531,9 +531,9 @@ mod tests {
             .flat_map(|l| &l.spans)
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("好"), "interrupted leftovers render: {text}");
+        assert!(text.contains("ok"), "interrupted leftovers render: {text}");
         assert!(!text.contains("**"), "markdown markers render away: {text}");
-        assert!(text.contains("（已中断）"), "interrupt marker: {text}");
+        assert!(text.contains("(interrupted)"), "interrupt marker: {text}");
     }
 
     /// todo_write rows: status symbols with migration marks (legacy CLI
@@ -548,8 +548,8 @@ mod tests {
                 input: serde_json::json!({"todos": [{"content": content, "status": status}]}),
             })
         };
-        app.handle_event(&todo("设计", "in_progress"));
-        app.handle_event(&todo("设计", "completed"));
+        app.handle_event(&todo("design", "in_progress"));
+        app.handle_event(&todo("design", "completed"));
         let last = app.items.last().unwrap();
         let text: String = last
             .lines
@@ -557,9 +557,9 @@ mod tests {
             .flat_map(|l| &l.spans)
             .map(|s| s.content.as_ref())
             .collect();
-        assert!(text.contains("✓ 设计"), "completion mark: {text}");
+        assert!(text.contains("✓ design"), "completion mark: {text}");
         assert!(
-            text.contains("（in_progress → completed）"),
+            text.contains("(in_progress -> completed)"),
             "migration mark: {text}"
         );
     }
@@ -568,15 +568,15 @@ mod tests {
     #[test]
     fn cursor_editing_multibyte_safe() {
         let mut app = App::new(ctx());
-        type_str(&mut app, "甲丙");
+        type_str(&mut app, "éc");
         app.handle_key(key(KeyCode::Left));
-        app.handle_key(key(KeyCode::Char('乙')));
-        assert_eq!(app.input, "甲乙丙");
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.input, "ébc");
         assert_eq!(app.cursor, 2);
         app.handle_key(key(KeyCode::Backspace));
-        assert_eq!(app.input, "甲丙");
+        assert_eq!(app.input, "éc");
         app.handle_key(key(KeyCode::Home));
         app.handle_key(key(KeyCode::Delete));
-        assert_eq!(app.input, "丙");
+        assert_eq!(app.input, "c");
     }
 }

@@ -1,23 +1,23 @@
-//! markdown → ratatui [`Line`] 渲染（消息流中助手消息的渲染内核）。
+//! markdown to ratatui [`Line`] rendering (rendering core for assistant messages in the message stream).
 //!
-//! 语义对齐 SPEC §15.5 与 cli/src/markdown.rs（那边产出 ANSI 字符串，
-//! 这里产出带样式的 ratatui 行；tui 不能依赖 cli，为同源不同形的重写）：
-//! - 标题：亮青加粗；
-//! - 粗体 / 斜体 / 删除线：对应 modifier 叠加；
-//! - 行内码：黄；
-//! - 代码块 / 引用：`│ ` 左边线（暗灰）；
-//! - 链接：蓝色下划线（只显文本，不显 URL）；
-//! - 水平线：暗灰 `─`。
+//! Semantics align with SPEC section 15.5 and cli/src/markdown.rs (which emits ANSI strings,
+//! while this emits styled ratatui rows; the tui cannot depend on cli, so this is a same-source rewrite):
+//! - Headings: bright cyan, bold;
+//! - Bold / italic / strikethrough: stacked modifiers;
+//! - Inline code: yellow;
+//! - Code blocks / quotes: `│ ` left border (dark gray);
+//! - Links: blue underline (text only, no URL);
+//! - Rules: dark gray `─`.
 //!
-//! 已知取舍：表格首版按纯文本退化（单元格以 ` │ ` 分隔），cli 侧的
-//! CJK 对齐 + 超宽压缩留待后续；输入应已过 `sanitize_terminal`（app 侧
-//! 在 delta 入缓冲时净化）。
+//! Known tradeoff: tables degrade to plain text in v1 (cells joined with ` │ `);
+//! CJK alignment + over-wide squashing are follow-ups; input must pass `sanitize_terminal` (
+//! sanitized on the app side when deltas enter the buffer).
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
-/// 主题色（与 cli 渲染同一色系：亮青强调 / 黄行内码 / 暗灰弱化）。
+/// Theme colors (same family as CLI rendering: bright cyan accent / yellow inline code / dimmed gray).
 fn heading_style() -> Style {
     Style::default()
         .fg(Color::LightCyan)
@@ -38,7 +38,7 @@ fn link_style() -> Style {
         .add_modifier(Modifier::UNDERLINED)
 }
 
-/// 行内样式状态（可叠加）。
+/// Inline style state (stackable).
 #[derive(Default, Clone, Copy)]
 struct Inline {
     strong: bool,
@@ -69,7 +69,7 @@ impl Inline {
     }
 }
 
-/// 渲染入口：一条完整助手消息 → 消息流条目行集（末尾无多余空行）。
+/// Render entry: one complete assistant message into message-stream rows (no trailing blank line).
 pub fn render_markdown(input: &str) -> Vec<Line<'static>> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
@@ -88,10 +88,10 @@ struct Renderer {
     inline: Inline,
     in_heading: bool,
     in_code_block: bool,
-    /// 代码块内当前行是否已写 `│ ` 前缀。
+    /// Whether the current line in a code block already has the `│ ` prefix.
     code_line_started: bool,
     quote_depth: usize,
-    /// 列表栈：Some(下一编号) 为有序。
+    /// List stack: Some(next number) means ordered.
     list_stack: Vec<Option<u64>>,
     in_table: bool,
 }
@@ -102,7 +102,7 @@ impl Renderer {
             Event::Start(tag) => self.start_tag(tag),
             Event::End(tag) => self.end_tag(tag),
             Event::Text(t) => self.text(t),
-            // 行内码：黄色，叠加行内 modifier。
+            // Inline code: yellow, stacked with inline modifiers.
             Event::Code(t) => {
                 self.ensure_prefix();
                 let mut s = inline_code_style();
@@ -122,7 +122,7 @@ impl Renderer {
                 self.spans
                     .push(Span::raw(if *checked { "☑ " } else { "☐ " }));
             }
-            // HTML / 脚注 / 图片首版不渲染（图片 alt 已由 pulldown 以 Text 给出）。
+            // HTML / footnotes / images do not render in v1 (image alt already arrives as Text via pulldown).
             _ => {}
         }
     }
@@ -171,7 +171,7 @@ impl Renderer {
                 self.in_table = true;
             }
             Tag::TableHead | Tag::TableRow => self.flush(),
-            // 表格退化形态：单元格以 ` │ ` 分隔。
+            // Degraded table form: cells joined with ` │ `.
             Tag::TableCell if !self.spans.is_empty() => {
                 self.spans.push(Span::styled(" │ ", bar_style()));
             }
@@ -215,7 +215,7 @@ impl Renderer {
 
     fn text(&mut self, t: &str) {
         if self.in_code_block {
-            // 代码块文本按行切分，每行挂 `│ ` 左边线（可跨 Text 事件续行）。
+            // Split code block text per line, each with a `│ ` left border (may span Text events).
             let mut parts = t.split('\n');
             let mut first = true;
             for part in &mut parts {
@@ -237,7 +237,7 @@ impl Renderer {
         self.spans.push(Span::styled(t.to_string(), style));
     }
 
-    /// 行首前缀：引用深度的 `│ ` 边线（表格单元格内不挂）。
+    /// Line-start prefix: `│ ` borders per quote depth (not inside table cells).
     fn ensure_prefix(&mut self) {
         if self.spans.is_empty() && !self.in_table {
             for _ in 0..self.quote_depth {
@@ -246,14 +246,14 @@ impl Renderer {
         }
     }
 
-    /// 结束当前行（空 spans 不产行，避免段间出现空行叠加）。
+    /// End the current line (empty spans emit nothing, avoiding stacked blank lines).
     fn flush(&mut self) {
         if !self.spans.is_empty() {
             self.lines.push(Line::from(std::mem::take(&mut self.spans)));
         }
     }
 
-    /// 块间空行：已有内容且当前行非空时补一个空行。
+    /// Blank line between blocks: add one when content exists and the current line is non-empty.
     fn block_gap(&mut self) {
         self.flush();
         if self.lines.last().is_some_and(|l| !l.spans.is_empty()) {
@@ -287,50 +287,50 @@ mod tests {
             .join("\n")
     }
 
-    /// 标题 / 粗体 / 行内码 / 代码块边线 / 列表 / 引用的文本形态锁定。
+    /// Locks the text shape of headings / bold / inline code / code borders / lists / quotes.
     #[test]
     fn renders_heading_code_list_quote() {
-        let md = "# 标题\n\n正文 **粗体** `code`\n\n```rust\nfn main() {}\n```\n\n- 甲\n- 乙\n\n> 引用\n";
+        let md = "# Title\n\nBody **bold** `code`\n\n```rust\nfn main() {}\n```\n\n- A\n- B\n\n> quote\n";
         let lines = render_markdown(md);
         let text = plain(&lines);
-        assert!(text.contains("标题"));
-        assert!(text.contains("正文 粗体 code"));
-        assert!(text.contains("│ fn main() {}"), "代码块边线: {text:?}");
-        assert!(text.contains("- 甲"));
-        assert!(text.contains("│ 引用"), "引用边线: {text:?}");
-        // 样式断言：标题亮青加粗；行内码黄；粗体叠加 BOLD。
+        assert!(text.contains("Title"));
+        assert!(text.contains("Body bold code"));
+        assert!(text.contains("│ fn main() {}"), "code block border: {text:?}");
+        assert!(text.contains("- A"));
+        assert!(text.contains("│ quote"), "quote border: {text:?}");
+        // Style assertions: bright cyan bold headings; yellow inline code; bold stacked.
         let heading = &lines[0];
         assert_eq!(heading.spans[0].style.fg, Some(Color::LightCyan));
         assert!(heading.spans[0].style.add_modifier.contains(Modifier::BOLD));
         let body = lines
             .iter()
-            .find(|l| l.spans.iter().any(|s| s.content.contains("粗体")))
+            .find(|l| l.spans.iter().any(|s| s.content.contains("bold")))
             .unwrap();
-        let bold = body.spans.iter().find(|s| s.content == "粗体").unwrap();
+        let bold = body.spans.iter().find(|s| s.content == "bold").unwrap();
         assert!(bold.style.add_modifier.contains(Modifier::BOLD));
         let code = body.spans.iter().find(|s| s.content == "code").unwrap();
         assert_eq!(code.style.fg, Some(Color::Yellow));
     }
 
-    /// 有序列表编号自增；段落之间恰好一个空行；末尾无空行。
+    /// Ordered lists auto-increment; exactly one blank line between paragraphs; no trailing blank line.
     #[test]
     fn ordered_list_and_blank_lines() {
-        let lines = render_markdown("甲\n\n乙\n\n1. 一\n2. 二\n");
+        let lines = render_markdown("A\n\nB\n\n1. one\n2. two\n");
         let text = plain(&lines);
-        assert!(text.contains("1. 一"));
-        assert!(text.contains("2. 二"));
+        assert!(text.contains("1. one"));
+        assert!(text.contains("2. two"));
         assert!(!text.ends_with('\n'));
-        assert!(!text.contains("\n\n\n"), "段间至多一个空行: {text:?}");
+        assert!(!text.contains("\n\n\n"), "at most one blank line between blocks: {text:?}");
     }
 
-    /// 链接只显文本不显 URL；删除线 modifier 生效。
+    /// Links show text without URL; strikethrough modifier applies.
     #[test]
     fn link_and_strikethrough() {
-        let lines = render_markdown("[站点](https://example.com) ~~旧~~");
+        let lines = render_markdown("[Site](https://example.com) ~~old~~");
         let text = plain(&lines);
-        assert!(text.contains("站点"));
+        assert!(text.contains("Site"));
         assert!(!text.contains("https://"));
-        let strike = lines[0].spans.iter().find(|s| s.content == "旧").unwrap();
+        let strike = lines[0].spans.iter().find(|s| s.content == "old").unwrap();
         assert!(strike.style.add_modifier.contains(Modifier::CROSSED_OUT));
     }
 }

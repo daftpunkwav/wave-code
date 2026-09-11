@@ -19,9 +19,9 @@ use crate::app::{App, SPINNER, accent, dim, warn};
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::vertical([
-        Constraint::Min(3),    // 消息流
-        Constraint::Length(3), // 输入框（含边框）
-        Constraint::Length(1), // 状态栏
+        Constraint::Min(3),    // message stream
+        Constraint::Length(3), // input box (with border)
+        Constraint::Length(1), // status bar
     ])
     .split(area);
     draw_messages(f, app, chunks[0]);
@@ -89,7 +89,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(if app.in_turn { dim() } else { accent() })
-        .title(Span::styled(" ∿ 输入 ", accent()));
+        .title(Span::styled(" ∿ Input ", accent()));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -173,7 +173,7 @@ fn draw_slash_popup(f: &mut Frame, app: &App, input_area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(dim())
-        .title(Span::styled(" 命令 ", dim()));
+        .title(Span::styled(" Commands ", dim()));
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -184,8 +184,8 @@ fn draw_approval(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let kind_label = match popup.kind {
-        operations_wire::ApprovalKind::Exec => "执行命令",
-        operations_wire::ApprovalKind::Write => "写入文件",
+        operations_wire::ApprovalKind::Exec => "Execute command",
+        operations_wire::ApprovalKind::Write => "Write file",
     };
     let width = (area.width * 3 / 4).clamp(30, 72).min(area.width);
     let detail_rows = (popup.detail.width() / width.saturating_sub(4).max(1) as usize + 2) as u16;
@@ -200,28 +200,28 @@ fn draw_approval(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(warn())
-        .title(Span::styled(" ⚠ 审批请求 ", warn()));
+        .title(Span::styled(" ⚠ Approval requested ", warn()));
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
     let mut lines = vec![
-        Line::from(vec![Span::styled(format!("类型：{kind_label}"), warn())]),
+        Line::from(vec![Span::styled(format!("Type: {kind_label}"), warn())]),
         Line::from(Span::raw(popup.detail.clone())),
         Line::default(),
     ];
     if popup.reason_mode {
         lines.push(Line::from(vec![
-            Span::raw("拒绝原因（回传模型）："),
+            Span::raw("Decline reason (sent to model):"),
             Span::styled(popup.reason.clone(), warn()),
         ]));
         lines.push(Line::default());
         lines.push(Line::from(Span::styled(
-            "Enter 确认拒绝 │ Esc 直接拒绝",
+            "Enter confirm decline │ Esc decline directly",
             dim(),
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            "y 放行 │ n 拒绝（附原因） │ Esc 拒绝",
+            "y allow │ n decline (with reason) │ Esc decline",
             warn(),
         )));
     }

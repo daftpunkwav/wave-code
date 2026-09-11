@@ -8,6 +8,7 @@ license.workspace = true
 runtime-runner = { path = "../../runtime/runner" }
 runtime-child = { path = "../../runtime/child" }
 state-store = { path = "../../state/store" }
+state-checkpoint = { path = "../../state/checkpoint" }
 safety-gate = { path = "../../safety/gate" }
 operations-wire = { path = "../../operations/wire" }
 infrastructure-base = { path = "../../infrastructure/base" }
@@ -19,3 +20,4 @@ async-trait.workspace = true
 [dev-dependencies]
 tokio.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true

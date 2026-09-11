@@ -33,6 +33,18 @@ pub enum CheckpointError {
     /// No checkpoint exists under the label.
     #[error("unknown checkpoint: {0}")]
     UnknownLabel(String),
+    /// Label rejected: expected 1-64 chars of `[A-Za-z0-9_-]`.
+    #[error("invalid checkpoint label: {0}")]
+    InvalidLabel(String),
+    /// Filesystem failure while writing or fsyncing the durable copy.
+    #[error("checkpoint IO failed: {0}")]
+    Io(String),
+}
+
+impl From<std::io::Error> for CheckpointError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e.to_string())
+    }
 }
 
 /// Ordered checkpoint store with rollback.
@@ -88,6 +100,154 @@ impl CheckpointStore {
     pub fn is_empty(&self) -> bool {
         self.checkpoints.is_empty()
     }
+}
+
+/// Durability policy for turn checkpoints.
+///
+/// Both flags default to true (fail-closed): when in doubt the actor
+/// checkpoints rather than skipping. Setting a flag to false disables
+/// that hook point, and a fully-disabled policy short-circuits with
+/// zero IO (no file is created, read, or even probed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckpointPolicy {
+    /// Save a durable checkpoint before a model request starts a turn.
+    pub checkpoint_before_model_request: bool,
+    /// Save a durable checkpoint before a tool side effect executes.
+    pub before_tool_side_effect: bool,
+}
+
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        Self {
+            checkpoint_before_model_request: true,
+            before_tool_side_effect: true,
+        }
+    }
+}
+
+impl CheckpointPolicy {
+    /// Policy with every hook point disabled: checkpoint helpers become
+    /// no-ops that touch neither the store nor the filesystem.
+    pub fn disabled() -> Self {
+        Self {
+            checkpoint_before_model_request: false,
+            before_tool_side_effect: false,
+        }
+    }
+
+    /// True when at least one hook point still checkpoints.
+    pub fn anything_enabled(&self) -> bool {
+        self.checkpoint_before_model_request || self.before_tool_side_effect
+    }
+}
+
+/// Durable checkpoint file extension under the checkpoints root.
+pub const CHECKPOINT_FILE_EXTENSION: &str = "json";
+
+/// Validate a turn-checkpoint label before it touches the filesystem.
+///
+/// Labels become a single `<label>.json` file name, so the rule matches
+/// snapshot labels: 1-64 chars of `[A-Za-z0-9_-]`, blocking `/` and `..`.
+pub fn validate_checkpoint_label(label: &str) -> Result<(), CheckpointError> {
+    validate_snapshot_label(label).map_err(CheckpointError::InvalidLabel)
+}
+
+/// Path of one durable checkpoint file, validating the label first.
+fn checkpoint_file_path(
+    root: &std::path::Path,
+    label: &str,
+) -> Result<std::path::PathBuf, CheckpointError> {
+    validate_checkpoint_label(label)?;
+    Ok(root.join(format!("{label}.{CHECKPOINT_FILE_EXTENSION}")))
+}
+
+/// Durably save one checkpoint payload under `root/<label>.json`.
+///
+/// The write is atomic (temp file plus rename) and fsynced before the
+/// rename returns, so a crash never leaves a half-written label. Callers
+/// save to the in-memory [`CheckpointStore`] first and call this second;
+/// on error the in-memory entry stays, making failures loud but never
+/// silent data loss.
+pub fn durable_save(
+    root: &std::path::Path,
+    label: &str,
+    data: &str,
+) -> Result<(), CheckpointError> {
+    let dest = checkpoint_file_path(root, label)?;
+    std::fs::create_dir_all(root)?;
+    let payload = serde_json::json!({"label": label, "data": data});
+    let bytes = serde_json::to_string(&payload).map_err(|e| CheckpointError::Io(e.to_string()))?;
+    // Stage beside the destination so rename stays on one filesystem.
+    let staging = root.join(format!(".staging-{label}.{CHECKPOINT_FILE_EXTENSION}"));
+    std::fs::write(&staging, &bytes)?;
+    // Fsync the payload before it becomes visible under its label. The
+    // handle needs write access: FlushFileBuffers fails on read-only
+    // handles (Windows ERROR_ACCESS_DENIED).
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&staging)?
+        .sync_all()?;
+    std::fs::rename(&staging, &dest)?;
+    // Best-effort directory fsync so the rename itself survives a crash.
+    if let Ok(dir) = std::fs::File::open(root) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// Load one durable checkpoint payload, if present.
+pub fn durable_load(
+    root: &std::path::Path,
+    label: &str,
+) -> Result<Option<String>, CheckpointError> {
+    let dest = checkpoint_file_path(root, label)?;
+    let text = match std::fs::read_to_string(&dest) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| CheckpointError::Io(e.to_string()))?;
+    Ok(value
+        .get("data")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned))
+}
+
+/// List durable checkpoint labels oldest-first (newest last).
+///
+/// Missing roots and unreadable entries read as empty/skipped, never as
+/// errors: resume is best-effort discovery, and the caller decides what
+/// a missing history means. Use `.last()` for the resume candidate.
+pub fn resume_checkpoint(root: &std::path::Path) -> Vec<String> {
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut labeled: Vec<(std::time::SystemTime, String)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(CHECKPOINT_FILE_EXTENSION) {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if validate_checkpoint_label(stem).is_err() {
+            continue;
+        }
+        // Dotfiles (staging temp files) never validate as labels, but skip
+        // them explicitly so a crashed writer stays invisible.
+        if stem.starts_with('.') || stem.starts_with(".staging-") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        labeled.push((modified, stem.to_owned()));
+    }
+    labeled.sort();
+    labeled.into_iter().map(|(_, label)| label).collect()
 }
 
 #[cfg(test)]
@@ -938,6 +1098,75 @@ mod snapshot_tests {
         assert_eq!(
             snapshot_default_root(&home),
             home.join(".wavecode").join("snapshots")
+        );
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[test]
+    fn policy_defaults_fail_closed() {
+        let policy = CheckpointPolicy::default();
+        assert!(policy.checkpoint_before_model_request);
+        assert!(policy.before_tool_side_effect);
+        assert!(policy.anything_enabled());
+        let off = CheckpointPolicy::disabled();
+        assert!(!off.checkpoint_before_model_request);
+        assert!(!off.before_tool_side_effect);
+        assert!(!off.anything_enabled());
+    }
+
+    #[test]
+    fn durable_round_trip_with_atomic_files() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("checkpoints");
+        // Missing roots read as empty, never as errors.
+        assert!(resume_checkpoint(&dir).is_empty());
+        durable_save(&dir, "turn-1", "state-one").unwrap();
+        durable_save(&dir, "turn-2", "state-two").unwrap();
+        assert_eq!(durable_load(&dir, "turn-1").unwrap().as_deref(), Some("state-one"));
+        assert_eq!(durable_load(&dir, "missing").unwrap(), None);
+        // Oldest first, newest last: the tail is the resume candidate.
+        let labels = resume_checkpoint(&dir);
+        assert_eq!(labels, vec!["turn-1".to_owned(), "turn-2".to_owned()]);
+        // No staging temp files leak into the listing or the directory.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".staging-"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn labels_reject_path_escapes() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            durable_save(root.path(), "../evil", "x").unwrap_err(),
+            CheckpointError::InvalidLabel(_)
+        ));
+        assert!(matches!(
+            durable_save(root.path(), "a/b", "x").unwrap_err(),
+            CheckpointError::InvalidLabel(_)
+        ));
+        assert!(validate_checkpoint_label("turn-12_ok").is_ok());
+        // Rejected labels never touch the filesystem.
+        assert!(resume_checkpoint(root.path()).is_empty());
+    }
+
+    #[test]
+    fn store_api_stays_backward_compatible() {
+        // Pre-existing behavior is unchanged by the additive variants.
+        let mut store = CheckpointStore::new();
+        assert_eq!(store.save("step-1", "a"), 1);
+        assert_eq!(store.get("step-1").unwrap().data, "a");
+        assert_eq!(store.labels(), vec!["step-1"]);
+        assert_eq!(
+            store.rollback("nope").unwrap_err(),
+            CheckpointError::UnknownLabel("nope".to_string())
         );
     }
 }

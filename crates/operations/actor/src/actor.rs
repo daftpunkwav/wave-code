@@ -33,6 +33,10 @@ use state_store::{CompactTrigger, Conversation, Role};
 use tokio::sync::mpsc;
 
 use crate::client::ActorClient;
+use crate::durable::{
+    checkpoint_turn, render_snapshot, resume_checkpoint, turn_label, DurabilityConfig,
+    TurnDurability,
+};
 
 /// Synthetic correlation id for session lifecycle warnings, which belong
 /// to no submission.
@@ -49,6 +53,7 @@ pub struct SessionActor<D> {
     submit_rx: mpsc::Receiver<Submission>,
     event_tx: mpsc::UnboundedSender<Event>,
     pending: VecDeque<Submission>,
+    durability: Option<TurnDurability>,
 }
 
 impl<D> SessionActor<D>
@@ -67,6 +72,46 @@ where
         interrupt: InterruptHandle,
         system: String,
     ) -> ActorClient {
+        Self::spawn_inner(
+            driver, conv, children, approvals, interrupt, system, None,
+        )
+    }
+
+    /// Spawn with durable turn checkpoints.
+    ///
+    /// Before each turn-driving path acts, the actor saves the pre-turn
+    /// snapshot to `store` plus an fsynced `<root>/turn-N.json` copy, gated
+    /// by `policy`. On startup the actor names the newest durable label so
+    /// the frontend can offer resume-from-checkpoint.
+    pub fn spawn_with_durability(
+        driver: D,
+        conv: Conversation,
+        children: Arc<ChildRuntime>,
+        approvals: Arc<ApprovalGate>,
+        interrupt: InterruptHandle,
+        system: String,
+        durability: DurabilityConfig,
+    ) -> ActorClient {
+        Self::spawn_inner(
+            driver,
+            conv,
+            children,
+            approvals,
+            interrupt,
+            system,
+            Some(TurnDurability::from(durability)),
+        )
+    }
+
+    fn spawn_inner(
+        driver: D,
+        conv: Conversation,
+        children: Arc<ChildRuntime>,
+        approvals: Arc<ApprovalGate>,
+        interrupt: InterruptHandle,
+        system: String,
+        durability: Option<TurnDurability>,
+    ) -> ActorClient {
         let (submit_tx, submit_rx) = mpsc::channel(CONTROL_CHANNEL_CAP);
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let client_interrupt = interrupt.clone();
@@ -81,6 +126,7 @@ where
                 submit_rx,
                 event_tx,
                 pending: VecDeque::new(),
+                durability,
             }
             .run(),
         );
@@ -101,9 +147,28 @@ where
             mut submit_rx,
             event_tx,
             mut pending,
+            mut durability,
         } = self;
 
         finish_lifecycle(&driver, &event_tx, HookPoint::SessionStart).await;
+
+        // Offer resume-from-checkpoint: when durable labels exist, name
+        // the newest so the frontend can restore it.
+        if let Some(dur) = durability.as_ref() {
+            let labels = resume_checkpoint(&dur.root);
+            if let Some(newest) = labels.last() {
+                let _ = event_tx.send(Event {
+                    id: LIFECYCLE_ID.to_string(),
+                    msg: EventMsg::Warning {
+                        message: format!(
+                            "resume available from checkpoint {newest} ({} saved)",
+                            labels.len()
+                        ),
+                    },
+                });
+            }
+        }
+        let mut turn_seq: u64 = 0;
 
         loop {
             let sub = match pending.pop_front() {
@@ -123,6 +188,28 @@ where
                     for note in children.drain_notifications() {
                         conv.push(Role::User, note);
                     }
+                    // Persist-then-act: the pre-turn snapshot is durable
+                    // before the driver broadcasts or executes anything.
+                    turn_seq += 1;
+                    let label = turn_label(turn_seq);
+                    let snapshot = render_snapshot(&conv);
+                    let checkpoint_on = durability.as_ref().is_some_and(|dur| {
+                        dur.policy.checkpoint_before_model_request
+                    });
+                    let warn_id = sub.id.clone();
+                    let warn_tx = event_tx.clone();
+                    checkpoint_turn(
+                        &mut durability,
+                        checkpoint_on,
+                        &label,
+                        &snapshot,
+                        &|message| {
+                            let _ = warn_tx.send(Event {
+                                id: warn_id.clone(),
+                                msg: EventMsg::Warning { message },
+                            });
+                        },
+                    );
                     let ctx = RunContext {
                         run_id: sub.id.clone(),
                         submission_id: sub.id.clone(),
@@ -159,6 +246,28 @@ where
                 }
                 Op::Compact => {
                     let id = sub.id.clone();
+                    // Compaction rewrites shared history (a state side
+                    // effect), so it honors the side-effect flag.
+                    turn_seq += 1;
+                    let label = turn_label(turn_seq);
+                    let snapshot = render_snapshot(&conv);
+                    let checkpoint_on = durability
+                        .as_ref()
+                        .is_some_and(|dur| dur.policy.before_tool_side_effect);
+                    let warn_tx = event_tx.clone();
+                    let warn_id = id.clone();
+                    checkpoint_turn(
+                        &mut durability,
+                        checkpoint_on,
+                        &label,
+                        &snapshot,
+                        &|message| {
+                            let _ = warn_tx.send(Event {
+                                id: warn_id.clone(),
+                                msg: EventMsg::Warning { message },
+                            });
+                        },
+                    );
                     let tx = event_tx.clone();
                     let sink = move |event: Event| {
                         let _ = tx.send(Event {
@@ -401,6 +510,7 @@ fn _outcome_docs(outcome: StopReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use state_checkpoint::{CheckpointPolicy, CheckpointStore};
     use state_store::CompactTrigger;
     use std::sync::Mutex;
     use tokio::sync::Notify;
@@ -802,5 +912,110 @@ mod tests {
         assert_eq!(ended.len(), 1);
         assert!(ended[0].iter().any(|line| line.contains("remember the sky")));
         assert!(ended[0].iter().any(|line| line.starts_with("user: ")));
+    }
+
+    fn durable_driver() -> FakeDriver {
+        FakeDriver {
+            inputs: Mutex::new(Vec::new()),
+            hold: false,
+            release: Arc::new(Notify::new()),
+            ended: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn spawn_durable(root: &std::path::Path) -> ActorClient {
+        SessionActor::spawn_with_durability(
+            durable_driver(),
+            Conversation::new(),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+            DurabilityConfig {
+                store: CheckpointStore::new(),
+                root: root.to_path_buf(),
+                policy: CheckpointPolicy::default(),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn startup_offers_resume_from_newest_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("checkpoints");
+        state_checkpoint::durable_save(&root, "turn-1", "a").unwrap();
+        state_checkpoint::durable_save(&root, "turn-2", "b").unwrap();
+        let mut client = spawn_durable(&root);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event.msg,
+            EventMsg::Warning { ref message }
+                if message.contains("turn-2") && message.contains("resume available")
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_entry_checkpoints_before_acting() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("checkpoints");
+        let mut client = spawn_durable(&root);
+        // Empty roots offer no resume, so the first event is the turn.
+        client.submit(user_input("s1", "hello")).await.unwrap();
+        while let Some(event) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.next_event(),
+        )
+        .await
+        .unwrap()
+        {
+            if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
+                break;
+            }
+        }
+        // The pre-turn snapshot was durable before the turn acted.
+        assert_eq!(
+            state_checkpoint::durable_load(&root, "turn-1")
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("never-created");
+        let mut client = SessionActor::spawn_with_durability(
+            durable_driver(),
+            Conversation::new(),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+            DurabilityConfig {
+                store: CheckpointStore::new(),
+                root: root.clone(),
+                policy: CheckpointPolicy::disabled(),
+            },
+        );
+        client.submit(user_input("s1", "hello")).await.unwrap();
+        while let Some(event) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.next_event(),
+        )
+        .await
+        .unwrap()
+        {
+            if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
+                break;
+            }
+        }
+        assert!(
+            !root.exists(),
+            "disabled policy performs zero IO, not even mkdir"
+        );
     }
 }

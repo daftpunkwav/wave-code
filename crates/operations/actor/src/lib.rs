@@ -20,6 +20,11 @@
 
 pub mod actor;
 pub mod client;
+pub mod durable;
 
 pub use actor::SessionActor;
 pub use client::{ActorClient, SubmitError};
+pub use durable::{
+    CheckpointSink, DurabilityConfig, persist_checkpoint, persist_then_act, render_snapshot,
+    resume_checkpoint, turn_label,
+};

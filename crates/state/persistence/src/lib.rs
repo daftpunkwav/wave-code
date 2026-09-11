@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Persist one record per turn as a single JSON line.
  * - Reload records in order, skipping corrupt lines explicitly.
+ * - Count skipped lines so strict callers can refuse partial loads.
  * - Serve the tail for quick resume previews.
  *
  * This module must not depend on: drivers, tools, or sessions. History
@@ -75,20 +76,35 @@ impl JsonlJournal {
     }
 
     /// Reload every parseable record in order.
+    ///
+    /// Corrupt lines skip silently here; use [`JsonlJournal::load_reported`]
+    /// to count them or [`JsonlJournal::load_all_checked`] to refuse them.
     pub fn load_all(&self) -> Result<Vec<TurnRecord>, JournalError> {
+        self.load_reported().map(|(records, _)| records)
+    }
+
+    /// Reload every parseable record, reporting skipped corrupt lines.
+    ///
+    /// The journal is a recovery path, so partial history still returns;
+    /// the count lets callers decide whether partial is acceptable.
+    pub fn load_reported(&self) -> Result<(Vec<TurnRecord>, usize), JournalError> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
             Err(e) => return Err(JournalError::Io(e)),
         };
         let mut records = Vec::new();
+        let mut skipped = 0;
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
             }
             let value: serde_json::Value = match serde_json::from_str(line) {
                 Ok(value) => value,
-                Err(_) => continue,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
             };
             records.push(TurnRecord {
                 run_id: value
@@ -127,6 +143,19 @@ impl JsonlJournal {
                     .unwrap_or_default()
                     .to_string(),
             });
+        }
+        Ok((records, skipped))
+    }
+
+    /// Reload, failing explicitly when any line was corrupt.
+    ///
+    /// Gives the [`JournalError::CorruptSkipped`] variant its job: resume
+    /// paths that must not silently continue from partial history use this
+    /// instead of [`JsonlJournal::load_all`].
+    pub fn load_all_checked(&self) -> Result<Vec<TurnRecord>, JournalError> {
+        let (records, skipped) = self.load_reported()?;
+        if skipped > 0 {
+            return Err(JournalError::CorruptSkipped(skipped));
         }
         Ok(records)
     }
@@ -178,5 +207,13 @@ mod tests {
         let all = journal.load_all().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].run_id, "r1");
+        // The skip is counted, and strict loads refuse partial history.
+        let (reported, skipped) = journal.load_reported().unwrap();
+        assert_eq!(reported.len(), 1);
+        assert_eq!(skipped, 1);
+        assert_eq!(
+            journal.load_all_checked().unwrap_err().to_string(),
+            "skipped 1 corrupt lines"
+        );
     }
 }

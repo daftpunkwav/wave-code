@@ -6,6 +6,7 @@
  * - Grant exclusive resource holds with expiries.
  * - Fence stale holders with monotonic tokens.
  * - Renew and release holds explicitly.
+ * - Expose live holds for inspection and dashboards.
  *
  * This module must not depend on: any other workspace crate. The store
  * is the single-process frontier: distributed backends implement the
@@ -98,6 +99,17 @@ impl LeaseStore {
             }
             _ => false,
         }
+    }
+
+    /// Inspect the live hold on a resource at `now_secs`, if any.
+    ///
+    /// Lapsed holds read as absent even before anyone re-acquires: leases
+    /// free on expiry, not on release, so dashboards must never show a
+    /// dead holder. Unknown resources also read as absent.
+    pub fn holder_at(&self, resource: &str, now_secs: u64) -> Option<&Lease> {
+        self.leases
+            .get(resource)
+            .filter(|lease| lease.expires_at > now_secs)
     }
 }
 
@@ -198,5 +210,16 @@ mod tests {
         assert!(second.fencing > first.fencing);
         // Expiry frees without release.
         assert!(store.acquire("gpu", "c", 10, 100).is_ok());
+    }
+
+    #[test]
+    fn inspection_hides_lapsed_holds() {
+        let mut store = LeaseStore::new();
+        assert_eq!(store.holder_at("gpu", 0), None);
+        let lease = store.acquire("gpu", "a", 10, 0).unwrap();
+        assert_eq!(store.holder_at("gpu", 5), Some(&lease));
+        // Lapsed at t=10 reads as absent even before re-acquire.
+        assert_eq!(store.holder_at("gpu", 10), None);
+        assert_eq!(store.holder_at("gpu", 100), None);
     }
 }

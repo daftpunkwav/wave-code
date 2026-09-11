@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Record every agent action with a monotonic sequence number.
  * - Attach observations to the steps that produced them.
+ * - Surface failed steps for evaluation and safety summaries.
  * - Render structural replays for debugging and evaluation.
  *
  * This module must not depend on: any other workspace crate.
@@ -103,6 +104,22 @@ impl Trajectory {
             .collect()
     }
 
+    /// Steps carrying at least one error observation, in record order.
+    ///
+    /// Evaluation and safety summaries consume this directly instead of
+    /// re-scanning observations per step; steps without observations, or
+    /// with success-only observations, never appear.
+    pub fn failed_steps(&self) -> Vec<&Step> {
+        self.steps
+            .iter()
+            .filter(|step| {
+                self.observations
+                    .iter()
+                    .any(|o| o.step_seq == step.seq && o.is_error)
+            })
+            .collect()
+    }
+
     /// Render a structural replay: one line per step with error marks.
     pub fn replay(&self) -> Vec<String> {
         self.steps
@@ -169,5 +186,24 @@ mod tests {
         assert!(replay[0].contains("[error]"));
         assert!(!replay[1].contains("[error]"));
         assert!(trajectory.observations_for(seq).len() == 1);
+    }
+
+    #[test]
+    fn failed_steps_lists_only_errored_in_order() {
+        let mut trajectory = Trajectory::new();
+        assert!(trajectory.failed_steps().is_empty());
+        let ok = trajectory.push_action(ActionKind::Note, "fine");
+        trajectory.push_observation(ok, "all good", false);
+        let bad = trajectory.push_action(
+            ActionKind::ToolCall {
+                name: "shell".to_string(),
+            },
+            "ls",
+        );
+        trajectory.push_observation(bad, "denied", true);
+        trajectory.push_action(ActionKind::Note, "unobserved");
+        let failed = trajectory.failed_steps();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].seq, bad);
     }
 }

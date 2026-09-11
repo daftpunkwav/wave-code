@@ -5,7 +5,7 @@
  * Responsibilities:
  * - Name task requests, handles, states, and outcomes.
  * - Define the spawn/query/stop seam drivers implement.
- * - Ship an immediate fake for tests and dry runs.
+ * - Ship fakes for tests: immediate completion and scripted lifecycles.
  *
  * This module must not depend on: runtime, state, or any execution
  * layer. Layer direction forbids action crates from naming runtime
@@ -129,6 +129,96 @@ impl TaskService for FakeTaskService {
     }
 }
 
+/// Scripted fake: tasks start Running and advance only when the test says.
+///
+/// The immediate fake above can never represent in-flight work, so no test
+/// can exercise Running-state handling or stop-before-finish flows. This
+/// fake fills that hole: `spawn` returns a Running task, and the test
+/// drives it to an outcome with `complete`, `fail`, or `stop`.
+#[derive(Debug, Default)]
+pub struct ScriptedTaskService {
+    tasks: std::sync::Mutex<std::collections::HashMap<String, TaskInfo>>,
+    next: std::sync::Mutex<u64>,
+}
+
+impl ScriptedTaskService {
+    /// Create an empty scripted service.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Finish one Running task with a summary; false for unknown ids.
+    pub fn complete(&self, id: &str, summary: impl Into<String>) -> bool {
+        self.finish(
+            id,
+            TaskOutcome::Completed {
+                summary: summary.into(),
+            },
+        )
+    }
+
+    /// Fail one Running task with a reason; false for unknown ids.
+    pub fn fail(&self, id: &str, reason: impl Into<String>) -> bool {
+        self.finish(
+            id,
+            TaskOutcome::Failed {
+                reason: reason.into(),
+            },
+        )
+    }
+
+    fn finish(&self, id: &str, outcome: TaskOutcome) -> bool {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        match tasks.get_mut(id) {
+            Some(info) if info.state == TaskState::Running => {
+                info.state = TaskState::Finished;
+                info.outcome = Some(outcome);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl TaskService for ScriptedTaskService {
+    fn spawn(&self, _request: TaskRequest) -> String {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        *next += 1;
+        let id = format!("task-{next}");
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                id.clone(),
+                TaskInfo {
+                    state: TaskState::Running,
+                    outcome: None,
+                },
+            );
+        id
+    }
+
+    fn query(&self, id: &str) -> Option<TaskInfo> {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    fn stop(&self, id: &str) -> bool {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        match tasks.get_mut(id) {
+            Some(info) if info.state == TaskState::Running => {
+                info.state = TaskState::Finished;
+                info.outcome = Some(TaskOutcome::Stopped);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +242,33 @@ mod tests {
         assert!(service.stop(&id));
         assert!(!service.stop("task-999"));
         assert!(service.query("task-999").is_none());
+    }
+
+    #[test]
+    fn scripted_drives_full_lifecycles() {
+        let service = ScriptedTaskService::new();
+        let running = service.spawn(request());
+        let info = service.query(&running).unwrap();
+        assert_eq!(info.state, TaskState::Running);
+        assert_eq!(info.outcome, None);
+        // Unknown ids advance nothing.
+        assert!(!service.complete("task-999", "x"));
+        assert!(!service.fail("task-999", "x"));
+        // Complete, fail, and stop each terminate exactly once.
+        assert!(service.complete(&running, "done"));
+        assert!(!service.complete(&running, "again"));
+        let second = service.spawn(request());
+        assert!(service.fail(&second, "boom"));
+        assert!(matches!(
+            service.query(&second).unwrap().outcome,
+            Some(TaskOutcome::Failed { .. })
+        ));
+        let third = service.spawn(request());
+        assert!(service.stop(&third));
+        assert!(!service.stop(&third));
+        assert_eq!(
+            service.query(&third).unwrap().outcome,
+            Some(TaskOutcome::Stopped)
+        );
     }
 }

@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Match tool names against exact and prefix patterns.
  * - Merge overlapping rules with Deny beating Ask beating Allow.
+ * - Attribute verdicts to the winning rules for audit and UX.
  * - Validate execution-wide ceilings before a session starts.
  *
  * This module must not depend on: any other workspace crate. Verdict
@@ -72,6 +73,17 @@ impl ToolPolicy {
             });
         }
         effect.unwrap_or(Effect::Ask)
+    }
+
+    /// Evaluate one tool and name the rules behind the verdict.
+    ///
+    /// Returns the same effect as [`ToolPolicy::evaluate`] plus every
+    /// matching rule in configuration order, so audit trails and denial
+    /// messages can cite the exact rules instead of a bare verdict.
+    /// Unmatched tools report the default Ask with an empty rule list.
+    pub fn explain(&self, tool: &str) -> (Effect, Vec<&Rule>) {
+        let matched: Vec<&Rule> = self.rules.iter().filter(|r| r.matches(tool)).collect();
+        (self.evaluate(tool), matched)
     }
 }
 
@@ -153,6 +165,22 @@ mod tests {
         assert_eq!(policy.evaluate("mcp__playwright__click"), Effect::Ask);
         assert_eq!(policy.evaluate("read_file"), Effect::Allow);
         assert_eq!(policy.evaluate("brand_new_tool"), Effect::Ask);
+    }
+
+    #[test]
+    fn explain_cites_winning_rules_in_order() {
+        let policy = policy();
+        let (effect, rules) = policy.explain("shell");
+        assert_eq!(effect, Effect::Deny);
+        assert_eq!(rules.len(), 2);
+        assert!(rules.iter().all(|r| r.pattern == "shell"));
+        // Verdicts always agree with evaluate.
+        let (effect, rules) = policy.explain("mcp__x__y");
+        assert_eq!(effect, policy.evaluate("mcp__x__y"));
+        assert_eq!(rules.len(), 1);
+        let (effect, rules) = policy.explain("brand_new_tool");
+        assert_eq!(effect, Effect::Ask);
+        assert!(rules.is_empty());
     }
 
     #[test]

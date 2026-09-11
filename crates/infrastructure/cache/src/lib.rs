@@ -6,6 +6,7 @@
  * - Serve fresh entries and report misses explicitly.
  * - Expire entries past their deadline on access.
  * - Evict least-recently-used entries when full.
+ * - Drop single entries on demand for proactive invalidation.
  *
  * This module must not depend on: any other workspace crate. Time
  * enters as caller timestamps, keeping every policy deterministic.
@@ -69,6 +70,19 @@ impl<V> TtlLruCache<V> {
         self.entries.insert(key, (value, now_secs));
     }
 
+    /// Drop one entry regardless of freshness; true when anything was held.
+    ///
+    /// Proactive invalidation for callers that know an entry went stale
+    /// (reloaded configuration, rotated credentials) and cannot wait out
+    /// the TTL. Unknown keys are silent no-ops.
+    pub fn remove(&mut self, key: &str) -> bool {
+        if self.entries.remove(key).is_none() {
+            return false;
+        }
+        self.order.retain(|k| k != key);
+        true
+    }
+
     /// Live entries after expiring everything past `now_secs`.
     pub fn len(&mut self, now_secs: u64) -> usize {
         let expired: Vec<String> = self
@@ -111,5 +125,17 @@ mod tests {
         cache.put("a", 2, 10);
         assert_eq!(cache.get("a", 10), Some(&2));
         assert_eq!(cache.len(10), 1);
+    }
+
+    #[test]
+    fn removal_invalidates_before_ttl() {
+        let mut cache = TtlLruCache::new(2, 100);
+        cache.put("a", 1, 0);
+        assert!(cache.remove("a"));
+        // Double removal and unknown keys remove nothing.
+        assert!(!cache.remove("a"));
+        assert!(!cache.remove("ghost"));
+        assert_eq!(cache.get("a", 10), None);
+        assert_eq!(cache.len(10), 0);
     }
 }

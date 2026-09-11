@@ -83,11 +83,30 @@ fn score_chunk(query_terms: &[String], chunk: &str) -> usize {
 /// Retrieve the top `top_k` chunks across documents by term overlap.
 ///
 /// Empty queries match nothing; ties keep document then chunk order.
+///
+/// Chunking uses a 400-character window with 50 characters of overlap:
+/// callers with different corpora (code, prose, logs) tune through
+/// [`retrieve_with`] instead.
 pub fn retrieve(documents: &[Document], query: &str, top_k: usize) -> Vec<ScoredChunk> {
+    retrieve_with(documents, query, top_k, 400, 50)
+}
+
+/// Retrieve with explicit chunking geometry.
+///
+/// Wider windows favor recall on long-form prose; narrower windows favor
+/// precision on code and logs. Overlaps at or above `window` degrade to a
+/// one-character step inside [`chunk_text`], never to a stall.
+pub fn retrieve_with(
+    documents: &[Document],
+    query: &str,
+    top_k: usize,
+    window: usize,
+    overlap: usize,
+) -> Vec<ScoredChunk> {
     let query_terms = terms(query);
     let mut scored = Vec::new();
     for (doc_index, doc) in documents.iter().enumerate() {
-        for (chunk_index, chunk) in chunk_text(&doc.text, 400, 50).iter().enumerate() {
+        for (chunk_index, chunk) in chunk_text(&doc.text, window, overlap).iter().enumerate() {
             let score = score_chunk(&query_terms, chunk);
             if score > 0 {
                 scored.push((
@@ -157,5 +176,23 @@ mod tests {
         let chunks = chunk_text("abcdefghij", 4, 2);
         assert_eq!(chunks, vec!["abcd", "cdef", "efgh", "ghij"]);
         assert!(chunk_text("", 4, 2).is_empty());
+    }
+
+    #[test]
+    fn narrow_windows_split_matches_for_precision() {
+        let docs = [Document {
+            id: "a".to_string(),
+            text: "alpha beta gamma delta epsilon zeta eta theta".to_string(),
+        }];
+        // A narrow window keeps only the neighbourhood of "zeta".
+        let narrow = retrieve_with(&docs, "zeta", 5, 12, 2);
+        assert!(!narrow.is_empty());
+        assert!(narrow.iter().all(|hit| hit.chunk.contains("zeta")));
+        assert!(narrow.iter().all(|hit| hit.chunk.chars().count() <= 12));
+        // The default geometry matches an explicit 400/50 call.
+        assert_eq!(
+            retrieve(&docs, "zeta", 5),
+            retrieve_with(&docs, "zeta", 5, 400, 50)
+        );
     }
 }

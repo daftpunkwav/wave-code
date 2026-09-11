@@ -25,6 +25,9 @@ pub struct Metrics {
     pub turns_started: u64,
     /// TurnCompleted events seen.
     pub turns_completed: u64,
+    /// TurnCompleted events with `interrupted` set: cancellation storms
+    /// surface here while `turns_completed` keeps the total.
+    pub turns_interrupted: u64,
     /// ToolCallBegin events seen.
     pub tool_calls: u64,
     /// ToolCallEnd events with `is_error`.
@@ -53,7 +56,12 @@ impl Metrics {
     pub fn record(&mut self, event: &Event) {
         match &event.msg {
             EventMsg::TurnStarted => self.turns_started += 1,
-            EventMsg::TurnCompleted { .. } => self.turns_completed += 1,
+            EventMsg::TurnCompleted { interrupted } => {
+                self.turns_completed += 1;
+                if *interrupted {
+                    self.turns_interrupted += 1;
+                }
+            }
             EventMsg::ToolCallBegin { .. } => self.tool_calls += 1,
             EventMsg::ToolCallEnd { is_error, .. } => {
                 if *is_error {
@@ -163,6 +171,7 @@ mod tests {
         }
         assert_eq!(metrics.turns_started, 1);
         assert_eq!(metrics.turns_completed, 1);
+        assert_eq!(metrics.turns_interrupted, 0);
         assert_eq!(metrics.tool_calls, 1);
         assert_eq!(metrics.tool_errors, 1);
         assert_eq!(metrics.approvals_requested, 1);
@@ -177,6 +186,15 @@ mod tests {
     #[test]
     fn error_rate_is_none_without_calls() {
         assert_eq!(Metrics::new().tool_error_rate(), None);
+    }
+
+    #[test]
+    fn interrupted_completions_count_separately() {
+        let mut metrics = Metrics::new();
+        metrics.record(&event(EventMsg::TurnCompleted { interrupted: false }));
+        metrics.record(&event(EventMsg::TurnCompleted { interrupted: true }));
+        assert_eq!(metrics.turns_completed, 2);
+        assert_eq!(metrics.turns_interrupted, 1);
     }
 
     #[test]

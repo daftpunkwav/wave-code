@@ -69,6 +69,32 @@ enum Command {
         /// Legacy thread id (`resume` without id lists threads).
         thread_id: Option<String>,
     },
+    /// Expose harness tools over MCP stdio.
+    Mcp {
+        /// MCP surface to run.
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+    /// Inspect installed plugin packs.
+    Plugin {
+        /// Plugin surface to run.
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+}
+
+/// MCP surfaces on the new stack.
+#[derive(Debug, Parser)]
+enum McpCommand {
+    /// Serve the builtin tools over stdio as an MCP server.
+    Serve,
+}
+
+/// Plugin surfaces on the new stack.
+#[derive(Debug, Parser)]
+enum PluginCommand {
+    /// List installed plugins with skill/MCP/hook counts.
+    List,
 }
 
 /// Terminal outcome driving the process exit code.
@@ -213,6 +239,27 @@ async fn main() -> anyhow::Result<()> {
         .await?;
         std::process::exit(Outcome::Completed.exit_code())
     }
+    // Credential-free surfaces return before assembly: `mcp serve` and
+    // `plugin list` expose local tools and metadata, so they must work
+    // with no provider configured.
+    if matches!(
+        args.command,
+        Some(Command::Mcp {
+            command: McpCommand::Serve
+        })
+    ) {
+        run_mcp_serve(cwd).await?;
+        std::process::exit(Outcome::Completed.exit_code())
+    }
+    if matches!(
+        args.command,
+        Some(Command::Plugin {
+            command: PluginCommand::List
+        })
+    ) {
+        run_plugin_list(home);
+        std::process::exit(Outcome::Completed.exit_code())
+    }
     // Only headless exec denies approvals openly: the REPL parks them on
     // the gate and answers inline, which needs parking enabled here.
     let headless = matches!(args.command, Some(Command::Exec { .. }));
@@ -250,6 +297,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Resume { thread_id }) => {
             run_resume(thread_id, args.permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
+        }
+        // Mcp/Plugin return before assembly above.
+        Some(Command::Mcp { .. }) | Some(Command::Plugin { .. }) => {
+            unreachable!("credential-free surfaces return before assembly")
         }
         None => unreachable!("bare invocation returns above"),
     }
@@ -307,6 +358,45 @@ fn tui_permission_mode(wire: &str) -> wavecode_tui::PermissionMode {
         "acceptEdits" => wavecode_tui::PermissionMode::AcceptEdits,
         "bypassPermissions" => wavecode_tui::PermissionMode::BypassPermissions,
         _ => wavecode_tui::PermissionMode::Default,
+    }
+}
+
+/// Serve the builtin tool registry over MCP stdio until EOF.
+///
+/// Needs no model credentials: it exposes local tools, so it returns
+/// before session assembly.
+async fn run_mcp_serve(cwd: PathBuf) -> anyhow::Result<()> {
+    let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
+    operations_bootstrap::mcp_serve::run_stdio_server(
+        std::sync::Arc::new(registry),
+        wavecode_tools::ToolCtx {
+            cwd,
+            deny_env: Vec::new(),
+        },
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("mcp server failed: {e}"))
+}
+
+/// List installed plugin packs with skill/MCP/hook counts.
+fn run_plugin_list(home: Option<PathBuf>) {
+    let loader = wavecode_skills::plugin::PluginLoader::load(home.as_deref());
+    for warning in loader.warnings() {
+        eprintln!("[warn] {warning}");
+    }
+    if loader.plugins().is_empty() {
+        println!("(no plugins installed)");
+        return;
+    }
+    for plugin in loader.plugins() {
+        println!(
+            "{} {} (skills: {}, mcp servers: {}, hooks: {})",
+            plugin.name,
+            plugin.version,
+            plugin.skill_count(),
+            plugin.mcp_count(),
+            plugin.hook_count()
+        );
     }
 }
 
@@ -832,10 +922,33 @@ mod tests {
                 "operations-wire",
                 "state-persistence",
                 "wavecode-config",
+                "wavecode-skills",
+                "wavecode-tools",
                 "wavecode-tui",
             ],
             "harness internal deps changed; update the matrix deliberately",
         );
+    }
+
+    #[test]
+    fn cli_routes_mcp_serve_and_plugin_list() {
+        let args = Args::try_parse_from(["wavecode", "mcp", "serve"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Mcp {
+                command: McpCommand::Serve
+            })
+        ));
+        let args = Args::try_parse_from(["wavecode", "plugin", "list"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Plugin {
+                command: PluginCommand::List
+            })
+        ));
+        // Existing surfaces keep parsing.
+        let args = Args::try_parse_from(["wavecode", "repl"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Repl)));
     }
 
     #[test]

@@ -14,6 +14,30 @@
 //! OS-level sandboxing (Linux landlock / macOS seatbelt / Windows ACL) is
 //! orthogonal to permission modes (mechanism separated from policy) and waits
 //! for a later milestone, see docs/project/SPEC.md section 17.
+//!
+//! ## Threat model: what this crate enforces (and what it does not)
+//!
+//! Enforced here or at the wired seams:
+//! - Policy verdicts: [`Sandbox::decide`] maps every tool call to
+//!   [`Verdict::Allow`] / [`Verdict::Ask`] / [`Verdict::Deny`] from the
+//!   permission mode plus allow/deny rules; denials return before execution.
+//! - Path confinement: file tools resolve through the tools-crate path
+//!   guard, so relative paths cannot escape the session working directory.
+//! - Secret scrubbing: the shell tool strips `deny_env` names (the assembled
+//!   provider key) plus sensitive-shape environment variables before spawn.
+//! - Human approvals: `Ask` verdicts park on the approval gate and execute
+//!   only on an explicit grant; headless sessions deny openly.
+//!
+//! Explicitly NOT provided: no OS isolation (Linux namespaces/seccomp,
+//! macOS seatbelt, Windows Job Objects), no containers or VMs, no syscall
+//! filtering. A spawned process runs with the user's own OS privileges, so
+//! a command that policy allows runs unconstrained by anything in this
+//! crate. Treat this crate as a policy gate, never as a containment boundary.
+//!
+//! Future seam: OS enforcement plugs in behind verdict execution without
+//! changing policy — the composition-root policy adapter consumes
+//! [`Verdict`] today, and a backend would enforce the same verdicts with
+//! OS primitives while [`Sandbox::decide`] keeps ruling on intent.
 
 use std::sync::{Arc, Mutex};
 

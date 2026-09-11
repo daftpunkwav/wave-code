@@ -11,6 +11,8 @@ serde.workspace = true
 # (SPEC section 3 discipline).
 serde_yaml.workspace = true
 thiserror.workspace = true
+# plugin.toml manifests (plugin packs); version unified at the workspace root.
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

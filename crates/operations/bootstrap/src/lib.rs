@@ -24,6 +24,7 @@ pub mod composite;
 pub mod gate_adapter;
 pub mod hook_adapter;
 pub mod mcp_bridge;
+pub mod mcp_serve;
 pub mod memory_finish;
 pub mod memory_tool;
 pub mod model_adapter;

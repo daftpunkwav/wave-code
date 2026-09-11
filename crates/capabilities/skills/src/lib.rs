@@ -31,6 +31,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod plugin;
+
 /// The `$ARGUMENTS` placeholder (replaced with the call arguments on inline
 /// expansion).
 const ARGUMENTS_PLACEHOLDER: &str = "$ARGUMENTS";

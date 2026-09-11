@@ -13,13 +13,13 @@
  * the legacy CLI.
  */
 
-//! Headless `harness exec`: one prompt in, streamed answer out.
+//! Headless `wavecode exec`: one prompt in, streamed answer out.
 //!
 //! Approvals deny openly (nothing can answer), interrupts arrive via
 //! Ctrl-C, and every event lands either on stdout (answer text) or
 //! stderr (progress, usage, diagnostics).
 
-use std::io::Write as _;
+use std::io::{IsTerminal as _, Write as _};
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -29,7 +29,7 @@ use operations_wire::{EventMsg, Op, Submission};
 
 /// Single-turn headless execution and interactive REPL over the new stack.
 #[derive(Debug, Parser)]
-#[command(name = "harness", version)]
+#[command(name = "wavecode", version)]
 struct Args {
     /// Config file path; defaults to the user-level config.
     #[arg(long, global = true)]
@@ -39,9 +39,10 @@ struct Args {
     #[arg(long, global = true)]
     model: Option<String>,
 
-    /// Subcommand selecting the frontend surface.
+    /// Subcommand selecting the frontend surface; empty runs the TUI on a
+    /// TTY and the REPL otherwise.
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 /// Frontend surfaces on the new stack.
@@ -177,9 +178,36 @@ async fn main() -> anyhow::Result<()> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from);
+    // Bare invocation: fullscreen TUI on a TTY, line REPL otherwise.
+    if args.command.is_none() {
+        if std::io::stdout().is_terminal() {
+            run_tui_new(args.config, args.model, cwd, home).await?;
+            std::process::exit(Outcome::Completed.exit_code())
+        }
+        let mut handle = assemble_session(AssembleOptions {
+            config_path: args.config,
+            model_override: args.model,
+            cwd,
+            home: home.clone(),
+            identity: DEFAULT_IDENTITY.to_string(),
+            headless: false,
+            initial_history: Vec::new(),
+        })
+        .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
+        for warning in &handle.warnings {
+            eprintln!("[warn] {warning}");
+        }
+        run_repl(
+            &mut handle.client,
+            &handle.memory_index,
+            &handle.mcp_servers,
+        )
+        .await?;
+        std::process::exit(Outcome::Completed.exit_code())
+    }
     // Only headless exec denies approvals openly: the REPL parks them on
     // the gate and answers inline, which needs parking enabled here.
-    let headless = matches!(args.command, Command::Exec { .. });
+    let headless = matches!(args.command, Some(Command::Exec { .. }));
     let mut handle = assemble_session(AssembleOptions {
         config_path: args.config,
         model_override: args.model,
@@ -195,11 +223,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match args.command {
-        Command::Exec { prompt, json } => {
+        Some(Command::Exec { prompt, json }) => {
             let outcome = run_exec(&mut handle.client, &prompt, json).await?;
             std::process::exit(outcome.exit_code())
         }
-        Command::Repl => {
+        Some(Command::Repl) => {
             run_repl(
                 &mut handle.client,
                 &handle.memory_index,
@@ -208,10 +236,88 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        Command::Resume { thread_id } => {
+        Some(Command::Resume { thread_id }) => {
             run_resume(thread_id, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
+        None => unreachable!("bare invocation returns above"),
+    }
+}
+
+/// Fullscreen TUI over a live harness session.
+///
+/// Interactive approval parking works here (headless stays false);
+/// config failures keep the exit-code-2-with-guidance contract.
+async fn run_tui_new(
+    config: Option<PathBuf>,
+    model: Option<String>,
+    cwd: PathBuf,
+    home: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let handle = match assemble_session(AssembleOptions {
+        config_path: config,
+        model_override: model,
+        cwd: cwd.clone(),
+        home,
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: false,
+        initial_history: Vec::new(),
+    }) {
+        Ok(handle) => handle,
+        Err(operations_bootstrap::SessionError::Config(e)) => {
+            print_config_error(&e);
+            std::process::exit(2)
+        }
+    };
+    for warning in &handle.warnings {
+        eprintln!("[warn] {warning}");
+    }
+    let ctx = wavecode_tui::TuiContext {
+        model_name: handle.model_name,
+        cwd,
+        permission_mode: tui_permission_mode(&handle.permission_mode),
+        skill_names: handle.skill_names,
+        mcp_server_lines: handle.mcp_servers,
+        memory_index: handle.memory_index,
+    };
+    wavecode_tui::run(handle.client, ctx).await
+}
+
+/// Map an assembled permission-mode wire name onto the TUI enum.
+///
+/// Unknown names fall back to Default so the TUI never shows a mode the
+/// policy rejected.
+fn tui_permission_mode(wire: &str) -> wavecode_tui::PermissionMode {
+    match wire {
+        "plan" => wavecode_tui::PermissionMode::Plan,
+        "acceptEdits" => wavecode_tui::PermissionMode::AcceptEdits,
+        "bypassPermissions" => wavecode_tui::PermissionMode::BypassPermissions,
+        _ => wavecode_tui::PermissionMode::Default,
+    }
+}
+
+/// Print a config error with creation guidance on missing files.
+fn print_config_error(err: &wavecode_config::ConfigError) {
+    eprintln!("错误：{err}");
+    if let wavecode_config::ConfigError::NotFound(path) = err {
+        eprintln!(
+            r#"
+请创建配置文件 {}，内容示例：
+
+model = "claude-sonnet-4-5"
+model_provider = "anthropic"
+
+[model_providers.anthropic]
+type = "anthropic"
+base_url = "https://api.anthropic.com"
+# api key 二选一（env_key 优先）：
+# 方式一（推荐）：env_key 指向环境变量名，运行时从该变量读取 key
+env_key = "ANTHROPIC_API_KEY"
+# 方式二：内联 api_key（注意保密，勿提交版本库）
+# api_key = "sk-ant-..."
+"#,
+            path.display()
+        );
     }
 }
 
@@ -246,7 +352,7 @@ async fn run_resume(thread_id: Option<String>, home: Option<PathBuf>) -> anyhow:
                 thread.thread_id, thread.message_count, thread.compaction_count, preview
             );
         }
-        println!("\nresume with: `harness resume <thread-id>`");
+        println!("\nresume with: `wavecode resume <thread-id>`");
         return Ok(());
     };
     let history = load_history(&root, &id)?;
@@ -458,7 +564,7 @@ async fn run_repl(
     let mut editor = rustyline::DefaultEditor::new()?;
     let mut turn: u64 = 0;
     let mut permission_mode = "default";
-    println!("harness repl (permission: {permission_mode}): {REPL_HELP}");
+    println!("wavecode repl (permission: {permission_mode}): {REPL_HELP}");
     loop {
         let line = match editor.readline("> ") {
             Ok(line) => line,
@@ -815,6 +921,22 @@ mod tests {
             approval_what(&operations_wire::ApprovalKind::Write),
             "modify files"
         );
+    }
+
+    #[test]
+    fn tui_permission_modes_follow_wire_names() {
+        use wavecode_tui::PermissionMode;
+        assert_eq!(tui_permission_mode("plan"), PermissionMode::Plan);
+        assert_eq!(
+            tui_permission_mode("acceptEdits"),
+            PermissionMode::AcceptEdits
+        );
+        assert_eq!(
+            tui_permission_mode("bypassPermissions"),
+            PermissionMode::BypassPermissions
+        );
+        assert_eq!(tui_permission_mode("default"), PermissionMode::Default);
+        assert_eq!(tui_permission_mode("typo"), PermissionMode::Default);
     }
 }
 

@@ -13,6 +13,8 @@ operations-actor = { path = "../../operations/actor" }
 operations-bootstrap = { path = "../../operations/bootstrap" }
 operations-wire = { path = "../../operations/wire" }
 state-persistence = { path = "../../state/persistence" }
+wavecode-config = { path = "../../foundation/config" }
+wavecode-tui = { path = "../tui" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

@@ -1,20 +1,99 @@
 # WaveCode
 
-多平台 AI coding agent：CLI / TUI / Web / Desktop 四端共用单一 Rust agent 核心，经统一 JSON-RPC 协议（app-server）接入。
+Headless-first AI coding agent in Rust: one `wavecode` binary serves single-turn
+execution, an interactive REPL, a fullscreen TUI, and legacy session resume over
+a shared agent core (multi-turn ReAct loop, tools, skills, memory, MCP).
 
-> 🚧 开发中，尚未发布稳定版本。
+> 🚧 Under active development; no stable release yet.
 
-## 构建与使用
+## Quick start
 
 ```bash
-cargo build -p wavecode-cli
+cargo build --bin wavecode
 
-wavecode exec "<prompt>"   # 单 turn 执行
-wavecode                   # 交互模式
+wavecode exec "fix the failing test"   # single turn, exit code follows outcome
+wavecode exec --json "summarize"       # JSONL events on stdout
+wavecode repl                          # interactive multi-turn session
+wavecode resume                        # list previous sessions / resume one
+wavecode                               # fullscreen TUI on a TTY, REPL otherwise
 ```
 
-首次使用需创建 `~/.wavecode/config.toml`（无配置启动时会打印创建指引与模板）。
+On first run without configuration, WaveCode prints a creation guide with a
+config template. Create `~/.wavecode/config.toml`:
+
+```toml
+model = "your-model"
+model_provider = "your-provider"
+
+[model_providers.your-provider]
+type = "anthropic"
+base_url = "https://api.example.com/anthropic"
+env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api_key)
+```
+
+## Surfaces
+
+- `exec`: one prompt, one turn. Streams the answer to stdout; tool activity,
+  approvals, and usage go to stderr. `--json` swaps to JSONL events on stdout
+  with human rendering on stderr. Ctrl-C interrupts the turn (exit 130).
+- `repl`: multi-turn session over one conversation. Slash commands: `/compact`
+  (compress context now), `/memory` (show memory index), `/mcp` (list
+  servers), `/permissions` (cycle approval mode), `/quit` (end session),
+  `/help`. `/skill-name args` invokes a user-invocable skill by name.
+- TUI: same session behind a fullscreen interface, including inline approval
+  prompts and `/mcp` status rows.
+- `resume`: `wavecode resume` lists recent legacy sessions newest-first;
+  `wavecode resume <thread-id>` imports its history as text and continues
+  interactively. Tool calls import as `[tool:name]` / `[error:...]` markers
+  (text import is the documented scope; replay never re-executes).
+
+## Permissions
+
+Four modes: `default` (approve writes/executions), `plan` (read-only),
+`acceptEdits` (file edits auto-approved), `bypassPermissions` (all approved,
+deny rules still apply). Sources in precedence order:
+
+1. `--permission-mode <mode>` CLI flag (global, wins over config),
+2. `permission_mode` in config,
+3. built-in `default`.
+
+Unknown values warn and fall back to `default`. `/permissions` in REPL/TUI
+cycles the mode for the running session.
+
+## Skills, memory, MCP
+
+- Skills: Markdown files with frontmatter discovered from home and project
+  directories. Inline skills expand into the turn; fork skills run as
+  background child tasks honoring their `allowed-tools` surface, with
+  completion re-injected as notifications. `task_output` / `task_stop` let the
+  model poll and stop them.
+- Memory: per-turn transcript distillation appends `[category]` entries to a
+  home-scoped store; the next session reads them back as its index.
+- MCP: stdio servers configured under `[mcp_servers.<name>]` (`command` plus
+  optional `args`/`env`) connect at startup with `initialize` + `tools/list`
+  and bridge each tool as `mcp__<server>__<tool>` (honoring
+  `annotations.readOnlyHint`). Unreachable servers degrade to warnings, never
+  failed startups. HTTP servers report `unavailable (http transport not
+  implemented)`; prompts-to-skills conversion is future work.
+
+## Develop
+
+```bash
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --check
+```
+
+Layout: `crates/foundation` (config, llm, protocol), `crates/capabilities`
+(tools, skills, memory, mcp, ...), `crates/runtime` (run loop, child turns),
+`crates/state` (conversation, persistence, trajectory), `crates/safety`
+(policy, approvals), `crates/operations` (actor, bootstrap composition root,
+replay), `crates/transport` (MCP stdio framing), `crates/frontends`
+(`wavecode` binary, TUI). `apps/` holds thin Web/Desktop/SDK shells.
+
+Commits follow Conventional Commits (`feat:`/`fix:`/`docs:`/`refactor:`/...,
+imperative subject, one change per commit).
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+MIT, see [LICENSE](LICENSE).

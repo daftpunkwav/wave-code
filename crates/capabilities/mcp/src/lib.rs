@@ -1,23 +1,22 @@
 //! wavecode-mcp — two-way Model Context Protocol support (P9 interface boundary).
 //!
-//! - Client: stdio and streamable-http (incl. OAuth) transports, with external
-//!   tools injected into the tool registry under the `mcp__{server}__{tool}`
+//! - Client: stdio and streamable-http transports, with external tools
+//!   injected into the tool registry under the `mcp__{server}__{tool}`
 //!   namespace;
 //! - Server: exposes WaveCode's own capabilities as an MCP server for other
 //!   agents / IDEs to call.
 //!
-//! **P9 scope (honest disclosure)**: this crate only defines the interface
-//! boundary — the [`McpClient`] / [`McpServerHandler`] traits, the tool and
-//! prompt data types, the naming convention, and the [`McpServerConfig`]
-//! config type. **No real transports**: stdio / streamable-http connections
-//! land in a later iteration (then aligned with the official rmcp crate's
-//! capability surface; this trait surface is designed against the MCP
-//! protocol's `tools/list`, `tools/call`, and `prompts/list` methods to avoid
-//! rework at integration time, while the remaining protocol surface —
-//! resources, notifications, etc. — extends on demand). Bridging MCP tools
-//! into wavecode `Tool`s and config-parsing orchestration live on the core
-//! side (the core->mcp edge is allowed by the SPEC section 3 matrix; mcp
-//! itself has no workspace-internal dependencies).
+//! **Scope (honest disclosure)**: this crate defines the interface boundary —
+//! the [`McpClient`] / [`McpServerHandler`] traits, the data types, and the
+//! naming convention / [`McpServerConfig`] config type. The real transports
+//! (stdio child process, streamable-http with session handling) and the
+//! bridge that injects MCP tools into the registry live on the composition
+//! side (`bootstrap::mcp_bridge`; the core->mcp edge is allowed by the SPEC
+//! section 3 matrix; mcp itself has no workspace-internal dependencies).
+//! The client trait surface covers `tools/list`, `tools/call`,
+//! `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`;
+//! interactive browser/PKCE OAuth stays out (static headers or the
+//! client-credentials grant only).
 
 use std::collections::HashMap;
 
@@ -139,6 +138,47 @@ pub struct McpPromptDef {
     pub arguments: Vec<McpPromptArgument>,
 }
 
+/// A resource exposed by an MCP server (mirrors a protocol `resources/list`
+/// result item).
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpResourceDef {
+    /// Resource URI (the `resources/read` key, e.g. `file:///logs/app.log`).
+    pub uri: String,
+    /// Human-readable name (defaults to the URI when the server omits it).
+    pub name: String,
+    /// Description (optional).
+    pub description: Option<String>,
+    /// MIME type (optional).
+    pub mime_type: Option<String>,
+}
+
+/// One `contents` entry of a protocol `resources/read` result.
+///
+/// First version is text-only: a `blob` (base64) entry surfaces as an
+/// omission note at the bridge layer, matching the non-text content-block
+/// handling of tool outputs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpResourceContent {
+    /// URI of the resource this content belongs to.
+    pub uri: String,
+    /// MIME type (optional).
+    pub mime_type: Option<String>,
+    /// Text payload; binary (`blob`) entries carry an omission note instead.
+    pub text: String,
+}
+
+/// One message of a protocol `prompts/get` result.
+///
+/// First version is text-only: a non-text content block surfaces as an
+/// omission note at the bridge layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct McpPromptMessage {
+    /// Message role (`user` or `assistant`).
+    pub role: String,
+    /// Text payload of the message content.
+    pub text: String,
+}
+
 /// MCP client errors.
 ///
 /// Only transport / protocol-level failures travel as `Err`; tool business
@@ -160,15 +200,15 @@ pub enum McpError {
 /// MCP client: the session surface to one external MCP server.
 ///
 /// Methods mirror the protocol capability surface (`tools/list` /
-/// `tools/call` / `prompts/list`); object-safe + Send + Sync, held by the
-/// bridge layer as `Arc<dyn McpClient>`.
+/// `tools/call` / `resources/*` / `prompts/*`); object-safe + Send + Sync,
+/// held by the bridge layer as `Arc<dyn McpClient>`.
 ///
-/// **Implementation status**: the stdio implementation is the assembly-side
-/// `StdioMcpClient` (child process + `transport-mcp` framing);
-/// streamable-http remains a later iteration. P9's verification surface is a
-/// mock (see the assembly-side `McpToolBridge` tests). Exponential-backoff
-/// reconnects on connection failure (SPEC section 10) are a transport
-/// implementation detail and stay out of the trait surface.
+/// **Implementation status**: real stdio and streamable-http implementations
+/// live at the composition side (`bootstrap::mcp_bridge`, `StdioMcpClient` /
+/// `HttpMcpClient`); streamable-http re-initializes once when the server
+/// expires a session (404). Exponential-backoff reconnects on connection
+/// failure (SPEC section 10) are a transport implementation detail and stay
+/// out of the trait surface.
 #[async_trait::async_trait]
 pub trait McpClient: Send + Sync {
     /// List every tool the server exposes (`tools/list`).
@@ -180,6 +220,28 @@ pub trait McpClient: Send + Sync {
     /// capability: the default impl returns an empty list when the server
     /// does not support prompts.
     async fn list_prompts(&self) -> Result<Vec<McpPromptDef>, McpError> {
+        Ok(vec![])
+    }
+    /// Render one prompt (`prompts/get`; `arguments` maps prompt argument
+    /// names to their string values). Optional capability: the default impl
+    /// returns no messages when the server does not support prompts.
+    async fn get_prompt(
+        &self,
+        _name: &str,
+        _arguments: HashMap<String, String>,
+    ) -> Result<Vec<McpPromptMessage>, McpError> {
+        Ok(vec![])
+    }
+    /// List the resources the server exposes (`resources/list`). Optional
+    /// capability: the default impl returns an empty list when the server
+    /// does not support resources.
+    async fn list_resources(&self) -> Result<Vec<McpResourceDef>, McpError> {
+        Ok(vec![])
+    }
+    /// Read one resource by URI (`resources/read`). Optional capability:
+    /// the default impl returns no contents when the server does not
+    /// support resources.
+    async fn read_resource(&self, _uri: &str) -> Result<Vec<McpResourceContent>, McpError> {
         Ok(vec![])
     }
 }

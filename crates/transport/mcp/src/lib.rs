@@ -121,6 +121,11 @@ pub enum TransportError {
     /// server-returned JSON-RPC error, unsupported interactive auth, ...).
     #[error("MCP protocol error: {0}")]
     Protocol(String),
+    /// The streamable-HTTP server answered 404 for the established session
+    /// (expired or terminated server-side): the session id was dropped and
+    /// the caller re-initializes, then retries the request once.
+    #[error("MCP session expired (server returned 404); re-initialize")]
+    SessionExpired,
 }
 
 /// Child-process MCP transport over stdio pipes.

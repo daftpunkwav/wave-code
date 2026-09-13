@@ -1,29 +1,39 @@
 /*!
  * @file McpBridge
- * @description Real stdio MCP client plus registry bridge tools.
+ * @description Real stdio/streamable-HTTP MCP clients plus registry bridge tools.
  *
  * Responsibilities:
- * - Speak MCP over child-process stdio (initialize handshake,
- *   tools/list with pagination, tools/call).
+ * - Speak MCP over child-process stdio and over streamable HTTP
+ *   (initialize handshake, capability detection, paged listings, calls).
  * - Bridge each listed tool as a `mcp__{server}__{tool}` registry tool.
+ * - Bridge capability-gated discovery tools: `mcp__{server}__read_resource`
+ *   and `mcp__{server}__get_prompt` when the server advertises the
+ *   resources / prompts capabilities (the server's catalog is embedded in
+ *   the tool description).
+ * - Re-initialize once when a streamable-HTTP server expires the session
+ *   (404), then retry the original request.
  * - Connect configured servers with warn-and-continue degradation:
  *   an unreachable server skips its tools, never fails startup.
  *
  * This module must not depend on: drivers, actors, or sessions. Servers
- * are plain child processes; the registry only sees bridge tools.
+ * are plain child processes or HTTP endpoints; the registry only sees
+ * bridge tools.
  */
 
-//! MCP stdio client and registry bridging.
+//! MCP clients (stdio + streamable HTTP) and registry bridging.
 //!
-//! Only stdio servers connect for now; HTTP servers report their status
-//! honestly instead of pretending. Interleaved server messages without a
+//! Both transports connect for real: handshake, capability-gated listings,
+//! and calls go over the wire. Interleaved stdio server messages without a
 //! matching response id are skipped (bounded), so stray notifications can
 //! never be misread as call results.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use wavecode_mcp::{McpClient, McpError, McpToolDef, McpToolOutput};
+use wavecode_mcp::{
+    McpClient, McpError, McpPromptDef, McpPromptMessage, McpResourceContent, McpResourceDef,
+    McpToolDef, McpToolOutput, try_tool_name,
+};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Protocol version offered at `initialize`.
@@ -53,6 +63,85 @@ fn check_initialize(payload: &serde_json::Value) -> std::result::Result<(), McpE
             "initialize response lacks protocolVersion".to_string(),
         ))
     }
+}
+
+/// Server capabilities relevant to bridging, read from the `initialize`
+/// response's `capabilities` block (presence of the sub-object means the
+/// capability is supported, per the MCP spec).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ServerCaps {
+    /// Server advertised the `resources` capability.
+    resources: bool,
+    /// Server advertised the `prompts` capability.
+    prompts: bool,
+}
+
+/// Read the advertised capabilities out of an `initialize` result.
+fn server_caps(payload: &serde_json::Value) -> ServerCaps {
+    let caps = payload.get("capabilities");
+    ServerCaps {
+        resources: caps.and_then(|c| c.get("resources")).is_some(),
+        prompts: caps.and_then(|c| c.get("prompts")).is_some(),
+    }
+}
+
+/// The request/response half both client transports share (each keeps its
+/// own connection handling behind [`McpClient`]; this trait exists so the
+/// list/call drivers below are written once).
+#[async_trait::async_trait]
+trait RpcClient {
+    /// One request/response exchange.
+    async fn rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, McpError>;
+}
+
+/// Walk a paginated MCP list method (`tools/list`, `resources/list`,
+/// `prompts/list`) to its end, parsing each page with `parse` and bounding
+/// the walk at [`MAX_LIST_PAGES`].
+async fn list_paged<C, T>(
+    client: &C,
+    method: &str,
+    parse: fn(&serde_json::Value) -> std::result::Result<(Vec<T>, Option<String>), McpError>,
+) -> std::result::Result<Vec<T>, McpError>
+where
+    C: RpcClient + ?Sized,
+{
+    let mut items = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MAX_LIST_PAGES {
+        let mut params = serde_json::json!({});
+        if let Some(next) = &cursor {
+            params["cursor"] = serde_json::Value::String(next.clone());
+        }
+        let (mut page, next) = parse(&client.rpc(method, params).await?)?;
+        items.append(&mut page);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return Ok(items),
+        }
+    }
+    Ok(items)
+}
+
+/// `tools/call` round trip shared by both transports.
+async fn call_tool_via<C>(
+    client: &C,
+    name: &str,
+    input: serde_json::Value,
+) -> std::result::Result<McpToolOutput, McpError>
+where
+    C: RpcClient + ?Sized,
+{
+    let payload = client
+        .rpc(
+            "tools/call",
+            serde_json::json!({"name": name, "arguments": input}),
+        )
+        .await?;
+    parse_tool_result(&payload)
 }
 
 /// Parse one `tools/list` page into tool definitions plus a next cursor.
@@ -153,10 +242,195 @@ fn transport_error(context: &str, error: transport_mcp::TransportError) -> McpEr
     }
 }
 
+/// Parse one `resources/list` page into resource definitions plus a cursor.
+///
+/// Items without a usable URI are skipped; a missing `name` falls back to
+/// the URI (the protocol makes it optional).
+fn parse_resources_list(
+    payload: &serde_json::Value,
+) -> std::result::Result<(Vec<McpResourceDef>, Option<String>), McpError> {
+    let malformed = || McpError::Protocol("malformed resources/list result".to_string());
+    let result = payload.as_object().ok_or_else(malformed)?;
+    let resources = result
+        .get("resources")
+        .and_then(|v| v.as_array())
+        .ok_or_else(malformed)?;
+    let mut defs = Vec::with_capacity(resources.len());
+    for item in resources {
+        let Some(uri) = item
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty())
+        else {
+            continue;
+        };
+        defs.push(McpResourceDef {
+            uri: uri.to_string(),
+            name: item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .filter(|n| !n.is_empty())
+                .unwrap_or(uri)
+                .to_string(),
+            description: item
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            mime_type: item
+                .get("mimeType")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        });
+    }
+    let cursor = result
+        .get("nextCursor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Ok((defs, cursor))
+}
+
+/// Parse a `resources/read` result into text contents.
+///
+/// `blob` (base64) entries surface as an omission note, matching the
+/// non-text content-block handling of tool results; a missing `contents`
+/// array is a protocol error.
+fn parse_resource_contents(
+    payload: &serde_json::Value,
+) -> std::result::Result<Vec<McpResourceContent>, McpError> {
+    let contents = payload
+        .get("contents")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| McpError::Protocol("malformed resources/read result".to_string()))?;
+    let mut out = Vec::with_capacity(contents.len());
+    for entry in contents {
+        let Some(uri) = entry
+            .get("uri")
+            .and_then(|v| v.as_str())
+            .filter(|u| !u.is_empty())
+        else {
+            continue;
+        };
+        let mime_type = entry
+            .get("mimeType")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let text = if let Some(text) = entry.get("text").and_then(|v| v.as_str()) {
+            text.to_string()
+        } else if entry.get("blob").is_some() {
+            "[binary resource content omitted]".to_string()
+        } else {
+            continue;
+        };
+        out.push(McpResourceContent {
+            uri: uri.to_string(),
+            mime_type,
+            text,
+        });
+    }
+    Ok(out)
+}
+
+/// Parse one `prompts/list` page into prompt definitions plus a cursor.
+fn parse_prompts_list(
+    payload: &serde_json::Value,
+) -> std::result::Result<(Vec<McpPromptDef>, Option<String>), McpError> {
+    let malformed = || McpError::Protocol("malformed prompts/list result".to_string());
+    let result = payload.as_object().ok_or_else(malformed)?;
+    let prompts = result
+        .get("prompts")
+        .and_then(|v| v.as_array())
+        .ok_or_else(malformed)?;
+    let mut defs = Vec::with_capacity(prompts.len());
+    for item in prompts {
+        let Some(name) = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|n| !n.is_empty())
+        else {
+            continue;
+        };
+        let arguments = item
+            .get("arguments")
+            .and_then(|v| v.as_array())
+            .map(|args| {
+                args.iter()
+                    .filter_map(|arg| {
+                        let name = arg.get("name").and_then(|v| v.as_str())?;
+                        Some(wavecode_mcp::McpPromptArgument {
+                            name: name.to_string(),
+                            description: arg
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
+                            required: arg
+                                .get("required")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        defs.push(McpPromptDef {
+            name: name.to_string(),
+            description: item
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            arguments,
+        });
+    }
+    let cursor = result
+        .get("nextCursor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Ok((defs, cursor))
+}
+
+/// Parse a `prompts/get` result into `(role, text)` messages.
+///
+/// Non-text content blocks surface as an omission note; items without a
+/// usable role are skipped.
+fn parse_prompt_messages(
+    payload: &serde_json::Value,
+) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
+    let messages = payload
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| McpError::Protocol("malformed prompts/get result".to_string()))?;
+    let mut out = Vec::with_capacity(messages.len());
+    for message in messages {
+        let Some(role) = message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.is_empty())
+        else {
+            continue;
+        };
+        let content = message.get("content");
+        let text = if let Some(text) = content.and_then(|c| c.get("text")).and_then(|v| v.as_str())
+        {
+            text.to_string()
+        } else if content.is_some() {
+            "[non-text content omitted]".to_string()
+        } else {
+            String::new()
+        };
+        out.push(McpPromptMessage {
+            role: role.to_string(),
+            text,
+        });
+    }
+    Ok(out)
+}
+
 /// Real MCP client over a spawned stdio server process.
 pub struct StdioMcpClient {
     transport: tokio::sync::Mutex<transport_mcp::ChildTransport>,
     server: String,
+    caps: ServerCaps,
 }
 
 impl StdioMcpClient {
@@ -178,6 +452,7 @@ impl StdioMcpClient {
         let client = Self {
             transport: tokio::sync::Mutex::new(transport),
             server: server.to_string(),
+            caps: ServerCaps::default(),
         };
         let payload = client
             .request(
@@ -196,7 +471,15 @@ impl StdioMcpClient {
         client
             .notify("notifications/initialized", serde_json::json!({}))
             .await?;
-        Ok(client)
+        Ok(Self {
+            caps: server_caps(&payload),
+            ..client
+        })
+    }
+
+    /// Capabilities the server advertised at `initialize`.
+    fn caps(&self) -> ServerCaps {
+        self.caps
     }
 
     /// One request/response exchange, skipping interleaved notifications.
@@ -241,24 +524,20 @@ impl StdioMcpClient {
 }
 
 #[async_trait::async_trait]
+impl RpcClient for StdioMcpClient {
+    async fn rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, McpError> {
+        self.request(method, params).await
+    }
+}
+
+#[async_trait::async_trait]
 impl McpClient for StdioMcpClient {
     async fn list_tools(&self) -> std::result::Result<Vec<McpToolDef>, McpError> {
-        let mut tools = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_LIST_PAGES {
-            let mut params = serde_json::json!({});
-            if let Some(next) = &cursor {
-                params["cursor"] = serde_json::Value::String(next.clone());
-            }
-            let payload = self.request("tools/list", params).await?;
-            let (mut defs, next) = parse_tools_list(&payload)?;
-            tools.append(&mut defs);
-            cursor = next;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(tools)
+        list_paged(self, "tools/list", parse_tools_list).await
     }
 
     async fn call_tool(
@@ -266,19 +545,86 @@ impl McpClient for StdioMcpClient {
         name: &str,
         input: serde_json::Value,
     ) -> std::result::Result<McpToolOutput, McpError> {
+        call_tool_via(self, name, input).await
+    }
+
+    async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
+        if !self.caps.prompts {
+            return Ok(vec![]);
+        }
+        list_paged(self, "prompts/list", parse_prompts_list).await
+    }
+
+    async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: HashMap<String, String>,
+    ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
+        if !self.caps.prompts {
+            return Ok(vec![]);
+        }
         let payload = self
-            .request(
-                "tools/call",
-                serde_json::json!({"name": name, "arguments": input}),
+            .rpc(
+                "prompts/get",
+                serde_json::json!({"name": name, "arguments": arguments}),
             )
             .await?;
-        parse_tool_result(&payload)
+        parse_prompt_messages(&payload)
+    }
+
+    async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
+        if !self.caps.resources {
+            return Ok(vec![]);
+        }
+        list_paged(self, "resources/list", parse_resources_list).await
+    }
+
+    async fn read_resource(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
+        if !self.caps.resources {
+            return Ok(vec![]);
+        }
+        let payload = self
+            .rpc("resources/read", serde_json::json!({"uri": uri}))
+            .await?;
+        parse_resource_contents(&payload)
     }
 }
 
 /// Real MCP client over a streamable-HTTP server endpoint.
 pub struct HttpMcpClient {
     transport: tokio::sync::Mutex<transport_mcp::http::HttpMcp>,
+    caps: ServerCaps,
+}
+
+/// Run the `initialize` handshake over an HTTP transport; returns the
+/// server capabilities. Also used to rebuild the session after the server
+/// expires it (404), so the exchange stays request-scoped and idempotent.
+async fn http_handshake(
+    transport: &transport_mcp::http::HttpMcp,
+) -> std::result::Result<ServerCaps, McpError> {
+    let payload = transport
+        .rpc(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "wavecode",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }),
+        )
+        .await
+        .map_err(|e| transport_error("request", e))?;
+    check_initialize(&payload)?;
+    transport
+        .notify("notifications/initialized", serde_json::json!({}))
+        .await
+        .map_err(|e| transport_error("notify", e))?;
+    Ok(server_caps(&payload))
 }
 
 impl HttpMcpClient {
@@ -294,41 +640,39 @@ impl HttpMcpClient {
             oauth,
         })
         .map_err(|e| transport_error("build", e))?;
-        let client = Self {
+        let caps = http_handshake(&transport).await?;
+        Ok(Self {
             transport: tokio::sync::Mutex::new(transport),
-        };
-        let payload = client
-            .request(
-                "initialize",
-                serde_json::json!({
-                    "protocolVersion": MCP_PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "wavecode",
-                        "version": env!("CARGO_PKG_VERSION"),
-                    },
-                }),
-            )
-            .await?;
-        check_initialize(&payload)?;
-        client
-            .notify("notifications/initialized", serde_json::json!({}))
-            .await?;
-        Ok(client)
+            caps,
+        })
+    }
+
+    /// Capabilities the server advertised at `initialize`.
+    fn caps(&self) -> ServerCaps {
+        self.caps
     }
 
     /// One request/response exchange over the HTTP transport.
+    ///
+    /// A 404 mid-session means the server expired (or dropped) the session:
+    /// the transport already cleared its session id, so re-initialize once
+    /// and retry. A second expiry surfaces as an error instead of looping.
     async fn request(
         &self,
         method: &str,
         params: serde_json::Value,
     ) -> std::result::Result<serde_json::Value, McpError> {
-        self.transport
-            .lock()
-            .await
-            .rpc(method, params)
-            .await
-            .map_err(|e| transport_error("request", e))
+        let transport = self.transport.lock().await;
+        match transport.rpc(method, params.clone()).await {
+            Err(transport_mcp::TransportError::SessionExpired) => {
+                http_handshake(&transport).await?;
+                transport
+                    .rpc(method, params)
+                    .await
+                    .map_err(|e| transport_error("request", e))
+            }
+            other => other.map_err(|e| transport_error("request", e)),
+        }
     }
 
     /// One fire-and-forget notification.
@@ -347,24 +691,20 @@ impl HttpMcpClient {
 }
 
 #[async_trait::async_trait]
+impl RpcClient for HttpMcpClient {
+    async fn rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, McpError> {
+        self.request(method, params).await
+    }
+}
+
+#[async_trait::async_trait]
 impl McpClient for HttpMcpClient {
     async fn list_tools(&self) -> std::result::Result<Vec<McpToolDef>, McpError> {
-        let mut tools = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_LIST_PAGES {
-            let mut params = serde_json::json!({});
-            if let Some(next) = &cursor {
-                params["cursor"] = serde_json::Value::String(next.clone());
-            }
-            let payload = self.request("tools/list", params).await?;
-            let (mut defs, next) = parse_tools_list(&payload)?;
-            tools.append(&mut defs);
-            cursor = next;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        Ok(tools)
+        list_paged(self, "tools/list", parse_tools_list).await
     }
 
     async fn call_tool(
@@ -372,13 +712,51 @@ impl McpClient for HttpMcpClient {
         name: &str,
         input: serde_json::Value,
     ) -> std::result::Result<McpToolOutput, McpError> {
+        call_tool_via(self, name, input).await
+    }
+
+    async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
+        if !self.caps.prompts {
+            return Ok(vec![]);
+        }
+        list_paged(self, "prompts/list", parse_prompts_list).await
+    }
+
+    async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: HashMap<String, String>,
+    ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
+        if !self.caps.prompts {
+            return Ok(vec![]);
+        }
         let payload = self
-            .request(
-                "tools/call",
-                serde_json::json!({"name": name, "arguments": input}),
+            .rpc(
+                "prompts/get",
+                serde_json::json!({"name": name, "arguments": arguments}),
             )
             .await?;
-        parse_tool_result(&payload)
+        parse_prompt_messages(&payload)
+    }
+
+    async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
+        if !self.caps.resources {
+            return Ok(vec![]);
+        }
+        list_paged(self, "resources/list", parse_resources_list).await
+    }
+
+    async fn read_resource(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
+        if !self.caps.resources {
+            return Ok(vec![]);
+        }
+        let payload = self
+            .rpc("resources/read", serde_json::json!({"uri": uri}))
+            .await?;
+        parse_resource_contents(&payload)
     }
 }
 
@@ -440,6 +818,248 @@ impl Tool for McpToolBridge {
             // report or retry instead of tripping an implementation fault.
             Err(error) => Ok(ToolOutput {
                 content: format!("MCP tool {} failed: {error}", self.name),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+/// Description for the `read_resource` bridge: usage line plus the server's
+/// resource catalog (one `- uri — name: description (mime)` per line).
+fn resource_catalog(server: &str, resources: &[McpResourceDef]) -> String {
+    let mut out = format!("Read a resource from MCP server {server} by URI.");
+    if resources.is_empty() {
+        out.push_str(" The server listed no resources; use a URI obtained from elsewhere.");
+        return out;
+    }
+    out.push_str(" Available resources:");
+    for resource in resources {
+        out.push_str(&format!("\n- {} — {}", resource.uri, resource.name));
+        if let Some(description) = &resource.description {
+            out.push_str(&format!(": {description}"));
+        }
+        if let Some(mime_type) = &resource.mime_type {
+            out.push_str(&format!(" ({mime_type})"));
+        }
+    }
+    out
+}
+
+/// Description for the `get_prompt` bridge: usage line plus the server's
+/// prompt catalog (one `- name: description [arguments: …]` per line).
+fn prompt_catalog(server: &str, prompts: &[McpPromptDef]) -> String {
+    let mut out = format!("Render a prompt from MCP server {server} by name.");
+    if prompts.is_empty() {
+        out.push_str(" The server listed no prompts.");
+        return out;
+    }
+    out.push_str(" Available prompts:");
+    for prompt in prompts {
+        out.push_str(&format!("\n- {}", prompt.name));
+        if let Some(description) = &prompt.description {
+            out.push_str(&format!(": {description}"));
+        }
+        if !prompt.arguments.is_empty() {
+            let names: Vec<String> = prompt
+                .arguments
+                .iter()
+                .map(|arg| {
+                    if arg.required {
+                        format!("{} (required)", arg.name)
+                    } else {
+                        arg.name.clone()
+                    }
+                })
+                .collect();
+            out.push_str(&format!(" [arguments: {}]", names.join(", ")));
+        }
+    }
+    out
+}
+
+/// `mcp__{server}__read_resource` bridge: reads one MCP resource by URI.
+///
+/// V1 discovery surface for the `resources` capability: the server's
+/// catalog is embedded in the description, so the listing is visible to the
+/// model without an extra registry tool.
+pub struct McpResourceBridge {
+    name: String,
+    description: String,
+    client: Arc<dyn McpClient>,
+}
+
+impl McpResourceBridge {
+    /// Build from the server's listed resources; `None` when the qualified
+    /// name is invalid (unreachable after server-name validation, guarded
+    /// anyway).
+    pub fn new(
+        server: &str,
+        resources: &[McpResourceDef],
+        client: Arc<dyn McpClient>,
+    ) -> Option<Self> {
+        Some(Self {
+            name: try_tool_name(server, "read_resource")?,
+            description: resource_catalog(server, resources),
+            client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for McpResourceBridge {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "uri": {
+                    "type": "string",
+                    "description": "Resource URI, from the catalog in this tool's description",
+                },
+            },
+            "required": ["uri"],
+        })
+    }
+
+    /// Reads have no side effects on the server.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
+        let Some(uri) = input.get("uri").and_then(|v| v.as_str()) else {
+            return Ok(ToolOutput {
+                content: "missing required string parameter `uri`".to_owned(),
+                is_error: true,
+            });
+        };
+        match self.client.read_resource(uri).await {
+            Ok(contents) => {
+                let text = contents
+                    .iter()
+                    .map(|content| content.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(ToolOutput {
+                    content: if text.is_empty() {
+                        format!("resource {uri} returned no contents")
+                    } else {
+                        text
+                    },
+                    is_error: false,
+                })
+            }
+            // Transport outage reads as a business error so the model can
+            // report or retry instead of tripping an implementation fault.
+            Err(error) => Ok(ToolOutput {
+                content: format!("MCP resource {uri} failed: {error}"),
+                is_error: true,
+            }),
+        }
+    }
+}
+
+/// `mcp__{server}__get_prompt` bridge: renders one MCP prompt by name.
+///
+/// V1 discovery surface for the `prompts` capability (the inline-skill
+/// conversion of SPEC section 10 stays on the core side); the prompt
+/// catalog is embedded in the description.
+pub struct McpPromptBridge {
+    name: String,
+    description: String,
+    client: Arc<dyn McpClient>,
+}
+
+impl McpPromptBridge {
+    /// Build from the server's listed prompts; `None` when the qualified
+    /// name is invalid (unreachable after server-name validation, guarded
+    /// anyway).
+    pub fn new(server: &str, prompts: &[McpPromptDef], client: Arc<dyn McpClient>) -> Option<Self> {
+        Some(Self {
+            name: try_tool_name(server, "get_prompt")?,
+            description: prompt_catalog(server, prompts),
+            client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for McpPromptBridge {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Prompt name, from the catalog in this tool's description",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Prompt argument values keyed by argument name",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            "required": ["name"],
+        })
+    }
+
+    /// Rendering a prompt has no side effects on the server.
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
+        let Some(name) = input.get("name").and_then(|v| v.as_str()) else {
+            return Ok(ToolOutput {
+                content: "missing required string parameter `name`".to_owned(),
+                is_error: true,
+            });
+        };
+        // The protocol wants string values; non-string entries are dropped
+        // rather than forwarded in a shape the server would reject.
+        let arguments: HashMap<String, String> = input
+            .get("arguments")
+            .and_then(|v| v.as_object())
+            .map(|object| {
+                object
+                    .iter()
+                    .filter_map(|(key, value)| value.as_str().map(|s| (key.clone(), s.to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        match self.client.get_prompt(name, arguments).await {
+            Ok(messages) => {
+                let text = messages
+                    .iter()
+                    .map(|message| format!("{}: {}", message.role, message.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Ok(ToolOutput {
+                    content: if text.is_empty() {
+                        format!("prompt {name} returned no messages")
+                    } else {
+                        text
+                    },
+                    is_error: false,
+                })
+            }
+            Err(error) => Ok(ToolOutput {
+                content: format!("MCP prompt {name} failed: {error}"),
                 is_error: true,
             }),
         }
@@ -605,6 +1225,47 @@ async fn connect_one(
     }
 }
 
+/// Register a connected client's tools plus capability-gated discovery
+/// bridges; returns the number of registered registry tools.
+///
+/// Discovery tools (`read_resource` / `get_prompt`) only register when the
+/// server advertised the capability; a listing that fails despite the
+/// advertisement skips that one tool quietly (same scoped degradation as a
+/// single malformed tool item).
+async fn bridge_server(
+    name: &str,
+    client: Arc<dyn McpClient>,
+    caps: ServerCaps,
+    registry: &Arc<wavecode_tools::Registry>,
+) -> std::result::Result<usize, McpError> {
+    let mut count = 0;
+    for def in &client.list_tools().await? {
+        // Empty tool names never reach the registry; the handshake told
+        // us the server speaks, so one bad item skips quietly.
+        if let Some(bridge) = McpToolBridge::new(name, def, client.clone()) {
+            registry.register(Arc::new(bridge));
+            count += 1;
+        }
+    }
+    if caps.resources {
+        if let Ok(resources) = client.list_resources().await {
+            if let Some(bridge) = McpResourceBridge::new(name, &resources, client.clone()) {
+                registry.register(Arc::new(bridge));
+                count += 1;
+            }
+        }
+    }
+    if caps.prompts {
+        if let Ok(prompts) = client.list_prompts().await {
+            if let Some(bridge) = McpPromptBridge::new(name, &prompts, client.clone()) {
+                registry.register(Arc::new(bridge));
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 /// Handshake, list, and bridge one stdio server; returns bridged count.
 async fn connect_stdio(
     name: &str,
@@ -613,19 +1274,9 @@ async fn connect_stdio(
     env: &HashMap<String, String>,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> std::result::Result<usize, McpError> {
-    let client: Arc<dyn McpClient> =
-        Arc::new(StdioMcpClient::connect(name, command, args, env).await?);
-    let tools = client.list_tools().await?;
-    let mut count = 0;
-    for def in &tools {
-        // Empty tool names never reach the registry; the handshake told
-        // us the server speaks, so one bad item skips quietly.
-        if let Some(bridge) = McpToolBridge::new(name, def, client.clone()) {
-            registry.register(Arc::new(bridge));
-            count += 1;
-        }
-    }
-    Ok(count)
+    let client = StdioMcpClient::connect(name, command, args, env).await?;
+    let caps = client.caps();
+    bridge_server(name, Arc::new(client), caps, registry).await
 }
 
 /// Handshake, list, and bridge one HTTP server; returns bridged count.
@@ -636,26 +1287,22 @@ async fn connect_http(
     oauth: Option<transport_mcp::http::OAuthClientCredentials>,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> std::result::Result<usize, McpError> {
-    let client: Arc<dyn McpClient> = Arc::new(HttpMcpClient::connect(url, headers, oauth).await?);
-    let tools = client.list_tools().await?;
-    let mut count = 0;
-    for def in &tools {
-        // Empty tool names never reach the registry; the handshake told
-        // us the server speaks, so one bad item skips quietly.
-        if let Some(bridge) = McpToolBridge::new(name, def, client.clone()) {
-            registry.register(Arc::new(bridge));
-            count += 1;
-        }
-    }
-    Ok(count)
+    let client = HttpMcpClient::connect(url, headers, oauth).await?;
+    let caps = client.caps();
+    bridge_server(name, Arc::new(client), caps, registry).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
     struct FakeClient {
         tools: Vec<McpToolDef>,
+        resources: Vec<McpResourceDef>,
+        prompts: Vec<McpPromptDef>,
+        caps: ServerCaps,
         calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         fail_calls: bool,
     }
@@ -664,6 +1311,9 @@ mod tests {
         fn new(tools: Vec<McpToolDef>) -> Self {
             Self {
                 tools,
+                resources: Vec::new(),
+                prompts: Vec::new(),
+                caps: ServerCaps::default(),
                 calls: std::sync::Mutex::new(Vec::new()),
                 fail_calls: false,
             }
@@ -689,6 +1339,56 @@ mod tests {
                 content: format!("ran {name}"),
                 is_error: false,
             })
+        }
+
+        async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
+            if !self.caps.prompts {
+                return Ok(vec![]);
+            }
+            Ok(self.prompts.clone())
+        }
+
+        async fn get_prompt(
+            &self,
+            name: &str,
+            arguments: HashMap<String, String>,
+        ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
+            if !self.caps.prompts {
+                return Ok(vec![]);
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("prompts/get".to_string(), serde_json::json!(arguments)));
+            Ok(vec![McpPromptMessage {
+                role: "user".to_string(),
+                text: format!("prompt {name} asks"),
+            }])
+        }
+
+        async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
+            if !self.caps.resources {
+                return Ok(vec![]);
+            }
+            Ok(self.resources.clone())
+        }
+
+        async fn read_resource(
+            &self,
+            uri: &str,
+        ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
+            if !self.caps.resources {
+                return Ok(vec![]);
+            }
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("resources/read".to_string(), serde_json::json!(uri)));
+            Ok(vec![McpResourceContent {
+                uri: uri.to_string(),
+                mime_type: Some("text/plain".to_string()),
+                text: "hello".to_string(),
+            }])
         }
     }
 
@@ -792,9 +1492,8 @@ mod tests {
     #[tokio::test]
     async fn bridge_transport_failures_read_as_business_errors() {
         let client = Arc::new(FakeClient {
-            tools: vec![],
-            calls: std::sync::Mutex::new(Vec::new()),
             fail_calls: true,
+            ..FakeClient::new(vec![])
         });
         let bridge = McpToolBridge::new("srv", &def("go"), client).expect("valid name");
         let out = bridge.execute(serde_json::json!({}), &ctx()).await.unwrap();
@@ -861,5 +1560,365 @@ mod tests {
         let report = connect_all(&[], &registry).await;
         assert!(report.lines.is_empty());
         assert!(report.warnings.is_empty());
+    }
+
+    #[test]
+    fn server_caps_read_from_initialize_payload() {
+        let caps = server_caps(&serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"resources": {}, "prompts": {"listChanged": true}},
+        }));
+        assert!(caps.resources && caps.prompts);
+        let tools_only = server_caps(&serde_json::json!({"capabilities": {"tools": {}}}));
+        assert!(!tools_only.resources && !tools_only.prompts);
+        assert_eq!(server_caps(&serde_json::json!({})), ServerCaps::default());
+    }
+
+    #[test]
+    fn resources_and_prompts_payloads_parse() {
+        // resources/list: uri-less and empty-uri items skip; missing name
+        // falls back to the uri; the cursor survives.
+        let (defs, cursor) = parse_resources_list(&serde_json::json!({
+            "resources": [
+                {"uri": "file:///a.txt", "name": "a", "description": "first", "mimeType": "text/plain"},
+                {"uri": "", "name": "skipped"},
+                {"name": "no uri skipped"},
+            ],
+            "nextCursor": "r2",
+        }))
+        .unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].uri, "file:///a.txt");
+        assert_eq!(defs[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(cursor.as_deref(), Some("r2"));
+        let (defs, cursor) =
+            parse_resources_list(&serde_json::json!({"resources": [{"uri": "mem://x"}]})).unwrap();
+        assert_eq!(defs[0].name, "mem://x");
+        assert_eq!(cursor, None);
+        assert!(parse_resources_list(&serde_json::json!({"resources": {}})).is_err());
+        assert!(parse_resources_list(&serde_json::json!([])).is_err());
+
+        // resources/read: text and blob entries; a text-less entry skips.
+        let contents = parse_resource_contents(&serde_json::json!({
+            "contents": [
+                {"uri": "file:///a.txt", "mimeType": "text/plain", "text": "hello"},
+                {"uri": "file:///b.bin", "blob": "aGVsbG8="},
+                {"uri": "file:///empty.json"},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0].text, "hello");
+        assert!(contents[1].text.contains("omitted"));
+        assert!(parse_resource_contents(&serde_json::json!({})).is_err());
+
+        // prompts/list: arguments parse with their required flags.
+        let (defs, cursor) = parse_prompts_list(&serde_json::json!({
+            "prompts": [
+                {"name": "review", "description": "code review", "arguments": [
+                    {"name": "path", "description": "file", "required": true},
+                    {"name": "lang"},
+                ]},
+                {"description": "nameless skipped"},
+                {"name": ""},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].arguments.len(), 2);
+        assert!(defs[0].arguments[0].required);
+        assert!(!defs[0].arguments[1].required);
+        assert_eq!(cursor, None);
+        assert!(parse_prompts_list(&serde_json::json!([])).is_err());
+
+        // prompts/get: role-bearing messages; non-text content degrades.
+        let messages = parse_prompt_messages(&serde_json::json!({
+            "messages": [
+                {"role": "user", "content": {"type": "text", "text": "review this"}},
+                {"role": "assistant", "content": {"type": "image", "data": "x"}},
+                {"content": {"type": "text", "text": "no role skipped"}},
+            ],
+        }))
+        .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].text, "review this");
+        assert!(messages[1].text.contains("omitted"));
+        assert!(parse_prompt_messages(&serde_json::json!({"messages": {}})).is_err());
+    }
+
+    #[test]
+    fn discovery_catalogs_embed_listings() {
+        let resources = vec![McpResourceDef {
+            uri: "file:///a.txt".to_string(),
+            name: "a".to_string(),
+            description: Some("first".to_string()),
+            mime_type: Some("text/plain".to_string()),
+        }];
+        let catalog = resource_catalog("srv", &resources);
+        assert!(catalog.contains("srv") && catalog.contains("file:///a.txt — a"));
+        assert!(catalog.contains("text/plain"));
+        assert!(resource_catalog("srv", &[]).contains("no resources"));
+
+        let prompts = vec![McpPromptDef {
+            name: "review".to_string(),
+            description: Some("code review".to_string()),
+            arguments: vec![wavecode_mcp::McpPromptArgument {
+                name: "path".to_string(),
+                description: None,
+                required: true,
+            }],
+        }];
+        let catalog = prompt_catalog("srv", &prompts);
+        assert!(catalog.contains("review") && catalog.contains("path (required)"));
+        assert!(prompt_catalog("srv", &[]).contains("no prompts"));
+    }
+
+    #[tokio::test]
+    async fn resource_bridge_reads_and_flags_bad_input() {
+        let resources = vec![McpResourceDef {
+            uri: "file:///a.txt".to_string(),
+            name: "a".to_string(),
+            description: None,
+            mime_type: None,
+        }];
+        let client: Arc<dyn McpClient> = Arc::new(FakeClient {
+            caps: ServerCaps {
+                resources: true,
+                prompts: false,
+            },
+            ..FakeClient::new(vec![])
+        });
+        let bridge = McpResourceBridge::new("srv", &resources, client).expect("valid name");
+        assert_eq!(bridge.name(), "mcp__srv__read_resource");
+        assert!(bridge.is_read_only());
+        let out = bridge
+            .execute(serde_json::json!({"uri": "file:///a.txt"}), &ctx())
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(out.content, "hello");
+        // A missing uri reads as a business error, not an implementation fault.
+        let out = bridge.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        assert!(out.is_error && out.content.contains("uri"));
+    }
+
+    #[tokio::test]
+    async fn prompt_bridge_renders_and_drops_non_string_arguments() {
+        let prompts = vec![McpPromptDef {
+            name: "review".to_string(),
+            description: None,
+            arguments: vec![],
+        }];
+        let client: Arc<dyn McpClient> = Arc::new(FakeClient {
+            caps: ServerCaps {
+                resources: false,
+                prompts: true,
+            },
+            ..FakeClient::new(vec![])
+        });
+        let bridge = McpPromptBridge::new("srv", &prompts, client).expect("valid name");
+        assert_eq!(bridge.name(), "mcp__srv__get_prompt");
+        assert!(bridge.is_read_only());
+        let out = bridge
+            .execute(
+                serde_json::json!({"name": "review", "arguments": {"path": "x.rs", "n": 1}}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("user: prompt review asks"));
+        let out = bridge.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        assert!(out.is_error && out.content.contains("name"));
+    }
+
+    #[tokio::test]
+    async fn bridge_server_registers_discovery_tools_only_when_capable() {
+        let resources = vec![McpResourceDef {
+            uri: "file:///a.txt".to_string(),
+            name: "a".to_string(),
+            description: None,
+            mime_type: None,
+        }];
+        let prompts = vec![McpPromptDef {
+            name: "review".to_string(),
+            description: None,
+            arguments: vec![],
+        }];
+        let capable = Arc::new(FakeClient {
+            caps: ServerCaps {
+                resources: true,
+                prompts: true,
+            },
+            resources,
+            prompts,
+            ..FakeClient::new(vec![def("click")])
+        });
+        let registry = Arc::new(wavecode_tools::Registry::builtin());
+        let count = bridge_server("srv", capable.clone(), capable.caps, &registry)
+            .await
+            .unwrap();
+        // One tool plus the two discovery bridges.
+        assert_eq!(count, 3);
+        assert!(registry.get("mcp__srv__click").is_some());
+        let reader = registry.get("mcp__srv__read_resource").expect("reader");
+        assert!(reader.description().contains("file:///a.txt"));
+        let out = reader
+            .execute(serde_json::json!({"uri": "file:///a.txt"}), &ctx())
+            .await
+            .unwrap();
+        assert_eq!(out.content, "hello");
+        let getter = registry.get("mcp__srv__get_prompt").expect("getter");
+        let out = getter
+            .execute(serde_json::json!({"name": "review"}), &ctx())
+            .await
+            .unwrap();
+        assert!(out.content.contains("user:"));
+
+        // Without the capabilities only the tool itself registers.
+        let plain_registry = Arc::new(wavecode_tools::Registry::builtin());
+        let plain = Arc::new(FakeClient::new(vec![def("click")]));
+        let count = bridge_server("srv", plain, ServerCaps::default(), &plain_registry)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(plain_registry.get("mcp__srv__read_resource").is_none());
+        assert!(plain_registry.get("mcp__srv__get_prompt").is_none());
+    }
+
+    /// Minimal hand-rolled HTTP/1.1 stub over TCP (one connection per
+    /// request): the handler maps the request's JSON-RPC method and
+    /// `mcp-session-id` header to a status, extra headers, and body.
+    /// Hermetic mirror of the stub style of the `transport-mcp` HTTP tests.
+    type StubHandler =
+        Arc<dyn Fn(&str, Option<&str>) -> (u16, Vec<(String, String)>, String) + Send + Sync>;
+
+    async fn spawn_rpc_stub(handler: StubHandler) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let handler = handler.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = socket.into_split();
+                    let mut reader = tokio::io::BufReader::new(reader);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let mut headers = HashMap::new();
+                    let mut content_length = 0usize;
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let trimmed = line.trim_end();
+                        if trimmed.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = trimmed.split_once(':') {
+                            let name = name.trim().to_ascii_lowercase();
+                            if name == "content-length" {
+                                content_length = value.trim().parse().unwrap_or(0);
+                            }
+                            headers.insert(name, value.trim().to_owned());
+                        }
+                    }
+                    let mut body = vec![0u8; content_length];
+                    if content_length > 0 && reader.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    let method = serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("method")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_default();
+                    let session = headers.get("mcp-session-id").cloned();
+                    let (status, extra, resp_body) = handler(&method, session.as_deref());
+                    let reason = match status {
+                        200 => "OK",
+                        202 => "Accepted",
+                        404 => "Not Found",
+                        _ => "OK",
+                    };
+                    let mut head = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
+                        resp_body.len()
+                    );
+                    for (name, value) in &extra {
+                        head.push_str(&format!("{name}: {value}\r\n"));
+                    }
+                    head.push_str("\r\n");
+                    let _ = writer.write_all(head.as_bytes()).await;
+                    let _ = writer.write_all(resp_body.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}/mcp")
+    }
+
+    /// End-to-end session expiry over the local stub: the first
+    /// post-handshake request 404s, the client re-initializes exactly once,
+    /// and the retried listing succeeds with the fresh session.
+    #[tokio::test]
+    async fn http_client_reinitializes_once_on_session_404() {
+        let initialize_hits = Arc::new(AtomicUsize::new(0));
+        let counter = initialize_hits.clone();
+        let handler: StubHandler = Arc::new(move |method, session| {
+            let json_headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+            match method {
+                "initialize" => {
+                    let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut headers = json_headers;
+                    headers.push(("mcp-session-id".to_owned(), format!("sess-{n}")));
+                    let body = serde_json::json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "serverInfo": {"name": "stub", "version": "0"},
+                        },
+                    })
+                    .to_string();
+                    (200, headers, body)
+                }
+                "notifications/initialized" => (202, vec![], String::new()),
+                "tools/list" => {
+                    if session == Some("sess-2") {
+                        let body = serde_json::json!({
+                            "jsonrpc": "2.0", "id": 2,
+                            "result": {"tools": [
+                                {"name": "click", "description": "clicks", "inputSchema": {"type": "object"}},
+                            ]},
+                        })
+                        .to_string();
+                        (200, json_headers, body)
+                    } else {
+                        (404, vec![], "session expired".to_owned())
+                    }
+                }
+                _ => (400, vec![], "unknown method".to_owned()),
+            }
+        });
+        let url = spawn_rpc_stub(handler).await;
+        let registry = Arc::new(wavecode_tools::Registry::builtin());
+        let count = connect_http("web", &url, HashMap::new(), None, &registry)
+            .await
+            .expect("connect succeeds after the re-initialize");
+        assert_eq!(count, 1, "the retried tools/list bridges one tool");
+        assert_eq!(
+            initialize_hits.load(Ordering::SeqCst),
+            2,
+            "exactly one re-initialize after the 404"
+        );
+        assert!(registry.get("mcp__web__click").is_some());
     }
 }

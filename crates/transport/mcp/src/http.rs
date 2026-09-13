@@ -5,6 +5,8 @@
  * - POST JSON-RPC messages with `Accept: application/json, text/event-stream`.
  * - Persist the `mcp-session-id` response header across requests.
  * - Parse single-JSON and SSE-stream response bodies.
+ * - Map a 404 on an established session to a re-initializable
+ *   `SessionExpired` error (the session id is dropped).
  * - Static-header passthrough plus OAuth client-credentials bearer auth
  *   with expiry-minus-skew token caching.
  * - Hermetic tests over a hand-rolled TCP stub server (no external network).
@@ -222,6 +224,15 @@ impl HttpMcp {
         self.store_session_id(&headers);
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(self.unauthorized_error(&headers));
+        }
+        // Per the Streamable-HTTP spec a 404 on an established session means
+        // the session expired (or was terminated) server-side: drop the
+        // session id and tell the caller to re-initialize. A 404 without a
+        // session is a plain routing error, not an expiry.
+        if status == reqwest::StatusCode::NOT_FOUND
+            && self.session_id.lock().unwrap().take().is_some()
+        {
+            return Err(TransportError::SessionExpired);
         }
         if !status.is_success() {
             return Err(TransportError::Http(format!(
@@ -572,6 +583,7 @@ mod tests {
             202 => "Accepted",
             400 => "Bad Request",
             401 => "Unauthorized",
+            404 => "Not Found",
             _ => "OK",
         };
         let mut head = format!(
@@ -992,6 +1004,109 @@ mod tests {
             .rpc("initialize", serde_json::json!({}))
             .await
             .unwrap();
+    }
+
+    /// Session expiry: a 404 for the established session clears it and maps
+    /// to `SessionExpired`; after a fresh `initialize` (new session id) the
+    /// exchange succeeds again. The re-initialize-and-retry orchestration
+    /// lives at the bridge layer; the transport only resets state.
+    #[tokio::test]
+    async fn session_404_maps_to_expiry_and_resets() {
+        // The stub rotates session ids: `sess-1` requests all 404 (expired),
+        // `sess-2` requests succeed, and the issued id is echoed in a header.
+        let issued = Arc::new(AtomicUsize::new(0));
+        let counter = issued.clone();
+        let handler: Handler =
+            Arc::new(
+                move |request: &RecordedRequest| match rpc_method(request).as_str() {
+                    "initialize" => {
+                        let session =
+                            format!("sess-{}", counter.fetch_add(1, Ordering::SeqCst) + 1);
+                        let mut headers = json_headers();
+                        headers.push(("mcp-session-id".to_owned(), session));
+                        (
+                            200,
+                            headers,
+                            json_rpc(serde_json::json!({"capabilities": {}})),
+                        )
+                    }
+                    "notifications/initialized" => (202, vec![], vec![]),
+                    _ => {
+                        if request.headers.get("mcp-session-id").map(String::as_str)
+                            == Some("sess-2")
+                        {
+                            (
+                                200,
+                                json_headers(),
+                                json_rpc(serde_json::json!({"ok": true})),
+                            )
+                        } else {
+                            (404, vec![], b"session expired".to_vec())
+                        }
+                    }
+                },
+            );
+        let server = StubServer::spawn(handler).await;
+        let transport = HttpMcp::new(test_config(&server)).unwrap();
+        transport
+            .rpc("initialize", serde_json::json!({}))
+            .await
+            .unwrap();
+
+        let error = transport
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TransportError::SessionExpired),
+            "404 on an established session maps to SessionExpired, got: {error}"
+        );
+        assert_eq!(
+            server.header(1, "mcp-session-id").as_deref(),
+            Some("sess-1"),
+            "the follow-up request carried the established session"
+        );
+
+        // Re-initialize (the bridge does this on SessionExpired): the new
+        // session id replaces the dropped one and requests succeed again.
+        transport
+            .rpc("initialize", serde_json::json!({}))
+            .await
+            .unwrap();
+        transport
+            .notify("notifications/initialized", serde_json::json!({}))
+            .await
+            .unwrap();
+        let ok = transport
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            ok.get("ok").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            server.header(4, "mcp-session-id").as_deref(),
+            Some("sess-2"),
+            "requests after re-initialization carry the fresh session"
+        );
+    }
+
+    /// A 404 without an established session is a plain HTTP error (bad
+    /// endpoint), never a session-expiry signal.
+    #[tokio::test]
+    async fn http_404_without_session_is_plain_error() {
+        let handler: Handler = Arc::new(|_: &RecordedRequest| (404, vec![], b"no route".to_vec()));
+        let server = StubServer::spawn(handler).await;
+        let transport = HttpMcp::new(test_config(&server)).unwrap();
+        let error = transport
+            .rpc("initialize", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TransportError::Http(_)) && error.to_string().contains("404"),
+            "got: {error}"
+        );
     }
 
     /// SSE edge cases: comments and control lines are ignored, broken `data:`

@@ -16,8 +16,8 @@
 //! Text deltas are intentionally skipped: replay answers "what ran, in
 //! what order, with what outcome", while transcripts keep the words.
 
-use operations_wire::{ApprovalKind, Event, EventMsg};
 use state_trajectory::{ActionKind, Trajectory};
+use wavecode_wire::{ApprovalKind, Event, EventMsg};
 
 /// Replay recorded events into a fresh trajectory.
 pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {

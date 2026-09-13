@@ -113,9 +113,9 @@ pub async fn evaluate<D: TurnDriver>(driver: &D, cases: &[EvalCase], system: &st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use operations_wire::Event;
     use runtime_runner::{HookPoint, TurnDriver};
     use state_store::{CompactTrigger, Role};
+    use wavecode_wire::Event;
 
     /// Stub driver echoing the input back as the assistant message.
     struct EchoDriver;

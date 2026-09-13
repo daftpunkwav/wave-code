@@ -13,10 +13,10 @@
 //! Client handle: the only frontend-facing surface of the actor.
 
 use infrastructure_base::InterruptHandle;
-use operations_wire::{Event, Submission};
 use runtime_runner::{InboxHandle, SteerTarget};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use wavecode_wire::{Event, Submission};
 
 /// Submission failures: the actor is gone, so delivery is impossible.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

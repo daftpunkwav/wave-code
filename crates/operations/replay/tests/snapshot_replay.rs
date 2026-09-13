@@ -12,8 +12,8 @@
  */
 
 use operations_replay::replay_to_trajectory;
-use operations_wire::Event;
 use state_trajectory::ActionKind;
+use wavecode_wire::Event;
 
 /// Load one committed fixture as wire events.
 fn load_fixture(name: &str) -> Vec<Event> {

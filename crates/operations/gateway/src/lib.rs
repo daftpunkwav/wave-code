@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use operations_actor::ActorClient;
-use operations_wire::{Op, Submission};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use wavecode_wire::{Op, Submission};
 
 /// Method names served by the gateway.
 pub const METHOD_SUBMIT: &str = "session/submit";
@@ -177,14 +177,14 @@ fn rpc_error(id: serde_json::Value, code: i64, message: &str) -> serde_json::Val
 mod tests {
     use super::*;
     use operations_actor::SessionActor;
-    use operations_wire::Event;
-    use operations_wire::EventMsg;
     use runtime_child::ChildRuntime;
     use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
     use safety_gate::ApprovalGate;
     use state_store::{CompactTrigger, Conversation};
     use std::sync::Arc;
     use tokio::io::duplex;
+    use wavecode_wire::Event;
+    use wavecode_wire::EventMsg;
 
     struct EchoDriver;
 

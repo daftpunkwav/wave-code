@@ -19,6 +19,7 @@
 //! here, so neither side names the other directly.
 
 pub mod acp;
+pub mod agent_task_tool;
 pub mod child_service;
 pub mod compactor;
 pub mod composite;
@@ -37,10 +38,12 @@ pub mod plan_tools;
 pub mod policy_adapter;
 pub mod session;
 pub mod skill_tool;
+pub mod status_queries;
 pub mod task_tools;
 pub mod tool_adapter;
 pub mod workflow_tools;
 
+pub use agent_task_tool::{AgentDef, TaskTool, discover_agent_defs};
 pub use child_service::TurnChildService;
 pub use compactor::ContextCompactor;
 pub use composite::CompositeExecutor;
@@ -62,5 +65,6 @@ pub use session::{
     SessionHandle, assemble_session,
 };
 pub use skill_tool::SkillTool;
+pub use status_queries::SessionStatus;
 pub use task_tools::{TaskOutputTool, TaskStopTool};
 pub use tool_adapter::ToolAdapter;

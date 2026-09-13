@@ -65,14 +65,17 @@ impl HookAdapter {
 
     /// Translate a legacy hook report into a gateway report.
     fn translate(report: wavecode_hooks::HookReport) -> GatewayReport {
+        let context = report.context;
         match report.verdict {
             wavecode_hooks::HookVerdict::Allow => GatewayReport {
                 allow: true,
                 message: report.warnings.join("\n"),
+                context,
             },
             wavecode_hooks::HookVerdict::Block(reason) => GatewayReport {
                 allow: false,
                 message: reason,
+                context,
             },
         }
     }

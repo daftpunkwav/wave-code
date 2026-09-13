@@ -199,6 +199,10 @@ pub struct HookReport {
     pub allow: bool,
     /// Human-readable summary, surfaced as a warning when non-empty.
     pub message: String,
+    /// Context injected by prompt-type hooks (their capped stdout), folded
+    /// into the conversation as harness guidance. Empty when none produced
+    /// output; never blocks by itself.
+    pub context: String,
 }
 
 /// Minimal message shape for a sample request.
@@ -1057,8 +1061,13 @@ where
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
-            let results = self.execute_calls(&ctx.run_id, &calls, &emit_msg).await;
+            let (results, hook_contexts) = self.execute_calls(&ctx.run_id, &calls, &emit_msg).await;
             conv.push(Role::User, format_tool_results(&results));
+            // Prompt-type hook contexts ride normal history as guidance,
+            // kept separate from tool outputs by construction.
+            if !hook_contexts.is_empty() {
+                conv.push(Role::User, hook_contexts.join("\n\n"));
+            }
             state.bump_tool_round();
         }
 
@@ -1154,7 +1163,11 @@ where
         run_id: &str,
         calls: &[ToolCall],
         emit: &(dyn Fn(EventMsg) + Send + Sync),
-    ) -> Vec<ToolResult> {
+    ) -> (Vec<ToolResult>, Vec<String>) {
+        // Prompt-type hook contexts from this dispatch batch (pre- and
+        // post-tool); returned for the caller to fold into the
+        // conversation, separated from tool outputs by construction.
+        let mut hook_contexts: Vec<String> = Vec::new();
         for call in calls {
             emit(EventMsg::ToolCallBegin {
                 call_id: call.call_id.clone(),
@@ -1212,6 +1225,12 @@ where
                 emit(EventMsg::Warning {
                     message: report.message.clone(),
                 });
+            }
+            if !report.context.is_empty() {
+                hook_contexts.push(format!(
+                    "[hook:pre-tool-use {}] {}",
+                    call.name, report.context
+                ));
             }
             if report.allow {
                 live.push(call);
@@ -1274,7 +1293,9 @@ where
         }))
         .await;
         for (id, call, output) in concurrent {
-            self.post_tool(call, &output, emit).await;
+            if let Some(context) = self.post_tool(call, &output, emit).await {
+                hook_contexts.push(format!("[hook:post-tool-use {}] {}", call.name, context));
+            }
             results.insert(id, result_of(call, output));
         }
 
@@ -1315,7 +1336,9 @@ where
                 continue;
             }
             let output = self.executor.execute(call.clone()).await;
-            self.post_tool(call, &output, emit).await;
+            if let Some(context) = self.post_tool(call, &output, emit).await {
+                hook_contexts.push(format!("[hook:post-tool-use {}] {}", call.name, context));
+            }
             results.insert(call.call_id.clone(), result_of(call, output));
         }
 
@@ -1340,16 +1363,17 @@ where
             });
             ordered.push(result);
         }
-        ordered
+        (ordered, hook_contexts)
     }
 
-    /// Post-tool hooks fire only for executed calls and never block.
+    /// Post-tool hooks fire only for executed calls and never block; a
+    /// prompt-type hook's context is returned to the caller.
     async fn post_tool(
         &self,
         call: &ToolCall,
         output: &ToolResult,
         emit: &(dyn Fn(EventMsg) + Send + Sync),
-    ) {
+    ) -> Option<String> {
         let report = self
             .hooks
             .run_tool(
@@ -1364,6 +1388,7 @@ where
                 message: report.message,
             });
         }
+        (!report.context.is_empty()).then_some(report.context)
     }
 }
 
@@ -1795,6 +1820,7 @@ mod run_loop_tests {
                 HookPoint::PromptSubmit if self.submit_block => HookReport {
                     allow: false,
                     message: "nope".to_string(),
+                    context: String::new(),
                 },
                 HookPoint::Stop => {
                     let mut left = self.lock_blocks();
@@ -1803,16 +1829,19 @@ mod run_loop_tests {
                         return HookReport {
                             allow: false,
                             message: "stop it".to_string(),
+                            context: String::new(),
                         };
                     }
                     HookReport {
                         allow: true,
                         message: String::new(),
+                        context: String::new(),
                     }
                 }
                 _ => HookReport {
                     allow: true,
                     message: String::new(),
+                    context: String::new(),
                 },
             }
         }

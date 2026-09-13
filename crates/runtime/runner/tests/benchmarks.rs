@@ -69,6 +69,7 @@ impl HookGateway for NullHooks {
         HookReport {
             allow: true,
             message: String::new(),
+            context: String::new(),
         }
     }
 }

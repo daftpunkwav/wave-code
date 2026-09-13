@@ -16,14 +16,41 @@
 //! worktree shapes work); when the cwd equals the project root or lies outside
 //! it, real paths are deduplicated and no file is concatenated twice.
 //!
-//! Deliberate omissions (out of the first-version scope; the remaining SPEC
+//! Deliberate omission (out of the first-version scope; the remaining SPEC
 //! section 7.1 items land later): `WAVECODE.override.md` project-level
-//! overrides and fallback filenames (CLAUDE.md/AGENTS.md) are not implemented.
+//! overrides. Fallback filenames (AGENTS.md/CLAUDE.md) ARE implemented: a
+//! tier with no `WAVECODE.md` falls back to `AGENTS.md`, then `CLAUDE.md`
+//! (first existing wins) so repos following either cross-tool convention
+//! still get their instructions loaded.
 
 use std::path::{Path, PathBuf};
 
 /// Instruction memory filename.
 pub const INSTRUCTION_FILE: &str = "WAVECODE.md";
+
+/// Fallback instruction filenames per tier, tried in order after
+/// [`INSTRUCTION_FILE`] when that file does not exist (interop with repos
+/// following the AGENTS.md / CLAUDE.md conventions; first existing wins so a
+/// repo carrying duplicated copies does not double its context cost).
+pub const FALLBACK_INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
+
+/// Resolve the instruction file for one tier directory: `WAVECODE.md` when it
+/// exists, otherwise the first [`FALLBACK_INSTRUCTION_FILES`] entry that
+/// exists, otherwise `WAVECODE.md` itself (the read fails and the tier is
+/// skipped, same as before).
+fn resolve_instruction_file(dir: &Path) -> PathBuf {
+    let primary = dir.join(INSTRUCTION_FILE);
+    if primary.exists() {
+        return primary;
+    }
+    for name in FALLBACK_INSTRUCTION_FILES {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    primary
+}
 
 /// Depth cap for recursive `@path` reference expansion (SPEC section 7.1):
 /// WAVECODE.md itself is depth 0, files it references are depth 1, and so on;
@@ -61,16 +88,17 @@ pub fn collect(home: Option<&Path>, cwd: &Path) -> InstructionMemory {
     let mut mem = InstructionMemory::default();
     let mut seen: Vec<PathBuf> = Vec::new();
 
-    // One tier: one WAVECODE.md plus that tier's rules-dir *.md files (sorted
-    // by filename). The user and project tiers have different directory shapes
+    // One tier: one instruction file (WAVECODE.md, or the AGENTS.md/CLAUDE.md
+    // fallback when absent) plus that tier's rules-dir *.md files (sorted by
+    // filename). The user and project tiers have different directory shapes
     // (~/.wavecode/WAVECODE.md + ~/.wavecode/rules vs
     // <dir>/WAVECODE.md + <dir>/.wavecode/rules), so the caller passes both
     // paths explicitly.
-    let collect_level = |instr_file: PathBuf,
+    let collect_level = |instr_dir: PathBuf,
                          rules_dir: PathBuf,
                          mem: &mut InstructionMemory,
                          seen: &mut Vec<PathBuf>| {
-        let mut files = vec![instr_file];
+        let mut files = vec![resolve_instruction_file(&instr_dir)];
         if let Ok(entries) = std::fs::read_dir(&rules_dir) {
             let mut rules: Vec<PathBuf> = entries
                 .filter_map(std::result::Result::ok)
@@ -107,7 +135,7 @@ pub fn collect(home: Option<&Path>, cwd: &Path) -> InstructionMemory {
     if let Some(home) = home {
         let user_dir = home.join(".wavecode");
         collect_level(
-            user_dir.join(INSTRUCTION_FILE),
+            user_dir.clone(),
             user_dir.join("rules"),
             &mut mem,
             &mut seen,
@@ -115,14 +143,14 @@ pub fn collect(home: Option<&Path>, cwd: &Path) -> InstructionMemory {
     }
     if let Some(root) = find_project_root(cwd) {
         collect_level(
-            root.join(INSTRUCTION_FILE),
+            root.clone(),
             root.join(".wavecode").join("rules"),
             &mut mem,
             &mut seen,
         );
     }
     collect_level(
-        cwd.join(INSTRUCTION_FILE),
+        cwd.to_path_buf(),
         cwd.join(".wavecode").join("rules"),
         &mut mem,
         &mut seen,
@@ -507,5 +535,59 @@ mod tests {
             );
             assert!(u < g, "user-level rules sort after their own WAVECODE.md");
         }
+    }
+
+    /// Fallback filenames (interop): a tier with no WAVECODE.md falls back to
+    /// AGENTS.md, then CLAUDE.md, first existing wins.
+    #[test]
+    fn fallback_instruction_files_first_existing_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo-a");
+        write(&root.join(".git/HEAD"), "x\n");
+        // Only AGENTS.md: it wins over the (absent) CLAUDE.md.
+        write(&root.join("AGENTS.md"), "FROM-AGENTS");
+        let mem = collect(None, &root);
+        assert!(
+            mem.combined.contains("FROM-AGENTS"),
+            "AGENTS.md fallback should load:\n{}",
+            mem.combined
+        );
+
+        // Both AGENTS.md and CLAUDE.md: AGENTS.md wins, CLAUDE.md must not
+        // also load (first-existing-wins avoids duplicated copies).
+        let root_b = dir.path().join("repo-b");
+        write(&root_b.join(".git/HEAD"), "x\n");
+        write(&root_b.join("AGENTS.md"), "B-AGENTS");
+        write(&root_b.join("CLAUDE.md"), "B-CLAUDE");
+        let mem = collect(None, &root_b);
+        assert!(mem.combined.contains("B-AGENTS"));
+        assert!(
+            !mem.combined.contains("B-CLAUDE"),
+            "CLAUDE.md must not load when AGENTS.md exists:\n{}",
+            mem.combined
+        );
+
+        // Only CLAUDE.md: second fallback kicks in.
+        let root_c = dir.path().join("repo-c");
+        write(&root_c.join(".git/HEAD"), "x\n");
+        write(&root_c.join("CLAUDE.md"), "C-CLAUDE");
+        let mem = collect(None, &root_c);
+        assert!(
+            mem.combined.contains("C-CLAUDE"),
+            "CLAUDE.md fallback should load:\n{}",
+            mem.combined
+        );
+
+        // WAVECODE.md present: fallbacks never load.
+        let root_d = dir.path().join("repo-d");
+        write(&root_d.join(".git/HEAD"), "x\n");
+        write(&root_d.join("WAVECODE.md"), "D-WAVECODE");
+        write(&root_d.join("AGENTS.md"), "D-AGENTS");
+        write(&root_d.join("CLAUDE.md"), "D-CLAUDE");
+        let mem = collect(None, &root_d);
+        assert!(mem.combined.contains("D-WAVECODE"));
+        assert!(!mem.combined.contains("D-AGENTS"));
+        assert!(!mem.combined.contains("D-CLAUDE"));
+        assert_eq!(mem.sources.len(), 1);
     }
 }

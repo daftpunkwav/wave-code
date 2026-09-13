@@ -10,6 +10,7 @@
 //! add web / browser tools; the execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
 
 mod fs;
+mod html;
 mod lsp;
 mod path_guard;
 mod pty;
@@ -24,7 +25,9 @@ mod webfetch;
 mod websearch;
 
 pub use fs::{Present, PresentStore, ReadImage};
-pub use lsp::{DocumentSymbols, FindReferences, GotoDefinition, Hover, LspProviders};
+pub use lsp::{
+    DocumentSymbols, FindReferences, GotoDefinition, Hover, LspDiagnostics, LspProviders,
+};
 pub use spill_tool::SpillRead;
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 pub use websearch::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};

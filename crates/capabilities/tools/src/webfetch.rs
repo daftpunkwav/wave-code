@@ -129,11 +129,13 @@ impl Tool for WebFetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch an http/https URL and return it as text. Redirects are followed \
-         (up to 5 hops); other schemes (file, ftp, data, ...) are rejected. Use \
-         max_bytes to bound the body (default 262144, clamped to max 1048576); \
-         oversize bodies are cut with a [truncated] marker. Use timeout_ms to \
-         bound the whole fetch (default 30000 ms, clamped to max 300000 ms)."
+        "Fetch an http/https URL and return it as text. HTML pages are \
+         converted to Markdown (pass raw=true to get the original HTML). \
+         Redirects are followed (up to 5 hops); other schemes (file, ftp, \
+         data, ...) are rejected. Use max_bytes to bound the body (default \
+         262144, clamped to max 1048576); oversize bodies are cut with a \
+         [truncated] marker. Use timeout_ms to bound the whole fetch \
+         (default 30000 ms, clamped to max 300000 ms)."
     }
 
     fn input_schema(&self) -> Value {
@@ -151,6 +153,10 @@ impl Tool for WebFetch {
                 "timeout_ms": {
                     "type": "integer",
                     "description": "Timeout in milliseconds (default 30000, clamped to max 300000)"
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "Return the original HTML instead of Markdown (default false)"
                 }
             },
             "required": ["url"]
@@ -253,6 +259,26 @@ impl Tool for WebFetch {
         if truncated {
             text.push_str("\n[truncated]");
         }
+        // HTML pages are converted to Markdown before entering model
+        // context: raw markup burns tokens on attributes and scripts while
+        // carrying little meaning. `raw: true` opts out (verbatim HTML).
+        let is_html = content_type.as_deref().is_some_and(|ct| {
+            ct.split(';').next().map(str::trim).is_some_and(|mime| {
+                mime.eq_ignore_ascii_case("text/html")
+                    || mime.eq_ignore_ascii_case("application/xhtml+xml")
+            })
+        }) || content_type.is_none()
+            && text
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("<!doctype html");
+        if is_html && !input.get("raw").and_then(Value::as_bool).unwrap_or(false) {
+            let converted = crate::html::html_to_markdown(&text);
+            if truncated {
+                return Ok(ok_output(format!("{converted}\n[truncated]")));
+            }
+            return Ok(ok_output(converted));
+        }
         Ok(ok_output(text))
     }
 }
@@ -310,6 +336,13 @@ mod tests {
                         "/ok" => {
                             let mut out = format!("{head_ok}Content-Length: 11\r\n\r\n").into_bytes();
                             out.extend_from_slice(b"hello fetch");
+                            out
+                        }
+                        "/html" => {
+                            let body = b"<html><head><title>T</title></head><body><h1>Hi</h1><p>Body <a href=\"/x\">link</a></p><script>var q=1;</script></body></html>";
+                            let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n".to_vec();
+                            out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+                            out.extend_from_slice(body);
                             out
                         }
                         _ => {
@@ -405,6 +438,50 @@ mod tests {
         assert!(!out.is_error, "unexpected failure: {}", out.content);
         assert!(out.content.contains("hello fetch"));
         assert!(!out.content.contains("[truncated]"));
+    }
+
+    /// HTML responses are converted to Markdown by default; `raw: true`
+    /// keeps the original markup.
+    #[tokio::test]
+    async fn fetch_converts_html_to_markdown_unless_raw() {
+        let (addr, server) = stub_server().await;
+        let (_d, c) = ctx();
+        let url = format!("http://{addr}/html");
+        let out = WebFetch
+            .execute(serde_json::json!({"url": url}), &c)
+            .await
+            .unwrap();
+        assert!(!out.is_error, "unexpected failure: {}", out.content);
+        assert!(
+            out.content.contains("# Hi"),
+            "heading converted: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("[link](/x)"),
+            "link converted: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("var q=1"),
+            "script dropped: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("<p>"),
+            "markup must not leak: {}",
+            out.content
+        );
+        let out = WebFetch
+            .execute(serde_json::json!({"url": url, "raw": true}), &c)
+            .await
+            .unwrap();
+        server.abort();
+        assert!(
+            out.content.contains("<h1>"),
+            "raw keeps markup: {}",
+            out.content
+        );
     }
 
     #[tokio::test]

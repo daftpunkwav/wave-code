@@ -38,6 +38,13 @@ pub struct Metrics {
     pub tokens_in: u64,
     /// Sum of reported output tokens.
     pub tokens_out: u64,
+    /// Sum of prompt-cache read tokens reported by the provider (0 when
+    /// the provider reports no cache accounting). Cache reads bill at a
+    /// fraction of fresh input, so cost estimates must weight them apart.
+    pub cache_read_tokens: u64,
+    /// Sum of prompt-cache write tokens reported by the provider (billed
+    /// at a premium over fresh input).
+    pub cache_creation_tokens: u64,
     /// CompactCompleted events seen.
     pub compactions: u64,
     /// Warning events seen.
@@ -72,10 +79,13 @@ impl Metrics {
             EventMsg::TokenCount {
                 input_tokens,
                 output_tokens,
-                ..
+                cache_read_tokens,
+                cache_creation_tokens,
             } => {
                 self.tokens_in += input_tokens;
                 self.tokens_out += output_tokens;
+                self.cache_read_tokens += cache_read_tokens;
+                self.cache_creation_tokens += cache_creation_tokens;
             }
             EventMsg::CompactCompleted { .. } => self.compactions += 1,
             EventMsg::Warning { .. } => self.warnings += 1,
@@ -92,6 +102,14 @@ impl Metrics {
             return None;
         }
         Some(self.tool_errors as f64 / self.tool_calls as f64)
+    }
+
+    /// Average output tokens per completed turn, if any turns completed.
+    pub fn avg_output_per_turn(&self) -> Option<f64> {
+        if self.turns_completed == 0 {
+            return None;
+        }
+        Some(self.tokens_out as f64 / self.turns_completed as f64)
     }
 }
 
@@ -198,6 +216,31 @@ mod tests {
         metrics.record(&event(EventMsg::TurnCompleted { interrupted: true }));
         assert_eq!(metrics.turns_completed, 2);
         assert_eq!(metrics.turns_interrupted, 1);
+    }
+
+    /// Cache accounting accumulates across samples and stays separable
+    /// from the raw in/out totals.
+    #[test]
+    fn cache_tokens_accumulate_per_sample() {
+        let mut metrics = Metrics::new();
+        for (read, creation) in [(100u64, 7u64), (50, 0)] {
+            metrics.record(&event(EventMsg::TokenCount {
+                input_tokens: 10,
+                output_tokens: 3,
+                cache_read_tokens: read,
+                cache_creation_tokens: creation,
+            }));
+        }
+        metrics.record(&event(EventMsg::TurnCompleted { interrupted: false }));
+        assert_eq!(metrics.cache_read_tokens, 150);
+        assert_eq!(metrics.cache_creation_tokens, 7);
+        assert_eq!(metrics.tokens_in, 20);
+        assert_eq!(metrics.avg_output_per_turn(), Some(6.0));
+    }
+
+    #[test]
+    fn avg_output_is_none_without_completed_turns() {
+        assert_eq!(Metrics::new().avg_output_per_turn(), None);
     }
 
     #[test]

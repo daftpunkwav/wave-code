@@ -5,9 +5,8 @@
 //! Pure logic with sync IO: writes are single-entry appends (small files),
 //! called by core's `memory_write` tool via `spawn_blocking`; reads happen
 //! once at startup assembly. Everything is transparent to the user and
-//! directly editable — this module only appends and never consolidates (the
-//! SPEC 24h+5-session gated consolidation is a first-version simplification,
-//! see the crate-level docs).
+//! directly editable — this module only appends; consolidation lives in the
+//! [`crate::consolidate`] module (heuristic v1, see the crate-level docs).
 
 use std::path::{Path, PathBuf};
 
@@ -137,15 +136,18 @@ impl MemoryStore {
 
 /// Entry formatting: a `- ` list item; continuation lines of multi-line
 /// content are indented two spaces to stay inside the same Markdown item.
-fn format_entry(content: &str) -> String {
+/// Visible to [`crate::consolidate`], which rewrites category files with the
+/// same shape `append` produced.
+pub(crate) fn format_entry(content: &str) -> String {
     let mut out = String::from("- ");
     out.push_str(&content.trim().replace('\n', "\n  "));
     out
 }
 
 /// Index summary: the content's first line, truncated to 80 chars by character
-/// count (an ellipsis marks the cut).
-fn summarize(content: &str) -> String {
+/// count (an ellipsis marks the cut). Visible to [`crate::consolidate`], which
+/// rebuilds index rows with the same shape `append` produced.
+pub(crate) fn summarize(content: &str) -> String {
     let first_line = content.trim().lines().next().unwrap_or_default();
     const MAX: usize = 80;
     if first_line.chars().count() <= MAX {

@@ -1,10 +1,13 @@
 /*! @file Webfetch
- * @description HTTP(S) URL fetch tool with size and redirect caps.
+ * @description HTTP(S) URL fetch tool with size, redirect caps, and HTML
+ * to Markdown conversion.
  *
  * Responsibilities:
  * - Fetch http/https URLs with manual redirect following (max 5 hops)
  * - Enforce a streaming size cap with a truncation marker
  * - Decode bodies as text with best-effort charset handling
+ * - Render HTML responses as Markdown before they enter model context
+ *   (raw=true opts out)
  *
  * This module must not depend on: UI-layer components, filesystem writes.
  */

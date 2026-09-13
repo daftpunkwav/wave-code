@@ -1,3 +1,17 @@
+/*!
+ * @file MemoryConsolidation
+ * @description Heuristic near-duplicate merge over memory store entries.
+ *
+ * Responsibilities:
+ * - Plan merges among near-duplicate entries (pure Jaccard-overlap
+ *   planner, deterministic, no model calls).
+ * - Rewrite affected category files and rebuild the index only when
+ *   something was dropped.
+ *
+ * This module must not depend on: models, embeddings, or any capability
+ * outside the memory crate's own store.
+ */
+
 //! Heuristic memory consolidation (SPEC section 7.2, first version): a
 //! "dream"-style background merge run at session end, after auto-extraction
 //! appended new entries. Near-duplicate entries within one category fold into

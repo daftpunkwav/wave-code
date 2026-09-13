@@ -98,13 +98,16 @@ trait RpcClient {
     ) -> std::result::Result<serde_json::Value, McpError>;
 }
 
+/// One parsed list page: items plus the next cursor, if the server paginates.
+type ListPage<T> = std::result::Result<(Vec<T>, Option<String>), McpError>;
+
 /// Walk a paginated MCP list method (`tools/list`, `resources/list`,
 /// `prompts/list`) to its end, parsing each page with `parse` and bounding
 /// the walk at [`MAX_LIST_PAGES`].
 async fn list_paged<C, T>(
     client: &C,
     method: &str,
-    parse: fn(&serde_json::Value) -> std::result::Result<(Vec<T>, Option<String>), McpError>,
+    parse: fn(&serde_json::Value) -> ListPage<T>,
 ) -> std::result::Result<Vec<T>, McpError>
 where
     C: RpcClient + ?Sized,
@@ -674,20 +677,6 @@ impl HttpMcpClient {
             other => other.map_err(|e| transport_error("request", e)),
         }
     }
-
-    /// One fire-and-forget notification.
-    async fn notify(
-        &self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> std::result::Result<(), McpError> {
-        self.transport
-            .lock()
-            .await
-            .notify(method, params)
-            .await
-            .map_err(|e| transport_error("notify", e))
-    }
 }
 
 #[async_trait::async_trait]
@@ -1247,21 +1236,19 @@ async fn bridge_server(
             count += 1;
         }
     }
-    if caps.resources {
-        if let Ok(resources) = client.list_resources().await {
-            if let Some(bridge) = McpResourceBridge::new(name, &resources, client.clone()) {
-                registry.register(Arc::new(bridge));
-                count += 1;
-            }
-        }
+    if caps.resources
+        && let Ok(resources) = client.list_resources().await
+        && let Some(bridge) = McpResourceBridge::new(name, &resources, client.clone())
+    {
+        registry.register(Arc::new(bridge));
+        count += 1;
     }
-    if caps.prompts {
-        if let Ok(prompts) = client.list_prompts().await {
-            if let Some(bridge) = McpPromptBridge::new(name, &prompts, client.clone()) {
-                registry.register(Arc::new(bridge));
-                count += 1;
-            }
-        }
+    if caps.prompts
+        && let Ok(prompts) = client.list_prompts().await
+        && let Some(bridge) = McpPromptBridge::new(name, &prompts, client.clone())
+    {
+        registry.register(Arc::new(bridge));
+        count += 1;
     }
     Ok(count)
 }

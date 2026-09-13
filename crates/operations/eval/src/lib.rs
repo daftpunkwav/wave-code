@@ -1,14 +1,17 @@
 /*!
- * @file BenchmarkRunner
- * @description Behavioural benchmarks over any turn driver.
+ * @file Eval
+ * @description Behavioural benchmarks and recorded-session replay checks.
  *
  * Responsibilities:
  * - Run scripted cases with fresh conversations each.
  * - Check history for expected content per case.
+ * - Validate recorded wire-event sessions against the protocol contract
+ *   and score their assistant output (keyless regression tier).
  * - Report pass rates without touching execution.
  *
  * This module must not depend on: concrete drivers, tools, or models.
- * Cases run through the TurnDriver seam with dropped events.
+ * Cases run through the TurnDriver seam with dropped events; replay is a
+ * pure read-only fold over recorded events.
  */
 
 //! Evaluation: scripted expectations against observable history.

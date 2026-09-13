@@ -620,15 +620,13 @@ impl<T: LspTransport> LspClient<T> {
             // as before.
             if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
             {
-                if let Some(sink) = &self.diagnostics {
-                    if let Some(params) = msg.get("params") {
-                        let uri = params.get("uri").and_then(Value::as_str);
-                        if let (Some(uri), Some(diags)) = (
-                            uri.filter(|u| !u.is_empty()),
-                            params.get("diagnostics").and_then(Value::as_array),
-                        ) {
-                            lock(sink).record(uri, diags);
-                        }
+                if let (Some(sink), Some(params)) = (&self.diagnostics, msg.get("params")) {
+                    let uri = params.get("uri").and_then(Value::as_str);
+                    if let (Some(uri), Some(diags)) = (
+                        uri.filter(|u| !u.is_empty()),
+                        params.get("diagnostics").and_then(Value::as_array),
+                    ) {
+                        lock(sink).record(uri, diags);
                     }
                 }
                 continue;

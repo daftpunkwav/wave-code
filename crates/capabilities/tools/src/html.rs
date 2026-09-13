@@ -1,3 +1,17 @@
+/*!
+ * @file HtmlToMarkdown
+ * @description Lenient single-pass HTML to Markdown conversion for webfetch.
+ *
+ * Responsibilities:
+ * - Turn structural markup (headings, lists, links, emphasis, code) into
+ *   Markdown that reads well in model context.
+ * - Drop pure presentation (scripts, styles, attributes, comments).
+ * - Degrade malformed or truncated HTML to plain text, never fail.
+ *
+ * This module must not depend on: I/O, network, or any other workspace
+ * crate. It is pure string transformation and unit-testable as such.
+ */
+
 //! Minimal HTML → Markdown conversion for the `webfetch` tool.
 //!
 //! Goal: make fetched pages readable in model context — structural markup
@@ -127,7 +141,7 @@ fn tag_name(inner: &str) -> String {
     let name: String = inner
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())
-        .map(|c| c.to_ascii_lowercase() as char)
+        .map(|c| c.to_ascii_lowercase())
         .collect();
     name
 }

@@ -13,6 +13,13 @@
 
 //! Evaluation: scripted expectations against observable history.
 
+mod replay;
+
+pub use replay::{
+    RecordedCase, ReplayReport, ReplayResult, evaluate_recorded, read_events_jsonl,
+    validate_contract,
+};
+
 use runtime_runner::{RunContext, StopReason, TurnDriver};
 use state_store::Conversation;
 

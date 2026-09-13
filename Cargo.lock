@@ -1209,7 +1209,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "runtime-runner",
+ "serde_json",
  "state-store",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "wavecode-wire",

@@ -10,15 +10,22 @@
 //!   fields, executed via the platform shell (Windows `cmd /C`, Unix `sh -c`,
 //!   overridable with `WAVECODE_SHELL` — the same heuristic as the shell
 //!   tool), with the event payload written to stdin as JSON;
-//! - `prompt` (SPEC schedules it post-M4): asks a model to rule allow/block
-//!   from a template; **not implemented** in this version, left as a
-//!   placeholder (see the [`HookDef`] notes).
+//! - `prompt` (this version, registered programmatically via
+//!   [`HookEngine::register_prompt_hook`]): the same execution shape as
+//!   `command` (matcher / shell / stdin payload / timeout), but exit code 0
+//!   captures stdout (capped at [`PROMPT_CONTEXT_MAX_BYTES`] with a
+//!   truncation marker) into [`HookReport::context`] as injected context, and
+//!   no outcome ever blocks — exit code 2 and every other failure degrade to
+//!   a warning so a broken prompt hook cannot veto the turn. The SPEC's
+//!   model-ruling flavor (post-M4) stays future work; see the [`HookDef`]
+//!   notes.
 //!
 //! Blocking semantics (SPEC section 9): exit code 0 allows; 2 blocks with
 //! stderr fed back to the model (only on blockable points: PreToolUse /
 //! UserPromptSubmit / Stop; exit code 2 on other points degrades to an
 //! allow-with-warning); any other nonzero code allows with a warning; timeouts
-//! force-kill and log a warning.
+//! force-kill and log a warning. Command entries only — prompt-type hooks are
+//! exempt: they never block (see the `prompt` bullet).
 //!
 //! Trust boundary (unlike the shell tool): hook commands come from the user's
 //! own config file, so they are authorized configuration rather than
@@ -45,6 +52,15 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Default timeout (SPEC section 9 config example): 10s.
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
+
+/// Per-hook capture cap for prompt-type hooks: stdout beyond this many bytes
+/// is cut (at a char boundary) with a truncation marker appended — injected
+/// context competes with the model's context window, so it stays bounded.
+pub const PROMPT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// Marker appended when a prompt hook's stdout exceeds
+/// [`PROMPT_CONTEXT_MAX_BYTES`].
+pub const PROMPT_CONTEXT_TRUNCATED: &str = "\n[...prompt hook output truncated]";
 
 /// Event point (SPEC section 9 table; the config `[hooks.<EventPoint>]` table
 /// names match the legal values of [`HookEventPoint::parse`]).
@@ -116,10 +132,14 @@ impl HookEventPoint {
 
 /// One hook definition (one row of a `[hooks.<EventPoint>]` table).
 ///
-/// First version is command-type only: this struct is the command hook; when
-/// the prompt type lands (SPEC section 9, model ruling from a template, post
-/// M4) this is expected to become a tagged enum (`type = "command" |
-/// "prompt"`), with the config surface evolving in step.
+/// One field set serves both flavors: entries built through the config
+/// assembler run as `command` hooks, while [`HookEngine::register_prompt_hook`]
+/// registers the same shape as a `prompt` hook (stdout becomes injected
+/// context, never blocks — see the module docs). The flavor deliberately
+/// lives in the engine rather than a field on this struct so the config
+/// assembler's exhaustive construction in another crate keeps compiling; when
+/// the config grows a `type` key this is expected to fold into a tagged enum
+/// (`type = "command" | "prompt"`).
 #[derive(Debug, Clone)]
 pub struct HookDef {
     /// Tool-name matcher (only meaningful on tool-ish points): `|`-separated
@@ -175,14 +195,21 @@ pub enum HookVerdict {
     Block(String),
 }
 
-/// An execution report for one event point: the ruling plus warnings (nonzero
-/// exit codes / timeouts / spawn failures).
+/// An execution report for one event point: the ruling, warnings (nonzero
+/// exit codes / timeouts / spawn failures), and the context injected by
+/// prompt-type hooks.
 #[derive(Debug, Clone, Default)]
 pub struct HookReport {
     /// Ruling (Allow / Block).
     pub verdict: HookVerdict,
     /// Warning list (callers turn these into Warning events / log lines).
     pub warnings: Vec<String>,
+    /// Injected context from prompt-type hooks: their exit-0 stdout, capped
+    /// per hook at [`PROMPT_CONTEXT_MAX_BYTES`] (empty when none produced
+    /// output). Separate from [`HookVerdict::Block`]'s stderr payload so
+    /// callers can route blocking messages and context injections
+    /// differently.
+    pub context: String,
 }
 
 /// Hook engine: the config tables plus the once-fired record.
@@ -192,8 +219,16 @@ pub struct HookReport {
 /// across sessions resets it.
 pub struct HookEngine {
     defs: HashMap<HookEventPoint, Vec<HookDef>>,
+    /// Prompt-type hooks (registered via [`HookEngine::register_prompt_hook`]):
+    /// stored apart from `defs` so `HookDef` keeps its exact field set (the
+    /// config assembler constructs it exhaustively in another crate).
+    prompts: Mutex<HashMap<HookEventPoint, Vec<HookDef>>>,
     /// Fired once-entries: (point, entry index).
     fired: Mutex<HashSet<(HookEventPoint, usize)>>,
+    /// Fired prompt entries: (point, entry index) — quota tracked separately
+    /// from command entries so the two flavors never consume each other's
+    /// `once`.
+    fired_prompts: Mutex<HashSet<(HookEventPoint, usize)>>,
     /// Runtime plugin middleware per event point (registration order is run
     /// order; empty unless `register_plugin_hook` was called).
     plugin_hooks: Mutex<HashMap<HookEventPoint, Vec<PluginHook>>>,
@@ -204,7 +239,9 @@ impl HookEngine {
     pub fn new(defs: HashMap<HookEventPoint, Vec<HookDef>>) -> Self {
         Self {
             defs,
+            prompts: Mutex::new(HashMap::new()),
             fired: Mutex::new(HashSet::new()),
+            fired_prompts: Mutex::new(HashSet::new()),
             plugin_hooks: Mutex::new(HashMap::new()),
         }
     }
@@ -212,13 +249,28 @@ impl HookEngine {
     /// Empty engine (no entries on any point) — the assembly layer skips
     /// wiring when this holds.
     pub fn is_empty(&self) -> bool {
-        self.defs.values().all(Vec::is_empty)
+        self.defs.values().all(Vec::is_empty) && lock(&self.prompts).values().all(Vec::is_empty)
     }
 
     /// Whether a point has entries (points without entries short-circuit
     /// without building a payload).
     pub fn has_hooks(&self, point: HookEventPoint) -> bool {
         self.defs.get(&point).is_some_and(|d| !d.is_empty())
+            || lock(&self.prompts)
+                .get(&point)
+                .is_some_and(|d| !d.is_empty())
+    }
+
+    /// Register one prompt-type hook for `point` (the config assembler maps
+    /// `type = "prompt"` rules here; command tables are untouched).
+    ///
+    /// Execution matches command hooks (matcher / shell / stdin payload /
+    /// timeout / once, registration order = run order), except: exit code 0
+    /// captures stdout into [`HookReport::context`] as injected context, and
+    /// no outcome ever blocks — exit code 2 and every failure degrade to a
+    /// warning. `once` quota is tracked separately from command entries.
+    pub fn register_prompt_hook(&self, point: HookEventPoint, def: HookDef) {
+        lock(&self.prompts).entry(point).or_default().push(def);
     }
 
     /// Static configuration diagnostics (no execution): flags entries
@@ -230,12 +282,14 @@ impl HookEngine {
     /// warns at runtime for empty commands on the hot path.
     pub fn validate(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let mut points: Vec<HookEventPoint> = self.defs.keys().copied().collect();
-        points.sort_by_key(|p| p.as_str()); // deterministic order
-        for point in points {
-            let Some(defs) = self.defs.get(&point) else {
-                continue;
-            };
+        // Command tables first, then prompt tables; the stable sort keeps
+        // that order within a point, and ordering by point name keeps the
+        // output deterministic.
+        let mut tables: Vec<(HookEventPoint, Vec<HookDef>)> =
+            self.defs.iter().map(|(p, d)| (*p, d.clone())).collect();
+        tables.extend(lock(&self.prompts).iter().map(|(p, d)| (*p, d.clone())));
+        tables.sort_by_key(|(p, _)| p.as_str());
+        for (point, defs) in tables {
             for (idx, def) in defs.iter().enumerate() {
                 if def.command.trim().is_empty() {
                     out.push(format!(
@@ -267,13 +321,45 @@ impl HookEngine {
         out
     }
 
-    /// Fire one event point: execute entries in config order, collecting
-    /// warnings; the first exit code 2 on a blockable point short-circuits to
-    /// Block (later entries no longer run — a block is final).
+    /// Fire one event point: command entries run first in config order (the
+    /// first exit code 2 on a blockable point short-circuits to Block — a
+    /// block is final, later entries and prompt hooks do not run), then
+    /// prompt entries in registration order (never block; each exit-0 stdout
+    /// is appended to [`HookReport::context`], newline-joined).
     pub async fn run(&self, point: HookEventPoint, input: &HookInput<'_>) -> HookReport {
         let mut report = HookReport::default();
-        let Some(defs) = self.defs.get(&point) else {
-            return report;
+        if let Some(defs) = self.defs.get(&point) {
+            self.run_entries(point, defs, false, input, &mut report)
+                .await;
+            if matches!(report.verdict, HookVerdict::Block(_)) {
+                return report;
+            }
+        }
+        let prompts = lock(&self.prompts).get(&point).cloned().unwrap_or_default();
+        if !prompts.is_empty() {
+            self.run_entries(point, &prompts, true, input, &mut report)
+                .await;
+        }
+        report
+    }
+
+    /// Execute one entry list (command or prompt flavor) in order, appending
+    /// warnings / context / a block ruling to `report`. Matcher filtering,
+    /// empty-command skipping, `once` accounting and every failure path are
+    /// shared verbatim between the flavors; only the `Success` and `Blocked`
+    /// outcomes differ (prompt captures context instead of blocking).
+    async fn run_entries(
+        &self,
+        point: HookEventPoint,
+        defs: &[HookDef],
+        prompt: bool,
+        input: &HookInput<'_>,
+        report: &mut HookReport,
+    ) {
+        let fired = if prompt {
+            &self.fired_prompts
+        } else {
+            &self.fired
         };
         for (idx, def) in defs.iter().enumerate() {
             // Matcher filtering: only tool-ish points can match; an entry
@@ -297,21 +383,38 @@ impl HookEngine {
                 continue;
             }
             // once: only an "actual execution" past the matcher consumes quota.
-            if def.once && !lock(&self.fired).insert((point, idx)) {
+            if def.once && !lock(fired).insert((point, idx)) {
                 continue;
             }
             match run_command(point, def, input).await {
-                ExecOutcome::Success => {}
-                ExecOutcome::Blocked(stderr) => {
-                    if point.blockable() {
-                        report.verdict = HookVerdict::Block(stderr);
-                        return report; // First block short-circuits (a block is final).
+                ExecOutcome::Success(stdout) => {
+                    // Command hooks ignore stdout; prompt hooks capture it
+                    // (capped) as injected context.
+                    if prompt {
+                        append_context(&mut report.context, &stdout);
                     }
-                    report.warnings.push(format!(
-                        "[{}] hook `{}` exited with code 2, but this point is not blockable (allowed with warning)",
-                        point.as_str(),
-                        def.command
-                    ));
+                }
+                ExecOutcome::Blocked(stderr) => {
+                    if prompt {
+                        // A prompt hook never blocks its point: exit code 2
+                        // (the command flavor's block signal) degrades to a
+                        // warning so a broken hook cannot veto the turn.
+                        report.warnings.push(format!(
+                            "[{}] prompt hook `{}` exited with code 2 (prompt hooks never block): {}",
+                            point.as_str(),
+                            def.command,
+                            one_line(&stderr)
+                        ));
+                    } else if point.blockable() {
+                        report.verdict = HookVerdict::Block(stderr);
+                        return; // First block short-circuits (a block is final).
+                    } else {
+                        report.warnings.push(format!(
+                            "[{}] hook `{}` exited with code 2, but this point is not blockable (allowed with warning)",
+                            point.as_str(),
+                            def.command
+                        ));
+                    }
                 }
                 ExecOutcome::NonZero(code, stderr) => {
                     report.warnings.push(format!(
@@ -336,7 +439,7 @@ impl HookEngine {
                     // as executed — the process really ran — so its quota
                     // stays consumed).
                     if def.once {
-                        lock(&self.fired).remove(&(point, idx));
+                        lock(fired).remove(&(point, idx));
                     }
                     report.warnings.push(format!(
                         "[{}] hook `{}` failed to spawn (allowed with warning): {reason}",
@@ -346,7 +449,6 @@ impl HookEngine {
                 }
             }
         }
-        report
     }
 }
 
@@ -371,8 +473,9 @@ fn matcher_matches(matcher: &str, tool: &str) -> bool {
 
 /// One execution's result (internal).
 enum ExecOutcome {
-    /// Exit code 0.
-    Success,
+    /// Exit code 0: payload is the trimmed stdout (prompt hooks turn it into
+    /// injected context; command hooks ignore it).
+    Success(String),
     /// Exit code 2: payload is the stderr (the model-facing block reason).
     Blocked(String),
     /// Other nonzero exit codes: payload is a stderr excerpt.
@@ -449,9 +552,10 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         Err(_) => ExecOutcome::Timeout, // future dropped -> kill_on_drop kills the process
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
         Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             match output.status.code() {
-                Some(0) => ExecOutcome::Success,
+                Some(0) => ExecOutcome::Success(stdout),
                 Some(2) => ExecOutcome::Blocked(stderr),
                 Some(code) => ExecOutcome::NonZero(code, stderr),
                 // Killed by a signal (no exit code): allow with a nonzero warning.
@@ -459,6 +563,34 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
             }
         }
     }
+}
+
+/// Cap one prompt hook's captured stdout: over-budget output is cut at a
+/// char boundary (stdout is lossy-decoded UTF-8, so the byte cap can split a
+/// multi-byte character) with [`PROMPT_CONTEXT_TRUNCATED`] appended.
+fn capture_context(stdout: &str) -> String {
+    if stdout.len() <= PROMPT_CONTEXT_MAX_BYTES {
+        return stdout.to_owned();
+    }
+    let mut end = PROMPT_CONTEXT_MAX_BYTES;
+    while !stdout.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &stdout[..end], PROMPT_CONTEXT_TRUNCATED)
+}
+
+/// Append one prompt hook's captured stdout to the report context
+/// (newline-joined across hooks; empty output contributes nothing so a
+/// silent-but-successful hook never injects blank context).
+fn append_context(context: &mut String, stdout: &str) {
+    let captured = capture_context(stdout);
+    if captured.is_empty() {
+        return;
+    }
+    if !context.is_empty() {
+        context.push('\n');
+    }
+    context.push_str(&captured);
 }
 
 /// Single-line a warning text (stderr may be multi-line; take the first line
@@ -886,6 +1018,110 @@ mod tests {
 
         let clean = engine(&[(HookEventPoint::PreToolUse, def(&exit_cmd(0, "")))]);
         assert!(clean.validate().is_empty());
+    }
+
+    /// Static validation covers prompt entries too (they warn and skip at
+    /// runtime exactly like command entries); a prompt-only engine is not
+    /// empty and has hooks on its point only.
+    #[test]
+    fn validate_covers_prompt_entries() {
+        let e = HookEngine::new(HashMap::new());
+        e.register_prompt_hook(HookEventPoint::Stop, def("   "));
+        let diagnostics = e.validate();
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("empty command"), "{diagnostics:?}");
+        assert!(!e.is_empty());
+        assert!(e.has_hooks(HookEventPoint::Stop));
+        assert!(!e.has_hooks(HookEventPoint::SessionStart));
+    }
+
+    // —— prompt hooks ——
+
+    /// A succeeding prompt hook injects its stdout as context: verdict stays
+    /// Allow with no warnings, and the capture is trimmed (cmd's echo appends
+    /// CRLF).
+    #[tokio::test]
+    async fn prompt_hook_success_captures_stdout_as_context() {
+        let e = HookEngine::new(HashMap::new());
+        e.register_prompt_hook(HookEventPoint::UserPromptSubmit, def("echo ctx-from-hook"));
+        let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert!(report.warnings.is_empty());
+        assert_eq!(report.context, "ctx-from-hook");
+    }
+
+    /// A failing prompt hook must not block its point: exit code 2 (the
+    /// command flavor's block signal) degrades to a warning even on a
+    /// blockable point, and no context is injected.
+    #[tokio::test]
+    async fn prompt_hook_failure_never_blocks() {
+        let e = HookEngine::new(HashMap::new());
+        e.register_prompt_hook(HookEventPoint::Stop, def(&exit_cmd(2, "would-block")));
+        let report = e.run(HookEventPoint::Stop, &input(None)).await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.warnings[0].contains("never block"), "{report:?}");
+        assert!(report.context.is_empty());
+    }
+
+    /// Command entries run first and leave the context empty; prompt context
+    /// accumulates newline-joined in registration order.
+    #[tokio::test]
+    async fn prompt_context_accumulates_after_command_entries() {
+        let e = engine(&[(HookEventPoint::PreToolUse, def(&exit_cmd(0, "")))]);
+        e.register_prompt_hook(HookEventPoint::PreToolUse, def("echo first-ctx"));
+        e.register_prompt_hook(HookEventPoint::PreToolUse, def("echo second-ctx"));
+        let report = e
+            .run(HookEventPoint::PreToolUse, &input(Some("shell")))
+            .await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert_eq!(report.context, "first-ctx\nsecond-ctx");
+    }
+
+    /// Prompt `once` quota is separate from the command flavor's: the command
+    /// entry firing every turn does not consume the prompt entry's once.
+    #[tokio::test]
+    async fn prompt_once_quota_is_independent() {
+        let e = engine(&[(HookEventPoint::Stop, def(&exit_cmd(0, "")))]);
+        e.register_prompt_hook(
+            HookEventPoint::Stop,
+            HookDef {
+                once: true,
+                ..def("echo once-ctx")
+            },
+        );
+        let r = e.run(HookEventPoint::Stop, &input(None)).await;
+        assert_eq!(r.context, "once-ctx");
+        let r = e.run(HookEventPoint::Stop, &input(None)).await;
+        assert_eq!(r.context, "", "prompt once consumed");
+        assert!(r.warnings.is_empty());
+    }
+
+    /// The capture cap: over-budget output is cut with the truncation marker;
+    /// a multi-byte character split by the byte cap is not torn (the cut
+    /// backs up to a char boundary).
+    #[test]
+    fn prompt_context_capture_caps_and_marks_truncation() {
+        let small = "within budget";
+        assert_eq!(capture_context(small), small);
+
+        let big = "a".repeat(PROMPT_CONTEXT_MAX_BYTES + 100);
+        let captured = capture_context(&big);
+        assert!(captured.ends_with(PROMPT_CONTEXT_TRUNCATED));
+        assert_eq!(
+            captured.len(),
+            PROMPT_CONTEXT_MAX_BYTES + PROMPT_CONTEXT_TRUNCATED.len()
+        );
+
+        // Three-byte characters: 64 KiB is not a multiple of 3, so the raw
+        // byte cap lands mid-character.
+        let wide = "\u{65e5}".repeat(PROMPT_CONTEXT_MAX_BYTES / 3 + 10);
+        let captured = capture_context(&wide);
+        assert!(captured.ends_with(PROMPT_CONTEXT_TRUNCATED));
+        assert!(
+            captured.len() < PROMPT_CONTEXT_MAX_BYTES + PROMPT_CONTEXT_TRUNCATED.len(),
+            "cut lands before the byte cap on a non-boundary"
+        );
     }
 
     // -- plugin middleware --

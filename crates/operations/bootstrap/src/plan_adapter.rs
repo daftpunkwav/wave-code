@@ -32,9 +32,11 @@ impl PlanTracker for TodoPlanTracker {
     }
 
     fn reminder(&self) -> String {
-        format!(
+        // Wrapped as a system reminder so the nudge reads as harness
+        // guidance, not user-authored input (tag owned by wavecode-context).
+        wavecode_context::wrap_system_reminder(&format!(
             "Plan has unfinished items; update the plan before finishing:\n{}",
             wavecode_tools::format_todos(&self.store.snapshot())
-        )
+        ))
     }
 }

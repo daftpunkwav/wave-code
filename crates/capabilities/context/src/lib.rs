@@ -17,7 +17,15 @@
 //!
 //! This crate depends only on `wavecode-llm` (SPEC section 3 matrix); trigger
 //! timing is orchestrated by core.
+//!
+//! Two auxiliary passes share the same history model: the cache-preserving
+//! micro-compaction pass ([`evict_old_tool_results`], which stubs the payloads
+//! of old tool results while leaving an anchored prefix and a recent window
+//! untouched) and the system-reminder injection channel
+//! ([`ReminderChannel`], the single channel for compaction notices, plan
+//! nudges, and similar meta text).
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -548,6 +556,281 @@ pub fn find_pairing_violations(history: &[Message]) -> Vec<String> {
     violations
 }
 
+// ---------------------------------------------------------------------------
+// cache-preserving micro-compaction (tool-result eviction)
+// ---------------------------------------------------------------------------
+
+/// Header line every eviction stub starts with. Together with the paired
+/// `tool_use_id` carried by the `ContentBlock::ToolResult` block itself, this
+/// tells the model which tool call the stub belonged to. (Tool results are
+/// recognized structurally via `ContentBlock::ToolResult` — never parsed
+/// heuristically out of unrelated text.)
+pub const EVICTED_RESULT_MARKER_PREFIX: &str = "[evicted tool result";
+
+/// Default count of head messages never touched by the eviction pass (the
+/// anchored prefix). Keeping the head byte-stable is what preserves Anthropic
+/// prompt-cache prefixes: cache hits extend up to the first changed message.
+pub const DEFAULT_EVICTION_ANCHORED_PREFIX: usize = 4;
+
+/// Default count of tail messages never touched by the eviction pass (the
+/// recent window). Aligned with [`DEFAULT_KEEP_RECENT`] so the eviction pass
+/// never stubs what a full compaction would keep verbatim anyway.
+pub const DEFAULT_EVICTION_RECENT_WINDOW: usize = DEFAULT_KEEP_RECENT;
+
+/// Default soft token threshold above which the eviction pass runs. Deliberately
+/// below the warn line of typical large windows so stale tool payloads are
+/// relieved before full compaction becomes necessary; callers wanting a
+/// window-proportional policy convert it into this flat value at the config
+/// layer (same convention as [`Thresholds`]).
+pub const DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS: u64 = 100_000;
+
+/// Parameters of the eviction pass (see [`evict_old_tool_results`]).
+#[derive(Debug, Clone)]
+pub struct EvictionConfig {
+    /// First `anchored_prefix` messages are never touched (anchored prefix,
+    /// cache-prefix preservation).
+    pub anchored_prefix: usize,
+    /// Last `recent_window` messages are never touched (recent window).
+    pub recent_window: usize,
+    /// Soft threshold (estimated tokens) above which
+    /// [`should_evict_tool_results`] fires.
+    pub soft_threshold_tokens: u64,
+}
+
+impl Default for EvictionConfig {
+    fn default() -> Self {
+        Self {
+            anchored_prefix: DEFAULT_EVICTION_ANCHORED_PREFIX,
+            recent_window: DEFAULT_EVICTION_RECENT_WINDOW,
+            soft_threshold_tokens: DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS,
+        }
+    }
+}
+
+/// Eviction trigger policy: run the pass once estimated usage reaches the
+/// soft threshold. Pure and parameterized; callers feed it the same
+/// `resolve_used_tokens` result they already compute for the threshold check.
+pub fn should_evict_tool_results(used_tokens: u64, cfg: &EvictionConfig) -> bool {
+    used_tokens >= cfg.soft_threshold_tokens
+}
+
+/// Map every assistant `tool_use` id to its tool name (ids are unique per
+/// conversation); used to name eviction stubs after the call they belonged to.
+fn tool_use_names(history: &[Message]) -> HashMap<&str, &str> {
+    let mut names = HashMap::new();
+    for m in history {
+        if m.role != Role::Assistant {
+            continue;
+        }
+        for b in &m.content {
+            if let ContentBlock::ToolUse { id, name, .. } = b {
+                names.insert(id.as_str(), name.as_str());
+            }
+        }
+    }
+    names
+}
+
+/// Eviction stub for one tool result: a single deterministic header line
+/// naming the tool call it belonged to (tool name when known, else the bare
+/// id). Deterministic in `(tool_use_id, name)` so a second pass reproduces it
+/// byte for byte — the root of [`evict_old_tool_results`]'s idempotency.
+fn evicted_result_stub(tool_use_id: &str, tool_name: Option<&str>) -> String {
+    match tool_name {
+        Some(name) => format!("{EVICTED_RESULT_MARKER_PREFIX} for {name} ({tool_use_id})]"),
+        None => format!("{EVICTED_RESULT_MARKER_PREFIX} for {tool_use_id}]"),
+    }
+}
+
+/// Cache-preserving micro-compaction: replace the payload of old tool results
+/// with a one-line eviction stub, keeping everything else verbatim.
+///
+/// What is never touched:
+/// - the first `cfg.anchored_prefix` messages (anchored prefix — with
+///   Anthropic prompt caching the cache prefix extends up to the first changed
+///   message, so a stable head keeps the prefix cacheable);
+/// - the last `cfg.recent_window` messages (recent window; defaults to
+///   [`DEFAULT_KEEP_RECENT`], matching full compaction's verbatim tail);
+/// - non-tool-result content: user/assistant text, images, and any text
+///   blocks sharing a message with an evicted result.
+///
+/// Tool results are recognized structurally (`ContentBlock::ToolResult`
+/// blocks in user messages) — never via text heuristics. Only `content` is
+/// replaced; the block keeps its `tool_use_id` and `is_error`, so pairing
+/// integrity ([`find_pairing_violations`]) is unaffected.
+///
+/// Idempotent: the stub is a pure function of `(tool_use_id, tool name)`, so
+/// running the pass again reproduces the same stubs and changes nothing
+/// further. When the anchored prefix and the recent window overlap (short
+/// history), the evictable range is empty and the history passes through
+/// unchanged (saturating arithmetic, never panics).
+pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<Message> {
+    let end = history.len().saturating_sub(cfg.recent_window);
+    let start = cfg.anchored_prefix.min(end);
+    if start >= end {
+        return history.to_vec();
+    }
+    let names = tool_use_names(history);
+    let mut out = Vec::with_capacity(history.len());
+    for (i, m) in history.iter().enumerate() {
+        let has_tool_result = m.role == Role::User
+            && i >= start
+            && i < end
+            && m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+        if !has_tool_result {
+            out.push(m.clone());
+            continue;
+        }
+        let content = m
+            .content
+            .iter()
+            .map(|b| match b {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    is_error,
+                    ..
+                } => ContentBlock::ToolResult {
+                    tool_use_id: tool_use_id.clone(),
+                    content: evicted_result_stub(
+                        tool_use_id,
+                        names.get(tool_use_id.as_str()).copied(),
+                    ),
+                    is_error: *is_error,
+                },
+                other => other.clone(),
+            })
+            .collect();
+        out.push(Message {
+            role: m.role,
+            content,
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// system-reminder injection channel
+// ---------------------------------------------------------------------------
+
+/// Opening tag of an injected system reminder.
+pub const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+
+/// Closing tag of an injected system reminder.
+pub const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+
+/// Default cap on pending (not yet injected) reminders. At the cap new
+/// reminders are dropped rather than queued — a bounded channel, never a
+/// silent queue growth.
+pub const DEFAULT_MAX_PENDING_REMINDERS: usize = 8;
+
+/// Wrap `text` in the canonical `<system-reminder>` block (the single
+/// injection format shared by compaction notices, plan nudges, and future
+/// callers).
+pub fn wrap_system_reminder(text: &str) -> String {
+    format!("{SYSTEM_REMINDER_OPEN}\n{text}\n{SYSTEM_REMINDER_CLOSE}")
+}
+
+/// True when `wrapped` is still present as a whole text block in
+/// `history`'s trailing user-role entry (i.e. not yet consumed by a model
+/// turn).
+fn reminder_still_present(history: &[Message], wrapped: &str) -> bool {
+    history
+        .last()
+        .filter(|m| m.role == Role::User)
+        .is_some_and(|m| {
+            m.content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Text { text } if text == wrapped))
+        })
+}
+
+/// FIFO queue of `<system-reminder>` blocks waiting for the next user-role
+/// entry. The single channel future callers (compaction notices, plan
+/// nudges, …) use to reach the model:
+///
+/// 1. `enqueue` a reminder text at any time (deduplicated while it is still
+///    pending or still present in the trailing user entry; capped);
+/// 2. `flush` right before the next user-role entry enters the history — the
+///    reminders merge into that entry (appended as text blocks) instead of
+///    each spawning its own message.
+#[derive(Debug, Clone)]
+pub struct ReminderChannel {
+    pending: VecDeque<String>,
+    max_pending: usize,
+}
+
+impl ReminderChannel {
+    /// Queue with the [`DEFAULT_MAX_PENDING_REMINDERS`] cap.
+    pub fn new() -> Self {
+        Self::with_cap(DEFAULT_MAX_PENDING_REMINDERS)
+    }
+
+    /// Queue with an explicit cap; a cap of 0 rejects every enqueue (kept
+    /// literal rather than clamped — a caller asking for no queue gets one).
+    pub fn with_cap(max_pending: usize) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            max_pending,
+        }
+    }
+
+    /// Number of reminders waiting for injection.
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Queue `text` for injection into the next user-role entry. Returns
+    /// `false` (no change) when an identical reminder is already pending,
+    /// when it is still present in `history`'s trailing user entry (injected
+    /// but not yet consumed by a model turn), or when the pending cap is
+    /// reached.
+    pub fn enqueue(&mut self, text: &str, history: &[Message]) -> bool {
+        let wrapped = wrap_system_reminder(text);
+        if self.pending.iter().any(|p| *p == wrapped) || reminder_still_present(history, &wrapped) {
+            return false;
+        }
+        if self.pending.len() >= self.max_pending {
+            return false;
+        }
+        self.pending.push_back(wrapped);
+        true
+    }
+
+    /// Drain all pending reminders into `history`: merged into the trailing
+    /// user-role entry when there is one (each reminder appended as a whole
+    /// text block), otherwise pushed as a fresh user-role entry carrying just
+    /// the reminders. Returns the number of reminders injected (0 leaves the
+    /// history untouched). Call this right before the next user-role entry
+    /// enters the history.
+    pub fn flush(&mut self, history: &mut Vec<Message>) -> usize {
+        let drained: Vec<String> = self.pending.drain(..).collect();
+        if drained.is_empty() {
+            return 0;
+        }
+        let blocks: Vec<ContentBlock> = drained
+            .into_iter()
+            .map(|text| ContentBlock::Text { text })
+            .collect();
+        let count = blocks.len();
+        match history.last_mut() {
+            Some(m) if m.role == Role::User => m.content.extend(blocks),
+            _ => history.push(Message {
+                role: Role::User,
+                content: blocks,
+            }),
+        }
+        count
+    }
+}
+
+impl Default for ReminderChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -817,6 +1100,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
                 usage: Usage {
                     input_tokens: 5000,
                     output_tokens: 120,
+                    ..Usage::default()
                 },
             },
         ]
@@ -1037,5 +1321,294 @@ Concurrent stock-deduction test; settlement ledger integration.";
             ..Default::default()
         };
         assert!(bad.validate().is_err());
+    }
+
+    // --- eviction (cache-preserving micro-compaction) ---
+
+    fn tool_result_with(id: &str, content: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: id.to_owned(),
+                content: content.to_owned(),
+                is_error: false,
+            }],
+        }
+    }
+
+    /// 11-message history with three tool rounds; the evictable band depends
+    /// on the config used with it.
+    fn eviction_history() -> Vec<Message> {
+        vec![
+            user_text("Goal: fix the build."),
+            assistant_text("Plan: read config first."),
+            tool_use("t1"),
+            tool_result_with("t1", &"a".repeat(5000)),
+            assistant_text("Config looks stale."),
+            tool_use("t2"),
+            tool_result_with("t2", &"b".repeat(5000)),
+            assistant_text("Patched."),
+            user_text("run tests next"),
+            tool_use("t3"),
+            tool_result("t3", false),
+        ]
+    }
+
+    #[test]
+    fn evict_preserves_anchored_prefix_and_recent_window() {
+        let history = eviction_history();
+        let cfg = EvictionConfig {
+            anchored_prefix: 2,
+            recent_window: 2,
+            ..Default::default()
+        };
+        let out = evict_old_tool_results(&history, &cfg);
+        // Message count unchanged (payload replacement, never removal).
+        assert_eq!(out.len(), history.len());
+        // Evictable band [2..8]: results at index 3 (t1) and 6 (t2) stubbed,
+        // each naming the tool call it belonged to.
+        for (idx, id) in [(3usize, "t1"), (6, "t2")] {
+            assert!(
+                matches!(&out[idx].content[0],
+                    ContentBlock::ToolResult { content, is_error: false, .. }
+                    if content.starts_with(EVICTED_RESULT_MARKER_PREFIX)
+                        && content.contains("read_file") && content.contains(id)
+                ),
+                "message[{idx}] should carry the eviction stub for {id}: {:?}",
+                out[idx].content[0]
+            );
+            let evicted = match &out[idx].content[0] {
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                _ => unreachable!(),
+            };
+            assert!(
+                !history[idx].content.iter().any(
+                    |b| matches!(b, ContentBlock::ToolResult { content, .. } if *content == evicted)
+                ),
+                "payload must not survive inline"
+            );
+        }
+        // Anchored prefix (0..2), recent window (8..10) and all text entries
+        // pass through byte-identical.
+        assert_eq!(&out[..2], &history[..2]);
+        assert_eq!(&out[8..], &history[8..]);
+        for idx in [4usize, 5, 7] {
+            assert_eq!(out[idx], history[idx], "assistant entry [{idx}] untouched");
+        }
+        // Replacing only the payload keeps pairing integrity intact.
+        assert_eq!(find_pairing_violations(&out), Vec::<String>::new());
+    }
+
+    #[test]
+    fn evict_is_idempotent() {
+        let history = eviction_history();
+        let cfg = EvictionConfig {
+            anchored_prefix: 2,
+            recent_window: 2,
+            ..Default::default()
+        };
+        let once = evict_old_tool_results(&history, &cfg);
+        let twice = evict_old_tool_results(&once, &cfg);
+        assert_eq!(once, twice, "second pass must change nothing further");
+    }
+
+    #[test]
+    fn evict_never_touches_non_tool_entries() {
+        let history = vec![
+            user_text("goal"),
+            tool_use("t1"),
+            Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "t1".into(),
+                        content: "long payload".into(),
+                        is_error: true,
+                    },
+                    ContentBlock::Text {
+                        text: "steering note".into(),
+                    },
+                ],
+            },
+            assistant_text("done"),
+        ];
+        let cfg = EvictionConfig {
+            anchored_prefix: 2,
+            recent_window: 1,
+            ..Default::default()
+        };
+        let out = evict_old_tool_results(&history, &cfg);
+        assert_eq!(out.len(), 4);
+        // Head and tail entries untouched.
+        assert_eq!(out[0], history[0]);
+        assert_eq!(out[3], history[3]);
+        // In the evicted message only the ToolResult payload is replaced
+        // (is_error preserved); the sibling text block survives verbatim.
+        assert!(matches!(
+            &out[2].content[0],
+            ContentBlock::ToolResult { is_error: true, content, .. }
+                if content.starts_with(EVICTED_RESULT_MARKER_PREFIX)
+        ));
+        assert!(matches!(
+            &out[2].content[1],
+            ContentBlock::Text { text } if text == "steering note"
+        ));
+    }
+
+    #[test]
+    fn evict_stub_falls_back_to_bare_id_for_orphans() {
+        let history = vec![
+            user_text("a"),              // 0: anchored
+            tool_use("t1"),              // 1
+            tool_result("t1", false),    // 2: evicted, named after the call
+            assistant_text("mid"),       // 3
+            tool_result("ghost", false), // 4: orphan -> bare-id stub
+            assistant_text("end"),       // 5: recent window
+        ];
+        let cfg = EvictionConfig {
+            anchored_prefix: 1,
+            recent_window: 1,
+            ..Default::default()
+        };
+        let out = evict_old_tool_results(&history, &cfg);
+        assert!(matches!(
+            &out[2].content[0],
+            ContentBlock::ToolResult { content, .. }
+                if content == "[evicted tool result for read_file (t1)]"
+        ));
+        assert!(matches!(
+            &out[4].content[0],
+            ContentBlock::ToolResult { content, .. }
+                if content == "[evicted tool result for ghost]"
+        ));
+        assert_eq!(out[0], history[0]);
+        assert_eq!(out[5], history[5]);
+    }
+
+    #[test]
+    fn evict_noop_when_windows_overlap() {
+        let history = vec![
+            user_text("a"),
+            tool_use("t1"),
+            tool_result("t1", false),
+            assistant_text("b"),
+        ];
+        // anchored 2 + recent 3 > len 4: the evictable range is empty.
+        let cfg = EvictionConfig {
+            anchored_prefix: 2,
+            recent_window: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            evict_old_tool_results(&history, &cfg),
+            history,
+            "overlapping windows leave a short history untouched"
+        );
+    }
+
+    #[test]
+    fn should_evict_policy_fires_at_soft_threshold() {
+        let cfg = EvictionConfig::default();
+        assert!(!should_evict_tool_results(
+            cfg.soft_threshold_tokens - 1,
+            &cfg
+        ));
+        assert!(should_evict_tool_results(cfg.soft_threshold_tokens, &cfg));
+        // Default coherence: the recent window matches full compaction's
+        // verbatim tail so the two passes never fight over the same entries.
+        assert_eq!(cfg.recent_window, DEFAULT_KEEP_RECENT);
+    }
+
+    // --- system-reminder injection channel ---
+
+    #[test]
+    fn wrap_system_reminder_format() {
+        assert_eq!(
+            wrap_system_reminder("hi"),
+            "<system-reminder>\nhi\n</system-reminder>"
+        );
+    }
+
+    #[test]
+    fn reminder_dedup_while_pending_and_while_present() {
+        let mut ch = ReminderChannel::new();
+        let mut history: Vec<Message> = Vec::new();
+        assert!(ch.enqueue("plan nudge", &history));
+        assert!(
+            !ch.enqueue("plan nudge", &history),
+            "identical reminder must not re-queue while pending"
+        );
+        // Empty history: flush pushes a fresh user entry carrying the block.
+        assert_eq!(ch.flush(&mut history), 1);
+        assert_eq!(ch.pending(), 0);
+        assert_eq!(history.len(), 1);
+        assert!(
+            !ch.enqueue("plan nudge", &history),
+            "identical reminder must not re-queue while still present in the trailing user entry"
+        );
+        // A model turn consumes the trailing entry; the same reminder may be
+        // queued again (recurring nudges stay possible).
+        history.push(assistant_text("ok"));
+        assert!(ch.enqueue("plan nudge", &history));
+    }
+
+    #[test]
+    fn reminder_cap_rejects_new_reminders() {
+        let mut history = vec![user_text("hi")];
+        let mut ch = ReminderChannel::with_cap(2);
+        assert!(ch.enqueue("a", &history));
+        assert!(ch.enqueue("b", &history));
+        assert!(
+            !ch.enqueue("c", &history),
+            "cap reached: new reminder dropped"
+        );
+        assert_eq!(ch.pending(), 2);
+        // Dedup does not consume cap capacity.
+        assert!(!ch.enqueue("a", &history));
+        assert_eq!(ch.pending(), 2);
+        // A literal cap of 0 rejects everything.
+        assert!(!ReminderChannel::with_cap(0).enqueue("x", &history));
+        // Flushing frees capacity.
+        assert_eq!(ch.flush(&mut history), 2);
+        assert_eq!(ch.pending(), 0);
+        assert!(ch.enqueue("c", &history));
+    }
+
+    #[test]
+    fn reminder_flush_merges_into_trailing_user_entry() {
+        let mut ch = ReminderChannel::new();
+        let mut history = vec![user_text("question"), assistant_text("answer")];
+        assert!(ch.enqueue("compaction notice", &history));
+        assert_eq!(ch.flush(&mut history), 1);
+        // Trailing entry is assistant: reminders arrive as a fresh user entry.
+        assert_eq!(history.len(), 3);
+        assert!(matches!(
+            &history[2].content[0],
+            ContentBlock::Text { text } if text == &wrap_system_reminder("compaction notice")
+        ));
+        assert_eq!(find_pairing_violations(&history), Vec::<String>::new());
+
+        // Trailing entry is user: reminders merge into it as extra text
+        // blocks; existing content is kept.
+        assert!(ch.enqueue("second notice", &history));
+        assert_eq!(ch.flush(&mut history), 1);
+        let last = history.last().unwrap();
+        assert_eq!(last.content.len(), 2);
+        assert!(matches!(
+            &last.content[0],
+            ContentBlock::Text { text } if text == &wrap_system_reminder("compaction notice")
+        ));
+        assert!(matches!(
+            &last.content[1],
+            ContentBlock::Text { text } if text == &wrap_system_reminder("second notice")
+        ));
+    }
+
+    #[test]
+    fn reminder_flush_empty_is_noop() {
+        let mut ch = ReminderChannel::new();
+        let mut history = vec![user_text("hi")];
+        assert_eq!(ch.flush(&mut history), 0);
+        assert_eq!(history.len(), 1, "empty flush must not add a message");
     }
 }

@@ -4,7 +4,9 @@
  * Responsibilities:
  * - Frame/unframe Content-Length JSON-RPC messages over async stdio
  * - Speak initialize/shutdown plus symbol/definition/hover/references
- * - Expose four read-only tools, each spawning an explicit server command
+ * - Record textDocument/publishDiagnostics pushes into a bounded store
+ * - Expose five read-only tools: four spawn an explicit server command,
+ *   lsp_diagnostics only reads the recorded diagnostics store
  *
  * This module must not depend on: UI-layer components, bundled servers.
  */
@@ -15,6 +17,9 @@
 //! request, then `shutdown`s. With a [`LspProviders`] registry the server for
 //! the file extension is spawned lazily once, initialized once, and reused
 //! across calls (shutdown on registry drop).
+//! Servers push `textDocument/publishDiagnostics` while a call's requests are
+//! in flight; registry-backed clients record those pushes into the registry's
+//! shared bounded store, and `lsp_diagnostics` renders it (no server call).
 //! No server is bundled: `server_command` names the binary explicitly
 //! (e.g. `rust-analyzer`, `pyright-langserver --stdio`).
 //!
@@ -37,6 +42,14 @@ use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, lock};
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// Timeout ceiling: 300 s, values above are clamped.
 const MAX_TIMEOUT_MS: u64 = 300_000;
+
+/// Cap on diagnostics kept per file: entries beyond the cap are dropped on
+/// each push (a chatty server cannot grow memory without bound; each push
+/// still fully replaces the file's previous list per LSP semantics).
+const MAX_DIAGNOSTICS_PER_FILE: usize = 200;
+/// Cap on tracked files: the oldest-inserted file is evicted FIFO when a new
+/// file would push the count past the cap.
+const MAX_DIAGNOSTIC_FILES: usize = 32;
 
 /// Build a business-failure output so the model can self-correct.
 fn err_output(reason: impl Into<String>) -> ToolOutput {
@@ -131,6 +144,15 @@ where
                 "LSP frame missing Content-Length",
             )
         })?;
+        // The length comes from the peer; refuse absurd declarations instead
+        // of pre-allocating (same threat as the llm SSE buffer cap).
+        const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+        if length > MAX_FRAME_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("LSP frame Content-Length {length} exceeds the {MAX_FRAME_BYTES}-byte cap"),
+            ));
+        }
         let mut body = vec![0u8; length];
         reader.read_exact(&mut body).await?;
         serde_json::from_slice(&body)
@@ -263,6 +285,10 @@ pub struct LspProviders {
     root_uri: String,
     commands: std::sync::Mutex<HashMap<String, String>>,
     pooled: std::sync::Mutex<HashMap<String, PooledClient>>,
+    /// Shared diagnostics sink installed on every client this registry holds:
+    /// pushes observed during any call land here and survive across calls
+    /// (read back by the `lsp_diagnostics` tool via [`Self::diagnostics_text`]).
+    diagnostics: Arc<std::sync::Mutex<DiagnosticsStore>>,
     spawns: AtomicU64,
 }
 
@@ -276,6 +302,7 @@ impl LspProviders {
             root_uri,
             commands: std::sync::Mutex::new(HashMap::new()),
             pooled: std::sync::Mutex::new(HashMap::new()),
+            diagnostics: Arc::new(std::sync::Mutex::new(DiagnosticsStore::default())),
             spawns: AtomicU64::new(0),
         }
     }
@@ -300,9 +327,12 @@ impl LspProviders {
     }
 
     /// Test-only: install an already-connected client for an extension
-    /// (backed by an in-memory fake; no real spawn, counter untouched).
+    /// (backed by an in-memory fake; no real spawn, counter untouched). The
+    /// injected client gets the shared diagnostics sink too, matching what
+    /// pooled spawns get.
     #[cfg(test)]
     pub fn insert_ready(&self, extension: &str, client: LspClient<AnyTransport>) {
+        let client = client.with_diagnostics_sink(Arc::clone(&self.diagnostics));
         lock(&self.pooled).insert(
             normalize_ext(extension),
             Arc::new(tokio::sync::Mutex::new(Some(client))),
@@ -319,6 +349,13 @@ impl LspProviders {
                 let _ = client.shutdown(Duration::from_millis(1_000)).await;
             }
         }
+    }
+
+    /// Render the diagnostics store's contents (see
+    /// [`DiagnosticsStore::render`]) — the read side of the sink that pooled
+    /// clients feed (the `lsp_diagnostics` tool).
+    pub fn diagnostics_text(&self, uri_filter: Option<&str>) -> String {
+        lock(&self.diagnostics).render(uri_filter)
     }
 
     /// Run one request against the pooled server for `ext` (spawn +
@@ -348,7 +385,8 @@ impl LspProviders {
             let transport = AnyTransport::spawn(&command, &self.root).map_err(|e| {
                 err_output(format!("failed to spawn language server '{command}': {e}"))
             })?;
-            let mut client = LspClient::new(transport);
+            let mut client =
+                LspClient::new(transport).with_diagnostics_sink(Arc::clone(&self.diagnostics));
             if let Err(e) = client.initialize(&self.root_uri, timeout).await {
                 return Err(err_output(format!("LSP initialize failed: {e}")));
             }
@@ -397,11 +435,150 @@ impl LspTransport for DuplexLsp {
     }
 }
 
+/// One stored diagnostic: the flattened fields the text renderer needs
+/// (positions kept 0-based exactly as LSP addresses them).
+struct DiagnosticEntry {
+    line: u32,
+    character: u32,
+    severity: u8,
+    message: String,
+}
+
+impl DiagnosticEntry {
+    /// Flatten one LSP `Diagnostic` object; entries without a usable range
+    /// start or message are skipped (defensive: the schema is advisory).
+    fn parse(d: &Value) -> Option<Self> {
+        let start = d.get("range")?.get("start")?;
+        Some(Self {
+            line: start.get("line")?.as_u64()? as u32,
+            character: start.get("character").and_then(Value::as_u64).unwrap_or(0) as u32,
+            severity: d
+                .get("severity")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(u8::MAX as u64) as u8,
+            message: d.get("message")?.as_str()?.to_owned(),
+        })
+    }
+}
+
+/// Bounded store of server-pushed diagnostics, keyed by the document URI
+/// exactly as the server addressed it. Each `textDocument/publishDiagnostics`
+/// notification fully replaces its file's list (LSP push semantics); the
+/// per-file list is capped at [`MAX_DIAGNOSTICS_PER_FILE`] and the number of
+/// tracked files at [`MAX_DIAGNOSTIC_FILES`] (oldest-inserted file evicted
+/// FIFO).
+#[derive(Default)]
+pub struct DiagnosticsStore {
+    files: HashMap<String, Vec<DiagnosticEntry>>,
+    /// Insertion order of tracked URIs (drives the FIFO eviction at the file
+    /// cap; never holds duplicates — a URI is pushed while untracked exactly
+    /// once, and eviction removes it from both sides).
+    order: Vec<String>,
+}
+
+impl DiagnosticsStore {
+    /// Record one push: `diagnostics` is the notification's array and
+    /// replaces any previous list for `uri`. Malformed entries are dropped;
+    /// the per-file cap keeps the first N entries.
+    pub fn record(&mut self, uri: &str, diagnostics: &[Value]) {
+        let entries: Vec<DiagnosticEntry> = diagnostics
+            .iter()
+            .take(MAX_DIAGNOSTICS_PER_FILE)
+            .filter_map(DiagnosticEntry::parse)
+            .collect();
+        if !self.files.contains_key(uri) {
+            while self.order.len() >= MAX_DIAGNOSTIC_FILES {
+                let Some(oldest) = self.order.first() else {
+                    break;
+                };
+                let oldest = oldest.clone();
+                self.files.remove(&oldest);
+                self.order.remove(0);
+            }
+            self.order.push(uri.to_owned());
+        }
+        self.files.insert(uri.to_owned(), entries);
+    }
+
+    /// Render stored diagnostics as compact text: one `line:col: severity:
+    /// message` entry per diagnostic (1-based, matching common compiler
+    /// output), grouped under each file URI. `uri_filter` restricts the
+    /// output to one file; `None` renders every tracked file. Files whose
+    /// latest push cleared their list are skipped.
+    pub fn render(&self, uri_filter: Option<&str>) -> String {
+        let mut out = String::new();
+        match uri_filter {
+            Some(uri) => {
+                if let Some(entries) = self.files.get(uri) {
+                    render_file(&mut out, uri, entries);
+                }
+            }
+            None => {
+                let mut uris: Vec<&String> = self.files.keys().collect();
+                uris.sort(); // deterministic order
+                for uri in uris {
+                    render_file(&mut out, uri, &self.files[uri]);
+                }
+            }
+        }
+        if out.is_empty() {
+            match uri_filter {
+                Some(uri) => format!("no diagnostics recorded for {uri}"),
+                None => "no diagnostics recorded".to_owned(),
+            }
+        } else {
+            out.trim_end().to_owned()
+        }
+    }
+}
+
+/// Append one file's block: the URI, then one indented line per diagnostic
+/// (messages are kept on one physical line by escaping embedded newlines).
+fn render_file(out: &mut String, uri: &str, entries: &[DiagnosticEntry]) {
+    if entries.is_empty() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(uri);
+    out.push('\n');
+    for e in entries {
+        out.push_str(&format!(
+            "  {}:{}: {}: {}\n",
+            e.line + 1,
+            e.character + 1,
+            severity_label(e.severity),
+            e.message.replace('\n', "\\n")
+        ));
+    }
+}
+
+/// LSP severity number to label (1 error / 2 warning / 3 information /
+/// 4 hint; anything else renders as the generic "diagnostic").
+fn severity_label(severity: u8) -> &'static str {
+    match severity {
+        1 => "error",
+        2 => "warning",
+        3 => "info",
+        4 => "hint",
+        _ => "diagnostic",
+    }
+}
+
 /// Minimal LSP client: `initialize` (plus `initialized`), one request at a
 /// time, then `shutdown`/`exit`. Request ids count up from 1 per client.
+/// Server-pushed `textDocument/publishDiagnostics` notifications observed
+/// while waiting for a response are recorded into an optional shared sink
+/// (see [`LspClient::with_diagnostics_sink`]); all other notifications are
+/// skipped as before.
 pub struct LspClient<T> {
     transport: T,
     next_id: u64,
+    /// Shared diagnostics sink (`None`: pushes are dropped, the historical
+    /// behavior — most callers never need them).
+    diagnostics: Option<Arc<std::sync::Mutex<DiagnosticsStore>>>,
 }
 
 impl<T: LspTransport> LspClient<T> {
@@ -410,7 +587,16 @@ impl<T: LspTransport> LspClient<T> {
         Self {
             transport,
             next_id: 1,
+            diagnostics: None,
         }
+    }
+
+    /// Attach a shared diagnostics sink: registry-backed clients share the
+    /// registry's store so pushes survive across pooled calls (per-call
+    /// override sessions feed it too when a registry is configured).
+    pub fn with_diagnostics_sink(mut self, sink: Arc<std::sync::Mutex<DiagnosticsStore>>) -> Self {
+        self.diagnostics = Some(sink);
+        self
     }
 
     /// Send a request and wait for the response with the matching id,
@@ -429,6 +615,24 @@ impl<T: LspTransport> LspClient<T> {
             .await?;
         loop {
             let msg = self.transport.recv(timeout).await?;
+            // Server push: record diagnostics (when a sink is attached) and
+            // keep waiting for the response; other notifications are skipped
+            // as before.
+            if msg.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics")
+            {
+                if let Some(sink) = &self.diagnostics {
+                    if let Some(params) = msg.get("params") {
+                        let uri = params.get("uri").and_then(Value::as_str);
+                        if let (Some(uri), Some(diags)) = (
+                            uri.filter(|u| !u.is_empty()),
+                            params.get("diagnostics").and_then(Value::as_array),
+                        ) {
+                            lock(sink).record(uri, diags);
+                        }
+                    }
+                }
+                continue;
+            }
             if msg.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
@@ -666,6 +870,11 @@ async fn run_lsp_call(
             }
         };
         let mut client = LspClient::new(transport);
+        // Registry-aware override sessions also feed the shared diagnostics
+        // store, so pushes observed here survive the session teardown.
+        if let Some(providers) = providers {
+            client = client.with_diagnostics_sink(Arc::clone(&providers.diagnostics));
+        }
         if let Err(e) = client.initialize(&path_to_uri(&ctx.cwd), timeout).await {
             return Ok(err_output(format!("LSP initialize failed: {e}")));
         }
@@ -741,9 +950,10 @@ impl Tool for DocumentSymbols {
 
     fn description(&self) -> &str {
         "List the symbol outline (functions, classes, etc.) of a file via a language \
-         server. Omit server_command to use the registered provider for the file
+         server. Omit server_command to use the registered provider for the file \
          extension, or provide it as an override (e.g. rust-analyzer, \
-         no server is bundled. Path is relative to the working directory."
+         pyright-langserver --stdio); no server is bundled. Path is relative to \
+         the working directory."
     }
 
     fn input_schema(&self) -> Value {
@@ -818,7 +1028,7 @@ impl Tool for GotoDefinition {
 
     fn description(&self) -> &str {
         "Jump to the definition of the symbol at a 0-based line/character position \
-         via a language server. Omit server_command to use the registered provider
+         via a language server. Omit server_command to use the registered provider \
          for the file extension, or provide it as an override (e.g. rust-analyzer, \
          pyright-langserver --stdio); no server is bundled. Path is relative to \
          the working directory."
@@ -904,7 +1114,7 @@ impl Tool for Hover {
 
     fn description(&self) -> &str {
         "Show hover documentation for the symbol at a 0-based line/character position \
-         via a language server. Omit server_command to use the registered provider
+         via a language server. Omit server_command to use the registered provider \
          for the file extension, or provide it as an override (e.g. rust-analyzer, \
          pyright-langserver --stdio); no server is bundled. Path is relative to \
          the working directory."
@@ -990,11 +1200,10 @@ impl Tool for FindReferences {
 
     fn description(&self) -> &str {
         "Find all references (including the declaration) to the symbol at a 0-based \
-         line/character position via a language server. Omit server_command to use
-         the registered provider for the file extension, or provide it as an
-         override (e.g. \
-         rust-analyzer, pyright-langserver --stdio); no server is bundled. Path is \
-         relative to the working directory."
+         line/character position via a language server. Omit server_command to use \
+         the registered provider for the file extension, or provide it as an \
+         override (e.g. rust-analyzer, pyright-langserver --stdio); no server is \
+         bundled. Path is relative to the working directory."
     }
 
     fn input_schema(&self) -> Value {
@@ -1040,6 +1249,95 @@ impl Tool for FindReferences {
             async |c, uri, line, ch, t| c.references(uri, line, ch, t).await,
         )
         .await
+    }
+}
+
+/// Read back the diagnostics captured from server pushes (read-only).
+///
+/// Language servers push `textDocument/publishDiagnostics` while a tool
+/// call's requests are in flight; registry-backed clients record those pushes
+/// into the registry's shared bounded store (see [`LspProviders`]). This tool
+/// renders the store — it never spawns a server or issues a request, so a
+/// path filter only needs to resolve (same path guard as the other LSP
+/// tools) to match the URIs earlier calls addressed.
+pub struct LspDiagnostics {
+    providers: Option<Arc<LspProviders>>,
+}
+
+impl LspDiagnostics {
+    /// Build without a registry: there is no store to read, so every call is
+    /// a business error (diagnostics only exist with registry-backed
+    /// clients).
+    pub fn new() -> Self {
+        Self { providers: None }
+    }
+
+    /// Build reading the shared store of `providers`.
+    pub fn with_providers(providers: Arc<LspProviders>) -> Self {
+        Self {
+            providers: Some(providers),
+        }
+    }
+}
+
+impl Default for LspDiagnostics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for LspDiagnostics {
+    fn name(&self) -> &str {
+        "lsp_diagnostics"
+    }
+
+    fn description(&self) -> &str {
+        "Return the diagnostics (errors, warnings, hints) that language servers \
+         pushed for files during earlier language-server tool calls. Provide path \
+         to see one file's diagnostics, or omit it to see every tracked file. \
+         Entries render as line:col (1-based) with severity and message. \
+         Read-only: reads the recorded diagnostics, never spawns a server."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path of the file, relative to the working directory; omit to return all tracked files"
+                }
+            }
+        })
+    }
+
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, input: Value, ctx: &ToolCtx) -> Result<ToolOutput> {
+        let Some(providers) = &self.providers else {
+            return Ok(err_output(
+                "no language server registry configured: lsp_diagnostics reads diagnostics recorded by registry-backed language-server tool calls",
+            ));
+        };
+        // Optional path: absent/null renders every tracked file; a present
+        // path resolves through the same guard as the other LSP tools so the
+        // URI matches what earlier pooled calls addressed.
+        let filter = match input.get("path") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(path)) => match resolve_uri(ctx, path)? {
+                Ok(uri) => Some(uri),
+                Err(out) => return Ok(out),
+            },
+            Some(_) => {
+                return Ok(err_output(
+                    "missing or invalid parameter 'path' (string required)",
+                ));
+            }
+        };
+        Ok(ok_output(providers.diagnostics_text(filter.as_deref())))
     }
 }
 
@@ -1146,6 +1444,146 @@ mod tests {
             .expect_err("unknown method must fail");
         assert!(err.to_string().contains("hover"));
         let _ = client.shutdown(timeout).await;
+    }
+
+    // -- diagnostics capture --
+
+    /// Fake language server that pushes a `textDocument/publishDiagnostics`
+    /// notification *before* answering `initialize` and every
+    /// `documentSymbol` (the push-then-reply ordering is what forces the
+    /// client to observe pushes while waiting for a response). The
+    /// documentSymbol push addresses the requested document URI so tests can
+    /// filter on it.
+    fn diagnostics_server() -> tokio::io::DuplexStream {
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut io = tokio::io::BufReader::new(server_end);
+            let timeout = Duration::from_secs(10);
+            loop {
+                let msg = match read_frame(&mut io, timeout).await {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let method = msg
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if method == "exit" {
+                    break;
+                }
+                let Some(id) = msg.get("id").cloned() else {
+                    continue; // Notification (e.g. initialized): no reply.
+                };
+                let reply = match method.as_str() {
+                    "initialize" => {
+                        let _ = write_frame(
+                            &mut io,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "textDocument/publishDiagnostics",
+                                "params": {"uri": "file:///w/a.rs", "diagnostics": [
+                                    {"range": {"start": {"line": 11, "character": 4}},
+                                     "severity": 1, "message": "first push"}
+                                ]}
+                            }),
+                        )
+                        .await;
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"capabilities": {}}})
+                    }
+                    "textDocument/documentSymbol" => {
+                        let uri = msg
+                            .pointer("/params/textDocument/uri")
+                            .and_then(Value::as_str)
+                            .unwrap_or("file:///unknown")
+                            .to_owned();
+                        let _ = write_frame(
+                            &mut io,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "textDocument/publishDiagnostics",
+                                "params": {"uri": uri, "diagnostics": [
+                                    {"range": {"start": {"line": 2, "character": 0}},
+                                     "severity": 2, "message": "unused import"}
+                                ]}
+                            }),
+                        )
+                        .await;
+                        json!({"jsonrpc": "2.0", "id": id, "result": []})
+                    }
+                    "shutdown" => json!({"jsonrpc": "2.0", "id": id, "result": null}),
+                    _ => {
+                        json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unknown method"}})
+                    }
+                };
+                if write_frame(&mut io, &reply).await.is_err() {
+                    break;
+                }
+            }
+        });
+        client_end
+    }
+
+    /// Store semantics: each push replaces its file's list, malformed entries
+    /// are dropped, and both caps hold (per-file entries, tracked files with
+    /// oldest-inserted FIFO eviction).
+    #[test]
+    fn diagnostics_store_replaces_and_caps() {
+        let mut store = DiagnosticsStore::default();
+        let diag = |line: u64, message: &str| json!({"range": {"start": {"line": line, "character": 0}}, "severity": 1, "message": message});
+        store.record("file:///a.rs", &[diag(0, "one")]);
+        store.record("file:///a.rs", &[diag(1, "two"), json!({"no": "range"})]);
+        // Second push fully replaces the first; malformed entries are skipped.
+        let text = store.render(Some("file:///a.rs"));
+        assert!(text.contains("2:1: error: two"), "{text}");
+        assert!(!text.contains("one"), "{text}");
+
+        // Per-file cap: entries beyond the cap are dropped on each push.
+        let flood: Vec<Value> = (0..MAX_DIAGNOSTICS_PER_FILE as u64 + 50)
+            .map(|i| diag(i, "flood"))
+            .collect();
+        store.record("file:///b.rs", &flood);
+        let text = store.render(Some("file:///b.rs"));
+        assert_eq!(text.lines().count(), 1 + MAX_DIAGNOSTICS_PER_FILE);
+
+        // File cap: a brand-new file at capacity evicts the oldest-inserted
+        // one, so the tracked set stays at the cap and stays fresh.
+        for i in 0..MAX_DIAGNOSTIC_FILES {
+            store.record(&format!("file:///f{i}.rs"), &[diag(0, "x")]);
+        }
+        store.record("file:///new.rs", &[diag(0, "fresh")]);
+        assert_eq!(store.files.len(), MAX_DIAGNOSTIC_FILES);
+        assert_eq!(store.order.len(), MAX_DIAGNOSTIC_FILES);
+        let text = store.render(None);
+        assert!(text.contains("file:///new.rs"), "{text}");
+        assert!(
+            text.contains(&format!("file:///f{}.rs", MAX_DIAGNOSTIC_FILES - 1)),
+            "{text}"
+        );
+        assert!(!text.contains("file:///f0.rs"), "oldest evicted: {text}");
+    }
+
+    /// Client records pushes into the attached sink while waiting for
+    /// responses; a later push for the same URI replaces the stored list.
+    #[tokio::test]
+    async fn client_records_publish_diagnostics_pushes() {
+        let store = Arc::new(std::sync::Mutex::new(DiagnosticsStore::default()));
+        let mut client = LspClient::new(DuplexLsp::new(diagnostics_server()))
+            .with_diagnostics_sink(store.clone());
+        let timeout = Duration::from_secs(10);
+        client.initialize("file:///w", timeout).await.unwrap();
+        let text = lock(&store).render(Some("file:///w/a.rs"));
+        assert!(text.contains("12:5: error: first push"), "{text}");
+        client
+            .document_symbol("file:///w/a.rs", timeout)
+            .await
+            .unwrap();
+        let text = lock(&store).render(None);
+        assert!(text.contains("3:1: warning: unused import"), "{text}");
+        assert!(!text.contains("first push"), "push replaced: {text}");
+        // Without a sink, pushes stay dropped (historical behavior).
+        let mut sinkless = LspClient::new(DuplexLsp::new(diagnostics_server()));
+        sinkless.initialize("file:///w", timeout).await.unwrap();
     }
 
     #[test]
@@ -1347,6 +1785,69 @@ mod tests {
         // All calls rode one pooled connection (no real spawn, five requests).
         assert_eq!(providers.spawn_count(), 0);
         assert_eq!(hits.load(std::sync::atomic::Ordering::Relaxed), 5);
+        providers.shutdown_all().await;
+    }
+
+    /// The diagnostics tool renders what pooled calls recorded: a navigation
+    /// call rides the pooled client (whose pushes feed the shared store), the
+    /// store render addresses the same resolved URI for a path filter, and a
+    /// registry-less tool is a business error.
+    #[tokio::test]
+    async fn lsp_diagnostics_tool_reads_shared_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx {
+            cwd: dir.path().to_path_buf(),
+            deny_env: Vec::new(),
+        };
+        std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        providers.register("py", "fake-server (injected)".to_owned());
+        let mut ready =
+            LspClient::new(AnyTransport(Box::new(DuplexLsp::new(diagnostics_server()))));
+        ready
+            .initialize("file:///w", Duration::from_secs(10))
+            .await
+            .unwrap();
+        providers.insert_ready("py", ready);
+        // A navigation call records the push into the shared store.
+        let out = DocumentSymbols::with_providers(providers.clone())
+            .execute(json!({"path": "a.py"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!out.is_error, "pooled call failed: {}", out.content);
+        // The tool renders the store without touching a server.
+        let tool = LspDiagnostics::with_providers(providers.clone());
+        let out = tool.execute(json!({}), &ctx).await.unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("unused import"), "{}", out.content);
+        // A path filter resolves through the same guard as the other tools
+        // and matches the URI the pooled call addressed.
+        let out = tool.execute(json!({"path": "a.py"}), &ctx).await.unwrap();
+        assert!(
+            out.content.contains("3:1: warning: unused import"),
+            "{}",
+            out.content
+        );
+        // Escaping paths are rejected by the path guard.
+        let out = tool
+            .execute(json!({"path": "../evil.py"}), &ctx)
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        // An untracked path is an honest empty answer, not an error.
+        let out = tool
+            .execute(json!({"path": "missing.py"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!out.is_error);
+        assert!(out.content.contains("no diagnostics recorded"));
+        // Registry-less builds have no store to read: business error.
+        let out = LspDiagnostics::new()
+            .execute(json!({}), &ctx)
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("no language server registry"));
         providers.shutdown_all().await;
     }
 

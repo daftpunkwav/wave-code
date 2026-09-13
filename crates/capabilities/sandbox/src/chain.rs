@@ -2,7 +2,7 @@
  *  @description Cross-platform backend probe chain and status lines.
  *
  *  Responsibilities:
- *  - Define the probe order (bwrap -> Landlock -> seatbelt -> Windows).
+ *  - Define the probe order (bwrap -> Landlock -> seatbelt -> Windows job).
  *  - Pick the first available backend (fail-closed when none is available).
  *  - Render one-line backend status surfacing the enforcement level.
  *
@@ -14,9 +14,9 @@ use std::sync::Arc;
 use super::os::{SandboxBackend, UnavailableBackend};
 
 /// Probe order, highest-priority first: Linux bwrap, Linux Landlock, macOS
-/// seatbelt. Windows has no enforcing backend (see `windows.rs`), so the
-/// chain ends at the refusing fallback there.
-pub const PROBE_ORDER: [&str; 3] = ["bwrap", "landlock", "seatbelt"];
+/// seatbelt, Windows Job Object (partial — see `windows.rs`). The chain ends
+/// at the refusing fallback only when none of these is available.
+pub const PROBE_ORDER: [&str; 4] = ["bwrap", "landlock", "seatbelt", "job"];
 
 /// First-available-wins over an explicit candidate list (the hermetic seam
 /// for the probe order: tests pass fakes, production passes the live

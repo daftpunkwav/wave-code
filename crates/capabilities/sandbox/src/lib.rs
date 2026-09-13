@@ -30,8 +30,9 @@
 //!
 //! Explicitly NOT provided: no containers or VMs, no syscall filtering.
 //! OS isolation is opt-in per spawn through the backend chain (Linux bwrap,
-//! then Landlock; macOS seatbelt; Windows has no enforcing backend and fails
-//! closed): a command that policy allows runs under the first available
+//! then Landlock; macOS seatbelt; Windows a partial Job-Object backend —
+//! process-tree lifetime control plus limits only, no filesystem or network
+//! boundary): a command that policy allows runs under the first available
 //! backend, or is refused when `sandbox_os` is on and nothing is available.
 //! Without confinement a spawned process runs with the user's own OS
 //! privileges — treat the policy gate as intent ruling, and the backend
@@ -60,7 +61,7 @@ pub use os::{
     detect_backend,
 };
 pub use seatbelt::SeatbeltBackend;
-pub use windows::WINDOWS_UNAVAILABLE_REASON;
+pub use windows::{WINDOWS_UNAVAILABLE_REASON, WindowsJobBackend};
 
 /// Unified lock-poisoning recovery policy (single decision point for this
 /// crate): the mode lock's critical section is a single read / write, so a
@@ -733,13 +734,10 @@ mod tests {
         );
     }
 
-    /// Deny holds under bypass too. Note this asserts `decide`-layer
-    /// semantics: the orchestration layer (core tool_dispatch) **bypasses
-    /// decide for read-only non-destructive tools and runs them directly**
-    /// (existing behavior — deny rules effectively do not fire on read-only
-    /// tools, see SEC-001). The gap from production semantics here is a
-    /// deliberate layering record; do not infer from this test that deny
-    /// stops read_file in the full pipeline.
+    /// Deny holds under bypass too. This asserts `decide`-layer
+    /// semantics; the run loop additionally routes every tool call through
+    /// `decide` (including read-only ones), so deny rules fire on the full
+    /// pipeline as well.
     #[test]
     fn deny_rules_apply_even_in_bypass_mode() {
         let sb = Sandbox::new(

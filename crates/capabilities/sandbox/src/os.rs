@@ -262,10 +262,11 @@ fn apply_landlock(profile: &ConfinementProfile) -> std::io::Result<()> {
 }
 
 /// Pick the platform backend in probe order (see `chain::PROBE_ORDER`):
-/// Linux tries bwrap, then Landlock; macOS tries seatbelt; Windows has no
-/// enforcing backend (see `windows.rs`). The first available backend wins;
-/// when nothing is available the refusing fallback is returned and any
-/// requested confinement fails closed (`SANDBOX_UNAVAILABLE`).
+/// Linux tries bwrap, then Landlock; macOS tries seatbelt; Windows tries the
+/// partial Job-Object backend (see `windows.rs` — process-tree lifetime
+/// control only, no filesystem / network boundary). The first available
+/// backend wins; when nothing is available the refusing fallback is returned
+/// and any requested confinement fails closed (`SANDBOX_UNAVAILABLE`).
 pub fn detect_backend() -> Arc<dyn SandboxBackend> {
     #[cfg(target_os = "linux")]
     {
@@ -287,7 +288,15 @@ pub fn detect_backend() -> Arc<dyn SandboxBackend> {
         }
         Arc::new(UnavailableBackend)
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(target_os = "windows")]
+    {
+        let job: Arc<dyn SandboxBackend> = Arc::new(crate::windows::WindowsJobBackend);
+        if job.is_available() {
+            return job;
+        }
+        Arc::new(UnavailableBackend)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Arc::new(UnavailableBackend)
     }
@@ -343,9 +352,9 @@ mod tests {
     #[test]
     fn detect_backend_matches_platform() {
         let backend = detect_backend();
-        // Availability is kernel-dependent on Linux/macOS; elsewhere it is
-        // always the refusing fallback.
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        // Availability is kernel-dependent on Linux/macOS, host-dependent on
+        // Windows; elsewhere it is always the refusing fallback.
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         assert!(!backend.is_available());
         #[cfg(target_os = "linux")]
         {
@@ -368,6 +377,16 @@ mod tests {
                 assert_eq!(backend.backend_name(), "seatbelt");
             } else {
                 assert!(!crate::seatbelt::SeatbeltBackend.is_available());
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Chain order: the Job-Object backend wins when available, else
+            // the refusing fallback (fail-closed only when it cannot arm).
+            if backend.is_available() {
+                assert_eq!(backend.backend_name(), "job");
+            } else {
+                assert!(!crate::windows::WindowsJobBackend.is_available());
             }
         }
     }

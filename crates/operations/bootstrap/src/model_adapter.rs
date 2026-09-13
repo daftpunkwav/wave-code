@@ -26,7 +26,10 @@ use wavecode_llm::{
 /// Samples a legacy chat model through the gateway seam.
 pub struct ModelAdapter {
     model: Arc<dyn ChatModel>,
-    model_name: String,
+    /// Wire model name, interior-mutable so `/model` switches it
+    /// mid-session (same provider/endpoint only: base URL and credentials
+    /// are baked into the wrapped client).
+    model_name: std::sync::RwLock<String>,
     max_tokens: u32,
     registry: Arc<wavecode_tools::Registry>,
 }
@@ -42,7 +45,7 @@ impl ModelAdapter {
     ) -> Self {
         Self {
             model,
-            model_name,
+            model_name: std::sync::RwLock::new(model_name),
             max_tokens,
             registry,
         }
@@ -107,10 +110,19 @@ pub fn build_chat_model(
                 None => Arc::new(client),
             }
         }
-        wavecode_config::ProviderKind::Anthropic => Arc::new(wavecode_llm::AnthropicClient::new(
-            provider.base_url.clone(),
-            api_key,
-        )),
+        wavecode_config::ProviderKind::Anthropic => {
+            let client = wavecode_llm::AnthropicClient::new(provider.base_url.clone(), api_key);
+            // Prompt caching defaults ON (unset = enabled); thinking only
+            // when a budget is configured. Both are per-provider choices.
+            let client = match provider.prompt_caching {
+                Some(false) => client.with_prompt_caching(false),
+                _ => client,
+            };
+            match provider.thinking_budget_tokens {
+                Some(budget) => Arc::new(client.with_thinking_budget(budget)),
+                None => Arc::new(client),
+            }
+        }
     }
 }
 
@@ -194,7 +206,11 @@ impl ModelGateway for ModelAdapter {
         on_delta: &(dyn Fn(SampleDelta) + Send + Sync),
     ) -> Result<SampleResponse, SampleError> {
         let req = ChatRequest {
-            model: self.model_name.clone(),
+            model: self
+                .model_name
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             system: request.system.clone(),
             messages: Arc::new(Self::messages(&request)),
             tools: self.tools(&request),
@@ -206,6 +222,8 @@ impl ModelGateway for ModelAdapter {
         let mut pending: Option<PendingTool> = None;
         let mut input_tokens: Option<u64> = None;
         let mut output_tokens: Option<u64> = None;
+        let mut cache_read_tokens: u64 = 0;
+        let mut cache_creation_tokens: u64 = 0;
         let mut truncated = false;
         while let Some(event) = stream.next().await {
             let event = event.map_err(|e| map_error(&e))?;
@@ -213,6 +231,17 @@ impl ModelGateway for ModelAdapter {
                 StreamEvent::TextDelta { text: delta } => {
                     text.push_str(&delta);
                     on_delta(SampleDelta::Text(delta));
+                }
+                StreamEvent::ThinkingDelta { text } => {
+                    // Thinking is per-turn reasoning: forwarded for live
+                    // display, never folded into the block list (the text
+                    // seam does not round-trip signed thinking blocks).
+                    on_delta(SampleDelta::Thinking(text));
+                }
+                StreamEvent::SignatureDelta { .. } => {
+                    // Signature deltas only matter for consumers that
+                    // round-trip signed thinking blocks; this adapter does
+                    // not, so the delta is dropped here by design.
                 }
                 StreamEvent::ToolUseBegin { id, name } => {
                     flush_text(&mut text, &mut blocks);
@@ -257,6 +286,8 @@ impl ModelGateway for ModelAdapter {
                     truncated = stop_reason == "max_tokens";
                     input_tokens = Some(usage.input_tokens);
                     output_tokens = Some(usage.output_tokens);
+                    cache_read_tokens = usage.cache_read_tokens;
+                    cache_creation_tokens = usage.cache_creation_tokens;
                 }
             }
         }
@@ -264,8 +295,19 @@ impl ModelGateway for ModelAdapter {
             blocks,
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
             truncated,
         })
+    }
+
+    fn set_model(&self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        *self.model_name.write().unwrap_or_else(|e| e.into_inner()) = name.to_string();
+        true
     }
 }
 
@@ -356,6 +398,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 1,
                     output_tokens: 2,
+                    ..Usage::default()
                 },
             },
         ])
@@ -391,12 +434,15 @@ mod tests {
                 usage: Usage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    ..Usage::default()
                 },
             },
         ])
         .sample_streaming(request(), &|delta| {
-            let SampleDelta::Text(text) = delta;
-            seen_clone.lock().unwrap().push(text);
+            // Thinking deltas (if any) are display-only and not asserted here.
+            if let SampleDelta::Text(text) = delta {
+                seen_clone.lock().unwrap().push(text);
+            }
         })
         .await
         .unwrap();
@@ -480,6 +526,7 @@ mod tests {
                         usage: Usage {
                             input_tokens: 1,
                             output_tokens: 1,
+                            ..Usage::default()
                         },
                     }),
                 ]))),

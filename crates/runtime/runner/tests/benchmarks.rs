@@ -12,7 +12,6 @@
  */
 
 use infrastructure_base::InterruptHandle;
-use operations_wire::Event;
 use runtime_runner::{
     ApprovalResolution, ApprovalSource, AskKind, CompactError, Compacted, Compactor, HookGateway,
     HookPoint, HookReport, LiteMessage, ModelGateway, PlanTracker, PolicyDecider, PolicyVerdict,
@@ -20,6 +19,7 @@ use runtime_runner::{
     StopReason, ToolCall, ToolExecutor, ToolRef, ToolResult,
 };
 use state_store::{CompactTrigger, Conversation};
+use wavecode_wire::Event;
 
 // Keep in sync with benchmarks/run.rs and benchmarks/baseline.json.
 const TOOL_ROUNDS: usize = 8;
@@ -103,6 +103,8 @@ impl ModelGateway for ScriptedToolModel {
                 input_tokens: Some(10),
                 output_tokens: Some(5),
                 truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             });
         }
         Ok(SampleResponse {
@@ -110,6 +112,8 @@ impl ModelGateway for ScriptedToolModel {
             input_tokens: Some(10),
             output_tokens: Some(5),
             truncated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         })
     }
 }

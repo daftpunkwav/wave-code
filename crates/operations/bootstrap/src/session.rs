@@ -86,6 +86,14 @@ pub struct SessionHandle {
     pub warnings: Vec<String>,
     /// Shared tool registry for late-registered tools (skills, MCP).
     tools_registry: Arc<wavecode_tools::Registry>,
+    /// Started runtime plugins owned for the session's lifetime so their
+    /// services stay reachable and unload runs on teardown. Service
+    /// injection into the run loop is not wired yet; access via
+    /// [`SessionHandle::plugins`].
+    plugins: runtime_plugin::Registry,
+    /// On-demand status views over plan / goal / snapshot state, shared
+    /// with frontends so slash commands never touch storage layout.
+    pub status: Arc<dyn operations_actor::StatusQueries>,
     /// MCP servers awaiting live connection (sorted by name).
     mcp_pending: Vec<(String, wavecode_config::McpServerRaw)>,
 }
@@ -105,6 +113,11 @@ impl SessionHandle {
         let report = crate::mcp_bridge::connect_all(&pending, &self.tools_registry).await;
         self.mcp_servers = report.lines;
         self.warnings.extend(report.warnings);
+    }
+
+    /// Started runtime plugins (service map and lifecycle).
+    pub fn plugins(&self) -> &runtime_plugin::Registry {
+        &self.plugins
     }
 }
 
@@ -432,7 +445,9 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     ));
     // Runtime plugins (service injection + middleware lifecycle): manifest
     // discovery warns-and-skips invalid plugins and never fails assembly.
-    let _runtime_plugins = runtime_plugin::load_and_start(home.as_deref(), &mut warnings);
+    // The handle owns the started registry for the session's lifetime, so
+    // plugins unload (reverse start order) when the session tears down.
+    let runtime_plugins = runtime_plugin::load_and_start(home.as_deref(), &mut warnings);
     register_child_tools(&native, tasks.clone());
 
     // The `skill` model tool needs the child service, which only exists
@@ -444,6 +459,32 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     registry.register(Arc::new(SkillTool::new(skill_set, task_service.clone())));
     registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
     registry.register(Arc::new(TaskStopTool::new(task_service.clone())));
+    // `task` is the free-form delegation surface (named agent definitions
+    // resolve per call from the tool's cwd, so registration needs only the
+    // shared child handle).
+    registry.register(Arc::new(crate::agent_task_tool::TaskTool::new(
+        task_service.clone(),
+    )));
+    // LSP tools get one shared, registry-backed providers handle: pooled
+    // servers survive across calls, and diagnostics pushed while any LSP
+    // tool call is in flight land in the same store `lsp_diagnostics`
+    // reads back. Re-registration replaces the builtin no-registry tools.
+    let lsp_providers = Arc::new(wavecode_tools::LspProviders::new(cwd.clone()));
+    registry.register(Arc::new(wavecode_tools::DocumentSymbols::with_providers(
+        lsp_providers.clone(),
+    )));
+    registry.register(Arc::new(wavecode_tools::GotoDefinition::with_providers(
+        lsp_providers.clone(),
+    )));
+    registry.register(Arc::new(wavecode_tools::Hover::with_providers(
+        lsp_providers.clone(),
+    )));
+    registry.register(Arc::new(wavecode_tools::FindReferences::with_providers(
+        lsp_providers.clone(),
+    )));
+    registry.register(Arc::new(wavecode_tools::LspDiagnostics::with_providers(
+        lsp_providers,
+    )));
     // Workflow engine (fan-out DAG runs plus Ralph loops) and durable
     // schedules ride the same child handle: schedules persist under
     // `<home>/.wavecode/schedule.json` so cron entries survive restarts.
@@ -494,6 +535,9 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         .map(wavecode_memory::MemoryStore::default_root);
     let snapshot_root =
         wavecode_tools::snapshot::snapshot_store_root_for_session(snapshot_memory_root.as_deref());
+    // The frontend status views read the same root the tools write, so
+    // /snapshots and /rewind never drift from what `snapshot` produced.
+    let status_snapshot_root = snapshot_root.clone();
     registry.register(Arc::new(wavecode_tools::snapshot::SnapshotTool::new(
         snapshot_root.clone(),
     )));
@@ -604,6 +648,11 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         config.mcp_servers.clone().into_iter().collect();
     mcp_pending.sort_by(|a, b| a.0.cmp(&b.0));
 
+    // Frontend status views share the tool-side snapshot root so /plan,
+    // /goal, /snapshots, and /rewind read exactly what the tools wrote.
+    let status =
+        crate::status_queries::SessionStatus::new(home.as_deref(), status_snapshot_root).shared();
+
     SessionHandle {
         client,
         approvals,
@@ -616,6 +665,8 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         mcp_servers,
         warnings,
         tools_registry: registry.clone(),
+        plugins: runtime_plugins,
+        status,
         mcp_pending,
     }
 }
@@ -811,8 +862,8 @@ fn is_insecure_http_url(base_url: &str) -> bool {
 mod tests {
     use super::*;
     use crate::HeadlessDeny;
-    use operations_wire::{Op, Submission};
     use wavecode_llm::{ChatModel, ChatRequest, EventStream, StreamEvent, Usage};
+    use wavecode_wire::{Op, Submission};
 
     const CONFIG: &str = r#"
 model = "m1"
@@ -928,6 +979,7 @@ api_key = "k-inline"
                         usage: Usage {
                             input_tokens: 1,
                             output_tokens: 1,
+                            ..Usage::default()
                         },
                     }]
                 });
@@ -953,6 +1005,7 @@ api_key = "k-inline"
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Usage::default()
                 },
             },
         ]
@@ -968,6 +1021,7 @@ api_key = "k-inline"
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 2,
+                    ..Usage::default()
                 },
             },
         ]

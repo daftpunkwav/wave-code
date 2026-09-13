@@ -50,6 +50,12 @@ pub struct Usage {
     pub input_tokens: u64,
     /// Cumulative output tokens.
     pub output_tokens: u64,
+    /// Cumulative prompt-cache read tokens (0 when the provider reports no
+    /// cache accounting).
+    pub cache_read_tokens: u64,
+    /// Cumulative prompt-cache write tokens (0 when the provider reports no
+    /// cache accounting).
+    pub cache_creation_tokens: u64,
 }
 
 /// Budget level evaluated from remaining context tokens.
@@ -249,6 +255,7 @@ mod tests {
         conv.settle(Usage {
             input_tokens: 100,
             output_tokens: 50,
+            ..Usage::default()
         });
         assert_eq!(conv.usage_carry().input_tokens, 100);
     }

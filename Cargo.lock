@@ -645,7 +645,6 @@ dependencies = [
  "clap",
  "operations-actor",
  "operations-bootstrap",
- "operations-wire",
  "rustyline",
  "serde_json",
  "state-persistence",
@@ -654,6 +653,7 @@ dependencies = [
  "wavecode-skills",
  "wavecode-tools",
  "wavecode-tui",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1152,7 +1152,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "infrastructure-base",
- "operations-wire",
  "runtime-child",
  "runtime-runner",
  "safety-gate",
@@ -1163,6 +1162,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1176,7 +1176,6 @@ dependencies = [
  "futures",
  "infrastructure-base",
  "operations-actor",
- "operations-wire",
  "runtime-child",
  "runtime-plugin",
  "runtime-prompt",
@@ -1201,6 +1200,7 @@ dependencies = [
  "wavecode-sandbox",
  "wavecode-skills",
  "wavecode-tools",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1208,11 +1208,11 @@ name = "operations-eval"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "operations-wire",
  "runtime-runner",
  "state-store",
  "thiserror 2.0.19",
  "tokio",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1222,7 +1222,6 @@ dependencies = [
  "async-trait",
  "infrastructure-base",
  "operations-actor",
- "operations-wire",
  "runtime-child",
  "runtime-runner",
  "safety-gate",
@@ -1230,6 +1229,7 @@ dependencies = [
  "state-store",
  "thiserror 2.0.19",
  "tokio",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1244,17 +1244,17 @@ dependencies = [
 name = "operations-observe"
 version = "0.1.0"
 dependencies = [
- "operations-wire",
  "serde_json",
+ "wavecode-wire",
 ]
 
 [[package]]
 name = "operations-replay"
 version = "0.1.0"
 dependencies = [
- "operations-wire",
  "serde_json",
  "state-trajectory",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1263,15 +1263,6 @@ version = "0.1.0"
 dependencies = [
  "runtime-runner",
  "serde_json",
-]
-
-[[package]]
-name = "operations-wire"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -1642,11 +1633,11 @@ dependencies = [
  "async-trait",
  "futures",
  "infrastructure-base",
- "operations-wire",
  "serde_json",
  "state-store",
  "thiserror 2.0.19",
  "tokio",
+ "wavecode-wire",
 ]
 
 [[package]]
@@ -1779,8 +1770,6 @@ dependencies = [
 name = "safety-gate"
 version = "0.1.0"
 dependencies = [
- "serde",
- "serde_json",
  "thiserror 2.0.19",
  "tokio",
 ]
@@ -1797,15 +1786,6 @@ name = "safety-policy"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "safety-sandbox"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "thiserror 2.0.19",
- "tokio",
 ]
 
 [[package]]
@@ -2668,6 +2648,7 @@ dependencies = [
  "tokio",
  "wavecode-protocol",
  "wavecode-tools",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2709,13 +2690,22 @@ dependencies = [
  "crossterm",
  "futures",
  "operations-actor",
- "operations-wire",
  "pulldown-cmark",
  "ratatui",
  "serde_json",
  "tokio",
  "unicode-width 0.2.0",
  "uuid",
+ "wavecode-wire",
+]
+
+[[package]]
+name = "wavecode-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

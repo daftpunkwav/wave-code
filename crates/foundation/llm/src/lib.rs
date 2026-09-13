@@ -131,6 +131,13 @@ pub struct ToolSpec {
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Tokens served from the provider's prompt cache (Anthropic
+    /// `cache_read_input_tokens`); 0 for providers without caching.
+    pub cache_read_tokens: u64,
+    /// Tokens written to the provider's prompt cache by this request
+    /// (Anthropic `cache_creation_input_tokens`); 0 for providers without
+    /// caching. Cache writes are billed at a premium, reads at a discount.
+    pub cache_creation_tokens: u64,
 }
 
 /// A streaming response event.
@@ -138,6 +145,14 @@ pub struct Usage {
 pub enum StreamEvent {
     /// Text delta.
     TextDelta { text: String },
+    /// Extended-thinking text delta (Anthropic `thinking_delta`). Thinking
+    /// blocks are per-turn reasoning: consumers may display them, and the
+    /// text-protocol seam deliberately does not round-trip them in history.
+    ThinkingDelta { text: String },
+    /// Signature delta accompanying a thinking block (Anthropic
+    /// `signature_delta`). Only meaningful for consumers that round-trip
+    /// signed thinking blocks; the text seam ignores it.
+    SignatureDelta { signature: String },
     /// Start of a tool-call block.
     ToolUseBegin { id: String, name: String },
     /// Incremental input JSON of a tool call.

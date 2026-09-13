@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use operations_actor::ActorClient;
 use operations_bootstrap::{AssembleOptions, DEFAULT_IDENTITY, assemble_session};
-use operations_wire::{EventMsg, Op, Submission};
+use wavecode_wire::{EventMsg, Op, Submission};
 
 /// Single-turn headless execution and interactive REPL over the new stack.
 #[derive(Debug, Parser)]
@@ -126,15 +126,30 @@ impl Outcome {
 
 /// Render one event to the text streams.
 ///
+/// Every model- or tool-sourced string (deltas, completions, plan/goal
+/// bodies, warnings, errors, tool names, call ids) passes
+/// `sanitize_terminal` before reaching the streams, matching the TUI's
+/// threat model: ANSI / OSC sequences must not reach the terminal.
+///
 /// Returns a terminal outcome when the event ends the turn.
 fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Option<Outcome> {
+    /// Sanitize into an owned string for `format!`/`push_str` use.
+    fn clean(text: &str) -> String {
+        wavecode_tui::text::sanitize_terminal(text).into_owned()
+    }
     match msg {
         EventMsg::TurnStarted => {
             stderr.push_str("[turn started]\n");
             None
         }
         EventMsg::AgentMessageDelta { text } => {
-            stdout.push_str(text);
+            stdout.push_str(&clean(text));
+            None
+        }
+        EventMsg::AgentThinkingDelta { text } => {
+            // Thinking is reasoning trace, not answer text: it goes to the
+            // human side channel (stderr) and never onto programmatic stdout.
+            stderr.push_str(&format!("[think] {}\n", clean(text)));
             None
         }
         EventMsg::AgentMessageComplete { text } => {
@@ -142,8 +157,11 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             // the full message for transcript use. Skip text already on
             // stdout so answers are not printed twice, while still
             // covering senders that emit a completion without deltas.
+            // Both sides are sanitized, so the suffix check compares the
+            // same bytes the deltas wrote.
+            let text = clean(text);
             if !text.is_empty() && !stdout.ends_with(text.as_str()) {
-                stdout.push_str(text);
+                stdout.push_str(&text);
             }
             if !stdout.is_empty() && !stdout.ends_with('\n') {
                 stdout.push('\n');
@@ -151,12 +169,12 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             None
         }
         EventMsg::ToolCallBegin { call_id, name, .. } => {
-            stderr.push_str(&format!("[tool] {name} ({call_id})\n"));
+            stderr.push_str(&format!("[tool] {} ({})\n", clean(name), clean(call_id)));
             None
         }
         EventMsg::ToolCallEnd { call_id, is_error } => {
             if *is_error {
-                stderr.push_str(&format!("[tool] {call_id} reported an error\n"));
+                stderr.push_str(&format!("[tool] {} reported an error\n", clean(call_id)));
             }
             None
         }
@@ -164,7 +182,8 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             // Neutral line: exec leaves the denial to the headless gate
             // while the REPL answers below via an inline prompt.
             stderr.push_str(&format!(
-                "[approval] {call_id} wants to {}\n",
+                "[approval] {} wants to {}\n",
+                clean(call_id),
                 approval_what(kind)
             ));
             None
@@ -172,8 +191,17 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
         EventMsg::TokenCount {
             input_tokens,
             output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
         } => {
-            stderr.push_str(&format!("[usage] in={input_tokens} out={output_tokens}\n"));
+            let cache_part = if *cache_read_tokens > 0 || *cache_creation_tokens > 0 {
+                format!(" cache_r={cache_read_tokens} cache_w={cache_creation_tokens}")
+            } else {
+                String::new()
+            };
+            stderr.push_str(&format!(
+                "[usage] in={input_tokens} out={output_tokens}{cache_part}\n"
+            ));
             None
         }
         EventMsg::CompactStarted { trigger } => {
@@ -185,7 +213,7 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             None
         }
         EventMsg::PlanProposed { text } => {
-            stderr.push_str(&format!("[plan proposed]\n{text}\n"));
+            stderr.push_str(&format!("[plan proposed]\n{}\n", clean(text)));
             None
         }
         EventMsg::PlanApproved => {
@@ -193,7 +221,7 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             None
         }
         EventMsg::GoalSet { objective } => {
-            stderr.push_str(&format!("[goal set]\n{objective}\n"));
+            stderr.push_str(&format!("[goal set]\n{}\n", clean(objective)));
             None
         }
         EventMsg::GoalCompleted => {
@@ -201,14 +229,14 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             None
         }
         EventMsg::Warning { message } => {
-            stderr.push_str(&format!("[warn] {message}\n"));
+            stderr.push_str(&format!("[warn] {}\n", clean(message)));
             None
         }
         EventMsg::Error {
             message,
             recoverable,
         } => {
-            stderr.push_str(&format!("[error] {message}\n"));
+            stderr.push_str(&format!("[error] {}\n", clean(message)));
             if *recoverable {
                 None
             } else {
@@ -256,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
             &handle.memory_index,
             &handle.mcp_servers,
             &handle.skill_names,
+            handle.status.as_ref(),
         )
         .await?;
         std::process::exit(Outcome::Completed.exit_code())
@@ -326,6 +355,7 @@ async fn main() -> anyhow::Result<()> {
                 &handle.memory_index,
                 &handle.mcp_servers,
                 &handle.skill_names,
+                handle.status.as_ref(),
             )
             .await?;
             std::process::exit(Outcome::Completed.exit_code())
@@ -380,6 +410,7 @@ async fn run_tui_new(
         skill_names: handle.skill_names,
         mcp_server_lines: handle.mcp_servers,
         memory_index: handle.memory_index,
+        status_queries: handle.status.clone(),
     };
     wavecode_tui::run(handle.client, ctx).await
 }
@@ -547,6 +578,7 @@ async fn run_resume(
         &handle.memory_index,
         &handle.mcp_servers,
         &handle.skill_names,
+        handle.status.as_ref(),
     )
     .await
 }
@@ -625,140 +657,6 @@ fn skill_request(name: &str, args: &str) -> String {
             args.trim()
         )
     }
-}
-
-/// Render the reviewed-plan status for `/plan` from the home-derived
-/// plan file (`<home>/.wavecode/plans/default.json`).
-///
-/// Local display only, mirroring `/mcp`: the TUI spells out the same
-/// convention, and neither frontend depends on the plan crate.
-fn plan_status_display() -> String {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
-    render_plan_file(home.as_deref())
-}
-
-/// Lenient rendering of one home directory's plan file: status plus the
-/// plan head, or a hint when no proposal exists yet. Never fails, so
-/// `/plan` display stays total.
-fn render_plan_file(home: Option<&std::path::Path>) -> String {
-    const EMPTY: &str =
-        "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)";
-    let Some(home) = home else {
-        return format!("{EMPTY}\n{PLAN_USAGE}");
-    };
-    let path = home.join(".wavecode").join("plans").join("default.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => return format!("{EMPTY}\n{PLAN_USAGE}"),
-    };
-    render_plan_text(&text)
-}
-
-/// Usage line shared by every `/plan` rendering: proposing and approving
-/// run through the model tools, never through the slash command.
-const PLAN_USAGE: &str =
-    "usage: /plan (status display only; proposing runs through the plan_propose tool)";
-
-/// Lenient rendering of raw plan file content (exposed for tests; the
-/// file shape is owned by the plan state crate).
-fn render_plan_text(text: &str) -> String {
-    const HEAD_CHARS: usize = 500;
-    let value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(value) => value,
-        Err(_) => {
-            return format!(
-                "(reviewed plan file unreadable; delete <home>/.wavecode/plans/default.json to start over)\n{PLAN_USAGE}"
-            );
-        }
-    };
-    let status = value
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("draft");
-    let round = value
-        .get("updated_round")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let mut out = format!("plan status: {status} (updated round {round})");
-    match value.get("plan_text").and_then(|v| v.as_str()) {
-        Some(body) if !body.trim().is_empty() => {
-            let head: String = body.chars().take(HEAD_CHARS).collect();
-            out.push_str(&format!("\nplan:\n{head}"));
-            if body.chars().count() > HEAD_CHARS {
-                out.push_str("\n(truncated; ask the agent for the full plan)");
-            }
-        }
-        _ => out.push_str("\n(no plan text yet)"),
-    }
-    out.push_str(&format!("\n{PLAN_USAGE}"));
-    out
-}
-
-/// Render the durable-goal status for `/goal` from the home-derived
-/// goal file (`<home>/.wavecode/goals/default.json`).
-///
-/// Local display only, mirroring `/plan`: the TUI spells out the same
-/// convention, and neither frontend depends on the goal state crate.
-fn goal_status_display() -> String {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
-    render_goal_file(home.as_deref())
-}
-
-/// Lenient rendering of one home directory's goal file: status plus the
-/// objective head, or a hint when no goal exists yet. Never fails, so
-/// `/goal` display stays total.
-fn render_goal_file(home: Option<&std::path::Path>) -> String {
-    const EMPTY: &str = "(no durable goal yet; ask the agent to set one with the goal_set tool)";
-    let Some(home) = home else {
-        return format!("{EMPTY}\n{GOAL_USAGE}");
-    };
-    let path = home.join(".wavecode").join("goals").join("default.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(_) => return format!("{EMPTY}\n{GOAL_USAGE}"),
-    };
-    render_goal_text(&text)
-}
-
-/// Usage line shared by every `/goal` rendering: setting and ticking run
-/// through the model tools, never through the slash command.
-const GOAL_USAGE: &str = "usage: /goal (status display only; the model sets the goal with goal_set and ticks it with goal_tick once per round)";
-
-/// Lenient rendering of raw goal file content (exposed for tests; the
-/// file shape is owned by the goal state crate).
-fn render_goal_text(text: &str) -> String {
-    const HEAD_CHARS: usize = 500;
-    let value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(value) => value,
-        Err(_) => {
-            return format!(
-                "(durable-goal file unreadable; delete <home>/.wavecode/goals/default.json to start over)\n{GOAL_USAGE}"
-            );
-        }
-    };
-    let status = value
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("active");
-    let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-    let round = value.get("round").and_then(|v| v.as_u64()).unwrap_or(0);
-    let mut out = format!("goal status: {status} (version {version}, round {round})");
-    match value.get("objective").and_then(|v| v.as_str()) {
-        Some(body) if !body.trim().is_empty() => {
-            let head: String = body.chars().take(HEAD_CHARS).collect();
-            out.push_str(&format!("\ngoal:\n{head}"));
-            if body.chars().count() > HEAD_CHARS {
-                out.push_str("\n(truncated; ask the agent for the full goal)");
-            }
-        }
-        _ => out.push_str("\n(no objective yet)"),
-    }
-    out.push_str(&format!("\n{GOAL_USAGE}"));
-    out
 }
 
 /// Permission modes in `/permissions` cycle order (wire names).
@@ -892,6 +790,7 @@ async fn run_repl(
     memory_index: &str,
     mcp_servers: &[String],
     skill_names: &[String],
+    status: &dyn operations_actor::StatusQueries,
 ) -> anyhow::Result<()> {
     use rustyline::error::ReadlineError;
 
@@ -948,28 +847,30 @@ async fn run_repl(
                 }
             }
             // Reviewed plan mode is local display only (mirrors /mcp):
-            // the plan file lives under `<home>/.wavecode/plans/` and the
-            // model mutates it through the plan_* tools, so the REPL only
-            // renders status plus usage, never writes.
-            Slash::Plan(_) => {
-                println!("{}", plan_status_display());
-            }
+            // state comes from the assembly-side queries, so the REPL
+            // renders current status without knowing the storage layout;
+            // the model mutates it through the plan_* tools.
+            Slash::Plan(_) => match status.plan_status() {
+                Some(text) => println!("{text}"),
+                None => println!(
+                    "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)"
+                ),
+            },
             // Durable goal mode is local display only (mirrors /plan):
-            // the goal file lives under `<home>/.wavecode/goals/` and the
-            // model mutates it through the goal_* tools, so the REPL only
-            // renders status plus usage, never writes.
-            Slash::Goal(_) => {
-                println!("{}", goal_status_display());
-            }
+            // state comes from the assembly-side queries; the model
+            // mutates it through the goal_* tools.
+            Slash::Goal(_) => match status.goal_status() {
+                Some(text) => println!("{text}"),
+                None => println!(
+                    "(no durable goal yet; ask the agent to set one with the goal_set tool)"
+                ),
+            },
             // File-content snapshots (no git dependence): `/snapshots`
             // lists labels, `/rewind <label>` shows one snapshot.
             // Both are local display only; the actual rewind runs
             // through the `restore` tool (approval-gated).
             Slash::Snapshots => {
-                let store = wavecode_tools::snapshot::SnapshotStore::new(
-                    wavecode_tools::snapshot::default_snapshot_store_root(),
-                );
-                let labels = store.list_labels();
+                let labels = status.snapshot_labels();
                 if labels.is_empty() {
                     println!(
                         "(no snapshots yet; ask the agent to capture one with the snapshot tool)"
@@ -981,15 +882,13 @@ async fn run_repl(
                 }
             }
             Slash::Rewind(label) => {
-                if label.trim().is_empty() {
+                let label = label.trim();
+                if label.is_empty() {
                     println!("usage: /rewind <label> (see /snapshots for labels)");
                 } else {
-                    let store = wavecode_tools::snapshot::SnapshotStore::new(
-                        wavecode_tools::snapshot::default_snapshot_store_root(),
-                    );
-                    match store.load_info(label.trim()) {
-                        Ok(info) => println!("{}", info.display()),
-                        Err(e) => println!("cannot show snapshot: {e}"),
+                    match status.snapshot_summary(label) {
+                        Some(summary) => println!("{summary}"),
+                        None => println!("unknown snapshot {label:?} (see /snapshots for labels)"),
                     }
                     println!("(rewind itself runs through the restore tool and needs approval)");
                 }
@@ -1036,19 +935,19 @@ async fn run_repl(
 }
 
 /// Human phrase for an approval kind, shared by progress lines and prompts.
-fn approval_what(kind: &operations_wire::ApprovalKind) -> &'static str {
+fn approval_what(kind: &wavecode_wire::ApprovalKind) -> &'static str {
     match kind {
-        operations_wire::ApprovalKind::Exec => "execute a command",
-        operations_wire::ApprovalKind::Write => "modify files",
+        wavecode_wire::ApprovalKind::Exec => "execute a command",
+        wavecode_wire::ApprovalKind::Write => "modify files",
     }
 }
 
 /// Map one approval answer line to a wire decision: y/yes approves once,
 /// anything else (including an empty line) denies without a reason.
-fn decide_approval(line: &str) -> operations_wire::WireDecision {
+fn decide_approval(line: &str) -> wavecode_wire::WireDecision {
     match line.trim().to_ascii_lowercase().as_str() {
-        "y" | "yes" => operations_wire::WireDecision::AllowOnce,
-        _ => operations_wire::WireDecision::Deny {
+        "y" | "yes" => wavecode_wire::WireDecision::AllowOnce,
+        _ => wavecode_wire::WireDecision::Deny {
             reason: String::new(),
         },
     }
@@ -1063,19 +962,19 @@ fn prompt_approval(
     editor: &mut rustyline::DefaultEditor,
     call_id: &str,
     what: &str,
-) -> anyhow::Result<operations_wire::WireDecision> {
+) -> anyhow::Result<wavecode_wire::WireDecision> {
     use rustyline::error::ReadlineError;
     println!("allow {what} ({call_id})? [y/N] ");
     match editor.readline("> ") {
         Ok(line) => Ok(decide_approval(&line)),
         Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-            Ok(operations_wire::WireDecision::Deny {
+            Ok(wavecode_wire::WireDecision::Deny {
                 reason: String::new(),
             })
         }
         Err(e) => {
             eprintln!("[approval] input error, denying: {e}");
-            Ok(operations_wire::WireDecision::Deny {
+            Ok(wavecode_wire::WireDecision::Deny {
                 reason: String::new(),
             })
         }
@@ -1167,12 +1066,12 @@ mod tests {
             [
                 "operations-actor",
                 "operations-bootstrap",
-                "operations-wire",
                 "state-persistence",
                 "wavecode-config",
                 "wavecode-skills",
                 "wavecode-tools",
                 "wavecode-tui",
+                "wavecode-wire",
             ],
             "harness internal deps changed; update the matrix deliberately",
         );
@@ -1269,71 +1168,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_renders_status_head_and_hints() {
-        // Missing home and missing files hint instead of failing.
-        assert!(render_plan_file(None).contains("no reviewed plan"));
-        let dir = std::env::temp_dir().join("wavecode-plan-missing-home");
-        assert!(render_plan_file(Some(dir.as_path())).contains("no reviewed plan"));
-        // A proposed plan renders status, text head, and usage.
-        let text = serde_json::json!({
-            "status": "proposed",
-            "plan_text": "migrate the store",
-            "updated_round": 1,
-            "history": [[1, "proposed"]],
-        })
-        .to_string();
-        let rendered = render_plan_text(&text);
-        assert!(rendered.contains("proposed"), "{rendered}");
-        assert!(rendered.contains("migrate the store"), "{rendered}");
-        assert!(rendered.contains("plan_propose"), "{rendered}");
-        // Empty text and corrupt content stay total.
-        let empty = serde_json::json!({"status": "draft"}).to_string();
-        assert!(render_plan_text(&empty).contains("no plan text yet"));
-        assert!(render_plan_text("{not json}").contains("unreadable"));
-        // Long plans truncate to a display head.
-        let long = serde_json::json!({
-            "status": "proposed",
-            "plan_text": "x".repeat(600),
-        })
-        .to_string();
-        assert!(render_plan_text(&long).contains("truncated"));
-    }
-
-    #[test]
-    fn goal_renders_status_head_and_hints() {
-        // Missing home and missing files hint instead of failing.
-        assert!(render_goal_file(None).contains("no durable goal"));
-        let dir = std::env::temp_dir().join("wavecode-goal-missing-home");
-        assert!(render_goal_file(Some(dir.as_path())).contains("no durable goal"));
-        // An active goal renders status, version, round, text head, and usage.
-        let text = serde_json::json!({
-            "status": "active",
-            "objective": "ship the milestone",
-            "version": 2,
-            "round": 1,
-            "updated_at": 0,
-        })
-        .to_string();
-        let rendered = render_goal_text(&text);
-        assert!(rendered.contains("active"), "{rendered}");
-        assert!(rendered.contains("version 2"), "{rendered}");
-        assert!(rendered.contains("round 1"), "{rendered}");
-        assert!(rendered.contains("ship the milestone"), "{rendered}");
-        assert!(rendered.contains("goal_set"), "{rendered}");
-        // Empty text and corrupt content stay total.
-        let empty = serde_json::json!({"status": "active"}).to_string();
-        assert!(render_goal_text(&empty).contains("no objective yet"));
-        assert!(render_goal_text("{not json}").contains("unreadable"));
-        // Long goals truncate to a display head.
-        let long = serde_json::json!({
-            "status": "active",
-            "objective": "x".repeat(600),
-        })
-        .to_string();
-        assert!(render_goal_text(&long).contains("truncated"));
-    }
-
-    #[test]
     fn skill_requests_name_the_skill_and_args() {
         assert_eq!(
             skill_request("review", ""),
@@ -1370,6 +1204,44 @@ mod tests {
         );
         assert_eq!(out, "hi\n");
         assert!(err.is_empty());
+    }
+
+    /// Model / tool-sourced text must not carry ANSI / OSC sequences to
+    /// the terminal (same threat model as the TUI's sanitize_terminal
+    /// gate). This locks the render path against silently dropping the
+    /// sanitizer again.
+    #[test]
+    fn model_and_tool_text_is_sanitized_before_output() {
+        let (mut out, mut err) = (String::new(), String::new());
+        let attack = "\x1b]52;;x\x07wipe \x1b[2J";
+        render_event(
+            &EventMsg::AgentMessageDelta {
+                text: attack.to_string(),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert!(!out.contains('\x1b'), "delta leaked ANSI: {out:?}");
+        render_event(
+            &EventMsg::Warning {
+                message: attack.to_string(),
+            },
+            &mut out,
+            &mut err,
+        );
+        render_event(
+            &EventMsg::ToolCallBegin {
+                call_id: attack.to_string(),
+                name: attack.to_string(),
+                input: serde_json::Value::Null,
+            },
+            &mut out,
+            &mut err,
+        );
+        assert!(
+            !err.contains('\x1b'),
+            "warning / tool lines leaked ANSI: {err:?}"
+        );
     }
 
     #[test]
@@ -1472,7 +1344,7 @@ mod tests {
 
     #[test]
     fn approval_answers_map_to_wire_decisions() {
-        use operations_wire::WireDecision;
+        use wavecode_wire::WireDecision;
         assert_eq!(decide_approval("y"), WireDecision::AllowOnce);
         assert_eq!(decide_approval("YES"), WireDecision::AllowOnce);
         assert_eq!(
@@ -1488,11 +1360,11 @@ mod tests {
             }
         );
         assert_eq!(
-            approval_what(&operations_wire::ApprovalKind::Exec),
+            approval_what(&wavecode_wire::ApprovalKind::Exec),
             "execute a command"
         );
         assert_eq!(
-            approval_what(&operations_wire::ApprovalKind::Write),
+            approval_what(&wavecode_wire::ApprovalKind::Write),
             "modify files"
         );
     }

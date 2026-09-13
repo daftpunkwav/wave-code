@@ -52,6 +52,13 @@ pub enum Op {
         /// Mode wire name, e.g. `plan` or `acceptEdits`.
         mode: String,
     },
+    /// Switch the sampling model by wire name (same provider only;
+    /// cross-provider switches need session re-assembly and are rejected
+    /// downstream with a warning).
+    SetModel {
+        /// Wire model name, e.g. `claude-sonnet-4-5`.
+        name: String,
+    },
     /// Shut the session down after draining in-flight work.
     Shutdown,
 }
@@ -102,6 +109,12 @@ pub enum EventMsg {
         /// New text since the previous delta.
         text: String,
     },
+    /// Incremental extended-thinking text (display-only; thinking never
+    /// enters conversation history, so there is no complete counterpart).
+    AgentThinkingDelta {
+        /// New thinking text since the previous delta.
+        text: String,
+    },
     /// The assistant message completed, carrying its full text.
     AgentMessageComplete {
         /// Full assembled assistant text for transcript rendering.
@@ -138,6 +151,15 @@ pub enum EventMsg {
         input_tokens: u64,
         /// Output tokens of the sample.
         output_tokens: u64,
+        /// Tokens served from the provider prompt cache; 0 when the
+        /// provider reports no cache accounting (default for
+        /// backward-compatible deserialization of older emitters).
+        #[serde(default)]
+        cache_read_tokens: u64,
+        /// Tokens written to the provider prompt cache by this sample;
+        /// 0 when the provider reports no cache accounting.
+        #[serde(default)]
+        cache_creation_tokens: u64,
     },
     /// Compaction started.
     CompactStarted {
@@ -212,6 +234,12 @@ mod tests {
                 },
                 "set_permission_mode",
             ),
+            (
+                Op::SetModel {
+                    name: "m".to_string(),
+                },
+                "set_model",
+            ),
             (Op::Shutdown, "shutdown"),
         ];
         for (op, tag) in cases {
@@ -226,6 +254,12 @@ mod tests {
                     text: "x".to_string(),
                 },
                 "agent_message_delta",
+            ),
+            (
+                EventMsg::AgentThinkingDelta {
+                    text: "x".to_string(),
+                },
+                "agent_thinking_delta",
             ),
             (
                 EventMsg::AgentMessageComplete {
@@ -260,6 +294,8 @@ mod tests {
                 EventMsg::TokenCount {
                     input_tokens: 1,
                     output_tokens: 2,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
                 },
                 "token_count",
             ),

@@ -1,8 +1,8 @@
 //! Protocol events → UI state transitions: rendering semantics mirror
 //! the legacy human renderer.
 
-use operations_wire::{ApprovalKind, Event};
 use ratatui::text::{Line, Span};
+use wavecode_wire::{ApprovalKind, Event};
 
 use super::App;
 use super::types::{ApprovalPopup, Item, accent, dim, err, parse_todo_input, todo_symbol, warn};
@@ -19,24 +19,37 @@ impl App {
     /// content-free event pulling the user back to the bottom while they
     /// read history would be unusable.
     pub fn handle_event(&mut self, ev: &Event) {
-        use operations_wire::EventMsg as M;
+        use wavecode_wire::EventMsg as M;
         let items_before = self.items.len();
         let buf_before = self.msg_buf.len();
         match &ev.msg {
             M::TurnStarted => {
                 self.in_turn = true;
                 self.msg_buf.clear();
+                self.think_buf.clear();
                 self.spinner = 0;
             }
             // Deltas are sanitized against terminal injection first.
             M::AgentMessageDelta { text } => {
+                self.flush_thinking();
                 let clean = sanitize_terminal(text);
                 self.msg_buf.push_str(&clean);
             }
-            M::AgentMessageComplete { .. } => self.flush_message(),
+            // Thinking is reasoning trace: buffered separately and rendered
+            // as one dim item when the next content event arrives, so word
+            // sized deltas do not spam the transcript.
+            M::AgentThinkingDelta { text } => {
+                let clean = sanitize_terminal(text);
+                self.think_buf.push_str(&clean);
+            }
+            M::AgentMessageComplete { .. } => {
+                self.flush_thinking();
+                self.flush_message()
+            }
             // Tool rows commit immediately; flush partial messages first
             // to keep chronological order readable.
             M::ToolCallBegin { name, input, .. } => {
+                self.flush_thinking();
                 self.flush_message();
                 self.tool_begin_item(name, input);
             }
@@ -51,10 +64,14 @@ impl App {
             M::TokenCount {
                 input_tokens,
                 output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
             } => {
                 self.tokens = Some((*input_tokens, *output_tokens));
+                self.cache_tokens = Some((*cache_read_tokens, *cache_creation_tokens));
             }
             M::CompactStarted { .. } => {
+                self.flush_thinking();
                 self.flush_message();
                 self.push_item(Item::plain("⟳ Compacting context...".into(), dim()));
             }
@@ -123,6 +140,7 @@ impl App {
                 self.push_item(Item::plain(msg, err()));
             }
             M::TurnCompleted { interrupted } => {
+                self.flush_thinking();
                 self.flush_message(); // leftover buffer on interrupt paths
                 if *interrupted {
                     self.push_item(Item::plain("(interrupted)".into(), warn()));
@@ -145,6 +163,17 @@ impl App {
         }
         let text = std::mem::take(&mut self.msg_buf);
         self.push_item(Item::assistant(&text));
+    }
+
+    /// Render buffered thinking as one dim item and clear; empty buffers
+    /// are a no-op. Called when the next content event arrives so the
+    /// reasoning trace keeps chronological order with the answer.
+    fn flush_thinking(&mut self) {
+        if self.think_buf.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.think_buf);
+        self.push_item(Item::plain(format!("· {text}"), dim()));
     }
 
     /// Tool call start row: todo_write shows list state migration,

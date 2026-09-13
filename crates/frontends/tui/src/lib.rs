@@ -4,7 +4,7 @@
 //! session actor: streaming message rendering, slash completion and
 //! commands, inline approval popups, Esc interrupts, and a status bar.
 //!
-//! **Crate boundary**: the TUI may only depend on operations-wire and
+//! **Crate boundary**: the TUI may only depend on wavecode-wire and
 //! operations-actor (in-process transport), never on capabilities or
 //! the composition root — every interaction crosses the Submission/Event
 //! surface, keeping remote frontends equivalent. This Cargo.toml is the
@@ -40,9 +40,9 @@ use crossterm::terminal::{
 };
 use futures::StreamExt;
 use operations_actor::ActorClient;
-use operations_wire::{Op, Submission};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use wavecode_wire::{Op, Submission};
 
 use app::App;
 pub use app::{PermissionMode, TuiContext};
@@ -154,8 +154,29 @@ mod tests {
     //! styles (colors / modifiers) lock in app / markdown unit tests, so
     //! ratatui upgrades never churn snapshot files.
     use super::*;
-    use operations_wire::{Event, EventMsg};
     use ratatui::backend::TestBackend;
+    use wavecode_wire::{Event, EventMsg};
+
+    /// Status-query stub for snapshot tests: nothing to show.
+    struct NoStatus;
+
+    impl operations_actor::StatusQueries for NoStatus {
+        fn plan_status(&self) -> Option<String> {
+            None
+        }
+
+        fn goal_status(&self) -> Option<String> {
+            None
+        }
+
+        fn snapshot_labels(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        fn snapshot_summary(&self, _label: &str) -> Option<String> {
+            None
+        }
+    }
 
     fn ctx() -> TuiContext {
         TuiContext {
@@ -165,6 +186,7 @@ mod tests {
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
             memory_index: String::new(),
+            status_queries: std::sync::Arc::new(NoStatus),
         }
     }
 
@@ -238,7 +260,7 @@ mod tests {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::NONE,
         ));
-        use operations_wire::EventMsg as M;
+        use wavecode_wire::EventMsg as M;
         app.handle_event(&ev(M::TurnStarted));
         app.handle_event(&ev(M::AgentMessageDelta {
             text: "**ok**\n".into(),
@@ -258,6 +280,8 @@ mod tests {
         app.handle_event(&ev(M::TokenCount {
             input_tokens: 120,
             output_tokens: 200_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }));
         app.handle_event(&ev(M::TurnCompleted { interrupted: false }));
         let text = draw_app(&mut app, 80, 24);
@@ -279,7 +303,7 @@ mod tests {
         let mut app = App::new(ctx());
         app.handle_event(&ev(EventMsg::ApprovalRequested {
             call_id: "c1".into(),
-            kind: operations_wire::ApprovalKind::Exec,
+            kind: wavecode_wire::ApprovalKind::Exec,
             detail: "shell: rm -rf build/".into(),
         }));
         let text = draw_app(&mut app, 80, 24);
@@ -322,7 +346,7 @@ mod tests {
     }
 
     /// Crate boundary: the TUI workspace dependencies are exactly
-    /// operations-wire and operations-actor. Nothing else internal.
+    /// operations-actor and wavecode-wire. Nothing else internal.
     ///
     /// Prefix guards are not enough here: `state-store` or `runtime-runner`
     /// match neither `operations-` nor `wavecode-` and would slip through.
@@ -331,17 +355,17 @@ mod tests {
     fn dependency_matrix_locked() {
         assert_eq!(
             internal_path_deps(include_str!("../Cargo.toml")),
-            ["operations-actor", "operations-wire"],
+            ["operations-actor", "wavecode-wire"],
             "tui internal deps changed; update the matrix deliberately",
         );
     }
 
     #[test]
     fn path_dep_scan_catches_prefix_evasions() {
-        let manifest = "[dependencies]\noperations-wire = { path = \"x\" }\nstate-store = { path = \"y\" }\nratatui.workspace = true\n[dev-dependencies]\nruntime-runner = { path = \"z\" }\n";
+        let manifest = "[dependencies]\nwavecode-wire = { path = \"x\" }\nstate-store = { path = \"y\" }\nratatui.workspace = true\n[dev-dependencies]\nruntime-runner = { path = \"z\" }\n";
         assert_eq!(
             internal_path_deps(manifest),
-            ["operations-wire", "state-store"],
+            ["state-store", "wavecode-wire"],
             " dev-deps ignored, registry deps ignored, other prefixes caught",
         );
     }

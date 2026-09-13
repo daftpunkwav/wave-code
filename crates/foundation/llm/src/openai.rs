@@ -28,6 +28,7 @@ use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use std::time::Duration;
 
+use crate::sse;
 use crate::{
     ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role,
     StreamEvent, ToolSpec, Usage, validate_image,
@@ -84,6 +85,15 @@ fn build_http_client() -> reqwest::Client {
 impl ChatModel for OpenAIClient {
     async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
         let url = chat_completions_url(&self.base_url);
+        // The request's model name wins (so callers can switch models
+        // mid-session); the constructor's name is the fallback for empty
+        // requests. Mirrors the Anthropic client, where `req.model` is
+        // authoritative.
+        let model = if req.model.is_empty() {
+            &self.model
+        } else {
+            &req.model
+        };
         let response = self
             .http
             .post(url)
@@ -91,7 +101,7 @@ impl ChatModel for OpenAIClient {
             .header("content-type", "application/json")
             .json(&build_request_body(
                 &req,
-                &self.model,
+                model,
                 self.reasoning_effort.as_deref(),
             ))
             .send()
@@ -113,7 +123,10 @@ impl ChatModel for OpenAIClient {
         let byte_stream = response
             .bytes_stream()
             .map(|r| r.map_err(|e| LlmError::Http(e.to_string())));
-        Ok(Box::pin(decode_openai_stream(byte_stream, MAX_SSE_BUF)))
+        Ok(Box::pin(decode_openai_stream(sse::stall_guard(
+            byte_stream,
+            sse::STREAM_IDLE_TIMEOUT,
+        ))))
     }
 }
 
@@ -315,45 +328,22 @@ fn translate_assistant(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
 
 // ---- Streaming decode ----
 
-/// Hard cap on the SSE byte buffer (8 MiB): exceeding it means the server is not
-/// sending SSE frame boundaries, so yield Err and terminate the stream.
-const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
-
-/// Byte-chunk stream to event stream: buffers bytes, splits SSE frames on blank
-/// lines, and feeds each `data` payload to the Chat Completions assembler.
-fn decode_openai_stream<S>(
-    byte_stream: S,
-    max_buf: usize,
-) -> impl Stream<Item = Result<StreamEvent>> + Send
+/// Byte-chunk stream to event stream: buffers bytes, splits SSE frames on
+/// blank lines, and feeds each `data` payload to the Chat Completions
+/// assembler.
+///
+/// Thin adapter over the shared [`sse::decode_sse_frames`] loop: framing,
+/// buffering, and stall detection live there so both providers share one
+/// memory-safety-critical implementation. Read-stall detection therefore
+/// truly follows the same deferred path as [`crate::AnthropicClient`].
+fn decode_openai_stream<S>(byte_stream: S) -> impl Stream<Item = Result<StreamEvent>> + Send
 where
     S: Stream<Item = Result<bytes::Bytes>> + Send,
 {
-    let mut byte_stream = Box::pin(byte_stream);
-    async_stream::try_stream! {
-        let mut buf: Vec<u8> = Vec::new();
-        let mut scanned: usize = 0;
-        let mut state = OpenAiStreamState::default();
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk?;
-            buf.extend_from_slice(&chunk);
-            if buf.len() > max_buf {
-                Err::<(), _>(LlmError::Sse(format!(
-                    "SSE buffer exceeded the {max_buf}-byte cap (server sent no frame boundary)"
-                )))?;
-            }
-            let mut from = scanned.saturating_sub(3);
-            while let Some((body_end, sep_len)) = find_frame_boundary(&buf[from..]) {
-                let frame: Vec<u8> = buf.drain(..from + body_end + sep_len).collect();
-                if let Some(data) = extract_data(&frame[..from + body_end])? {
-                    for event in feed_openai_data(&mut state, &data)? {
-                        yield event;
-                    }
-                }
-                from = 0;
-            }
-            scanned = buf.len();
-        }
-    }
+    let mut state = OpenAiStreamState::default();
+    sse::decode_sse_frames(byte_stream, sse::MAX_SSE_BUF, move |data| {
+        feed_openai_data(&mut state, data)
+    })
 }
 
 /// Feeds one SSE `data` payload, returning zero or more stream events.
@@ -394,6 +384,10 @@ fn feed_openai_data(state: &mut OpenAiStreamState, data: &str) -> Result<Vec<Str
     if let Some(usage) = chunk.usage {
         state.prompt_tokens = usage.prompt_tokens;
         state.completion_tokens = usage.completion_tokens;
+        state.cached_tokens = usage
+            .prompt_tokens_details
+            .map(|d| d.cached_tokens)
+            .unwrap_or(0);
     }
     Ok(events)
 }
@@ -472,6 +466,8 @@ fn finish_turn(state: &OpenAiStreamState) -> Vec<StreamEvent> {
         usage: Usage {
             input_tokens: state.prompt_tokens,
             output_tokens: state.completion_tokens,
+            cache_read_tokens: state.cached_tokens,
+            ..Usage::default()
         },
     });
     events
@@ -492,6 +488,7 @@ struct OpenAiStreamState {
     stop_reason: Option<String>,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: u64,
 }
 
 // ---- Private deserialization structs for one Chat Completions chunk ----
@@ -549,37 +546,17 @@ struct OpenAiUsage {
     prompt_tokens: u64,
     #[serde(default)]
     completion_tokens: u64,
+    /// Cache accounting (`prompt_tokens_details.cached_tokens`); absent on
+    /// providers without the field, degrading to 0.
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
 }
 
-/// Finds a frame boundary in the buffer (`\n\n` or `\r\n\r\n`, whichever comes first).
-fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = find_subsequence(buf, b"\n\n").map(|i| (i, 2));
-    let crlf = find_subsequence(buf, b"\r\n\r\n").map(|i| (i, 4));
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (only, None) | (None, only) => only,
-    }
+#[derive(Deserialize, Default)]
+struct OpenAiPromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
-
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Extracts the `data:` payload from a single SSE frame (multiple data lines
-/// are joined with `\n`); frames without data lines return `Ok(None)`.
-fn extract_data(frame: &[u8]) -> Result<Option<String>> {
-    let text = std::str::from_utf8(frame).map_err(|e| LlmError::Sse(e.to_string()))?;
-    let mut data_lines: Vec<&str> = Vec::new();
-    for line in text.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(payload) = line.strip_prefix("data:") {
-            data_lines.push(payload.strip_prefix(' ').unwrap_or(payload));
-        }
-    }
-    Ok((!data_lines.is_empty()).then(|| data_lines.join("\n")))
-}
-
-// ---- Model capability table ----
 
 /// Approximate per-model limits (context window and max output tokens).
 ///
@@ -833,9 +810,7 @@ mod tests {
                 .into_iter()
                 .map(|c| Ok::<_, LlmError>(bytes::Bytes::from_static(c))),
         );
-        decode_openai_stream(byte_stream, MAX_SSE_BUF)
-            .collect()
-            .await
+        decode_openai_stream(byte_stream).collect().await
     }
 
     #[tokio::test]
@@ -981,6 +956,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 5,
                     output_tokens: 7,
+                    ..Usage::default()
                 },
             })
         );
@@ -1008,11 +984,37 @@ mod tests {
         use futures::StreamExt;
         let chunk = || Ok::<_, LlmError>(bytes::Bytes::from_static(b"data: no-boundary-here\n"));
         let byte_stream = futures::stream::iter([chunk(), chunk(), chunk()]);
-        let results: Vec<_> = decode_openai_stream(byte_stream, 32).collect().await;
+        let mut state = OpenAiStreamState::default();
+        let results: Vec<_> = sse::decode_sse_frames(byte_stream, 32, move |data| {
+            feed_openai_data(&mut state, data)
+        })
+        .collect()
+        .await;
         assert_eq!(results.len(), 1);
         assert!(
             matches!(&results[0], Err(LlmError::Sse(msg)) if msg.contains("cap")),
             "should report the buffer-over-cap error: {:?}",
+            results[0]
+        );
+    }
+
+    /// The OpenAI stream path wires the shared read-stall guard: an upstream
+    /// that stops producing bytes ends the stream with a Timeout error
+    /// instead of hanging forever (parity with the Anthropic client).
+    #[tokio::test]
+    async fn openai_stream_ends_with_timeout_when_upstream_stalls() {
+        use futures::StreamExt;
+        let first = Ok::<_, LlmError>(bytes::Bytes::from_static(b"data: {\"choices\":[]}\n\n"));
+        let hang: futures::stream::Pending<Result<bytes::Bytes>> = futures::stream::pending();
+        let guarded = sse::stall_guard(
+            futures::stream::iter(vec![first]).chain(hang),
+            std::time::Duration::from_millis(30),
+        );
+        let results: Vec<_> = decode_openai_stream(guarded).collect().await;
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0], Err(LlmError::Timeout(msg)) if msg.contains("idle timeout")),
+            "a stalled upstream must end the stream with Timeout: {:?}",
             results[0]
         );
     }

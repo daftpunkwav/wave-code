@@ -35,6 +35,17 @@ pub struct ProviderConfig {
     /// providers without the param keep working unchanged.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Extended-thinking token budget for Anthropic-protocol providers
+    /// (Anthropic `thinking.budget_tokens`); `None` keeps thinking off.
+    /// The budget is clamped per request into the API-satisfiable range.
+    #[serde(default)]
+    pub thinking_budget_tokens: Option<u32>,
+    /// Prompt-cache breakpoints on Anthropic-protocol requests. Unset means
+    /// enabled (repeated turns are the norm and cache reads are billed at a
+    /// fraction of fresh input); set `false` only for gateways that reject
+    /// the `cache_control` field.
+    #[serde(default)]
+    pub prompt_caching: Option<bool>,
 }
 
 impl std::fmt::Debug for ProviderConfig {

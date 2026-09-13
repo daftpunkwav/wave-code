@@ -17,11 +17,11 @@
 use std::sync::Arc;
 
 use infrastructure_base::InterruptHandle;
-use operations_wire::Event;
 use runtime_runner::{HookPoint, InboxHandle, RunContext, StopReason, TurnDriver};
 use state_store::{CompactTrigger, Conversation};
 use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, Message, Role};
 use wavecode_memory::{MemoryStore, parse_extracted_entries};
+use wavecode_wire::Event;
 
 /// Distillation system prompt: line format in, line format out.
 const DISTILL_SYSTEM: &str = "Extract durable memories from this session transcript for future sessions. \
@@ -99,6 +99,12 @@ impl MemoryFinisher {
                 .map_err(|e| format!("memory store failed: {e}"))?;
             stored += 1;
         }
+        // Background consolidation ("dream" merge): fold the near-duplicate
+        // entries the store just grew. Best-effort under the same silence
+        // contract as extraction — a merge failure must never block session
+        // exit, and this layer has no event channel to log through (see
+        // `end_session`), so failures are skipped.
+        let _ = self.store.consolidate();
         Ok(stored)
     }
 }
@@ -155,6 +161,10 @@ impl<D: TurnDriver> TurnDriver for SessionMemory<D> {
 
     fn set_permission_mode(&self, mode: &str) -> bool {
         self.inner.set_permission_mode(mode)
+    }
+
+    fn set_model(&self, name: &str) -> bool {
+        self.inner.set_model(name)
     }
 
     fn interrupt_handle(&self) -> Option<InterruptHandle> {

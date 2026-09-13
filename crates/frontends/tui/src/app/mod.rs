@@ -8,7 +8,7 @@
 //! Deltas enter the buffer sanitized and render as markdown once on
 //! complete (a plain-text preview trails the stream while flowing).
 
-use operations_wire::Op;
+use wavecode_wire::Op;
 
 /// Spinner frames for in-turn waiting (status bar, advanced per 100ms tick).
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -40,6 +40,9 @@ pub struct App {
     /// Streaming assistant buffer (deltas accumulate, submitted on
     /// complete / before tool rows).
     msg_buf: String,
+    /// Streaming thinking buffer (deltas accumulate, rendered as one dim
+    /// item when the next content event arrives).
+    think_buf: String,
     /// Whether a turn is running.
     pub in_turn: bool,
     /// Input box text and cursor (character index).
@@ -56,6 +59,9 @@ pub struct App {
     slash_selected: usize,
     /// Latest TokenCount (status bar input/output).
     pub tokens: Option<(u64, u64)>,
+    /// Latest TokenCount cache counters (read, creation); `None` or zero
+    /// values mean the provider reports no cache accounting.
+    pub cache_tokens: Option<(u64, u64)>,
     /// Current permission mode (synced locally after `/permissions`).
     pub permission_mode: PermissionMode,
     /// Spinner phase.
@@ -65,6 +71,9 @@ pub struct App {
     quit: bool,
     /// Last rendered todo_write list (used to diff status migration).
     last_todos: Vec<(String, String)>,
+    /// Model label shown in the status bar: the locally requested
+    /// `/model` override once set, the session model otherwise.
+    model_label: Option<String>,
 }
 
 impl App {
@@ -74,6 +83,7 @@ impl App {
             ctx,
             items: Vec::new(),
             msg_buf: String::new(),
+            think_buf: String::new(),
             in_turn: false,
             input: String::new(),
             cursor: 0,
@@ -83,11 +93,13 @@ impl App {
             slash_dismissed: false,
             slash_selected: 0,
             tokens: None,
+            cache_tokens: None,
             permission_mode,
             spinner: 0,
             outbox: Vec::new(),
             quit: false,
             last_todos: Vec::new(),
+            model_label: None,
         };
         app.push_item(Item::plain(
             "WaveCode TUI — Enter submit · / completion · Esc interrupt · Ctrl-C quit".into(),
@@ -110,7 +122,7 @@ impl App {
     }
 
     pub fn model_name(&self) -> &str {
-        &self.ctx.model_name
+        self.model_label.as_deref().unwrap_or(&self.ctx.model_name)
     }
 
     pub fn cwd(&self) -> &std::path::Path {
@@ -153,8 +165,38 @@ impl App {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use operations_wire::{ApprovalKind, Event, EventMsg, WireDecision};
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use wavecode_wire::{ApprovalKind, Event, EventMsg, WireDecision};
+
+    /// Deterministic status-query stub: slash state tests no longer hit
+    /// the real home directory.
+    #[derive(Default)]
+    struct StubStatus {
+        plan: Option<String>,
+        goal: Option<String>,
+        labels: Vec<String>,
+    }
+
+    impl operations_actor::StatusQueries for StubStatus {
+        fn plan_status(&self) -> Option<String> {
+            self.plan.clone()
+        }
+
+        fn goal_status(&self) -> Option<String> {
+            self.goal.clone()
+        }
+
+        fn snapshot_labels(&self) -> Vec<String> {
+            self.labels.clone()
+        }
+
+        fn snapshot_summary(&self, label: &str) -> Option<String> {
+            self.labels
+                .contains(&label.to_string())
+                .then(|| format!("Snapshot '{label}': 1 file (10 bytes)"))
+        }
+    }
 
     fn ctx() -> TuiContext {
         TuiContext {
@@ -164,6 +206,7 @@ mod tests {
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
             memory_index: String::new(),
+            status_queries: Arc::new(StubStatus::default()),
         }
     }
 
@@ -283,6 +326,8 @@ mod tests {
         app.handle_event(&ev(EventMsg::TokenCount {
             input_tokens: 1,
             output_tokens: 2,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }));
         assert!(!app.follow_tail, "TokenCount must not pull back to bottom");
         app.handle_event(&ev(EventMsg::TurnStarted));
@@ -503,56 +548,87 @@ mod tests {
         assert!(has_hint);
     }
 
-    /// /plan: locally render reviewed-plan status (no Op); hint when no
-    /// proposal exists yet. The file read hits the real home directory,
-    /// so the test accepts either rendering, never an Op.
+    /// /plan: locally render reviewed-plan status (no Op); the row text
+    /// comes from the injected status queries, and an empty query
+    /// renders the empty-state hint.
     #[test]
     fn plan_shows_status_locally() {
         let mut app = App::new(ctx());
         type_str(&mut app, "/plan");
         app.handle_key(key(KeyCode::Enter));
         assert!(app.take_ops().is_empty(), "/plan renders locally");
-        let has_row = app
+        let has_hint = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("no reviewed plan"));
+        assert!(has_hint);
+        // Completion offers the new builtin.
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/p");
+        assert!(app.slash_candidates().contains(&"/plan".to_string()));
+
+        let mut app = App::new(TuiContext {
+            status_queries: Arc::new(StubStatus {
+                plan: Some("plan status: proposed (updated round 1)\nplan:\ndo things".into()),
+                ..StubStatus::default()
+            }),
+            ..ctx()
+        });
+        type_str(&mut app, "/plan");
+        app.handle_key(key(KeyCode::Enter));
+        let has_status = app
             .items
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
             .any(|s| {
-                s.content.contains("plan status:")
-                    || s.content.contains("no reviewed plan")
-                    || s.content.contains("plan file unreadable")
+                s.content
+                    .contains("plan status: proposed (updated round 1)")
             });
-        assert!(has_row);
-        // Completion offers the new builtin.
-        let mut app = App::new(ctx());
-        type_str(&mut app, "/p");
-        assert!(app.slash_candidates().contains(&"/plan".to_string()));
+        assert!(has_status);
     }
 
     /// /goal: locally render durable-goal status (no Op); hint when no
-    /// goal exists yet. The file read hits the real home directory,
-    /// so the test accepts either rendering, never an Op.
+    /// goal exists yet, query text when one does.
     #[test]
     fn goal_shows_status_locally() {
         let mut app = App::new(ctx());
         type_str(&mut app, "/goal");
         app.handle_key(key(KeyCode::Enter));
         assert!(app.take_ops().is_empty(), "/goal renders locally");
-        let has_row = app
+        let has_hint = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("no durable goal"));
+        assert!(has_hint);
+        // Completion offers the new builtin.
+        let mut app = App::new(ctx());
+        type_str(&mut app, "/g");
+        assert!(app.slash_candidates().contains(&"/goal".to_string()));
+
+        let mut app = App::new(TuiContext {
+            status_queries: Arc::new(StubStatus {
+                goal: Some("goal status: active (version 1, round 2)\ngoal:\nship it".into()),
+                ..StubStatus::default()
+            }),
+            ..ctx()
+        });
+        type_str(&mut app, "/goal");
+        app.handle_key(key(KeyCode::Enter));
+        let has_status = app
             .items
             .iter()
             .flat_map(|i| &i.lines)
             .flat_map(|l| &l.spans)
             .any(|s| {
-                s.content.contains("goal status:")
-                    || s.content.contains("no durable goal")
-                    || s.content.contains("goal file unreadable")
+                s.content
+                    .contains("goal status: active (version 1, round 2)")
             });
-        assert!(has_row);
-        // Completion offers the new builtin.
-        let mut app = App::new(ctx());
-        type_str(&mut app, "/g");
-        assert!(app.slash_candidates().contains(&"/goal".to_string()));
+        assert!(has_status);
     }
 
     /// /snapshots: locally list labels (no Op); empty stores hint at the
@@ -575,8 +651,9 @@ mod tests {
         );
     }
 
-    /// /rewind: usage without a label, rejection for bad labels, and an
-    /// unknown-label row for well-formed but missing labels (no Op ever).
+    /// /rewind: usage without a label, an unknown-label row for
+    /// well-formed but missing labels, and the query summary for known
+    /// labels (no Op ever).
     #[test]
     fn rewind_shows_usage_and_label_errors_locally() {
         let mut app = App::new(ctx());
@@ -595,18 +672,6 @@ mod tests {
         type_str(&mut app, "/rewind a/b");
         app.handle_key(key(KeyCode::Enter));
         assert!(app.take_ops().is_empty());
-        let has_invalid = app
-            .items
-            .iter()
-            .flat_map(|i| &i.lines)
-            .flat_map(|l| &l.spans)
-            .any(|s| s.content.contains("invalid snapshot label"));
-        assert!(has_invalid);
-
-        let mut app = App::new(ctx());
-        type_str(&mut app, "/rewind wavecode-no-such-snapshot-1");
-        app.handle_key(key(KeyCode::Enter));
-        assert!(app.take_ops().is_empty());
         let has_unknown = app
             .items
             .iter()
@@ -614,6 +679,25 @@ mod tests {
             .flat_map(|l| &l.spans)
             .any(|s| s.content.contains("unknown snapshot"));
         assert!(has_unknown);
+
+        // Known label: the injected summary renders verbatim.
+        let mut app = App::new(TuiContext {
+            status_queries: Arc::new(StubStatus {
+                labels: vec!["snap-1".to_string()],
+                ..StubStatus::default()
+            }),
+            ..ctx()
+        });
+        type_str(&mut app, "/rewind snap-1");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.take_ops().is_empty());
+        let has_summary = app
+            .items
+            .iter()
+            .flat_map(|i| &i.lines)
+            .flat_map(|l| &l.spans)
+            .any(|s| s.content.contains("Snapshot 'snap-1': 1 file"));
+        assert!(has_summary);
     }
 
     /// Event flow: buffered deltas render as markdown on complete;
@@ -622,7 +706,7 @@ mod tests {
     #[test]
     fn event_flow_markdown_and_interrupt() {
         let mut app = App::new(ctx());
-        use operations_wire::EventMsg as M;
+        use wavecode_wire::EventMsg as M;
         app.handle_event(&ev(M::TurnStarted));
         assert!(app.in_turn);
         app.handle_event(&ev(M::AgentMessageDelta {
@@ -632,6 +716,8 @@ mod tests {
         app.handle_event(&ev(M::TokenCount {
             input_tokens: 5,
             output_tokens: 100,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }));
         app.handle_event(&ev(M::TurnCompleted { interrupted: true }));
         assert!(!app.in_turn);

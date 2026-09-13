@@ -23,11 +23,11 @@ use std::sync::{Arc, Mutex};
 use serde_json::Value;
 
 use infrastructure_base::InterruptHandle;
-use operations_wire::{ApprovalKind as WireApprovalKind, Event, EventMsg};
 use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
     check_budget, estimate_tokens,
 };
+use wavecode_wire::{ApprovalKind as WireApprovalKind, Event, EventMsg};
 
 /// Default ceiling for tool rounds inside one run.
 ///
@@ -80,6 +80,12 @@ pub struct TurnState {
     pub last_input_tokens: Option<u64>,
     /// Cumulative output tokens across samples in this run.
     pub total_output_tokens: u64,
+    /// Cumulative prompt-cache read tokens across samples in this run
+    /// (0 when the provider reports no cache accounting).
+    pub total_cache_read_tokens: u64,
+    /// Cumulative prompt-cache write tokens across samples in this run
+    /// (0 when the provider reports no cache accounting).
+    pub total_cache_creation_tokens: u64,
     /// How many tool dispatch rounds have executed in this run.
     pub tool_rounds: u32,
     /// How many reactive compactions have run in this run.
@@ -241,7 +247,7 @@ pub enum SampleBlock {
 }
 
 /// Response of one model sample.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SampleResponse {
     /// Ordered content blocks of the assistant message.
     pub blocks: Vec<SampleBlock>,
@@ -249,6 +255,12 @@ pub struct SampleResponse {
     pub input_tokens: Option<u64>,
     /// Output tokens reported by the provider, if any.
     pub output_tokens: Option<u64>,
+    /// Tokens served from the provider prompt cache (0 when the provider
+    /// reports no cache accounting).
+    pub cache_read_tokens: u64,
+    /// Tokens written to the provider prompt cache by this sample (0 when
+    /// the provider reports no cache accounting).
+    pub cache_creation_tokens: u64,
     /// True when the provider stopped at its output limit.
     pub truncated: bool,
 }
@@ -336,6 +348,9 @@ pub trait HookGateway: Send + Sync {
 pub enum SampleDelta {
     /// Assistant text fragment as it arrives.
     Text(String),
+    /// Extended-thinking fragment as it arrives (display-only: thinking is
+    /// per-turn reasoning and never enters the conversation history).
+    Thinking(String),
 }
 
 /// Samples the model once; implemented by the provider adapter.
@@ -343,6 +358,14 @@ pub enum SampleDelta {
 pub trait ModelGateway: Send + Sync {
     /// Sample the model; `PromptTooLong` signals the loop to compact.
     async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError>;
+
+    /// Switch the wire model name for subsequent samples; false rejects
+    /// the name. Adapters over fixed models keep the default (rejecting);
+    /// adapters with a swappable name override this. Same-provider
+    /// switching only: cross-provider changes need session re-assembly.
+    fn set_model(&self, _name: &str) -> bool {
+        false
+    }
 
     /// Sample with per-delta callbacks for live frontends.
     ///
@@ -460,31 +483,6 @@ impl InboxHandle {
             .drain(..)
             .collect()
     }
-}
-
-/// Dispatch tool calls with read-only parallelism and serial mutation.
-///
-/// Calls whose executor reports read-only and non-destructive run
-/// concurrently via `join_all`; all other calls run serially afterwards,
-/// one at a time, so mutations never interleave. Results are grouped by
-/// class (read-only block first) and keep declaration order within each
-/// class. Callers needing global declaration order must submit
-/// single-class batches.
-pub async fn dispatch_calls<E: ToolExecutor>(
-    executor: &E,
-    calls: Vec<ToolCall>,
-) -> Vec<ToolResult> {
-    let (read_only, mutating): (Vec<ToolCall>, Vec<ToolCall>) = calls
-        .into_iter()
-        .partition(|c| executor.is_read_only(&c.name) && !executor.is_destructive(&c.name));
-    let mut out = Vec::with_capacity(read_only.len() + mutating.len());
-    let concurrent =
-        futures::future::join_all(read_only.into_iter().map(|call| executor.execute(call))).await;
-    out.extend(concurrent);
-    for call in mutating {
-        out.push(executor.execute(call).await);
-    }
-    out
 }
 
 /*
@@ -915,9 +913,13 @@ where
             // part of the event contract.
             let response = match self
                 .model
-                .sample_streaming(request, &|delta| {
-                    let SampleDelta::Text(text) = delta;
-                    emit_msg(EventMsg::AgentMessageDelta { text });
+                .sample_streaming(request, &|delta| match delta {
+                    SampleDelta::Text(text) => {
+                        emit_msg(EventMsg::AgentMessageDelta { text });
+                    }
+                    SampleDelta::Thinking(text) => {
+                        emit_msg(EventMsg::AgentThinkingDelta { text });
+                    }
                 })
                 .await
             {
@@ -967,6 +969,12 @@ where
             if let Some(output) = response.output_tokens {
                 state.add_output(output);
             }
+            state.total_cache_read_tokens = state
+                .total_cache_read_tokens
+                .saturating_add(response.cache_read_tokens);
+            state.total_cache_creation_tokens = state
+                .total_cache_creation_tokens
+                .saturating_add(response.cache_creation_tokens);
 
             let mut text = String::new();
             let mut calls = Vec::new();
@@ -1087,6 +1095,7 @@ where
         conv.settle(Usage {
             input_tokens: estimate_tokens(&done.summary) + CONTEXT_OVERHEAD_TOKENS,
             output_tokens: 0,
+            ..Usage::default()
         });
         emit(EventMsg::CompactCompleted {
             summary_tokens: done.summary_tokens,
@@ -1396,6 +1405,14 @@ pub trait TurnDriver: Send + Sync {
         false
     }
 
+    /// Switch the sampling model by wire name; false rejects the name.
+    ///
+    /// Defaults to rejecting: the gateway behind the loop decides whether
+    /// the name is acceptable (same-provider switches only).
+    fn set_model(&self, _name: &str) -> bool {
+        false
+    }
+
     /// Session teardown hook: the actor calls this once with the final
     /// transcript (one `role: text` line per entry) before returning from
     /// Shutdown or client disconnect. The default is a no-op; composition
@@ -1473,6 +1490,10 @@ where
 
     fn set_permission_mode(&self, mode: &str) -> bool {
         self.policy.set_permission_mode(mode)
+    }
+
+    fn set_model(&self, name: &str) -> bool {
+        self.model.set_model(name)
     }
 
     fn interrupt_handle(&self) -> Option<InterruptHandle> {
@@ -1613,10 +1634,14 @@ fn settle(
     conv.settle(Usage {
         input_tokens: *input,
         output_tokens: state.total_output_tokens,
+        cache_read_tokens: state.total_cache_read_tokens,
+        cache_creation_tokens: state.total_cache_creation_tokens,
     });
     emit(EventMsg::TokenCount {
         input_tokens: *input,
         output_tokens: state.total_output_tokens,
+        cache_read_tokens: state.total_cache_read_tokens,
+        cache_creation_tokens: state.total_cache_creation_tokens,
     });
 }
 
@@ -1661,51 +1686,6 @@ mod tests {
             state.bump_tool_round();
         }
         assert!(state.rounds_exhausted(DEFAULT_MAX_TOOL_ROUNDS));
-    }
-
-    #[tokio::test]
-    async fn dispatch_groups_read_only_first_and_keeps_order() {
-        struct Echo;
-        #[async_trait::async_trait]
-        impl ToolExecutor for Echo {
-            async fn execute(&self, call: ToolCall) -> ToolResult {
-                ToolResult {
-                    call_id: call.call_id.clone(),
-                    content: call.name.clone(),
-                    is_error: call.name == "boom",
-                }
-            }
-
-            fn is_read_only(&self, tool: &str) -> bool {
-                tool != "write_file"
-            }
-
-            fn is_destructive(&self, _tool: &str) -> bool {
-                false
-            }
-        }
-
-        fn call(id: &str, name: &str) -> ToolCall {
-            ToolCall {
-                call_id: id.to_string(),
-                name: name.to_string(),
-                input: serde_json::Value::Null,
-            }
-        }
-
-        let results = dispatch_calls(
-            &Echo,
-            vec![
-                call("m1", "write_file"),
-                call("r1", "read_a"),
-                call("r2", "boom"),
-            ],
-        )
-        .await;
-        let ids: Vec<_> = results.iter().map(|r| r.call_id.as_str()).collect();
-        assert_eq!(ids, vec!["r1", "r2", "m1"]);
-        // Business failures ride as Ok results so the model can self-correct.
-        assert!(results.iter().find(|r| r.call_id == "r2").unwrap().is_error);
     }
 
     #[test]
@@ -1865,6 +1845,8 @@ mod run_loop_tests {
                     input_tokens: Some(5),
                     output_tokens: Some(1),
                     truncated: false,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
                 }),
             }
         }
@@ -2008,6 +1990,8 @@ mod run_loop_tests {
             input_tokens: Some(10),
             output_tokens: Some(1),
             truncated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
         }
     }
 
@@ -2166,6 +2150,8 @@ mod run_loop_tests {
                 input_tokens: Some(10),
                 output_tokens: Some(1),
                 truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             }));
         model
             .steps
@@ -2206,6 +2192,70 @@ mod run_loop_tests {
     }
 
     #[tokio::test]
+    async fn allowed_calls_run_read_only_first_then_mutations() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![
+                    SampleBlock::ToolUse {
+                        call_id: "m1".to_string(),
+                        name: "write_file".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                    SampleBlock::ToolUse {
+                        call_id: "r1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                    SampleBlock::ToolUse {
+                        call_id: "r2".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                ],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let conv = &mut Conversation::new();
+        let run = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        assert_eq!(outcome, StopReason::Completed);
+        // Read-only allows execute before mutations; results still come
+        // back in declaration order.
+        let executed = run.executor.lock_executed();
+        assert_eq!(
+            *executed,
+            vec![
+                "read_file".to_string(),
+                "read_file".to_string(),
+                "write_file".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn restricted_runs_refuse_denied_tools_without_executing() {
         let fx = Fixture::new();
         let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
@@ -2222,6 +2272,8 @@ mod run_loop_tests {
                 input_tokens: Some(10),
                 output_tokens: Some(1),
                 truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             }));
         model
             .steps
@@ -2288,6 +2340,8 @@ mod run_loop_tests {
                 input_tokens: Some(10),
                 output_tokens: Some(1),
                 truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             }));
         model
             .steps
@@ -2372,6 +2426,8 @@ mod run_loop_tests {
                     input_tokens: Some(10),
                     output_tokens: Some(1),
                     truncated: true,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
                 }));
         }
         let conv = &mut Conversation::new();
@@ -2415,6 +2471,8 @@ mod run_loop_tests {
                         input_tokens: Some(10),
                         output_tokens: Some(1),
                         truncated: true,
+                        cache_read_tokens: 0,
+                        cache_creation_tokens: 0,
                     }));
             }
             let conv = &mut Conversation::new();
@@ -2626,6 +2684,7 @@ mod run_loop_tests {
         conv.settle(Usage {
             input_tokens: 6000,
             output_tokens: 0,
+            ..Usage::default()
         });
         let events = fx.events.clone();
         let outcome = RunLoop::new(

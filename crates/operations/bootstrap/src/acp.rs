@@ -31,9 +31,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use operations_actor::ActorClient;
-use operations_wire::{EventMsg, Op, Submission};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
+use wavecode_wire::{EventMsg, Op, Submission};
 
 use crate::session::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionHandle};
 
@@ -692,6 +692,25 @@ where
             }
             None
         }
+        EventMsg::AgentThinkingDelta { text } => {
+            if !text.is_empty() {
+                // ACP has a dedicated thought chunk kind; reasoning trace
+                // maps there, never onto the message chunk.
+                write_notification(
+                    writer,
+                    "session/update",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": { "type": "text", "text": text },
+                        },
+                    }),
+                )
+                .await;
+            }
+            None
+        }
         EventMsg::ToolCallBegin { call_id, name, .. } => {
             write_notification(
                 writer,
@@ -876,6 +895,7 @@ api_key = "k-inline"
                 usage: Usage {
                     input_tokens: 1,
                     output_tokens: 1,
+                    ..Usage::default()
                 },
             },
         ]
@@ -899,6 +919,7 @@ api_key = "k-inline"
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Usage::default()
                 },
             },
         ]

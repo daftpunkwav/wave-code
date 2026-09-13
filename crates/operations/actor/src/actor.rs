@@ -25,12 +25,12 @@ use std::sync::Arc;
 use infrastructure_base::{
     CONTROL_CHANNEL_CAP, InterruptHandle, PENDING_QUEUE_CAP, SHUTDOWN_DRAIN,
 };
-use operations_wire::{Event, EventMsg, Op, Submission, WireDecision};
 use runtime_child::ChildRuntime;
 use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
 use safety_gate::{ApprovalDecision, ApprovalGate};
 use state_store::{CompactTrigger, Conversation, Role};
 use tokio::sync::mpsc;
+use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
 
 use crate::client::ActorClient;
 use crate::durable::{
@@ -324,6 +324,19 @@ where
                         });
                     }
                 }
+                Op::SetModel { name } => {
+                    // Live model switch through the driver seam; a reject
+                    // (unknown/fixed gateway) warns so the switch never
+                    // silently fails.
+                    if !driver.set_model(&name) {
+                        let _ = event_tx.send(Event {
+                            id: sub.id.clone(),
+                            msg: EventMsg::Warning {
+                                message: format!("model switch rejected: {name:?}"),
+                            },
+                        });
+                    }
+                }
             }
         }
     }
@@ -425,10 +438,11 @@ fn route_extra(
     match sub.op {
         Op::UserInput { .. } | Op::Compact => queue_or_reject(pending, sub, event_tx),
         Op::Interrupt => interrupt.trigger(),
-        Op::SetPermissionMode { .. } => {
-            // Mode switches apply at the next turn boundary; queue one
-            // marker so ordering with inputs is preserved. Control-class
-            // immediacy is unnecessary: policy reads the mode per call.
+        Op::SetPermissionMode { .. } | Op::SetModel { .. } => {
+            // Mode/model switches apply at the next turn boundary; queue
+            // one marker so ordering with inputs is preserved. Control-
+            // class immediacy is unnecessary: policy and the gateway read
+            // the value per sample.
             queue_or_reject(pending, sub, event_tx);
         }
         Op::ExecApproval { call_id, decision } => {

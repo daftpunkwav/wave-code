@@ -16,7 +16,7 @@
 //! Dashboards, cost guards, and evaluations all read [`Metrics`]; none of
 //! them can perturb execution because recording is a read-only fold.
 
-use operations_wire::{Event, EventMsg};
+use wavecode_wire::{Event, EventMsg};
 
 /// Cumulative counters folded from the event stream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,6 +72,7 @@ impl Metrics {
             EventMsg::TokenCount {
                 input_tokens,
                 output_tokens,
+                ..
             } => {
                 self.tokens_in += input_tokens;
                 self.tokens_out += output_tokens;
@@ -129,7 +130,7 @@ impl SpanTimer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use operations_wire::ApprovalKind;
+    use wavecode_wire::ApprovalKind;
 
     fn event(msg: EventMsg) -> Event {
         Event {
@@ -160,6 +161,8 @@ mod tests {
             EventMsg::TokenCount {
                 input_tokens: 100,
                 output_tokens: 25,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
             },
             EventMsg::CompactCompleted { summary_tokens: 25 },
             EventMsg::Warning {

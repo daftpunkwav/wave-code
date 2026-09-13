@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 
+use crate::sse::{MAX_SSE_BUF, STREAM_IDLE_TIMEOUT, stall_guard};
 use crate::{
     ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role, SseParser,
-    StreamEvent, validate_image,
+    StreamEvent, ToolSpec, validate_image,
 };
 
 /// Anthropic Messages API streaming client.
@@ -17,16 +18,45 @@ pub struct AnthropicClient {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+    /// Inject prompt-cache breakpoints (system / last tool / last message
+    /// block, `cache_control: ephemeral`) into the request body. On by
+    /// default — repeated turns are the norm and cache reads are billed at a
+    /// fraction of fresh input — but disableable for Anthropic-protocol
+    /// gateways that reject the `cache_control` field.
+    prompt_caching: bool,
+    /// Extended-thinking budget in tokens (`thinking.budget_tokens`); `None`
+    /// keeps thinking off so providers/agents that never asked for it are
+    /// unchanged. The budget is clamped into the API-satisfiable range at
+    /// request-build time (see [`thinking_body`]).
+    thinking_budget: Option<u32>,
 }
 
 impl AnthropicClient {
-    /// Creates a new client.
+    /// Creates a new client (prompt caching on, thinking off).
     pub fn new(base_url: String, api_key: String) -> Self {
         Self {
             base_url,
             api_key,
             http: build_http_client(),
+            prompt_caching: true,
+            thinking_budget: None,
         }
+    }
+
+    /// Enable extended thinking with the given token budget. The budget is
+    /// clamped per request into the API-satisfiable range (>= 1024 and
+    /// < `max_tokens`); requests whose `max_tokens` cannot satisfy the
+    /// 1024 minimum silently keep thinking off for that request.
+    pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
+        self.thinking_budget = Some(budget_tokens);
+        self
+    }
+
+    /// Turn prompt-cache breakpoints off (third-party gateways that reject
+    /// `cache_control`).
+    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
+        self.prompt_caching = enabled;
+        self
     }
 }
 
@@ -57,7 +87,11 @@ impl ChatModel for AnthropicClient {
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&build_request_body(&req))
+            .json(&build_request_body(
+                &req,
+                self.prompt_caching,
+                self.thinking_budget,
+            ))
             .send()
             .await
             .map_err(|e| LlmError::Http(e.to_string()))?;
@@ -99,17 +133,104 @@ fn truncate_error_body(body: &str) -> String {
 }
 
 /// Builds the Anthropic Messages API request body (stream is always true).
-pub(crate) fn build_request_body(req: &ChatRequest) -> serde_json::Value {
-    serde_json::json!({
+///
+/// `prompt_caching` injects up to three `cache_control: ephemeral` breakpoints
+/// (system block, last tool, last message content block) so stable prefixes
+/// (system prompt, tool schemas, older history) hit the provider cache on
+/// every turn after the first; `thinking_budget` enables extended thinking
+/// (see [`thinking_body`]). Both are serialization-only: the caller's
+/// `ChatRequest` is never mutated.
+pub(crate) fn build_request_body(
+    req: &ChatRequest,
+    prompt_caching: bool,
+    thinking_budget: Option<u32>,
+) -> serde_json::Value {
+    let merged = merge_adjacent_same_role(&req.messages);
+    let mut messages = translate_messages(&merged);
+    if prompt_caching
+        && let Some(last) = messages.last_mut()
+        && let Some(last_block) = last
+            .get_mut("content")
+            .and_then(|c| c.as_array_mut())
+            .and_then(|blocks| blocks.last_mut())
+    {
+        // The tail breakpoint caches each turn's prefix for the next turn
+        // (incremental caching); the marker sits on the final content block.
+        if let Some(obj) = last_block.as_object_mut() {
+            obj.insert(
+                "cache_control".into(),
+                serde_json::json!({"type": "ephemeral"}),
+            );
+        }
+    }
+    let mut body = serde_json::json!({
         "model": req.model,
-        "system": req.system,
-        // Serialize via the Arc<Vec<Message>> snapshot deref (serde's rc feature is off,
-        // so no need to enable an extra feature for this single serialization).
-        "messages": translate_messages(&merge_adjacent_same_role(&req.messages)),
-        "tools": req.tools,
+        "messages": messages,
         "max_tokens": req.max_tokens,
         "stream": true,
-    })
+    });
+    body["system"] = system_body(&req.system, prompt_caching);
+    body["tools"] = tools_body(&req.tools, prompt_caching);
+    if let Some(budget) = thinking_budget
+        && let Some(thinking) = thinking_body(budget, req.max_tokens)
+    {
+        body["thinking"] = thinking;
+    }
+    body
+}
+
+/// Builds the `system` field: a single cached text block when caching is on
+/// and the system prompt is non-empty; an empty system stays the empty string
+/// (some gateways reject `[]`), and caching-off keeps the plain-string shape.
+fn system_body(system: &str, prompt_caching: bool) -> serde_json::Value {
+    if system.is_empty() {
+        return serde_json::Value::String(String::new());
+    }
+    if prompt_caching {
+        serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }])
+    } else {
+        serde_json::Value::String(system.to_owned())
+    }
+}
+
+/// Builds the `tools` array: when caching is on the last tool carries the
+/// cache breakpoint (tool schemas sit at the front of the cacheable prefix;
+/// only one breakpoint is needed for the whole array).
+fn tools_body(tools: &[ToolSpec], prompt_caching: bool) -> serde_json::Value {
+    let mut specs: Vec<serde_json::Value> = tools
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<_, _>>()
+        .unwrap_or_default();
+    if prompt_caching
+        && let Some(last) = specs.last_mut()
+        && let Some(obj) = last.as_object_mut()
+    {
+        obj.insert(
+            "cache_control".into(),
+            serde_json::json!({"type": "ephemeral"}),
+        );
+    }
+    serde_json::Value::Array(specs)
+}
+
+/// Builds the `thinking` field: the API requires `budget_tokens >= 1024` and
+/// `max_tokens > budget_tokens`. A `max_tokens` that cannot satisfy the
+/// minimum keeps thinking off for that request (a config problem must not
+/// fail every turn); otherwise the budget is clamped into the valid range.
+fn thinking_body(budget: u32, max_tokens: u32) -> Option<serde_json::Value> {
+    if max_tokens <= 1024 {
+        return None;
+    }
+    let effective = budget.clamp(1024, max_tokens - 1);
+    Some(serde_json::json!({
+        "type": "enabled",
+        "budget_tokens": effective,
+    }))
 }
 
 /// Translates merged messages into Anthropic wire blocks.
@@ -193,50 +314,11 @@ fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
     out
 }
 
-/// Hard cap on the SSE byte buffer (8 MiB): exceeding it means the server is not sending SSE frame
-/// boundaries, so yield Err and terminate the stream - this stops a malicious/broken server from
-/// blowing up memory with boundary-less data (OOM).
-const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
-
-/// Read-stall timeout: when the gap between adjacent byte chunks exceeds this value, the upstream
-/// is considered stalled (wedged connection), and the stream ends with Err. Only "idle time between
-/// chunks" is constrained, never the whole-stream duration - a long reply that keeps producing
-/// bytes (Anthropic ping / delta both count) is unaffected; at this scale, 120s with zero bytes
-/// basically leaves a dead connection as the only explanation.
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Byte-stream stall guard: wraps each `next()` with an idle timeout; a timeout ends the stream with
-/// [`LlmError::Timeout`]. It sits upstream of [`decode_event_stream`] rather than inside it,
-/// keeping frame-parsing logic orthogonal to the timeout policy (tests can drive each independently).
-fn stall_guard<S>(
-    byte_stream: S,
-    idle_timeout: Duration,
-) -> impl Stream<Item = Result<bytes::Bytes>> + Send
-where
-    S: Stream<Item = Result<bytes::Bytes>> + Send,
-{
-    let mut byte_stream = Box::pin(byte_stream);
-    async_stream::try_stream! {
-        loop {
-            // Only counts while the consumer polls: a suspended consumer (e.g. waiting on approval) spends no budget.
-            match tokio::time::timeout(idle_timeout, byte_stream.as_mut().next()).await {
-                // Stalled: the upstream produced no bytes within the timeout.
-                Err(_) => {
-                    Err::<(), _>(LlmError::Timeout(format!(
-                        "stream idle timeout: no data for {idle_timeout:?} (upstream connection may have stalled)"
-                    )))?;
-                }
-                Ok(None) => break,
-                Ok(Some(chunk)) => yield chunk?,
-            }
-        }
-    }
-}
-
 /// Byte-chunk stream to event stream: buffers bytes, splits SSE frames on blank lines, and hands data to [`SseParser`].
 ///
-/// chunk boundaries are arbitrary (TCP may split one frame across chunks), so framing must happen at the byte-buffer layer;
-/// when the buffer reaches `max_buf` with no frame boundary, yield Err and terminate the stream.
+/// Thin adapter over the shared [`crate::sse::decode_sse_frames`] loop: framing,
+/// buffering, and stall detection live there so both providers share one
+/// memory-safety-critical implementation.
 /// This function is the core parse path shared by [`ChatModel::stream`] and the tests.
 fn decode_event_stream<S>(
     byte_stream: S,
@@ -245,77 +327,16 @@ fn decode_event_stream<S>(
 where
     S: Stream<Item = Result<bytes::Bytes>> + Send,
 {
-    let mut byte_stream = Box::pin(byte_stream);
-    async_stream::try_stream! {
-        let mut buf: Vec<u8> = Vec::new();
-        // buf[..scanned] is confirmed to hold no complete frame boundary; resuming the next scan at scanned - 3 suffices
-        // (step 3 bytes back: the longest separator \r\n\r\n is 4 bytes and may straddle a chunk boundary),
-        // avoiding an O(n²) full-buffer rescan per chunk under unbounded long frames.
-        let mut scanned: usize = 0;
-        let mut parser = SseParser::new();
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk?;
-            buf.extend_from_slice(&chunk);
-            if buf.len() > max_buf {
-                // Yield Err and terminate the stream (same as the `?` behavior on feed below).
-                Err::<(), _>(LlmError::Sse(format!(
-                    "SSE buffer exceeded the {max_buf}-byte cap (server sent no frame boundary)"
-                )))?;
-            }
-            let mut from = scanned.saturating_sub(3);
-            while let Some((body_end, sep_len)) = find_frame_boundary(&buf[from..]) {
-                let frame: Vec<u8> = buf.drain(..from + body_end + sep_len).collect();
-                if let Some(data) = extract_data(&frame[..from + body_end])? {
-                    // feed returned Err: yield Err and terminate the stream (`?` operator behavior).
-                    if let Some(event) = parser.feed(&data)? {
-                        yield event;
-                    }
-                }
-                // After cutting one frame the remaining bytes shift forward; keep cutting from the head (one chunk may hold several frames).
-                from = 0;
-            }
-            scanned = buf.len();
-        }
-        // A trailing incomplete frame at end of stream is dropped per SSE convention.
-    }
-}
-
-/// Finds a frame boundary in the buffer (`\n\n` or `\r\n\r\n`, whichever comes first).
-///
-/// Returns `(body length, separator length)`.
-fn find_frame_boundary(buf: &[u8]) -> Option<(usize, usize)> {
-    let lf = find_subsequence(buf, b"\n\n").map(|i| (i, 2));
-    let crlf = find_subsequence(buf, b"\r\n\r\n").map(|i| (i, 4));
-    match (lf, crlf) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (only, None) | (None, only) => only,
-    }
-}
-
-/// Substring search: returns the first index of `needle` in `haystack`.
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Extracts the `data:` payload from a single SSE frame (multiple data lines are joined with `\n`).
-///
-/// A frame with no data lines (e.g. a bare `event:` / comment line) returns `Ok(None)`.
-fn extract_data(frame: &[u8]) -> Result<Option<String>> {
-    let text = std::str::from_utf8(frame).map_err(|e| LlmError::Sse(e.to_string()))?;
-    let mut data_lines: Vec<&str> = Vec::new();
-    for line in text.split('\n') {
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if let Some(payload) = line.strip_prefix("data:") {
-            // SSE spec: at most one leading space may follow the colon.
-            data_lines.push(payload.strip_prefix(' ').unwrap_or(payload));
-        }
-    }
-    Ok((!data_lines.is_empty()).then(|| data_lines.join("\n")))
+    let mut parser = SseParser::new();
+    crate::sse::decode_sse_frames(byte_stream, max_buf, move |data| {
+        Ok(parser.feed(data)?.into_iter().collect())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sse::find_subsequence;
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
 
@@ -445,7 +466,7 @@ mod tests {
             }],
             max_tokens: 8192,
         };
-        let v = build_request_body(&req);
+        let v = build_request_body(&req, false, None);
         assert_eq!(v["model"], "MiniMax-M3");
         assert_eq!(v["system"], "sys");
         assert_eq!(v["stream"], true);
@@ -453,6 +474,101 @@ mod tests {
         assert_eq!(v["messages"][1]["content"][0]["type"], "tool_use");
         assert_eq!(v["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(v["tools"][0]["name"], "read_file");
+    }
+
+    /// Prompt caching injects exactly the three documented breakpoints
+    /// (system block, last tool, last message content block); the caller's
+    /// request and earlier blocks stay untouched.
+    #[test]
+    fn prompt_caching_injects_breakpoints() {
+        let req = ChatRequest {
+            model: "m1".into(),
+            system: "sys".into(),
+            messages: std::sync::Arc::new(vec![
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text { text: "hi".into() }],
+                },
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Text {
+                        text: "thinking".into(),
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text { text: "go".into() }],
+                },
+            ]),
+            tools: vec![
+                ToolSpec {
+                    name: "a".into(),
+                    description: "da".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                },
+                ToolSpec {
+                    name: "b".into(),
+                    description: "db".into(),
+                    input_schema: serde_json::json!({"type":"object"}),
+                },
+            ],
+            max_tokens: 8192,
+        };
+        let v = build_request_body(&req, true, None);
+        // System becomes a single cached text block.
+        let system = v["system"].as_array().unwrap();
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+        // Only the LAST tool carries the breakpoint.
+        let tools = v["tools"].as_array().unwrap();
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+        // Only the last content block of the last message carries it.
+        let messages = v["messages"].as_array().unwrap();
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert!(messages[1]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        // The caller's request is untouched.
+        assert_eq!(req.tools.len(), 2);
+        // Caching off keeps the plain-string system and marker-free tools.
+        let plain = build_request_body(&req, false, None);
+        assert_eq!(plain["system"], "sys");
+        assert!(plain["tools"][1].get("cache_control").is_none());
+    }
+
+    /// Empty system + caching keeps the empty-string shape (some gateways
+    /// reject `[]`); thinking is serialized with a clamped budget.
+    #[test]
+    fn thinking_and_empty_system_shapes() {
+        let req = ChatRequest {
+            model: "m1".into(),
+            system: String::new(),
+            messages: std::sync::Arc::new(vec![]),
+            tools: vec![],
+            max_tokens: 8192,
+        };
+        let v = build_request_body(&req, true, Some(4096));
+        assert_eq!(v["system"], "");
+        assert_eq!(v["thinking"]["type"], "enabled");
+        assert_eq!(v["thinking"]["budget_tokens"], 4096);
+
+        // Budget below the 1024 minimum is clamped up; above max_tokens-1 clamped down.
+        let v = build_request_body(&req, true, Some(8));
+        assert_eq!(v["thinking"]["budget_tokens"], 1024);
+        let v = build_request_body(&req, true, Some(u32::MAX));
+        assert_eq!(v["thinking"]["budget_tokens"], 8191);
+
+        // A max_tokens that cannot satisfy the minimum keeps thinking off.
+        let tiny = ChatRequest {
+            max_tokens: 1024,
+            ..req.clone()
+        };
+        let v = build_request_body(&tiny, true, Some(4096));
+        assert!(v.get("thinking").is_none());
     }
 
     /// Adjacent same-role messages merge in the request body (third-party alternating-role endpoint compat):
@@ -485,7 +601,7 @@ mod tests {
             tools: vec![],
             max_tokens: 8,
         };
-        let v = build_request_body(&req);
+        let v = build_request_body(&req, false, None);
         let messages = v["messages"].as_array().unwrap();
         assert_eq!(
             messages.len(),

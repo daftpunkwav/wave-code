@@ -137,6 +137,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         None => "tokens —".to_string(),
     };
     spans.push(Span::styled(tokens, dim()));
+    // Cache accounting appears only when the provider reports it.
+    if let Some((read, created)) = app.cache_tokens
+        && (read > 0 || created > 0)
+    {
+        spans.push(Span::styled(format!(" cache r{read}/w{created}"), dim()));
+    }
     spans.push(Span::styled(" │ ", dim()));
     spans.push(Span::styled(app.cwd().display().to_string(), dim()));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -184,8 +190,8 @@ fn draw_approval(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let kind_label = match popup.kind {
-        operations_wire::ApprovalKind::Exec => "Execute command",
-        operations_wire::ApprovalKind::Write => "Write file",
+        wavecode_wire::ApprovalKind::Exec => "Execute command",
+        wavecode_wire::ApprovalKind::Write => "Write file",
     };
     let width = (area.width * 3 / 4).clamp(30, 72).min(area.width);
     let detail_rows = (popup.detail.width() / width.saturating_sub(4).max(1) as usize + 2) as u16;

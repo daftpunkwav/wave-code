@@ -1,0 +1,172 @@
+# Architecture
+
+WaveCode is a headless-first AI coding agent in Rust. One `wavecode` binary serves single-turn execution (`exec`), an interactive REPL, a fullscreen TUI, and legacy session resume over a shared agent core: a multi-turn ReAct loop with tools, skills, memory, and MCP.
+
+The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies point downward only; there are no cycles. This document describes the groups bottom-up, the dependency rules that hold the layering together, and the life of a turn.
+
+## Dependency rules
+
+1. **Everything may depend on `infrastructure/`.** These crates are leaf primitives with zero internal dependencies.
+2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `operations-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
+3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to name concrete capability crates and adapt them to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends.
+4. **Policy never matches tool names.** Tools carry declarative attributes (`action-kit` `ToolAttrs`), and policy decisions consume those attributes, so adding a tool cannot silently drift the policy layer.
+5. **New behavior lands on extension points, not loop changes.** Changing `runtime/runner` requires updating this document.
+
+## Layer map
+
+```
+frontends      wavecode binary (exec / repl / resume / TUI launch) and the TUI client
+                 │
+operations     wire protocol, session actor, bootstrap composition root,
+               RPC gateway, eval, observe, replay, notify, simulate
+                 │
+runtime        RunLoop, child turns, scheduler, prompt assembly, plugin seam,
+               capability inventory, identity, skill routing
+                 │
+action         tool registry + attributes, child tasks, workflow engine,
+               background jobs, browser seam, term retrieval
+                 │
+safety         tool policy, approval gate, injection guardrail, audit log,
+               secrets vault, OS sandbox backends
+state          conversation store, turn journal, trajectory, checkpoints,
+               durable goals, plans, profiles, workspaces, artifacts
+                 │
+capabilities   tools, skills, memory, MCP client, sandbox policy, hooks,
+               context pipeline          (the "wavecode-*" stack)
+foundation     config, multi-provider LLM client, protocol vocabulary, auth
+                 │
+infrastructure channels + interrupts + limits, TTL/LRU cache, layered config,
+               leases, token-bucket rate limit, model routing, JSON schema
+```
+
+## Crate inventory
+
+Package names sometimes differ from directory names (the `wavecode-*` capability stack predates the layered layout); the table uses package names.
+
+### `infrastructure/` — leaf primitives
+
+| Crate | Responsibility |
+| --- | --- |
+| `infrastructure-base` | OS runtime primitives: channel capacities, cooperative interrupt handle, truncation budgets |
+| `infrastructure-cache` | Bounded TTL + LRU cache |
+| `infrastructure-config` | Layered key/value configuration with feature flags |
+| `infrastructure-coord` | Single-process leases with fencing tokens |
+| `infrastructure-ratelimit` | Token-bucket rate limiting with an explicit clock |
+| `infrastructure-routing` | Priority model routes with fallback chains and cost books |
+| `infrastructure-schema` | JSON subset-schema validation with error lists |
+
+### Vocabulary and DTO layers
+
+| Crate | Responsibility |
+| --- | --- |
+| `operations-wire` | Frontend/backend wire types for submissions and events |
+| `action-kit` | Tool registry, declarative tool attributes, execution context |
+| `wavecode-protocol` | Shared frontend-protocol vocabulary: permission modes, approval kinds |
+
+### `state/` — durable data
+
+| Crate | Responsibility |
+| --- | --- |
+| `state-store` | Persisted conversation history and context budget checks |
+| `state-persistence` | Append-only JSONL turn journal backing `resume` |
+| `state-trajectory` | Ordered action/observation log with structural replay |
+| `state-checkpoint` | Labelled state snapshots with rollback |
+| `state-goal` | Durable per-session objective with CAS versioning |
+| `state-plan` | Reviewed plan-mode state machine |
+| `state-profile` | User identity and environment snapshots for prompts |
+| `state-workspace` | Project root discovery and bounded file inventory |
+| `state-artifact` | Versioned registry of run-produced artifacts |
+
+### `safety/` — policy and isolation
+
+| Crate | Responsibility |
+| --- | --- |
+| `safety-policy` | Declarative per-tool policy with deny-wins merging |
+| `safety-gate` | Permission modes, policy verdicts, and the approval gate |
+| `safety-guardrail` | Heuristic prompt-injection screening and taint tracking |
+| `safety-audit` | Append-only audit trail of security-relevant decisions |
+| `safety-secrets` | Secret storage with redaction for logs and transcripts |
+| `safety-sandbox` | OS isolation backends (seatbelt, bubblewrap, Windows restrictions) behind a fail-closed chain |
+
+### `runtime/` — execution core
+
+| Crate | Responsibility |
+| --- | --- |
+| `runtime-runner` | The RunLoop: owns the per-turn state machine (sample → decide → execute → recover), retry budgets, idempotency keys |
+| `runtime-child` | Tracked background child tasks with depth accounting |
+| `runtime-scheduler` | Priority queues, delayed tasks, cron matching, limits |
+| `runtime-prompt` | System prompt assembly from named content slots |
+| `runtime-plugin` | Minimal plugin system: service injection, middleware hooks, in-session lifecycle |
+| `runtime-capability` | Capability inventory with pluggable discovery sources |
+| `runtime-identity` | Agent profile, role, and persona declarations |
+| `runtime-skills` | Skill execution modes with threshold routing |
+
+### `action/` — agent action surface
+
+| Crate | Responsibility |
+| --- | --- |
+| `action-tasks` | Child task lifecycle behind a capability-neutral seam |
+| `action-workflow` | Validated DAG execution and Ralph loops over `action-tasks` |
+| `action-jobs` | Background shell jobs with wait/cancel/notice semantics |
+| `action-browser` | Browser automation behind an async tab seam |
+| `action-retrieval` | Term-overlap retrieval over chunked documents |
+
+### `foundation/` + `capabilities/` — the capability stack
+
+Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapters; new layers must not depend on them directly.
+
+| Crate | Responsibility |
+| --- | --- |
+| `wavecode-config` | TOML config loading (`~/.wavecode/config.toml`) and provider resolution |
+| `wavecode-llm` | Multi-provider abstraction: Anthropic/OpenAI adapters, SSE streaming, retry |
+| `wavecode-auth` | Provider-scoped credentials for model access |
+| `wavecode-tools` | Tool trait, registry, built-in tools (fs, search, shell, todo), path guarding |
+| `wavecode-skills` | `SKILL.md` discovery, parsing, and catalog |
+| `wavecode-memory` | Instruction memory (`WAVECODE.md`) and per-turn transcript distillation |
+| `wavecode-mcp` | Model Context Protocol client over stdio and streamable HTTP |
+| `wavecode-sandbox` | Permission and execution-safety layer for tool runs |
+| `wavecode-hooks` | Lifecycle hooks (PreToolUse / PostToolUse / UserPromptSubmit / SessionStart) |
+| `wavecode-context` | Context-management pipeline: compression, spill, budget stages |
+
+### `operations/` — assembly and operations
+
+| Crate | Responsibility |
+| --- | --- |
+| `operations-actor` | Serial session driver: submission routing plus turn driving |
+| `operations-bootstrap` | Composition root adapting concrete capabilities to runner traits |
+| `operations-gateway` | NDJSON JSON-RPC 2.0 gateway over the session actor |
+| `operations-eval` | Behavioural benchmarks over any turn driver |
+| `operations-observe` | Folds turn wire events into cumulative operations metrics |
+| `operations-replay` | Structural replay of recorded wire events to trajectories |
+| `operations-notify` | In-process topic bus plus webhook payload formatting |
+| `operations-simulate` | Dry-run rendering of model-planned actions (plan preview) |
+
+### `transport/` + `frontends/`
+
+| Crate | Responsibility |
+| --- | --- |
+| `transport-mcp` | JSON-RPC framing over child-process stdio pipes |
+| `harness-cli` | The `wavecode` binary: exec, REPL, resume; exit codes follow turn outcomes |
+| `wavecode-tui` | ratatui fullscreen client over the session actor |
+
+## Life of a turn
+
+1. A frontend (`harness-cli`, TUI, or an RPC client through `operations-gateway`) submits a prompt as a wire submission.
+2. `operations-actor` serializes submissions per session and drives `runtime-runner`.
+3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
+4. Tool executions pass the `safety-gate` approval flow; verdicts come from `safety-policy` rules plus permission modes, with OS-level isolation from `safety-sandbox`.
+5. Every step emits `operations-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
+6. Turn records append to `state-persistence`'s JSONL journal, which `resume` replays as text.
+
+## Benchmarks
+
+`benchmarks/` pins user-visible behavior and turn performance with offline, keyless fixtures; see [benchmarks/README.md](../benchmarks/README.md). Executable benches live in `crates/runtime/runner/tests/benchmarks.rs`.
+
+## Subsystem pages
+
+Per-subsystem documentation, a cookbook, defensive patterns, and postmortems live alongside this document:
+
+- Subsystems: [core loop](subsystems/core-loop.md) · [tools](subsystems/tools.md) · [context engineering](subsystems/context-engineering.md) · [safety](subsystems/safety.md) · [extensibility](subsystems/extensibility.md) · [sessions and state](subsystems/sessions-state.md) · [evals](subsystems/evals.md)
+- Cookbook: [adding a tool](cookbook/adding-a-tool.md) · [adding a subagent](cookbook/adding-a-subagent.md) · [recording and replaying](cookbook/recording-and-replaying.md)
+- [Defensive patterns](defensive-patterns.md)
+- Postmortems: [2026-09-13 bulk regex corruption](postmortem/2026-09-13-bulk-regex-corruption.md)

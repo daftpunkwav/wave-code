@@ -369,9 +369,7 @@ mod tests {
             let (mut stream, _) = listener.accept().expect("one connection");
             let mut buf = [0u8; 8192];
             let mut raw = Vec::new();
-            while !find_crlf2(&raw)
-                .is_some_and(|pos| raw.len() >= pos + content_length(&raw[..pos]))
-            {
+            while find_crlf2(&raw).is_none_or(|pos| raw.len() < pos + content_length(&raw[..pos])) {
                 match stream.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => raw.extend_from_slice(&buf[..n]),

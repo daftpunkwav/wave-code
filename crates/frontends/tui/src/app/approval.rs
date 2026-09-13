@@ -1,7 +1,7 @@
 //! Approval popup key routing: every key goes here while open.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use operations_wire::{Op, WireDecision};
+use wavecode_wire::{Op, WireDecision};
 
 use super::App;
 

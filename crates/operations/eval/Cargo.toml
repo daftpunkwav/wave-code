@@ -13,4 +13,4 @@ async-trait.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
-operations-wire = { path = "../wire" }
+wavecode-wire = { path = "../../foundation/wire" }

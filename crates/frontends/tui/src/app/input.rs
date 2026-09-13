@@ -2,7 +2,7 @@
 //! approval popup is open every key routes to it (see [`super::approval`]).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use operations_wire::Op;
+use wavecode_wire::Op;
 
 use super::App;
 use crate::text::sanitize_terminal;

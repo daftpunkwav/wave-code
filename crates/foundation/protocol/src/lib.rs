@@ -9,7 +9,7 @@
  *
  * This module must not depend on: any workspace crate. It is pure data.
  * The live frontend request/event surface (`Submission` / `Op` / `Event` /
- * `EventMsg`) lives in exactly one place: `operations-wire`. Do not
+ * `EventMsg`) lives in exactly one place: `wavecode-wire`. Do not
  * reintroduce parallel copies here; a second source of truth drifts.
  */
 
@@ -19,7 +19,7 @@
 //! (`PermissionMode`, `ApprovalKind`) so config, sandbox, actor, and
 //! frontends cannot drift apart. It deliberately contains no request or
 //! event types: the live `Submission { id, op }` / `Event { id, msg }`
-//! surface lives in `operations-wire`, the single source of truth for
+//! surface lives in `wavecode-wire`, the single source of truth for
 //! frontend communication.
 
 use serde::{Deserialize, Serialize};

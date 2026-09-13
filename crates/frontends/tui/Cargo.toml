@@ -4,12 +4,12 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-# Boundary: the TUI workspace dependencies are exactly operations-wire
-# and operations-actor (in-process transport). It must not reach into
+# Boundary: the TUI workspace dependencies are exactly operations-actor
+# and wavecode-wire (in-process transport). It must not reach into
 # capabilities or the composition root — every interaction crosses the
 # Submission/Event surface. tests::dependency_matrix_locked locks this.
 [dependencies]
-operations-wire = { path = "../../operations/wire" }
+wavecode-wire = { path = "../../foundation/wire" }
 operations-actor = { path = "../../operations/actor" }
 ratatui.workspace = true
 crossterm.workspace = true

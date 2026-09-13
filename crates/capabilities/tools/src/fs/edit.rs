@@ -1,4 +1,4 @@
-//! File tools (split from fs_tools.rs in phase 3).
+//! Edit tool: exact-string file edits with atomic write and uniqueness checks.
 
 use super::*;
 

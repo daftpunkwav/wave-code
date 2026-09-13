@@ -10,7 +10,7 @@ runtime-child = { path = "../../runtime/child" }
 state-store = { path = "../../state/store" }
 state-checkpoint = { path = "../../state/checkpoint" }
 safety-gate = { path = "../../safety/gate" }
-operations-wire = { path = "../../operations/wire" }
+wavecode-wire = { path = "../../foundation/wire" }
 infrastructure-base = { path = "../../infrastructure/base" }
 tokio.workspace = true
 tracing.workspace = true

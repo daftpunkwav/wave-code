@@ -1,21 +1,21 @@
-## Git 规范
+# Git conventions
 
-### 提交信息（Conventional Commits）
+## Commit messages (Conventional Commits)
 
 ```
 <type>: <subject>
 ```
 
-type 用 `feat`/`fix`/`docs`/`refactor`/`chore`/`test`/`perf` 等标准类型；subject 祈使语气、≤ 50 字符，直接描述行为，不写内部阶段编号（如 P0–P9）；一个提交只做一件事。
+`type` is one of the standard types: `feat` / `fix` / `docs` / `refactor` / `chore` / `test` / `perf`. The subject is written in the imperative mood, kept to 50 characters or fewer, and describes the behavior directly — no internal phase numbers (e.g. P0–P9). One commit does one thing.
 
-示例：`feat: 初始化项目代码库`、`fix: 修复长会话上下文溢出`
+Examples: `feat: initialize project repository`, `fix: fix context overflow in long sessions`
 
-### 分支命名
+## Branch naming
 
 ```
-<type>/<kebab-case-描述>
+<type>/<kebab-case-description>
 ```
 
-type 同上，描述用 kebab-case。
+`type` as above; the description is kebab-case.
 
-示例：`feat/context-compaction`、`fix/memory-dedup`
+Examples: `feat/context-compaction`, `fix/memory-dedup`

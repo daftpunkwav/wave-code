@@ -1,4 +1,4 @@
-//! Search tools (split from search_tools.rs in phase 3).
+//! Glob tool: pattern file search with match limits.
 
 use super::*;
 

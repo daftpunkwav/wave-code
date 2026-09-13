@@ -1,4 +1,4 @@
-//! File tools (split from fs_tools.rs in phase 3).
+//! List tool: directory listings with entry limits and metadata.
 
 use super::*;
 

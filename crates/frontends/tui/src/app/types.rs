@@ -6,9 +6,9 @@
 
 use std::path::PathBuf;
 
-use operations_wire::ApprovalKind;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use wavecode_wire::ApprovalKind;
 
 use crate::markdown::render_markdown;
 
@@ -91,6 +91,10 @@ pub struct TuiContext {
     /// Persistent memory index text for local `/memory` rendering.
     /// Empty means memory is unavailable.
     pub memory_index: String,
+    /// On-demand status views over plan / goal / snapshot state, served
+    /// by the assembly side so slash commands render current state
+    /// without knowing where or in what shape it is stored.
+    pub status_queries: std::sync::Arc<dyn operations_actor::StatusQueries>,
 }
 
 /// One message stream entry (committed, immutable; owns styled rows).

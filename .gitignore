@@ -9,6 +9,16 @@ dist/
 Thumbs.db
 desktop.ini
 
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+*~
+
+# Rust coverage / profiling residue
+*.profraw
+*.profdata
+
 # Project-level wavecode config may contain API keys; use user-level ~/.wavecode/config.toml only
 .wavecode/
 
@@ -17,6 +27,13 @@ desktop.ini
 
 # ZCode local tool state and session artifacts (includes historical one-off migration scripts)
 .zcode/
+
+# Claude Code local state: personal settings and throwaway worktrees
+.claude/settings.local.json
+.claude/worktrees/
+
+# Local agent instruction overrides (personal, never shared)
+*.local.md
 
 # Local docs directory (local working copy of docs): kept local-only, never committed
 docs-local/

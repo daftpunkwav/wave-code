@@ -1,7 +1,7 @@
 //! markdown to ratatui [`Line`] rendering (rendering core for assistant messages in the message stream).
 //!
-//! Semantics align with SPEC section 15.5 and cli/src/markdown.rs (which emits ANSI strings,
-//! while this emits styled ratatui rows; the tui cannot depend on cli, so this is a same-source rewrite):
+//! Semantics align with SPEC section 15.5 (heading colors, list shapes,
+//! inline emphasis stacking) so markdown output stays consistent across surfaces:
 //! - Headings: bright cyan, bold;
 //! - Bold / italic / strikethrough: stacked modifiers;
 //! - Inline code: yellow;

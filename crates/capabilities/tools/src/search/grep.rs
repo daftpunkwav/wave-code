@@ -1,4 +1,4 @@
-//! Search tools (split from search_tools.rs in phase 3).
+//! Grep tool: regex content search with per-file scanning and result caps.
 
 use super::*;
 

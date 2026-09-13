@@ -1,4 +1,4 @@
-//! File tools (split from fs_tools.rs in phase 3).
+//! Write tool: create or overwrite files with atomic write and size caps.
 
 use super::*;
 

@@ -219,9 +219,9 @@ impl TaskService for TurnChildService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use operations_wire::Event;
     use runtime_runner::{HookPoint, TurnDriver};
     use state_store::{CompactTrigger, Role};
+    use wavecode_wire::Event;
 
     struct EchoDriver;
 

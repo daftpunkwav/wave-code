@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 operations-actor = { path = "../actor" }
-operations-wire = { path = "../wire" }
+wavecode-wire = { path = "../../foundation/wire" }
 tokio.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

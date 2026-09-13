@@ -5,7 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-operations-wire = { path = "../wire" }
+wavecode-wire = { path = "../../foundation/wire" }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -10,7 +10,7 @@ async-trait.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 state-store = { path = "../../state/store" }
-operations-wire = { path = "../../operations/wire" }
+wavecode-wire = { path = "../../foundation/wire" }
 infrastructure-base = { path = "../../infrastructure/base" }
 
 [dev-dependencies]

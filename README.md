@@ -84,12 +84,21 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --check
 ```
 
-Layout: `crates/foundation` (config, llm, protocol), `crates/capabilities`
-(tools, skills, memory, mcp, ...), `crates/runtime` (run loop, child turns),
-`crates/state` (conversation, persistence, trajectory), `crates/safety`
-(policy, approvals), `crates/operations` (actor, bootstrap composition root,
-replay), `crates/transport` (MCP stdio framing), `crates/frontends`
-(`wavecode` binary, TUI). `apps/` holds thin Web/Desktop/SDK shells.
+Layout: the workspace is a flat crate DAG under `crates/<group>/<crate>`,
+dependencies pointing downward only — `infrastructure` (primitives),
+`foundation` (config, llm, protocol, auth) and `capabilities` (tools, skills,
+memory, mcp, ...) form the capability stack, `state` (conversation,
+persistence, trajectory) and `safety` (policy, approvals, sandbox) hold
+durable data and policy, `action` (tool registry, tasks, workflows) and
+`runtime` (run loop, child turns, scheduler) execute, `operations` (wire
+protocol, actor, bootstrap composition root, gateway) assembles, and
+`frontends` hosts the `wavecode` binary and TUI. `apps/` holds thin
+Web/Desktop/SDK shells. See [docs/architecture.md](docs/architecture.md).
+
+Documentation: [architecture overview](docs/architecture.md),
+[development guide](docs/development.md),
+[contributing guide](CONTRIBUTING.md), and [AGENTS.md](AGENTS.md) for coding
+agents.
 
 Commits follow Conventional Commits (`feat:`/`fix:`/`docs:`/`refactor:`/...,
 imperative subject, one change per commit).

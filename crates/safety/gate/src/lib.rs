@@ -1,14 +1,15 @@
 /*!
  * @file ApprovalGate
- * @description Permission modes, policy verdicts, and the approval gate.
+ * @description Policy verdicts and the approval gate.
  *
  * Responsibilities:
- * - Own the four permission modes with frozen wire names.
  * - Decide allow/ask/deny inputs for the run loop (pure policy data).
  * - Park approval requests keyed by call id with one-shot delivery.
  *
  * This module must not depend on: runtime, state, action, operations,
- * transport, or any orchestration layer.
+ * transport, or any orchestration layer. Permission modes are wire
+ * vocabulary owned by `wavecode-protocol`; this crate never redefines
+ * them.
  */
 
 //! Pure-policy safety primitives with a race-free approval gate.
@@ -23,60 +24,14 @@ use std::sync::Mutex;
 
 use tokio::sync::oneshot;
 
-/// Permission mode selected for a session.
-///
-/// Wire names are frozen (`camelCase`) so persisted configs keep parsing.
-/// Renaming these variants is a breaking protocol change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PermissionMode {
-    /// Ask for anything sensitive; the default.
-    Default,
-    /// Propose plans without executing them.
-    Plan,
-    /// Auto-approve edits, ask for command execution.
-    AcceptEdits,
-    /// Bypass all approval prompts (explicit operator opt-in only).
-    BypassPermissions,
-}
-
-impl PermissionMode {
-    /// Canonical wire string of the mode.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Plan => "plan",
-            Self::AcceptEdits => "acceptEdits",
-            Self::BypassPermissions => "bypassPermissions",
-        }
-    }
-
-    /// Parse a wire string back into a mode.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "default" => Some(Self::Default),
-            "plan" => Some(Self::Plan),
-            "acceptEdits" => Some(Self::AcceptEdits),
-            "bypassPermissions" => Some(Self::BypassPermissions),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for PermissionMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// What kind of approval an ask verdict requests.
 ///
 /// Deprecated: this duplicates the canonical protocol types without
-/// adding methods or serialization. Use `operations_wire::ApprovalKind`
+/// adding methods or serialization. Use `wavecode_wire::ApprovalKind`
 /// (new harness stack) or `wavecode_protocol::ApprovalKind` (legacy
 /// stack) instead; this alias disappears in a later breaking-change
 /// window.
-#[deprecated(note = "use operations_wire::ApprovalKind or wavecode_protocol::ApprovalKind instead")]
+#[deprecated(note = "use wavecode_wire::ApprovalKind or wavecode_protocol::ApprovalKind instead")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalKind {
     /// Arbitrary command execution.
@@ -179,19 +134,6 @@ impl ApprovalGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wire_names_stay_frozen() {
-        assert_eq!(PermissionMode::Default.as_str(), "default");
-        assert_eq!(PermissionMode::Plan.as_str(), "plan");
-        assert_eq!(PermissionMode::AcceptEdits.as_str(), "acceptEdits");
-        assert_eq!(
-            PermissionMode::BypassPermissions.as_str(),
-            "bypassPermissions"
-        );
-        assert_eq!(PermissionMode::parse("plan"), Some(PermissionMode::Plan));
-        assert_eq!(PermissionMode::parse("unknown"), None);
-    }
 
     #[tokio::test]
     async fn decision_is_one_shot_and_late_decisions_drop() {

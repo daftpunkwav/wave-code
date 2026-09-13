@@ -19,7 +19,7 @@ runtime-scheduler = { path = "../../runtime/scheduler" }
 infrastructure-base = { path = "../../infrastructure/base" }
 safety-gate = { path = "../../safety/gate" }
 operations-actor = { path = "../actor" }
-operations-wire = { path = "../wire" }
+wavecode-wire = { path = "../../foundation/wire" }
 wavecode-tools = { path = "../../capabilities/tools" }
 wavecode-sandbox = { path = "../../capabilities/sandbox" }
 wavecode-hooks = { path = "../../capabilities/hooks" }

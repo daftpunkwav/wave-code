@@ -89,10 +89,6 @@ impl ServiceMap {
     /// Insert an already-erased service, keyed by its own `service_id()`.
     pub fn insert_erased(&mut self, service: Arc<dyn AnyService>) {
         let id = service.service_id();
-        eprintln!(
-            "DBG insert id={id:?} dyn-obj={:?}",
-            TypeId::of::<dyn AnyService>()
-        );
         self.inner.insert(id, service);
     }
 
@@ -278,6 +274,17 @@ impl Registry {
             )?;
         }
         Ok(order)
+    }
+}
+
+impl Drop for Registry {
+    fn drop(&mut self) {
+        // Unload in reverse start order so dependents tear down before
+        // their dependencies, mirroring `start`. Hot-unloaded plugins are
+        // already gone from `order`, so this only covers live entries.
+        while let Some(name) = self.order.last().cloned() {
+            self.unload(&name);
+        }
     }
 }
 

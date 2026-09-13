@@ -1,4 +1,4 @@
-//! File tools (split from fs_tools.rs in phase 3).
+//! Read tool: file contents with line/byte budgets and truncation markers.
 
 use super::*;
 

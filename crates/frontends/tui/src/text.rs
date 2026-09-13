@@ -1,7 +1,7 @@
 //! Terminal text utilities: control-character sanitizing and char-based truncation (single source for both frontends).
 //!
-//! The cli reuses this module through the SPEC section 3 matrix cli-to-tui edge (settled 2026-09;
-//! previously two hand-synced mirror copies, now merged here with the cli copy removed). Model /
+//! Shared by the terminal frontends (previously hand-synced mirror copies
+//! merged here). Model /
 //! tool-sourced text must pass [`sanitize_terminal`] before reaching the terminal: guards against ANSI / OSC
 //! injection wiping the scrollback.
 
@@ -75,7 +75,7 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    /// Lock sanitizing semantics (the cli side reuses this impl, no duplicate cases needed).
+    /// Lock sanitizing semantics (single shared impl for both frontends).
     #[test]
     fn sanitize_strips_control_sequences() {
         assert_eq!(sanitize_terminal("a\x1b[2Jb"), "ab");

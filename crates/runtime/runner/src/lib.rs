@@ -981,6 +981,9 @@ where
                         input: input.clone(),
                     }),
                     SampleBlock::ToolResult { .. } => {}
+                    // Responses never carry images today; if one ever
+                    // does, the block still belongs in history.
+                    SampleBlock::Image { .. } => {}
                 }
                 if !matches!(block, SampleBlock::ToolResult { .. }) {
                     blocks.push(block.clone());

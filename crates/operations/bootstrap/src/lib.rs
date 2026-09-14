@@ -23,6 +23,7 @@ pub mod agent_task_tool;
 pub mod child_service;
 pub mod compactor;
 pub mod composite;
+pub mod evicting_gateway;
 pub mod gate_adapter;
 pub mod goal_tools;
 pub mod hook_adapter;

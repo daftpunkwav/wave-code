@@ -94,7 +94,7 @@ impl ModelAdapter {
 }
 
 /// Map one history block onto the provider block shape.
-fn to_content_block(block: &Block) -> ContentBlock {
+pub(crate) fn to_content_block(block: &Block) -> ContentBlock {
     match block {
         Block::Text(text) => ContentBlock::Text { text: text.clone() },
         Block::ToolUse {
@@ -114,6 +114,11 @@ fn to_content_block(block: &Block) -> ContentBlock {
             tool_use_id: call_id.clone(),
             content: content.clone(),
             is_error: *is_error,
+        },
+        Block::Image { id, mime, base64 } => ContentBlock::Image {
+            id: id.clone(),
+            mime: mime.clone(),
+            base64: base64.clone(),
         },
     }
 }

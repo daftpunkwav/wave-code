@@ -375,12 +375,14 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         },
     );
     let policy = PolicyAdapter::new(sandbox, registry.clone());
-    let model_adapter = ModelAdapter::new(
+    // Tool-result eviction rides the gateway seam: every sample crosses
+    // the pass, stored history keeps original payloads.
+    let model_adapter = crate::evicting_gateway::EvictingGateway::new(ModelAdapter::new(
         model.clone(),
         model_name.clone(),
         max_output_tokens,
         registry.clone(),
-    );
+    ));
     let approvals = Arc::new(ApprovalGate::new());
     let gate_source = if headless {
         crate::gate_adapter::Approvals::Headless(crate::gate_adapter::HeadlessDeny)

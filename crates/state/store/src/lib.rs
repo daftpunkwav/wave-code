@@ -61,6 +61,16 @@ pub enum Block {
         /// True when the call failed.
         is_error: bool,
     },
+    /// Inline image attachment (base64; providers validate mime and size
+    /// at the translation layer).
+    Image {
+        /// Optional client-side label, preserved but never sent to providers.
+        id: Option<String>,
+        /// MIME type of the image.
+        mime: String,
+        /// Base64-encoded image bytes.
+        base64: String,
+    },
 }
 
 /// One message in the persisted conversation history.
@@ -97,6 +107,10 @@ impl HistoryEntry {
                     "[{call_id}] {}: {content}",
                     if *is_error { "error" } else { "ok" }
                 ),
+                Block::Image { id, mime, .. } => match id {
+                    Some(label) => format!("[image {mime}: {label}]"),
+                    None => format!("[image {mime}]"),
+                },
             })
             .collect::<Vec<_>>()
             .join("\n")

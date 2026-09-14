@@ -226,7 +226,11 @@ fn decode_entities(text: &str) -> String {
                     } else {
                         num.parse::<u32>().ok()
                     };
+                    // Control characters (NUL, ESC, the C1 range) stay
+                    // literal so they cannot reach model context;
+                    // whitespace such as tab / newline still decodes.
                     code.and_then(char::from_u32)
+                        .filter(|c| !c.is_control() || c.is_whitespace())
                 } else {
                     None
                 }
@@ -503,6 +507,16 @@ mod tests {
         assert_eq!(html_to_markdown("中文<code>x</code>"), "中文`x`");
         // Multi-byte text running into a truncated tag.
         assert_eq!(html_to_markdown("中文<div class=\"x"), "中文");
+    }
+
+    #[test]
+    fn numeric_control_references_stay_literal() {
+        // NUL and other control characters must not enter the output;
+        // whitespace references still decode.
+        assert_eq!(html_to_markdown("<p>x &#0; y</p>"), "x &#0; y");
+        assert_eq!(html_to_markdown("<p>x &#1; y</p>"), "x &#1; y");
+        assert_eq!(html_to_markdown("<p>x &#x1F; y</p>"), "x &#x1F; y");
+        assert_eq!(html_to_markdown("<p>a&#9;b</p>"), "a b");
     }
 
     #[test]

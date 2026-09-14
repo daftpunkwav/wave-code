@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use runtime_runner::{CompactError, Compacted, Compactor, LiteMessage};
-use state_store::estimate_tokens;
+use runtime_runner::{CompactError, Compacted, Compactor};
+use state_store::{HistoryEntry, Role as HistoryRole, estimate_tokens};
 use wavecode_context::{ContextConfig, ModelSummary, compact_history};
 use wavecode_llm::{ChatModel, ContentBlock, Message, Role};
 
@@ -36,19 +36,21 @@ impl ContextCompactor {
 impl Compactor for ContextCompactor {
     async fn compact(
         &self,
-        history: Vec<LiteMessage>,
+        history: Vec<HistoryEntry>,
         _trigger: state_store::CompactTrigger,
     ) -> Result<Compacted, CompactError> {
+        // The summarizer works on prose: block entries flatten to their
+        // legacy text view so tool payloads stay visible to the summary.
         let messages: Vec<Message> = history
             .into_iter()
-            .filter(|m| !m.text.is_empty())
-            .map(|m| Message {
-                role: if m.from_model {
+            .filter(|entry| !entry.text().is_empty())
+            .map(|entry| Message {
+                role: if entry.role == HistoryRole::Assistant {
                     Role::Assistant
                 } else {
                     Role::User
                 },
-                content: vec![ContentBlock::Text { text: m.text }],
+                content: vec![ContentBlock::Text { text: entry.text() }],
             })
             .collect();
         let strategy = ModelSummary::new(self.model.clone(), self.model_name.clone());

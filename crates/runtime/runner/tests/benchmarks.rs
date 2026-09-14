@@ -14,11 +14,11 @@
 use infrastructure_base::InterruptHandle;
 use runtime_runner::{
     ApprovalResolution, ApprovalSource, AskKind, CompactError, Compacted, Compactor, HookGateway,
-    HookPoint, HookReport, LiteMessage, ModelGateway, PlanTracker, PolicyDecider, PolicyVerdict,
-    RunConfig, RunContext, RunLoop, SampleBlock, SampleError, SampleRequest, SampleResponse,
-    StopReason, ToolCall, ToolExecutor, ToolRef, ToolResult,
+    HookPoint, HookReport, ModelGateway, PlanTracker, PolicyDecider, PolicyVerdict, RunConfig,
+    RunContext, RunLoop, SampleBlock, SampleError, SampleRequest, SampleResponse, StopReason,
+    ToolCall, ToolExecutor, ToolRef, ToolResult,
 };
-use state_store::{CompactTrigger, Conversation};
+use state_store::{CompactTrigger, Conversation, HistoryEntry};
 use wavecode_wire::Event;
 
 // Keep in sync with benchmarks/run.rs and benchmarks/baseline.json.
@@ -153,7 +153,7 @@ struct NullCompactor;
 impl Compactor for NullCompactor {
     async fn compact(
         &self,
-        _history: Vec<LiteMessage>,
+        _history: Vec<HistoryEntry>,
         _trigger: CompactTrigger,
     ) -> Result<Compacted, CompactError> {
         Ok(Compacted {

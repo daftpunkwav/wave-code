@@ -18,6 +18,7 @@ use futures::StreamExt;
 use runtime_runner::{
     ModelGateway, SampleBlock, SampleDelta, SampleError, SampleRequest, SampleResponse, ToolRef,
 };
+use state_store::{Block, Role as HistoryRole};
 use wavecode_llm::{
     ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Role, StreamEvent,
     ToolSpec,
@@ -51,22 +52,28 @@ impl ModelAdapter {
         }
     }
 
-    /// Convert seam messages; empty model-side texts are dropped because
-    /// providers reject empty assistant messages.
+    /// Convert seam messages block by block; assistant entries with no
+    /// content are dropped because providers reject empty assistant
+    /// messages, while entries carrying tool blocks always count as
+    /// non-empty.
     fn messages(request: &SampleRequest) -> Vec<Message> {
         request
             .messages
             .iter()
-            .filter(|m| !m.from_model || !m.text.is_empty())
-            .map(|m| Message {
-                role: if m.from_model {
+            .filter(|entry| {
+                entry.role != HistoryRole::Assistant
+                    || entry.blocks.iter().any(|block| match block {
+                        Block::Text(text) => !text.is_empty(),
+                        _ => true,
+                    })
+            })
+            .map(|entry| Message {
+                role: if entry.role == HistoryRole::Assistant {
                     Role::Assistant
                 } else {
                     Role::User
                 },
-                content: vec![ContentBlock::Text {
-                    text: m.text.clone(),
-                }],
+                content: entry.blocks.iter().map(to_content_block).collect(),
             })
             .collect()
     }
@@ -83,6 +90,31 @@ impl ModelAdapter {
                 input_schema: tool.input_schema(),
             })
             .collect()
+    }
+}
+
+/// Map one history block onto the provider block shape.
+fn to_content_block(block: &Block) -> ContentBlock {
+    match block {
+        Block::Text(text) => ContentBlock::Text { text: text.clone() },
+        Block::ToolUse {
+            call_id,
+            name,
+            input,
+        } => ContentBlock::ToolUse {
+            id: call_id.clone(),
+            name: name.clone(),
+            input: input.clone(),
+        },
+        Block::ToolResult {
+            call_id,
+            content,
+            is_error,
+        } => ContentBlock::ToolResult {
+            tool_use_id: call_id.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+        },
     }
 }
 
@@ -339,7 +371,7 @@ pub fn __test_messages(request: &SampleRequest) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use runtime_runner::LiteMessage;
+    use state_store::{Block, HistoryEntry};
     use wavecode_llm::{ChatModel, EventStream, Usage};
 
     #[derive(Debug, Clone)]
@@ -368,9 +400,9 @@ mod tests {
     fn request() -> SampleRequest {
         SampleRequest {
             system: "sys".to_string(),
-            messages: vec![LiteMessage {
-                from_model: false,
-                text: "hello".to_string(),
+            messages: vec![HistoryEntry {
+                role: state_store::Role::User,
+                blocks: vec![Block::Text("hello".to_string())],
             }],
             tools: vec![],
         }
@@ -454,25 +486,80 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_model_texts_are_dropped_from_requests() {
+    async fn empty_assistant_entries_are_dropped_from_requests() {
         let req = SampleRequest {
             system: String::new(),
             messages: vec![
-                LiteMessage {
-                    from_model: true,
-                    text: String::new(),
+                HistoryEntry {
+                    role: state_store::Role::Assistant,
+                    blocks: vec![Block::Text(String::new())],
                 },
-                LiteMessage {
-                    from_model: false,
-                    text: String::new(),
+                HistoryEntry {
+                    role: state_store::Role::User,
+                    blocks: vec![Block::Text(String::new())],
+                },
+                // Tool blocks make an assistant entry non-empty even
+                // without text.
+                HistoryEntry {
+                    role: state_store::Role::Assistant,
+                    blocks: vec![Block::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "shell".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    }],
                 },
             ],
             tools: vec![],
         };
         let messages = __test_messages(&req);
-        // Empty assistant texts are dropped; empty user texts are kept.
-        assert_eq!(messages.len(), 1);
+        // Empty assistant entries are dropped; user entries and tool
+        // entries are kept.
+        assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn block_entries_translate_to_provider_blocks() {
+        let req = SampleRequest {
+            system: String::new(),
+            messages: vec![
+                HistoryEntry {
+                    role: state_store::Role::Assistant,
+                    blocks: vec![Block::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "shell".to_string(),
+                        input: serde_json::json!({"command": "ls"}),
+                    }],
+                },
+                HistoryEntry {
+                    role: state_store::Role::User,
+                    blocks: vec![Block::ToolResult {
+                        call_id: "c1".to_string(),
+                        content: "a.rs".to_string(),
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![],
+        };
+        let messages = __test_messages(&req);
+        assert_eq!(
+            messages[0].content[0],
+            ContentBlock::ToolUse {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            }
+        );
+        assert_eq!(
+            messages[1].content[0],
+            ContentBlock::ToolResult {
+                tool_use_id: "c1".to_string(),
+                content: "a.rs".to_string(),
+                is_error: false,
+            }
+        );
     }
 
     /// Scripted ChatModel for failover tests: fails once when armed, else

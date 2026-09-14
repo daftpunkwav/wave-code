@@ -19,19 +19,20 @@ use runtime_runner::SampleBlock;
 /// Render planned blocks as one dry-run line each.
 ///
 /// Text blocks preview as speech, tool blocks as invocations with their
-/// raw input. Nothing here touches executors, policy, or approvals.
+/// raw input. Result blocks never appear in a plan (results exist only
+/// after execution) and are skipped. Nothing here touches executors,
+/// policy, or approvals.
 pub fn render_plan(blocks: &[SampleBlock]) -> Vec<String> {
     blocks
         .iter()
-        .map(|block| match block {
-            SampleBlock::Text(text) => format!("say: {text}"),
+        .filter_map(|block| match block {
+            SampleBlock::Text(text) => Some(format!("say: {text}")),
             SampleBlock::ToolUse {
                 call_id,
                 name,
                 input,
-            } => {
-                format!("run {name} ({call_id}) with {input}")
-            }
+            } => Some(format!("run {name} ({call_id}) with {input}")),
+            SampleBlock::ToolResult { .. } => None,
         })
         .collect()
 }
@@ -64,6 +65,7 @@ pub fn summarize(blocks: &[SampleBlock]) -> PlanSummary {
         match block {
             SampleBlock::Text(_) => summary.speeches += 1,
             SampleBlock::ToolUse { .. } => summary.tool_calls += 1,
+            SampleBlock::ToolResult { .. } => {}
         }
     }
     summary
@@ -71,14 +73,14 @@ pub fn summarize(blocks: &[SampleBlock]) -> PlanSummary {
 
 /// Tool names of one plan in block order (repeats kept).
 ///
-/// Lets reviewers see at a glance which tools WOULD run; speech blocks
-/// contribute nothing.
+/// Lets reviewers see at a glance which tools WOULD run; speech and
+/// result blocks contribute nothing.
 pub fn tool_names(blocks: &[SampleBlock]) -> Vec<&str> {
     blocks
         .iter()
         .filter_map(|block| match block {
             SampleBlock::ToolUse { name, .. } => Some(name.as_str()),
-            SampleBlock::Text(_) => None,
+            SampleBlock::Text(_) | SampleBlock::ToolResult { .. } => None,
         })
         .collect()
 }

@@ -205,15 +205,6 @@ pub struct HookReport {
     pub context: String,
 }
 
-/// Minimal message shape for a sample request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LiteMessage {
-    /// True for model messages, false for user messages.
-    pub from_model: bool,
-    /// Text payload of the message.
-    pub text: String,
-}
-
 /// Minimal tool reference advertised to the model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolRef {
@@ -223,31 +214,22 @@ pub struct ToolRef {
     pub description: String,
 }
 
+/// One content block crossing the model seam.
+///
+/// Re-exported from the conversation store so history, sample requests,
+/// and sample responses share one shape. Responses never contain
+/// [`SampleBlock::ToolResult`]; results enter history through the loop.
+pub use state_store::Block as SampleBlock;
+
 /// Request handed to the model gateway for one sample.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SampleRequest {
     /// System prompt text assembled by the prompt layer.
     pub system: String,
-    /// Conversation snapshot for this sample.
-    pub messages: Vec<LiteMessage>,
+    /// Conversation snapshot for this sample, blocks included.
+    pub messages: Vec<HistoryEntry>,
     /// Tools available in this sample.
     pub tools: Vec<ToolRef>,
-}
-
-/// One content block returned by the model gateway.
-#[derive(Debug, Clone, PartialEq)]
-pub enum SampleBlock {
-    /// Plain assistant text.
-    Text(String),
-    /// A tool invocation request.
-    ToolUse {
-        /// Identifier pairing the request with its future result.
-        call_id: String,
-        /// Tool name as registered in the capability registry.
-        name: String,
-        /// Raw JSON input for the tool.
-        input: Value,
-    },
 }
 
 /// Response of one model sample.
@@ -605,7 +587,7 @@ pub trait Compactor: Send + Sync {
     /// Summarize `history` for `trigger`, preserving pairing order.
     async fn compact(
         &self,
-        history: Vec<LiteMessage>,
+        history: Vec<HistoryEntry>,
         trigger: CompactTrigger,
     ) -> Result<Compacted, CompactError>;
 }
@@ -902,7 +884,7 @@ where
 
             let request = SampleRequest {
                 system: system.to_string(),
-                messages: history_lite(conv),
+                messages: history_messages(conv),
                 // Restricted runs never see denied tools: the model plans
                 // within its surface instead of hitting refusals.
                 tools: self
@@ -980,7 +962,11 @@ where
                 .total_cache_creation_tokens
                 .saturating_add(response.cache_creation_tokens);
 
+            // The assistant entry keeps every block (text and tool calls)
+            // so providers see the request/result pairing on the next
+            // sample instead of a flattened text rendering.
             let mut text = String::new();
+            let mut blocks = Vec::new();
             let mut calls = Vec::new();
             for block in &response.blocks {
                 match block {
@@ -994,10 +980,14 @@ where
                         name: name.clone(),
                         input: input.clone(),
                     }),
+                    SampleBlock::ToolResult { .. } => {}
+                }
+                if !matches!(block, SampleBlock::ToolResult { .. }) {
+                    blocks.push(block.clone());
                 }
             }
-            if !text.is_empty() {
-                conv.push(Role::Assistant, text.clone());
+            if !blocks.is_empty() {
+                conv.push_blocks(Role::Assistant, blocks);
             }
             emit_msg(EventMsg::AgentMessageComplete { text });
 
@@ -1056,13 +1046,13 @@ where
             // synthesized results instead of executing anything.
             if self.interrupt.is_triggered() {
                 let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
-                conv.push(Role::User, format_tool_results(&results));
+                conv.push_blocks(Role::User, result_blocks(&results));
                 settle(conv, &last_input, &state, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
             let (results, hook_contexts) = self.execute_calls(&ctx.run_id, &calls, &emit_msg).await;
-            conv.push(Role::User, format_tool_results(&results));
+            conv.push_blocks(Role::User, result_blocks(&results));
             // Prompt-type hook contexts ride normal history as guidance,
             // kept separate from tool outputs by construction.
             if !hook_contexts.is_empty() {
@@ -1094,7 +1084,7 @@ where
         });
         let done = self
             .compactor
-            .compact(history_lite(conv), trigger)
+            .compact(history_messages(conv), trigger)
             .await
             .map_err(|e| e.to_string())?;
         conv.replace(vec![HistoryEntry {
@@ -1629,20 +1619,16 @@ fn interrupted_result(call: &ToolCall) -> ToolResult {
     }
 }
 
-/// Render tool results as history text, keeping ids for pairing audits.
-fn format_tool_results(results: &[ToolResult]) -> String {
+/// Render tool results as history blocks, keeping ids for pairing.
+fn result_blocks(results: &[ToolResult]) -> Vec<SampleBlock> {
     results
         .iter()
-        .map(|r| {
-            format!(
-                "[{}] {}: {}",
-                r.call_id,
-                if r.is_error { "error" } else { "ok" },
-                r.content
-            )
+        .map(|r| SampleBlock::ToolResult {
+            call_id: r.call_id.clone(),
+            content: r.content.clone(),
+            is_error: r.is_error,
         })
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 /// Settle usage after sampling: no completed sample means no-op, so the
@@ -1671,14 +1657,8 @@ fn settle(
 }
 
 /// Snapshot the conversation as model-facing messages.
-fn history_lite(conv: &Conversation) -> Vec<LiteMessage> {
-    conv.snapshot()
-        .iter()
-        .map(|entry| LiteMessage {
-            from_model: entry.role == Role::Assistant,
-            text: entry.text(),
-        })
-        .collect()
+fn history_messages(conv: &Conversation) -> Vec<HistoryEntry> {
+    conv.snapshot().as_ref().clone()
 }
 
 /// Display name of one compaction trigger for event payloads.
@@ -1922,7 +1902,7 @@ mod run_loop_tests {
     impl Compactor for FakeCompactor {
         async fn compact(
             &self,
-            _history: Vec<LiteMessage>,
+            _history: Vec<HistoryEntry>,
             trigger: CompactTrigger,
         ) -> Result<Compacted, CompactError> {
             self.calls
@@ -2752,7 +2732,7 @@ mod run_loop_tests {
     }
 
     /// Request-recording scripted model for inbox tests.
-    type SeenLog = std::sync::Arc<Mutex<Vec<Vec<LiteMessage>>>>;
+    type SeenLog = std::sync::Arc<Mutex<Vec<Vec<HistoryEntry>>>>;
     type ReleaseGate = std::sync::Arc<tokio::sync::Notify>;
 
     struct CaptureModel {
@@ -2793,7 +2773,7 @@ mod run_loop_tests {
     fn seen_texts(seen: &SeenLog, index: usize) -> Vec<String> {
         seen.lock().unwrap_or_else(|e| e.into_inner())[index]
             .iter()
-            .map(|m| m.text.clone())
+            .map(|entry| entry.text())
             .collect()
     }
 

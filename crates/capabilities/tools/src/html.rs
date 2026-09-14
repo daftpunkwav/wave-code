@@ -125,7 +125,9 @@ fn tokenize(html: &str) -> Vec<Token> {
             }
             text_start = pos;
         } else {
-            pos += 1;
+            // Advance by one full character so `pos` stays on a char
+            // boundary for the `html[pos..]` slicing above.
+            pos += html[pos..].chars().next().map_or(1, char::len_utf8);
         }
     }
     // Trailing text after the last tag; skipped entirely when the scan
@@ -461,6 +463,19 @@ mod tests {
             "a & b <c> A B &nope;"
         );
         assert_eq!(html_to_markdown("<p>caf&#233; &mdash; ok</p>"), "café — ok");
+    }
+
+    #[test]
+    fn multibyte_text_does_not_panic() {
+        // Regression: the tokenizer once advanced `pos` by single bytes and
+        // panicked when it landed inside a multi-byte character.
+        assert_eq!(html_to_markdown("<p>café</p>"), "café");
+        assert_eq!(html_to_markdown("<p>你好世界</p>"), "你好世界");
+        assert_eq!(html_to_markdown("<p>🦀 push</p>"), "🦀 push");
+        // Multi-byte text running into a tag.
+        assert_eq!(html_to_markdown("中文<code>x</code>"), "中文`x`");
+        // Multi-byte text running into a truncated tag.
+        assert_eq!(html_to_markdown("中文<div class=\"x"), "中文");
     }
 
     #[test]

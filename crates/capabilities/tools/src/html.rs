@@ -165,7 +165,21 @@ fn split_tag(inner: &str) -> (String, String) {
 fn attr_value(attrs: &str, name: &str) -> Option<String> {
     let lower = attrs.to_ascii_lowercase();
     let key = format!("{name}=");
-    let idx = lower.find(&key)?;
+    // `name=` must start at an attribute-name boundary, else a lookup for
+    // `href` would be satisfied by `data-href=`.
+    let mut from = 0usize;
+    let idx = loop {
+        let found = lower[from..].find(&key)? + from;
+        let at_boundary = found == 0
+            || !lower[..found]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '.'));
+        if at_boundary {
+            break found;
+        }
+        from = found + 1;
+    };
     let rest = attrs[idx + key.len()..].trim_start();
     let quote = rest.chars().next()?;
     if quote == '"' || quote == '\'' {
@@ -463,6 +477,19 @@ mod tests {
             "a & b <c> A B &nope;"
         );
         assert_eq!(html_to_markdown("<p>caf&#233; &mdash; ok</p>"), "café — ok");
+    }
+
+    #[test]
+    fn attribute_lookup_requires_name_boundary() {
+        // `data-href` must not satisfy an `href` lookup.
+        let md = html_to_markdown("<a data-href=\"https://e.com/x\">text</a>");
+        assert_eq!(md, "text");
+        // A decoy attribute is skipped in favor of the real one.
+        let md = html_to_markdown(
+            "<a data-href=\"decoy\" title=\"t\" href=\"https://e.com/real\">link</a>",
+        );
+        assert!(md.contains("[link](https://e.com/real)"), "{md}");
+        assert!(!md.contains("decoy"), "{md}");
     }
 
     #[test]

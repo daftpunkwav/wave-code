@@ -314,7 +314,7 @@ async fn continuation_micro_bench() {
     let history = conv
         .snapshot()
         .iter()
-        .map(|entry| entry.text.as_str())
+        .map(|entry| entry.text())
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -373,7 +373,7 @@ async fn session_open_bench() {
     let history = conv
         .snapshot()
         .iter()
-        .map(|entry| entry.text.as_str())
+        .map(|entry| entry.text())
         .collect::<Vec<_>>()
         .join("\n");
     for index in 0..SESSION_TURNS {

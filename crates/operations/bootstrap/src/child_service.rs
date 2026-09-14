@@ -152,7 +152,7 @@ impl TaskService for TurnChildService {
                     summary: conv
                         .snapshot()
                         .last()
-                        .map(|entry| entry.text.clone())
+                        .map(|entry| entry.text())
                         .unwrap_or_default(),
                     output_tokens: conv.usage_carry().output_tokens,
                 }

@@ -372,7 +372,7 @@ async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            format!("{role}: {}", entry.text)
+            format!("{role}: {}", entry.text())
         })
         .collect();
     driver.end_session(&transcript).await;

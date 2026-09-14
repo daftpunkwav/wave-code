@@ -154,7 +154,7 @@ pub fn render_snapshot(conv: &state_store::Conversation) -> String {
                 state_store::Role::User => "user",
                 state_store::Role::Assistant => "assistant",
             };
-            format!("{role}: {}", entry.text)
+            format!("{role}: {}", entry.text())
         })
         .collect::<Vec<_>>()
         .join("\n")

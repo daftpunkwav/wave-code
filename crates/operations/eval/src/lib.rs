@@ -91,7 +91,7 @@ pub async fn evaluate<D: TurnDriver>(driver: &D, cases: &[EvalCase], system: &st
         let history = conv
             .snapshot()
             .iter()
-            .map(|entry| entry.text.as_str())
+            .map(|entry| entry.text())
             .collect::<Vec<_>>()
             .join("\n");
         let missing: Vec<String> = case

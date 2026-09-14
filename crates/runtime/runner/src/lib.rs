@@ -1099,7 +1099,7 @@ where
             .map_err(|e| e.to_string())?;
         conv.replace(vec![HistoryEntry {
             role: Role::User,
-            text: done.summary.clone(),
+            blocks: vec![state_store::Block::Text(done.summary.clone())],
         }]);
         conv.settle(Usage {
             input_tokens: estimate_tokens(&done.summary) + CONTEXT_OVERHEAD_TOKENS,
@@ -1676,7 +1676,7 @@ fn history_lite(conv: &Conversation) -> Vec<LiteMessage> {
         .iter()
         .map(|entry| LiteMessage {
             from_model: entry.role == Role::Assistant,
-            text: entry.text.clone(),
+            text: entry.text(),
         })
         .collect()
 }
@@ -1695,7 +1695,7 @@ fn trigger_name(trigger: CompactTrigger) -> &'static str {
 fn flatten(conv: &Conversation) -> String {
     conv.snapshot()
         .iter()
-        .map(|entry| entry.text.as_str())
+        .map(|entry| entry.text())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -2213,7 +2213,7 @@ mod run_loop_tests {
         let history = conv
             .snapshot()
             .iter()
-            .map(|e| e.text.as_str())
+            .map(|e| e.text())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(history.contains("nope"));
@@ -2339,7 +2339,7 @@ mod run_loop_tests {
         let history = conv
             .snapshot()
             .iter()
-            .map(|e| e.text.as_str())
+            .map(|e| e.text())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(history.contains("not in this run's allowed tools"));
@@ -2402,7 +2402,7 @@ mod run_loop_tests {
         let history = conv
             .snapshot()
             .iter()
-            .map(|e| e.text.as_str())
+            .map(|e| e.text())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(history.contains("duplicate tool call id"));
@@ -2480,7 +2480,7 @@ mod run_loop_tests {
         let reminders = conv
             .snapshot()
             .iter()
-            .filter(|e| e.text == CONTINUATION_PROMPT)
+            .filter(|e| e.text() == CONTINUATION_PROMPT)
             .count();
         assert_eq!(reminders, 2);
     }
@@ -2533,7 +2533,7 @@ mod run_loop_tests {
             assert_eq!(outcome, StopReason::Completed);
             conv.snapshot()
                 .iter()
-                .filter(|e| e.text == CONTINUATION_PROMPT)
+                .filter(|e| e.text() == CONTINUATION_PROMPT)
                 .count()
         }
         // Zero disables continuations; one allows exactly one.
@@ -2574,7 +2574,7 @@ mod run_loop_tests {
         let reminders = conv
             .snapshot()
             .iter()
-            .filter(|e| e.text == "PLAN-REMINDER")
+            .filter(|e| e.text() == "PLAN-REMINDER")
             .count();
         assert_eq!(reminders, 3);
     }
@@ -2615,7 +2615,7 @@ mod run_loop_tests {
         let blocks = conv
             .snapshot()
             .iter()
-            .filter(|e| e.text.contains("Stop hook blocked turn completion"))
+            .filter(|e| e.text().contains("Stop hook blocked turn completion"))
             .count();
         assert_eq!(blocks, 3);
     }

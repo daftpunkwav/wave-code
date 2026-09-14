@@ -34,13 +34,88 @@ pub enum Role {
     Assistant,
 }
 
+/// One content block of a history entry.
+///
+/// Text carries prose; ToolUse / ToolResult preserve the request-result
+/// pairing across samples so providers see structured tool history
+/// instead of flattened text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Block {
+    /// Plain message text.
+    Text(String),
+    /// A tool call requested by the model.
+    ToolUse {
+        /// Identifier pairing the call with its future result.
+        call_id: String,
+        /// Tool name as registered in the capability registry.
+        name: String,
+        /// Raw JSON input for the tool.
+        input: serde_json::Value,
+    },
+    /// A tool execution result fed back to the model.
+    ToolResult {
+        /// Identifier pairing the result with its call.
+        call_id: String,
+        /// Result payload text.
+        content: String,
+        /// True when the call failed.
+        is_error: bool,
+    },
+}
+
 /// One message in the persisted conversation history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HistoryEntry {
     /// Who produced this entry.
     pub role: Role,
-    /// Text payload of the entry.
-    pub text: String,
+    /// Ordered content blocks of the entry.
+    pub blocks: Vec<Block>,
+}
+
+impl HistoryEntry {
+    /// Legacy text view of the entry.
+    ///
+    /// Text blocks join with newlines; tool payloads render in the
+    /// bracketed convention the text-only history used before blocks
+    /// existed, so text-based consumers (resume import, token estimates)
+    /// keep seeing the same shape.
+    pub fn text(&self) -> String {
+        self.blocks
+            .iter()
+            .map(|block| match block {
+                Block::Text(text) => text.clone(),
+                Block::ToolUse {
+                    call_id,
+                    name,
+                    input,
+                } => format!("[{call_id}] call {name} {input}"),
+                Block::ToolResult {
+                    call_id,
+                    content,
+                    is_error,
+                } => format!(
+                    "[{call_id}] {}: {content}",
+                    if *is_error { "error" } else { "ok" }
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Text of all text blocks, joined with newlines.
+    ///
+    /// Unlike [`HistoryEntry::text`] this never renders tool payloads;
+    /// use it where tool noise would corrupt prose (summaries, display).
+    pub fn prose(&self) -> String {
+        self.blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// Token usage carried across samples and runs.
@@ -130,10 +205,12 @@ impl Conversation {
 
     /// Append one entry; the single write entry of this store.
     pub fn push(&mut self, role: Role, text: impl Into<String>) {
-        self.entries.push(HistoryEntry {
-            role,
-            text: text.into(),
-        });
+        self.push_blocks(role, vec![Block::Text(text.into())]);
+    }
+
+    /// Append one entry from content blocks.
+    pub fn push_blocks(&mut self, role: Role, blocks: Vec<Block>) {
+        self.entries.push(HistoryEntry { role, blocks });
     }
 
     /// Number of persisted entries.
@@ -171,15 +248,15 @@ impl Conversation {
 
 /// Merge adjacent entries from the same role.
 ///
-/// Rationale: some providers reject consecutive same-role messages. Merging
-/// with a newline keeps the wire payload valid without losing content.
+/// Rationale: some providers reject consecutive same-role messages. The
+/// merged entry keeps every block in order, preserving tool pairing on
+/// the wire while text blocks still read as one message.
 pub fn normalize_history(entries: &[HistoryEntry]) -> Vec<HistoryEntry> {
     let mut out: Vec<HistoryEntry> = Vec::with_capacity(entries.len());
     for entry in entries {
         match out.last_mut() {
             Some(last) if last.role == entry.role => {
-                last.text.push('\n');
-                last.text.push_str(&entry.text);
+                last.blocks.extend(entry.blocks.iter().cloned());
             }
             _ => out.push(entry.clone()),
         }
@@ -217,21 +294,77 @@ mod tests {
         let entries = vec![
             HistoryEntry {
                 role: Role::User,
-                text: "a".to_string(),
+                blocks: vec![Block::Text("a".to_string())],
             },
             HistoryEntry {
                 role: Role::User,
-                text: "b".to_string(),
+                blocks: vec![Block::Text("b".to_string())],
             },
             HistoryEntry {
                 role: Role::Assistant,
-                text: "c".to_string(),
+                blocks: vec![Block::Text("c".to_string())],
             },
         ];
         let normalized = normalize_history(&entries);
         assert_eq!(normalized.len(), 2);
-        assert_eq!(normalized[0].text, "a\nb");
+        assert_eq!(normalized[0].text(), "a\nb");
         assert!(find_pairing_violations(&normalized).is_empty());
+    }
+
+    #[test]
+    fn block_entries_render_legacy_text_views() {
+        let entry = HistoryEntry {
+            role: Role::User,
+            blocks: vec![
+                Block::Text("before".to_string()),
+                Block::ToolResult {
+                    call_id: "c1".to_string(),
+                    content: "ls out".to_string(),
+                    is_error: false,
+                },
+                Block::ToolResult {
+                    call_id: "c2".to_string(),
+                    content: "boom".to_string(),
+                    is_error: true,
+                },
+                Block::ToolUse {
+                    call_id: "c3".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            ],
+        };
+        assert_eq!(
+            entry.text(),
+            "before\n[c1] ok: ls out\n[c2] error: boom\n[c3] call shell {\"command\":\"ls\"}"
+        );
+        assert_eq!(entry.prose(), "before");
+    }
+
+    #[test]
+    fn push_blocks_preserves_pairing_in_snapshots() {
+        let mut conv = Conversation::new();
+        conv.push(Role::User, "list the files");
+        conv.push_blocks(
+            Role::Assistant,
+            vec![Block::ToolUse {
+                call_id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            }],
+        );
+        conv.push_blocks(
+            Role::User,
+            vec![Block::ToolResult {
+                call_id: "c1".to_string(),
+                content: "a.rs".to_string(),
+                is_error: false,
+            }],
+        );
+        let snap = conv.snapshot();
+        assert_eq!(snap.len(), 3);
+        assert!(matches!(snap[1].blocks[0], Block::ToolUse { .. }));
+        assert!(matches!(snap[2].blocks[0], Block::ToolResult { .. }));
     }
 
     #[test]

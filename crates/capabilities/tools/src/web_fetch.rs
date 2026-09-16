@@ -93,7 +93,46 @@ fn validate_url(input: &Value) -> std::result::Result<reqwest::Url, ToolOutput> 
             url.scheme()
         )));
     }
+    if let Some(host) = url.host_str()
+        && is_link_local_host(host)
+    {
+        // Link-local targets (cloud metadata 169.254.169.254, fe80::/10)
+        // are unreachable-by-design for a web-reading tool, and this tool
+        // is read-only in every permission mode — an injected prompt must
+        // not be able to pivot at instance credentials or local services.
+        return Err(err_output(format!(
+            "refusing to fetch link-local host '{host}': this tool never \
+             reaches cloud metadata or local-link addresses"
+        )));
+    }
     Ok(url)
+}
+
+/// True when the host string is a link-local IP literal: the check holds
+/// without DNS.
+///
+/// Scope: link-local only (IPv4 169.254/16 — including cloud instance
+/// metadata at 169.254.169.254 — and IPv6 fe80::/10). Loopback and
+/// RFC1918 targets stay reachable so local dev servers keep working,
+/// and public DNS names resolving into link-local ranges are not caught
+/// (blocking those would require pinning resolved IPs at connect time).
+fn is_link_local_host(host: &str) -> bool {
+    // Trim IPv6 brackets and one trailing root dot (`example.com.`).
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let host = host.strip_suffix('.').unwrap_or(host);
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            // IPv4-mapped IPv6 (::ffff:a.b.c.d) connects as plain IPv4, so
+            // it must be judged by the embedded v4 address, not its v6
+            // prefix.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_link_local();
+            }
+            v6.segments()[0] & 0xffc0 == 0xfe80
+        }
+        Err(_) => false,
+    }
 }
 
 /// Decode a body as text: explicit latin-1 family charsets decode each
@@ -427,6 +466,40 @@ mod tests {
         assert!(lossy.contains('\u{FFFD}'));
         let plain = decode_body("héllo".as_bytes(), None);
         assert_eq!(plain, "héllo");
+    }
+
+    #[test]
+    fn link_local_and_metadata_hosts_are_refused() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.1.1/x",
+            "http://[fe80::1]/",
+            // IPv4-mapped IPv6 literals connect as plain IPv4: the
+            // embedded address must be judged, not the v6 prefix.
+            "http://[::ffff:169.254.169.254]/",
+            "http://[::ffff:a9fe:a9fe]/",
+        ] {
+            let out = validate_url(&serde_json::json!({"url": url}))
+                .err()
+                .unwrap_or_else(|| panic!("'{url}' must be refused"));
+            assert!(out.is_error, "'{url}'");
+        }
+    }
+
+    #[test]
+    fn loopback_private_and_public_hosts_still_pass_validation() {
+        for url in [
+            "https://example.com/x",
+            "http://localhost/admin",  // loopback stays reachable (dev servers)
+            "http://127.0.0.1:3000/",  // same
+            "http://192.168.1.10/dev", // RFC1918 stays reachable
+            "http://example.com.",     // root dot is trimmed, not link-local
+        ] {
+            assert!(
+                validate_url(&serde_json::json!({"url": url})).is_ok(),
+                "'{url}' must pass"
+            );
+        }
     }
 
     #[tokio::test]

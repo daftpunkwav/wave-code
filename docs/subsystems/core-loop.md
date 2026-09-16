@@ -37,11 +37,11 @@ Actors never name these seven types; they drive a `TurnDriver` (blanket-impl'd f
 11. **Checkpoint 3 — pre-tool**: an interrupt here synthesizes `interrupted` results for every declared call, preserving call/result pairing without executing anything.
 12. Dispatch (`execute_calls`, below), append results as a user entry, `bump_tool_round`, loop.
 
-`settle` runs on every sampling exit; `TokenCount` is emitted only when a sample completed, and `TurnCompleted` is emitted exactly once, last.
+`settle` runs on every sampling exit; `TokenCount` is emitted only when a sample completed (carrying the session `context_window` and estimated `context_used` for frontend context meters), and `TurnCompleted` is emitted exactly once, last.
 
 ## Dispatch pipeline (`execute_calls`)
 
-Fixed order: **all `ToolCallBegin` events upfront in declaration order; all `ToolCallEnd` events after, in declaration order.** Every declared call gets exactly one result slot, so pairing cannot break (a trailing fallback fills impossible gaps with an internal-error slot).
+Fixed order: **all `ToolCallBegin` events upfront in declaration order; all `ToolCallEnd` events after, in declaration order.** Every declared call gets exactly one result slot, so pairing cannot break (a trailing fallback fills impossible gaps with an internal-error slot). Each `ToolCallEnd` carries a bounded output preview (`ToolCallPreview`, capped at 4 KiB, character-boundary safe) so frontends can render result heads without the full transcript body.
 
 Per call: duplicate call-id admission (first occurrence runs; duplicates get error slots without executing — paired lookups would otherwise consume a slot twice) → per-run allowlist (`RunAllowlist`, fork-scoped `allowed-tools`; denial is a business error, and restricted runs never even see denied tools in `available_tools`) → `PreToolUse` hook (block ⇒ error slot, never reaches policy) → `PolicyDecider`:
 

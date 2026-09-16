@@ -147,7 +147,8 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | --- | --- |
 | `transport-mcp` | JSON-RPC framing over child-process stdio pipes |
 | `harness-cli` | The `wavecode` binary: exec, REPL, resume; exit codes follow turn outcomes |
-| `wavecode-tui` | ratatui fullscreen client over the session actor |
+| `tui-engine` | Inline terminal rendering engine: components, editor, markdown, diff screen |
+| `console-ui` | Themed console frontend over the wire + actor (transcript, dialogs, slash commands) |
 
 ## Life of a turn
 
@@ -166,7 +167,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 
 Per-subsystem documentation, a cookbook, defensive patterns, and postmortems live alongside this document:
 
-- Subsystems: [core loop](subsystems/core-loop.md) · [tools](subsystems/tools.md) · [context engineering](subsystems/context-engineering.md) · [safety](subsystems/safety.md) · [extensibility](subsystems/extensibility.md) · [sessions and state](subsystems/sessions-state.md) · [evals](subsystems/evals.md)
+- Subsystems: [core loop](subsystems/core-loop.md) · [tools](subsystems/tools.md) · [context engineering](subsystems/context-engineering.md) · [safety](subsystems/safety.md) · [extensibility](subsystems/extensibility.md) · [sessions and state](subsystems/sessions-state.md) · [evals](subsystems/evals.md) · [console ui](subsystems/ui.md)
 - Cookbook: [adding a tool](cookbook/adding-a-tool.md) · [adding a subagent](cookbook/adding-a-subagent.md) · [recording and replaying](cookbook/recording-and-replaying.md)
 - [Defensive patterns](defensive-patterns.md)
 - Postmortems: [2026-09-13 bulk regex corruption](postmortem/2026-09-13-bulk-regex-corruption.md)

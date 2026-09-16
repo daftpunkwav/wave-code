@@ -24,7 +24,7 @@ use tui_engine::markdown::PlainHighlighter;
 use tui_engine::screen::Screen;
 use tui_engine::terminal::{self, TerminalGuard};
 use uuid::Uuid;
-use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
+use wavecode_wire::{Event, EventMsg, Op, Submission};
 
 use crate::chrome::footer as footer_chrome;
 use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint};
@@ -32,7 +32,7 @@ use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
 use crate::dialogs::{Answer, ApprovalDialog, Dialog, QuestionDialog};
 use crate::history;
-use crate::messages::tool_call::{ToolCall, ToolState};
+use crate::messages::tool_call::ToolCall;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
 use crate::slash;
@@ -356,11 +356,6 @@ impl ConsoleUi {
                 if let Some(index) = self.open_calls.remove(call_id)
                     && let Some(entry) = self.transcript.get_mut(index)
                 {
-                    let state = if *is_error {
-                        ToolState::Failed
-                    } else {
-                        ToolState::Done
-                    };
                     if let Some(card) = as_tool_call(entry.component.as_mut()) {
                         let preview = output.as_ref().map(|preview| {
                             (
@@ -449,13 +444,31 @@ impl ConsoleUi {
                 kind,
                 detail,
             } => {
-                self.push_status(
-                    &format!("approval requested for {call_id} ({kind:?}): {detail}"),
-                    false,
-                );
+                let detail = tui_engine::sanitize::sanitize_terminal(detail);
+                self.dialog = Some(Dialog::Approval(ApprovalDialog::new(
+                    call_id.clone(),
+                    *kind,
+                    &detail,
+                )));
                 true
             }
-            EventMsg::QuestionRequested { .. } => false,
+            EventMsg::QuestionRequested {
+                call_id,
+                question,
+                options,
+            } => {
+                let question = tui_engine::sanitize::sanitize_terminal(question);
+                let options: Vec<String> = options
+                    .iter()
+                    .map(|option| tui_engine::sanitize::sanitize_terminal(option).into_owned())
+                    .collect();
+                self.dialog = Some(Dialog::Question(QuestionDialog::new(
+                    call_id.clone(),
+                    &question,
+                    options,
+                )));
+                true
+            }
         }
     }
 
@@ -523,7 +536,7 @@ impl ConsoleUi {
                             &if labels.is_empty() {
                                 "no snapshots".to_string()
                             } else {
-                                format!("{}", labels.join(", "))
+                                labels.join(", ")
                             },
                             false,
                         );
@@ -894,7 +907,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{self, Token};
+    use crate::theme;
     use std::path::Path;
     use test_support::{NullStatus, TestLink};
     use tui_engine::keys::Mods;

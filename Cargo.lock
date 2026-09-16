@@ -313,6 +313,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "console-ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "futures",
+ "operations-actor",
+ "serde_json",
+ "tokio",
+ "tui-engine",
+ "uuid",
+ "wavecode-wire",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -637,6 +652,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "console-ui",
  "operations-actor",
  "operations-bootstrap",
  "rustyline",
@@ -646,7 +662,6 @@ dependencies = [
  "wavecode-config",
  "wavecode-skills",
  "wavecode-tools",
- "wavecode-tui",
  "wavecode-wire",
 ]
 

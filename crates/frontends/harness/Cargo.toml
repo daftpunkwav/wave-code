@@ -16,7 +16,7 @@ wavecode-tools = { path = "../../capabilities/tools" }
 wavecode-skills = { path = "../../capabilities/skills" }
 state-persistence = { path = "../../state/persistence" }
 wavecode-config = { path = "../../foundation/config" }
-wavecode-tui = { path = "../tui" }
+console-ui = { path = "../console" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

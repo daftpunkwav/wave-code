@@ -135,7 +135,7 @@ impl Outcome {
 fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Option<Outcome> {
     /// Sanitize into an owned string for `format!`/`push_str` use.
     fn clean(text: &str) -> String {
-        wavecode_tui::text::sanitize_terminal(text).into_owned()
+        console_ui::sanitize_terminal(text).into_owned()
     }
     match msg {
         EventMsg::TurnStarted => {
@@ -418,29 +418,15 @@ async fn run_tui_new(
     for warning in &handle.warnings {
         eprintln!("[warn] {warning}");
     }
-    let ctx = wavecode_tui::TuiContext {
+    let ctx = console_ui::UiContext {
         model_name: handle.model_name,
         cwd,
-        permission_mode: tui_permission_mode(&handle.permission_mode),
+        permission_mode: handle.permission_mode,
         skill_names: handle.skill_names,
-        mcp_server_lines: handle.mcp_servers,
-        memory_index: handle.memory_index,
-        status_queries: handle.status.clone(),
+        mcp_servers: handle.mcp_servers,
+        status: handle.status.clone(),
     };
-    wavecode_tui::run(handle.client, ctx).await
-}
-
-/// Map an assembled permission-mode wire name onto the TUI enum.
-///
-/// Unknown names fall back to Guarded so the TUI never shows a mode the
-/// policy rejected.
-fn tui_permission_mode(wire: &str) -> wavecode_tui::PermissionMode {
-    match wire {
-        "plan" => wavecode_tui::PermissionMode::Plan,
-        "guarded" => wavecode_tui::PermissionMode::Guarded,
-        "auto" => wavecode_tui::PermissionMode::Auto,
-        _ => wavecode_tui::PermissionMode::Guarded,
-    }
+    console_ui::run(handle.client, ctx).await
 }
 
 /// Serve the builtin tool registry over MCP stdio until EOF.
@@ -881,9 +867,9 @@ async fn run_repl(
             // mutates it through the goal tool.
             Slash::Goal(_) => match status.goal_status() {
                 Some(text) => println!("{text}"),
-                None => println!(
-                    "(no durable goal yet; ask the agent to set one with the goal tool)"
-                ),
+                None => {
+                    println!("(no durable goal yet; ask the agent to set one with the goal tool)")
+                }
             },
             // File-content snapshots (no git dependence): `/snapshots`
             // lists labels, `/rewind <label>` shows one snapshot.
@@ -1144,13 +1130,13 @@ mod tests {
         assert_eq!(
             names,
             [
+                "console-ui",
                 "operations-actor",
                 "operations-bootstrap",
                 "state-persistence",
                 "wavecode-config",
                 "wavecode-skills",
                 "wavecode-tools",
-                "wavecode-tui",
                 "wavecode-wire",
             ],
             "harness internal deps changed; update the matrix deliberately",
@@ -1450,13 +1436,12 @@ mod tests {
     }
 
     #[test]
-    fn tui_permission_modes_follow_wire_names() {
-        use wavecode_tui::PermissionMode;
-        assert_eq!(tui_permission_mode("plan"), PermissionMode::Plan);
-        assert_eq!(tui_permission_mode("guarded"), PermissionMode::Guarded);
-        assert_eq!(tui_permission_mode("auto"), PermissionMode::Auto);
-        // The session only emits canonical names; anything else falls back
-        // to guarded so the TUI never displays a rejected mode.
-        assert_eq!(tui_permission_mode("typo"), PermissionMode::Guarded);
+    fn permission_mode_labels_follow_wire_names() {
+        use console_ui::ui::permission_mode_label;
+        assert_eq!(permission_mode_label("plan"), "Plan Mode");
+        assert_eq!(permission_mode_label("auto"), "Auto Approve");
+        assert_eq!(permission_mode_label("guarded"), "Ask When Needed");
+        // Unknown names degrade to the guarded label.
+        assert_eq!(permission_mode_label("typo"), "Ask When Needed");
     }
 }

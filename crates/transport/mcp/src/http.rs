@@ -122,7 +122,11 @@ impl HttpMcp {
     /// the endpoint URL or the OAuth block is invalid.
     pub fn new(config: HttpMcpConfig) -> Result<Self, TransportError> {
         config.validate().map_err(TransportError::Protocol)?;
+        // No redirects, matching the LLM clients and web tools: a 30x must
+        // not rewrite POST semantics or carry headers along a redirect
+        // chain the operator never configured.
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))?;
         Ok(Self {
@@ -182,7 +186,7 @@ impl HttpMcp {
         let raw = serde_json::to_vec(body).map_err(|e| {
             TransportError::Protocol(format!("failed to encode JSON-RPC request: {e}"))
         })?;
-        let session = self.session_id.lock().unwrap().clone();
+        let session = self.session_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
         // A static `Authorization` header wins: skip the OAuth grant entirely
         // so no token request is issued when explicit auth is configured.
         let bearer = if has_static_authorization(&self.headers) {
@@ -230,7 +234,7 @@ impl HttpMcp {
         // session id and tell the caller to re-initialize. A 404 without a
         // session is a plain routing error, not an expiry.
         if status == reqwest::StatusCode::NOT_FOUND
-            && self.session_id.lock().unwrap().take().is_some()
+            && self.session_id.lock().unwrap_or_else(|e| e.into_inner()).take().is_some()
         {
             return Err(TransportError::SessionExpired);
         }
@@ -254,7 +258,7 @@ impl HttpMcp {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         if let Some(session) = session {
-            *self.session_id.lock().unwrap() = Some(session.to_owned());
+            *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.to_owned());
         }
     }
 
@@ -292,7 +296,7 @@ impl HttpMcp {
             Some(oauth) => oauth,
             None => return Ok(None),
         };
-        if let Some(cached) = self.token.lock().unwrap().clone() {
+        if let Some(cached) = self.token.lock().unwrap_or_else(|e| e.into_inner()).clone() {
             let remaining = cached.expires_at.saturating_duration_since(Instant::now());
             if remaining > Duration::from_secs(TOKEN_EXPIRY_SKEW_SECS) {
                 return Ok(Some(cached.value));
@@ -300,7 +304,7 @@ impl HttpMcp {
         }
         let token = fetch_client_credentials(&self.client, &oauth).await?;
         let value = token.value.clone();
-        *self.token.lock().unwrap() = Some(token);
+        *self.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
         Ok(Some(value))
     }
 }
@@ -576,7 +580,7 @@ mod tests {
             headers,
             body,
         };
-        observed.lock().unwrap().push(request.clone());
+        observed.lock().unwrap_or_else(|e| e.into_inner()).push(request.clone());
         let (status, extra, resp_body) = handler(&request);
         let reason = match status {
             200 => "OK",
@@ -700,6 +704,34 @@ mod tests {
             headers: HashMap::new(),
             oauth: None,
         }
+    }
+
+    /// Redirects must not be followed: a 302 surfaces as an error and no
+    /// second request hits the redirect target path.
+    #[tokio::test]
+    async fn redirects_are_not_followed() {
+        let handler: Handler = Arc::new(|req: &RecordedRequest| {
+            if req.path.ends_with("/mcp") {
+                (
+                    302,
+                    vec![("Location".to_string(), "/elsewhere".to_string())],
+                    Vec::new(),
+                )
+            } else {
+                (404, Vec::new(), b"gone".to_vec())
+            }
+        });
+        let server = StubServer::spawn(handler).await;
+        let transport = HttpMcp::new(test_config(&server)).unwrap();
+        let outcome = transport
+            .rpc(
+                "initialize",
+                serde_json::json!({"protocolVersion": "2025-03-26"}),
+            )
+            .await;
+        assert!(outcome.is_err(), "a 302 must surface as an error");
+        // Exactly one request was made: the redirect was not chased.
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
 
     /// Full round trip: initialize persists the session id, `tools/list`

@@ -12,6 +12,7 @@ license.workspace = true
 tui-engine = { path = "../engine" }
 wavecode-wire = { path = "../../foundation/wire" }
 operations-actor = { path = "../../operations/actor" }
+async-trait.workspace = true
 crossterm.workspace = true
 tokio.workspace = true
 futures.workspace = true

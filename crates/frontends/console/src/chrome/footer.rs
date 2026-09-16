@@ -1,0 +1,137 @@
+//! The two-row footer: mode/model/cwd/tip and transient-hint/context.
+
+use crate::state::{AppState, context_percent, format_tokens};
+use crate::theme::{self, Token};
+use tui_engine::width;
+
+/// Rotating toolbar tips (10 s cadence), weighted rotation kept simple
+/// as a fixed order.
+pub const TIPS: [&str; 6] = [
+    "ctrl+o expand tool output",
+    "shift+enter for newline",
+    "ctrl+s steer a running turn",
+    "! for shell mode",
+    "@ to mention files",
+    "up arrow recalls history",
+];
+
+/// Tip rotation cadence.
+pub const TIP_ROTATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Which transient message owns the left side of row 2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransientHint {
+    /// The exit confirmation (double Ctrl+C / Ctrl+D).
+    ExitConfirm,
+    /// Nothing transient: row 2 carries only the context meter.
+    None,
+}
+
+/// Build footer row 1: mode badge, model, shortened cwd, rotating tip.
+pub fn row1(state: &AppState, tip: Option<&str>, columns: usize) -> String {
+    let theme = theme::current();
+    let mut line = String::new();
+    line.push_str(&mode_badge(&state.permission_mode));
+    line.push_str("  ");
+    line.push_str(&theme.paint(Token::Text, &state.model_name));
+    line.push_str("  ");
+    line.push_str(&theme.paint(Token::TextDim, &crate::ui::shorten_cwd(&state.cwd, 3)));
+    if let Some(tip) = tip {
+        let used = width::width(&line);
+        let tip_text = theme.paint(Token::TextMuted, &format!(" | {tip}"));
+        let tip_width = width::width(&tip_text);
+        if used + tip_width <= columns {
+            line.push_str(&" ".repeat(columns - used - tip_width));
+            line.push_str(&tip_text);
+        }
+    }
+    line
+}
+
+/// Build footer row 2: transient hint (left) and context meter (right).
+pub fn row2(state: &AppState, hint: &TransientHint, columns: usize) -> String {
+    let theme = theme::current();
+    let mut left = String::new();
+    if *hint == TransientHint::ExitConfirm {
+        left.push_str(&theme.bold(Token::Warning, "Press ctrl+c again to exit"));
+    }
+    let mut right = String::new();
+    if let (Some(used), Some(window)) = (state.context_used, state.context_window) {
+        right = theme.paint(
+            Token::Text,
+            &format!(
+                "context: {}% ({}/{})",
+                context_percent(used, window),
+                format_tokens(used),
+                format_tokens(window)
+            ),
+        );
+    }
+    let spacing = columns
+        .saturating_sub(width::width(&left) + width::width(&right))
+        .max(if right.is_empty() { 0 } else { 1 });
+    left.push_str(&" ".repeat(spacing));
+    left.push_str(&right);
+    left
+}
+
+/// The bracketed mode badge.
+pub fn mode_badge(mode: &str) -> String {
+    let theme = theme::current();
+    let (label, token) = match mode {
+        "plan" => ("[Plan Mode]", Token::Primary),
+        "auto" => ("[Auto Approve]", Token::Warning),
+        _ => ("[Ask When Needed]", Token::Text),
+    };
+    theme.bold(token, label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn state() -> AppState {
+        let mut state = AppState::new(
+            "test-model".to_string(),
+            PathBuf::from("/home/user/work/proj"),
+            "guarded".to_string(),
+            Vec::new(),
+        );
+        state.context_used = Some(84_000);
+        state.context_window = Some(200_000);
+        state
+    }
+
+    #[test]
+    fn row1_carries_mode_model_cwd_and_tip() {
+        theme::set(theme::Theme::dark());
+        unsafe { std::env::set_var("HOME", "/home/user") };
+        let line = row1(&state(), Some("ctrl+o expand tool output"), 120);
+        let plain = width::strip_ansi(&line);
+        assert!(plain.contains("[Ask When Needed]"), "{plain}");
+        assert!(plain.contains("test-model"), "{plain}");
+        assert!(plain.contains("proj"), "{plain}");
+        assert!(plain.contains("ctrl+o expand tool output"), "{plain}");
+        unsafe { std::env::set_var("HOME", "") };
+    }
+
+    #[test]
+    fn row1_drops_tip_when_narrow() {
+        theme::set(theme::Theme::dark());
+        let line = row1(&state(), Some("ctrl+o expand tool output"), 40);
+        let plain = width::strip_ansi(&line);
+        assert!(!plain.contains("ctrl+o expand"), "tip dropped: {plain}");
+    }
+
+    #[test]
+    fn row2_shows_context_and_exit_hint() {
+        theme::set(theme::Theme::dark());
+        let line = row2(&state(), &TransientHint::None, 80);
+        let plain = width::strip_ansi(&line);
+        assert!(plain.ends_with("context: 42% (82.0k/195k)"), "{plain:?}");
+        let hinted = row2(&state(), &TransientHint::ExitConfirm, 80);
+        let plain = width::strip_ansi(&hinted);
+        assert!(plain.contains("Press ctrl+c again to exit"), "{plain}");
+    }
+}

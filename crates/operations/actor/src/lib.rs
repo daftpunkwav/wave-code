@@ -29,4 +29,5 @@ pub use durable::{
     CheckpointSink, DurabilityConfig, persist_checkpoint, persist_then_act, render_snapshot,
     resume_checkpoint, turn_label,
 };
+pub use runtime_runner::SteerTarget;
 pub use status::StatusQueries;

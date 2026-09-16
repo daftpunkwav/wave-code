@@ -15,9 +15,13 @@
 
 //! The inline console frontend: themed chrome over the session wire.
 
+pub mod chrome;
+pub mod controllers;
 pub mod messages;
+pub mod panes;
 pub mod state;
 pub mod theme;
+pub mod transcript;
 pub mod ui;
 pub mod welcome;
 

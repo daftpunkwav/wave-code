@@ -2,38 +2,70 @@
 //! dispatch, and the session event pump.
 //!
 //! Frame layout (inline mode, native scrollback): transcript lines,
-//! then the editor box, then the two footer rows. As the transcript
-//! grows, earlier lines scroll into scrollback and are never rewritten.
-//! Operations destined for the session are placed on an outbox that
-//! the run loop drains and submits, keeping the UI logic synchronous
-//! and testable.
+//! live thinking block, live assistant draft, activity pane, queue
+//! pane, the editor box, then the two footer rows — all inside a
+//! one-column gutter. Operations destined for the session are queued
+//! on an outbox the run loop flushes; steering crosses the actor
+//! inbox directly.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use crossterm::event::{Event as CEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
-use operations_actor::{ActorClient, StatusQueries};
+use operations_actor::{ActorClient, StatusQueries, SteerTarget, SubmitError};
+use tui_engine::component::Component;
 use tui_engine::editor::{Editor, EditorAction, EditorStyle};
 use tui_engine::keys::{Key, KeyEvent};
 use tui_engine::markdown::PlainHighlighter;
 use tui_engine::screen::Screen;
 use tui_engine::terminal::{self, TerminalGuard};
-use tui_engine::width;
 use uuid::Uuid;
-use wavecode_wire::{EventMsg, Op, Submission};
+use wavecode_wire::{Event, EventMsg, Op, Submission};
 
-use crate::messages::{AssistantMessage, StatusLine, UserMessage};
-use crate::state::{AppState, StreamingPhase, context_percent, format_tokens};
-use crate::theme::{self, Token};
+use crate::chrome::footer as footer_chrome;
+use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint};
+use crate::controllers::StreamingController;
+use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
+use crate::panes;
+use crate::state::{AppState, StreamingPhase};
+use crate::theme;
+use crate::transcript::Transcript;
 use crate::welcome::Welcome;
 
 /// One-space chrome gutter: transcript, editor, and footer share it.
 const GUTTER: usize = 1;
 /// Double-press window for the Ctrl+C exit confirmation.
 pub const EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
+
+/// The session seam the UI drives. Implemented by [`ActorClient`] in
+/// production; tests substitute recorded links.
+#[async_trait]
+pub trait SessionLink: Send + Sync {
+    /// Submit one operation to the session.
+    async fn submit(&self, submission: Submission) -> Result<(), SubmitError>;
+    /// Await the next session event; `None` when the session ended.
+    async fn next_event(&mut self) -> Option<Event>;
+    /// Steer a running turn with user text.
+    fn steer(&self, text: &str, target: SteerTarget) -> bool;
+}
+
+#[async_trait]
+impl SessionLink for ActorClient {
+    async fn submit(&self, submission: Submission) -> Result<(), SubmitError> {
+        ActorClient::submit(self, submission).await
+    }
+
+    async fn next_event(&mut self) -> Option<Event> {
+        ActorClient::next_event(self).await
+    }
+
+    fn steer(&self, text: &str, target: SteerTarget) -> bool {
+        ActorClient::steer(self, text, target)
+    }
+}
 
 /// Session facts the UI cannot derive from the wire.
 #[derive(Clone)]
@@ -65,21 +97,26 @@ pub enum Flow {
 pub struct ConsoleUi {
     state: AppState,
     status: Arc<dyn StatusQueries>,
+    link: Box<dyn SessionLink>,
     editor: Editor,
-    transcript: Vec<Box<dyn tui_engine::Component>>,
+    transcript: Transcript,
     screen: Screen,
+    streaming: StreamingController,
+    /// True when the current message arrived via deltas (its completion
+    /// then carries no new text).
+    streaming_flushed_assistant: bool,
+    activity: ActivityPane,
+    expanded: ExpandedFlag,
     outbox: Vec<Op>,
-    /// Text streamed for the in-flight assistant message.
-    assistant_draft: String,
-    /// Streamed thinking text (shown live, then folded in later phases).
-    thinking_draft: String,
     exit_armed_at: Option<Instant>,
+    tip_index: usize,
+    tip_rotated_at: Instant,
     version: String,
 }
 
 impl ConsoleUi {
     /// Build the UI; seeds the transcript with the welcome card.
-    pub fn new(ctx: &UiContext, version: impl Into<String>) -> Self {
+    pub fn new(link: Box<dyn SessionLink>, ctx: &UiContext, version: impl Into<String>) -> Self {
         let state = AppState::new(
             ctx.model_name.clone(),
             ctx.cwd.clone(),
@@ -89,33 +126,97 @@ impl ConsoleUi {
         let mut ui = Self {
             state,
             status: ctx.status.clone(),
+            link,
             editor: Editor::new(EditorStyle::default()),
-            transcript: Vec::new(),
+            transcript: Transcript::new(),
             screen: Screen::new(),
+            streaming: StreamingController::new(),
+            streaming_flushed_assistant: false,
+            activity: ActivityPane::new(),
+            expanded: ExpandedFlag::new(),
             outbox: Vec::new(),
-            assistant_draft: String::new(),
-            thinking_draft: String::new(),
             exit_armed_at: None,
+            tip_index: 0,
+            tip_rotated_at: Instant::now(),
             version: version.into(),
         };
-        ui.push_welcome();
+        let info = welcome_info_of(&ui.state, &ui.version);
+        ui.transcript.push_new_turn(Box::new(Welcome::new(info)));
         ui
     }
 
-    fn push_welcome(&mut self) {
-        let info = crate::welcome::WelcomeInfo {
-            version: self.version.clone(),
-            model: self.state.model_name.clone(),
-            mode: permission_mode_label(&self.state.permission_mode).to_string(),
-            cwd: self.state.cwd.to_string_lossy().to_string(),
-            mcp_servers: self.state.mcp_servers.clone(),
+    /// Submit user text: queued while busy, sent otherwise.
+    pub fn submit(&mut self, text: &str) {
+        let text = text.to_string();
+        if self.state.busy() {
+            self.state.queued.push(text);
+            return;
+        }
+        self.push_user_message(&text);
+        self.enqueue(Op::UserInput { text });
+        self.state.phase = StreamingPhase::Waiting;
+        self.activity.set_phase(StreamingPhase::Waiting);
+    }
+
+    /// Queue one operation for the run loop to submit.
+    pub fn enqueue(&mut self, op: Op) {
+        self.outbox.push(op);
+    }
+
+    /// Drain the pending operations into the session (run loop calls).
+    pub async fn flush_outbox(&mut self) {
+        for op in std::mem::take(&mut self.outbox) {
+            let submission = Submission {
+                id: Uuid::new_v4().to_string(),
+                op,
+            };
+            if let Err(error) = self.link.submit(submission).await {
+                self.push_status(&format!("submission failed: {error}"), true);
+            }
+        }
+    }
+
+    /// Await the next session event.
+    pub async fn next_event(&mut self) -> Option<Event> {
+        self.link.next_event().await
+    }
+
+    /// Steer the running turn with the queued message or editor text.
+    /// Returns true when steering landed.
+    pub fn steer(&mut self) -> bool {
+        if !self.state.busy() {
+            self.push_status("nothing is running to steer", false);
+            return false;
+        }
+        let source = if let Some(queued) = self.state.queued.first().cloned() {
+            Some((queued, true))
+        } else if !self.editor.is_empty() {
+            Some((self.editor.text(), false))
+        } else {
+            None
         };
-        self.transcript.push(Box::new(Welcome::new(info)));
+        let Some((text, from_queue)) = source else {
+            self.push_status("type a message or queue one to steer", false);
+            return false;
+        };
+        let landed = self.link.steer(&text, SteerTarget::NextStep);
+        if landed {
+            if from_queue {
+                self.state.queued.remove(0);
+            } else {
+                self.editor.clear();
+            }
+            self.push_status("steering the running turn", false);
+        } else {
+            self.push_status("steering is unavailable for this session", true);
+        }
+        landed
     }
 
     /// Push one user message.
     pub fn push_user_message(&mut self, text: &str) {
-        self.transcript.push(Box::new(UserMessage::new(text)));
+        self.transcript
+            .push_new_turn(Box::new(UserMessage::new(text)));
     }
 
     /// Push one assistant markdown message.
@@ -135,26 +236,36 @@ impl ConsoleUi {
         }
     }
 
-    /// Submit user text: queued while busy, sent otherwise.
-    pub fn submit(&mut self, text: &str) {
-        let text = text.to_string();
-        if self.state.busy() {
-            self.state.queued.push(text);
-            return;
+    /// Fold the live thinking block into a finalized transcript entry.
+    fn finalize_thinking(&mut self) {
+        if !self.streaming.thinking.is_empty() {
+            let text = std::mem::take(&mut self.streaming.thinking);
+            self.transcript
+                .push(Box::new(Thinking::finalized(text, self.expanded.clone())));
         }
-        self.push_user_message(&text);
-        self.enqueue(Op::UserInput { text });
-        self.state.phase = StreamingPhase::Waiting;
     }
 
-    /// Queue one operation for the run loop to submit.
-    pub fn enqueue(&mut self, op: Op) {
-        self.outbox.push(op);
+    /// Flush the streamed assistant draft into a transcript message.
+    fn flush_assistant_draft(&mut self) {
+        if !self.streaming.assistant.is_empty() {
+            let draft = self.streaming.take_assistant();
+            self.push_assistant_message(&draft);
+        }
     }
 
-    /// Drain the pending operations (the run loop submits these).
-    pub fn take_ops(&mut self) -> Vec<Op> {
-        std::mem::take(&mut self.outbox)
+    /// Session status queries (slash commands call these on demand).
+    pub fn status(&self) -> &Arc<dyn StatusQueries> {
+        &self.status
+    }
+
+    /// Pending outbox length (tests).
+    pub fn take_outbox_len(&mut self) -> usize {
+        self.outbox.len()
+    }
+
+    /// Borrow the pending outbox (tests).
+    pub fn pending_ops(&self) -> &Vec<Op> {
+        &self.outbox
     }
 
     /// Handle one wire event; returns true when the frame changed.
@@ -162,37 +273,45 @@ impl ConsoleUi {
         match msg {
             EventMsg::TurnStarted => {
                 self.state.phase = StreamingPhase::Waiting;
+                self.activity.set_phase(StreamingPhase::Waiting);
                 true
             }
             EventMsg::AgentThinkingDelta { text } => {
-                self.thinking_draft.push_str(text);
+                self.streaming.push_thinking(text);
                 self.state.phase = StreamingPhase::Thinking;
+                self.activity.set_phase(StreamingPhase::Thinking);
                 true
             }
             EventMsg::AgentMessageDelta { text } => {
-                self.assistant_draft.push_str(text);
+                self.finalize_thinking();
+                self.streaming.push_assistant(text);
+                self.streaming_flushed_assistant = true;
                 self.state.phase = StreamingPhase::Composing;
+                self.activity.set_phase(StreamingPhase::Composing);
                 true
             }
             EventMsg::AgentMessageComplete { text } => {
-                // Deltas already streamed the text; the completion carries
-                // the full body for transcript rendering.
-                if !self.assistant_draft.is_empty() {
-                    let draft = std::mem::take(&mut self.assistant_draft);
-                    self.push_assistant_message(&draft);
-                } else if !text.is_empty() {
+                self.finalize_thinking();
+                // Deltas accumulated the full body; only fall back to the
+                // completion text when nothing streamed.
+                self.flush_assistant_draft();
+                if !self.streaming_flushed_assistant && !text.is_empty() {
                     self.push_assistant_message(text);
                 }
-                self.thinking_draft.clear();
+                self.streaming_flushed_assistant = false;
                 true
             }
             EventMsg::ToolCallBegin { name, .. } => {
+                self.finalize_thinking();
+                self.flush_assistant_draft();
                 self.state.phase = StreamingPhase::Tool;
+                self.activity.set_phase(StreamingPhase::Tool);
                 self.push_status(&format!("running {name}"), false);
                 true
             }
             EventMsg::ToolCallEnd { is_error, .. } => {
                 self.state.phase = StreamingPhase::Composing;
+                self.activity.set_phase(StreamingPhase::Composing);
                 if *is_error {
                     self.push_status("tool call failed", true);
                 }
@@ -212,13 +331,8 @@ impl ConsoleUi {
                 true
             }
             EventMsg::CompactCompleted { summary_tokens } => {
-                self.push_status(
-                    &format!(
-                        "context compacted ({} tokens)",
-                        format_tokens(*summary_tokens)
-                    ),
-                    false,
-                );
+                self.push_status("context compacted", false);
+                let _ = summary_tokens;
                 true
             }
             EventMsg::PlanProposed { text } => {
@@ -248,16 +362,21 @@ impl ConsoleUi {
                 self.push_status(&format!("error: {message}"), true);
                 if !*recoverable {
                     self.state.phase = StreamingPhase::Idle;
+                    self.activity.set_phase(StreamingPhase::Idle);
                 }
                 true
             }
             EventMsg::TurnCompleted { interrupted } => {
+                self.finalize_thinking();
+                self.flush_assistant_draft();
+                self.streaming.clear();
                 self.state.phase = StreamingPhase::Idle;
+                self.activity.set_phase(StreamingPhase::Idle);
                 if *interrupted {
                     self.push_status("interrupted", false);
                 }
-                self.assistant_draft.clear();
-                self.thinking_draft.clear();
+                // Trim old turns now that the frame is stable.
+                self.transcript.trim();
                 // Dequeue a queued message as the next turn.
                 if !self.state.queued.is_empty() {
                     let next = self.state.queued.remove(0);
@@ -304,6 +423,18 @@ impl ConsoleUi {
                     Flow::Continue
                 }
             }
+            (Key::Char('o'), m) if m.ctrl => {
+                self.expanded.toggle();
+                Flow::Continue
+            }
+            (Key::Char('s'), m) if m.ctrl => {
+                self.steer();
+                Flow::Continue
+            }
+            (Key::Esc, _) if self.state.busy() => {
+                self.enqueue(Op::Interrupt);
+                Flow::Continue
+            }
             (Key::Up, _) => {
                 self.editor.history_previous();
                 Flow::Continue
@@ -340,55 +471,43 @@ impl ConsoleUi {
 
     /// The two footer rows.
     pub fn footer(&mut self, columns: usize) -> Vec<String> {
-        let theme = theme::current();
-        let mut line1 = String::new();
-        line1.push_str(&mode_badge(&self.state.permission_mode));
-        line1.push_str("  ");
-        line1.push_str(&theme.paint(Token::Text, &self.state.model_name));
-        line1.push_str("  ");
-        line1.push_str(&theme.paint(Token::TextDim, &shorten_cwd(&self.state.cwd, 3)));
-
-        let mut line2 = String::new();
-        if self.exit_armed() {
-            line2.push_str(&theme.bold(Token::Warning, "Press ctrl+c again to exit"));
+        if self.tip_rotated_at.elapsed() >= TIP_ROTATE_INTERVAL {
+            self.tip_index = self.tip_index.wrapping_add(1);
+            self.tip_rotated_at = Instant::now();
         }
-        let mut right = String::new();
-        if let (Some(used), Some(window)) = (self.state.context_used, self.state.context_window) {
-            right = format!(
-                "context: {}% ({}/{})",
-                context_percent(used, window),
-                format_tokens(used),
-                format_tokens(window)
-            );
-            right = theme.paint(Token::Text, &right);
-        }
-        let left_width = width::width(&line2);
-        let right_width = width::width(&right);
-        let spacing = columns
-            .saturating_sub(left_width + right_width)
-            .max(if right.is_empty() { 0 } else { 1 });
-        line2.push_str(&" ".repeat(spacing));
-        line2.push_str(&right);
-        vec![line1, line2]
+        let tip = footer_chrome::TIPS[self.tip_index % footer_chrome::TIPS.len()];
+        let hint = if self.exit_armed() {
+            TransientHint::ExitConfirm
+        } else {
+            TransientHint::None
+        };
+        vec![
+            footer_chrome::row1(&self.state, Some(tip), columns),
+            footer_chrome::row2(&self.state, &hint, columns),
+        ]
     }
 
     /// Assemble the full frame at (columns, rows).
     pub fn frame(&mut self, columns: usize, rows: usize) -> Vec<String> {
         let inner = columns.saturating_sub(GUTTER * 2);
         let mut lines = Vec::new();
-        let _ = &self.status;
-        for component in &mut self.transcript {
-            lines.extend(component.render(inner));
+        lines.extend(self.transcript.render(inner));
+        // Live thinking block (moves to the transcript when finalized).
+        if !self.streaming.thinking.is_empty() {
+            let mut block = Thinking::live(self.expanded.clone());
+            block.push(&self.streaming.thinking.clone());
+            lines.extend(Component::render(&mut block, inner));
         }
-        // In-flight draft renders as a live message (streaming).
-        if !self.assistant_draft.is_empty() {
+        // Live assistant draft.
+        if !self.streaming.assistant.is_empty() {
             let mut draft =
-                AssistantMessage::new(self.assistant_draft.clone(), Box::new(PlainHighlighter));
-            lines.extend(tui_engine::Component::render(&mut draft, inner));
+                AssistantMessage::new(self.streaming.assistant.clone(), Box::new(PlainHighlighter));
+            lines.extend(Component::render(&mut draft, inner));
         }
+        lines.extend(self.activity.render(inner));
+        lines.extend(panes::render_queue(&self.state.queued, inner));
         lines.extend(self.editor.render_box(inner, rows));
         lines.extend(self.footer(inner));
-        // Apply the chrome gutter as a uniform left indent.
         let pad = " ".repeat(GUTTER);
         lines
             .into_iter()
@@ -396,8 +515,13 @@ impl ConsoleUi {
             .collect()
     }
 
+    /// True when an animation tick must repaint (busy phases animate).
+    pub fn needs_tick_render(&self) -> bool {
+        self.state.busy() || self.exit_armed()
+    }
+
     /// Render one frame to the terminal.
-    pub fn render(&mut self, out: &mut impl Write, columns: usize, rows: usize) {
+    pub fn render(&mut self, out: &mut impl std::io::Write, columns: usize, rows: usize) {
         let frame = self.frame(columns, rows);
         let mut buffer: Vec<u8> = Vec::with_capacity(16 * 1024);
         self.screen.draw(&mut buffer, &frame, columns, rows);
@@ -406,19 +530,19 @@ impl ConsoleUi {
     }
 }
 
-/// The bracketed mode badge for the footer.
-pub fn mode_badge(mode: &str) -> String {
-    let theme = theme::current();
-    let (label, token) = match mode {
-        "plan" => ("[Plan Mode]", Token::Primary),
-        "auto" => ("[Auto Approve]", Token::Warning),
-        _ => ("[Ask When Needed]", Token::Text),
-    };
-    theme.bold(token, label)
+/// Welcome info derived from state (construction-order helper).
+fn welcome_info_of(state: &AppState, version: &str) -> crate::welcome::WelcomeInfo {
+    crate::welcome::WelcomeInfo {
+        version: version.to_string(),
+        model: state.model_name.clone(),
+        mode: crate::ui::permission_mode_label(&state.permission_mode).to_string(),
+        cwd: state.cwd.to_string_lossy().to_string(),
+        mcp_servers: state.mcp_servers.clone(),
+    }
 }
 
 /// Shorten a cwd for the footer: home → `~`, keep the last `keep`
-/// segments with a `…/` prefix when trimmed.
+/// segments with a `~/` prefix when trimmed.
 pub fn shorten_cwd(path: &std::path::Path, keep: usize) -> String {
     let text = path.to_string_lossy().to_string();
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
@@ -454,14 +578,14 @@ pub fn permission_mode_label(mode: &str) -> &'static str {
 /// Handles key events, bracketed pastes, resizes, and session events;
 /// renders through the differential screen. Ctrl+C exits via the
 /// double-press cascade (interrupting the turn first when busy).
-pub async fn run(mut client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
+pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
     let mut guard =
         TerminalGuard::enter().map_err(|e| anyhow::anyhow!("terminal init failed: {e}"))?;
     let _ = guard.keyboard_enhanced();
     theme::set(theme::detect::resolve(None));
 
     let (mut columns, mut rows) = terminal::size().unwrap_or((80, 24));
-    let mut ui = ConsoleUi::new(&ctx, env!("CARGO_PKG_VERSION"));
+    let mut ui = ConsoleUi::new(Box::new(client), &ctx, env!("CARGO_PKG_VERSION"));
     ui.render(&mut std::io::stdout().lock(), columns, rows);
 
     let mut events = EventStream::new();
@@ -471,16 +595,7 @@ pub async fn run(mut client: ActorClient, ctx: UiContext) -> anyhow::Result<()> 
 
     while flow == Flow::Continue {
         let stdout = std::io::stdout();
-        // Drain queued submissions before waiting for the next event.
-        for op in ui.take_ops() {
-            let submission = Submission {
-                id: Uuid::new_v4().to_string(),
-                op,
-            };
-            if let Err(error) = client.submit(submission).await {
-                ui.push_status(&format!("submission failed: {error}"), true);
-            }
-        }
+        ui.flush_outbox().await;
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(CEvent::Key(key))) => {
@@ -503,7 +618,7 @@ pub async fn run(mut client: ActorClient, ctx: UiContext) -> anyhow::Result<()> 
                 Some(Err(_)) => {}
                 None => break,
             },
-            event = client.next_event() => {
+            event = ui.next_event() => {
                 match event {
                     Some(event) => {
                         ui.handle_wire_event(&event.msg);
@@ -513,9 +628,10 @@ pub async fn run(mut client: ActorClient, ctx: UiContext) -> anyhow::Result<()> 
                 }
             }
             _ = tick.tick() => {
-                // Animation frames (spinners) land with the phase work in
-                // later phases; render only when the exit hint expires.
-                ui.render(&mut stdout.lock(), columns, rows);
+                // Spinner animation and streaming flush cadence.
+                if ui.needs_tick_render() {
+                    ui.render(&mut stdout.lock(), columns, rows);
+                }
             }
         }
     }
@@ -525,8 +641,8 @@ pub async fn run(mut client: ActorClient, ctx: UiContext) -> anyhow::Result<()> 
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    //! A no-op status seam for tests.
-    use operations_actor::StatusQueries;
+    //! Test seams: a no-op status view and a recording session link.
+    use super::*;
 
     /// All queries empty.
     pub struct NullStatus;
@@ -545,6 +661,42 @@ pub(crate) mod test_support {
             None
         }
     }
+
+    /// Records submissions and steering; yields no events.
+    #[derive(Default)]
+    pub struct TestLink {
+        pub submitted: std::sync::Mutex<Vec<Op>>,
+        pub steered: std::sync::Mutex<Vec<(String, SteerTarget)>>,
+    }
+
+    impl TestLink {
+        pub fn new() -> Self {
+            Self::default()
+        }
+    }
+
+    #[async_trait]
+    impl SessionLink for TestLink {
+        async fn submit(&self, submission: Submission) -> Result<(), SubmitError> {
+            self.submitted
+                .lock()
+                .expect("test lock")
+                .push(submission.op);
+            Ok(())
+        }
+
+        async fn next_event(&mut self) -> Option<Event> {
+            std::future::pending().await
+        }
+
+        fn steer(&self, text: &str, target: SteerTarget) -> bool {
+            self.steered
+                .lock()
+                .expect("test lock")
+                .push((text.to_string(), target));
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -552,29 +704,206 @@ mod tests {
     use super::*;
     use crate::theme;
     use std::path::Path;
+    use test_support::{NullStatus, TestLink};
     use tui_engine::keys::Mods;
     use tui_engine::width::strip_ansi;
 
-    fn ctx() -> UiContext {
-        UiContext {
-            model_name: "test-model".to_string(),
-            cwd: PathBuf::from("/home/user/work/proj/sub"),
-            permission_mode: "guarded".to_string(),
-            skill_names: Vec::new(),
-            mcp_servers: vec!["fs".to_string()],
-            status: Arc::new(test_support::NullStatus),
-        }
+    fn ui() -> ConsoleUi {
+        theme::set(theme::Theme::dark());
+        ConsoleUi::new(
+            Box::new(TestLink::new()),
+            &UiContext {
+                model_name: "test-model".to_string(),
+                cwd: PathBuf::from("/home/user/work/proj/sub"),
+                permission_mode: "guarded".to_string(),
+                skill_names: Vec::new(),
+                mcp_servers: vec!["fs".to_string()],
+                status: Arc::new(NullStatus),
+            },
+            "0.1.0",
+        )
     }
 
     #[test]
-    fn mode_badges_match_display_names() {
-        theme::set(theme::Theme::dark());
-        assert_eq!(strip_ansi(&mode_badge("plan")), "[Plan Mode]");
-        assert_eq!(strip_ansi(&mode_badge("auto")), "[Auto Approve]");
-        assert_eq!(strip_ansi(&mode_badge("guarded")), "[Ask When Needed]");
-        assert_eq!(strip_ansi(&mode_badge("unknown")), "[Ask When Needed]");
-        // Auto carries the warning color (bold amber).
-        assert!(mode_badge("auto").contains("\x1b[38;2;232;168;56;1m"));
+    fn welcome_card_lists_brand_and_mcp() {
+        let mut ui = ui();
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("WaveCode"), "brand: {joined}");
+        assert!(joined.contains("1 servers"), "mcp count: {joined}");
+        assert!(joined.contains("Directory:"), "{joined}");
+    }
+
+    #[test]
+    fn submit_enqueues_and_renders_user_message() {
+        let mut ui = ui();
+        ui.submit("hello");
+        assert!(ui.state.busy(), "turn in flight");
+        assert_eq!(ui.take_outbox_len(), 1, "user_input queued on the outbox");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("hello"), "user text in frame: {joined}");
+    }
+
+    #[test]
+    fn busy_submit_queues_message_and_pane_renders() {
+        let mut ui = ui();
+        ui.submit("first");
+        ui.submit("second");
+        assert_eq!(ui.state.queued, vec!["second".to_string()]);
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("❯ second"), "queue pane: {joined}");
+        assert!(joined.contains("ctrl-s to steer"), "steer hint: {joined}");
+    }
+
+    #[test]
+    fn turn_completion_dequeues_next_message() {
+        let mut ui = ui();
+        ui.submit("first");
+        ui.submit("second");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(ui.state.busy(), "queued message starts the next turn");
+        assert!(ui.state.queued.is_empty());
+    }
+
+    #[test]
+    fn thinking_streaming_finalizes_into_transcript() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentThinkingDelta {
+            text: "pondering".to_string(),
+        });
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("thinking…"), "live header: {joined}");
+        assert!(joined.contains("pondering"), "live tail: {joined}");
+        // Assistant output finalizes the thinking block.
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "answer".to_string(),
+        });
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "answer".to_string(),
+        });
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("pondering"), "finalized block persists");
+        assert!(joined.contains("answer"), "assistant text: {joined}");
+        assert!(!joined.contains("thinking…"), "live header gone: {joined}");
+    }
+
+    #[test]
+    fn completion_without_deltas_still_renders() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "direct answer".to_string(),
+        });
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("direct answer"), "{joined}");
+    }
+
+    #[test]
+    fn ctrl_c_cascade_arms_then_exits() {
+        let mut ui = ui();
+        assert_eq!(
+            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
+            Flow::Continue
+        );
+        assert_eq!(
+            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
+            Flow::Exit
+        );
+    }
+
+    #[test]
+    fn ctrl_c_while_busy_interrupts_instead_of_exiting() {
+        let mut ui = ui();
+        ui.submit("go");
+        assert_eq!(
+            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
+            Flow::Continue
+        );
+        assert!(!ui.exit_armed(), "interrupt does not arm exit");
+        assert!(matches!(ui.pending_ops().last(), Some(Op::Interrupt)));
+    }
+
+    #[test]
+    fn ctrl_o_toggles_expansion() {
+        let mut ui = ui();
+        assert!(!ui.expanded.get());
+        ui.handle_key(KeyEvent::new(Key::Char('o'), Mods::CTRL));
+        assert!(ui.expanded.get());
+        ui.handle_key(KeyEvent::new(Key::Char('o'), Mods::CTRL));
+        assert!(!ui.expanded.get());
+    }
+
+    #[test]
+    fn ctrl_s_steers_with_editor_text() {
+        let mut ui = ui();
+        ui.submit("go");
+        // Type text into the editor via direct insert.
+        ui.editor.insert_text("change course");
+        assert!(ui.steer());
+        assert!(ui.editor.is_empty(), "editor cleared after steering");
+    }
+
+    #[test]
+    fn ctrl_s_without_running_turn_reports() {
+        let mut ui = ui();
+        ui.editor.insert_text("hello");
+        assert!(!ui.steer(), "idle turn cannot steer");
+        assert!(ui.editor.text() == "hello", "editor untouched");
+    }
+
+    #[test]
+    fn esc_while_busy_interrupts() {
+        let mut ui = ui();
+        ui.submit("go");
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(matches!(ui.pending_ops().last(), Some(Op::Interrupt)));
+    }
+
+    #[test]
+    fn footer_shows_context_meter() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::TokenCount {
+            input_tokens: 84_000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            context_window: Some(200_000),
+            context_used: Some(84_000),
+        });
+        let footer = ui.footer(80);
+        let right = strip_ansi(&footer[1]);
+        assert!(
+            right.trim_end().ends_with("context: 42% (82.0k/195k)"),
+            "footer line 2: {right:?}"
+        );
     }
 
     #[test]
@@ -593,121 +922,18 @@ mod tests {
     }
 
     #[test]
-    fn footer_shows_context_meter() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        ui.handle_wire_event(&EventMsg::TokenCount {
-            input_tokens: 84_000,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_creation_tokens: 0,
-            context_window: Some(200_000),
-            context_used: Some(84_000),
-        });
-        let footer = ui.footer(80);
-        let right = strip_ansi(&footer[1]);
-        assert!(
-            right.trim_end().ends_with("context: 42% (82.0k/195k)"),
-            "footer line 2: {right:?}"
-        );
-    }
-
-    #[test]
-    fn submit_enqueues_and_renders_user_message() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        ui.submit("hello");
-        assert!(ui.state.busy(), "turn in flight");
-        assert_eq!(ui.take_ops().len(), 1, "user_input queued on the outbox");
-        let frame = ui.frame(80, 24);
-        let joined: String = frame
-            .iter()
-            .map(|l| strip_ansi(l))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("hello"), "user text in frame: {joined}");
-    }
-
-    #[test]
-    fn busy_submit_queues_message() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        ui.submit("first");
-        ui.submit("second");
-        assert_eq!(ui.state.queued, vec!["second".to_string()]);
-    }
-
-    #[test]
-    fn turn_completion_dequeues_next_message() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        ui.submit("first");
-        ui.submit("second");
-        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
-        assert!(ui.state.busy(), "queued message starts the next turn");
-        assert!(ui.state.queued.is_empty());
-    }
-
-    #[test]
-    fn ctrl_c_cascade_arms_then_exits() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        assert_eq!(
-            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
-            Flow::Continue
-        );
-        assert_eq!(
-            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
-            Flow::Exit
-        );
-    }
-
-    #[test]
-    fn ctrl_c_while_busy_interrupts_instead_of_exiting() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        ui.submit("go");
-        assert_eq!(
-            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
-            Flow::Continue
-        );
-        assert!(!ui.exit_armed(), "interrupt does not arm exit");
-        assert!(matches!(ui.take_ops().last(), Some(Op::Interrupt)));
-    }
-
-    #[test]
-    fn assistant_streaming_lands_as_transcript_message() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
+    fn frame_lines_fit_width() {
+        let mut ui = ui();
+        ui.submit("a very long user message that certainly wraps inside the eighty column budget of this test frame");
         ui.handle_wire_event(&EventMsg::AgentMessageDelta {
-            text: "hel".to_string(),
-        });
-        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
-            text: "lo".to_string(),
-        });
-        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
-            text: "hello".to_string(),
+            text: "streamed reply ".repeat(20).trim_end().to_string(),
         });
         let frame = ui.frame(80, 24);
-        let joined: String = frame
-            .iter()
-            .map(|l| strip_ansi(l))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("hello"), "assistant body: {joined}");
-    }
-
-    #[test]
-    fn welcome_card_lists_mcp_servers() {
-        theme::set(theme::Theme::dark());
-        let mut ui = ConsoleUi::new(&ctx(), "0.1.0");
-        let frame = ui.frame(80, 24);
-        let joined: String = frame
-            .iter()
-            .map(|l| strip_ansi(l))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("WaveCode"), "brand: {joined}");
-        assert!(joined.contains("1 servers"), "mcp count: {joined}");
+        for line in &frame {
+            assert!(
+                tui_engine::width::width(line) <= 80,
+                "line exceeds width: {line:?}"
+            );
+        }
     }
 }

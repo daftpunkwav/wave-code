@@ -75,14 +75,7 @@ where
         system: String,
     ) -> ActorClient {
         Self::spawn_inner(
-            driver,
-            conv,
-            children,
-            approvals,
-            questions,
-            interrupt,
-            system,
-            None,
+            driver, conv, children, approvals, questions, interrupt, system, None,
         )
     }
 

@@ -313,6 +313,13 @@ async fn run_step(
             match await_child(tasks, task_id).await {
                 Ok(summary) => summaries.push(summary),
                 Err(reason) => {
+                    // The step has failed; stop the siblings still in
+                    // flight so a failed workflow does not leave orphan
+                    // children burning tokens and injecting notices.
+                    // Stopping already-finished ids is a harmless no-op.
+                    for pending in &ids {
+                        tasks.stop(pending);
+                    }
                     return Err(WorkflowError::StepFailed {
                         id: step.id.clone(),
                         reason,
@@ -558,6 +565,77 @@ mod tests {
                 id: "fragile".to_string(),
                 reason: "boom".to_string(),
             }
+        );
+    }
+
+    /// Stub failing every child while recording every `stop`, so the
+    /// sibling-teardown path is observable.
+    struct FailAllRecordingStops {
+        stopped: Mutex<Vec<String>>,
+        spawned: Mutex<Vec<String>>,
+    }
+
+    impl TaskService for FailAllRecordingStops {
+        fn spawn(&self, _request: TaskRequest) -> String {
+            let id = format!(
+                "task-{}",
+                self.spawned.lock().unwrap_or_else(|e| e.into_inner()).len() + 1
+            );
+            self.spawned
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(id.clone());
+            id
+        }
+
+        fn query(&self, _id: &str) -> Option<action_tasks::TaskInfo> {
+            Some(action_tasks::TaskInfo {
+                state: TaskState::Finished,
+                outcome: Some(TaskOutcome::Failed {
+                    reason: "boom".to_string(),
+                }),
+                lineage: Vec::new(),
+            })
+        }
+
+        fn stop(&self, id: &str) -> bool {
+            self.stopped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(id.to_string());
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn step_failure_stops_every_child_in_the_chunk() {
+        let spec = WorkflowSpec {
+            steps: vec![WorkflowStep {
+                id: "fan".to_string(),
+                kind: StepKind::Fanout,
+                input: serde_json::json!(["x", "y", "z"]),
+                depends_on: Vec::new(),
+                max_parallel: None,
+            }],
+        };
+        let service = FailAllRecordingStops {
+            stopped: Mutex::new(Vec::new()),
+            spawned: Mutex::new(Vec::new()),
+        };
+        let err = run_workflow(&spec, &service).await.expect_err("run fails");
+        assert!(
+            matches!(err, WorkflowError::StepFailed { ref reason, .. } if reason.contains("boom")),
+            "{err:?}"
+        );
+        // The failing step's whole chunk was asked to stop: an in-flight
+        // sibling must not keep burning tokens after the step failed.
+        assert_eq!(
+            service.stopped.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            vec![
+                "task-1".to_string(),
+                "task-2".to_string(),
+                "task-3".to_string()
+            ]
         );
     }
 

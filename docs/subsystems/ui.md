@@ -47,9 +47,9 @@ receivers remain compatible.
 | --- | --- |
 | `TurnStarted` | phase → waiting |
 | `AgentThinkingDelta` | live thinking block (spinner + last 2 lines, dim italic) |
-| `AgentMessageDelta` | thinking finalizes; assistant draft streams (50 ms flush cadence) |
+| `AgentMessageDelta` | thinking finalizes; assistant draft streams (delta batches mark the draft dirty; the frame repaints when the 50 ms flush interval elapses, or on the 100 ms tick) |
 | `AgentMessageComplete` | draft (or completion text) lands as a markdown message |
-| `ToolCallBegin` / `ToolCallEnd` | tool card open/close (state dot, verb, key arg, outcome) |
+| `ToolCallBegin` / `ToolCallEnd` | tool card open/close (state dot, verb, key arg, outcome); `edit_file` cards lead with a clustered LCS diff preview (2 000-line budget per side) |
 | `ApprovalRequested` | approval dialog (1/2 quick-select, Enter, Esc = deny) |
 | `QuestionRequested` | question dialog (numbered options + free text) |
 | `TokenCount` | footer context meter |
@@ -73,6 +73,23 @@ receivers remain compatible.
   exit (1 500 ms window, footer hint). Ctrl+O toggles expansion, Ctrl+S
   steers the running turn (queued message or editor text), Esc
   interrupts while busy.
+
+## Input sanitizing
+
+`ConsoleUi::push_status` / `push_user_message` / `push_assistant_message`
+and the delta handlers funnel every wire-sourced string through
+`sanitize_terminal` before it enters a component; tool cards sanitize
+name and argument summaries the same way. The engine adds a second
+guard: markdown hyperlinks whose URL carries control characters degrade
+to plain styled text (no OSC 8 emission). The trust boundary stays the
+same as the rest of the harness: wire strings are hostile until
+sanitized.
+
+## Steering vocabulary note
+
+`SteerTarget` originates in `runtime-runner` but is re-exported through
+`operations-actor`; the console depends only on the actor crate, which
+is the established seam (the actor already wraps the runner).
 
 ## Theming
 

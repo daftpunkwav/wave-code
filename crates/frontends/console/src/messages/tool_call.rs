@@ -5,9 +5,11 @@
 //! the shared Ctrl+O flag expands the result body. Per-tool argument
 //! summaries come from [`args_summary`].
 
+use crate::diff;
 use crate::messages::ExpandedFlag;
 use crate::theme::{self, Token};
 use tui_engine::component::Component;
+use tui_engine::sanitize::sanitize_terminal;
 use tui_engine::width;
 
 /// Argument values truncate to this length (head/tail aware).
@@ -49,7 +51,7 @@ pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
         _ => pick(&["path", "command", "url", "query", "name", "description"]),
     }
     .unwrap_or_default();
-    truncate_arg(&raw, MAX_ARG_LENGTH)
+    truncate_arg(sanitize_terminal(&raw).as_ref(), MAX_ARG_LENGTH)
 }
 
 /// Smart path shortening: deep paths keep their tail.
@@ -70,6 +72,9 @@ fn truncate_arg(value: &str, max: usize) -> String {
     out.push('…');
     out
 }
+
+/// Old/new text pairs worth a clustered diff preview.
+const DIFF_TOOLS: [&str; 1] = ["edit_file"];
 
 /// The verb for a card header.
 pub fn verb(name: &str, state: ToolState) -> String {
@@ -108,6 +113,8 @@ pub struct ToolCall {
     state: ToolState,
     /// Result preview (head of the output, truncation flag).
     output: Option<(String, bool)>,
+    /// Old/new pair for edit-style tools (clustered diff preview).
+    edit: Option<(String, String, Option<String>)>,
     expanded: ExpandedFlag,
     lines: Option<(usize, ToolState, bool, Vec<String>)>,
 }
@@ -115,11 +122,31 @@ pub struct ToolCall {
 impl ToolCall {
     /// A running card for a call.
     pub fn running(name: &str, input: &serde_json::Value, expanded: ExpandedFlag) -> Self {
+        let name = sanitize_terminal(name).into_owned();
+        let args = args_summary(&name, input);
+        let edit = DIFF_TOOLS.contains(&name.as_str()).then(|| {
+            let old = input
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .map(|s| sanitize_terminal(s).into_owned())
+                .unwrap_or_default();
+            let new = input
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .map(|s| sanitize_terminal(s).into_owned())
+                .unwrap_or_default();
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| sanitize_terminal(s).into_owned());
+            (old, new, path)
+        });
         Self {
-            name: name.to_string(),
-            args: args_summary(name, input),
+            name,
+            args,
             state: ToolState::Running,
             output: None,
+            edit,
             expanded,
             lines: None,
         }
@@ -168,6 +195,17 @@ impl ToolCall {
 
     fn body(&self, columns: usize) -> Vec<String> {
         let theme = theme::current();
+        // Edit-style calls lead with the clustered diff preview.
+        if let Some((old, new, path)) = &self.edit {
+            let incomplete = self.state == ToolState::Running;
+            let budget = if self.expanded.get() { 200 } else { 10 };
+            let mut rows = diff::render(old, new, path.as_deref(), incomplete, budget);
+            if rows.is_empty() {
+                // Oversized edit: summarize instead of computing a diff.
+                rows.push(theme.paint(Token::TextDim, "  (edit too large for an inline preview)"));
+            }
+            return rows;
+        }
         let Some((text, truncated)) = &self.output else {
             return Vec::new();
         };
@@ -304,6 +342,36 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("out5"), "expanded shows all: {joined}");
+    }
+
+    #[test]
+    fn edit_cards_render_clustered_diff() {
+        theme::set(theme::Theme::dark());
+        let input = serde_json::json!({
+            "path": "src/lib.rs",
+            "old_string": "a\nb\nc",
+            "new_string": "a\nX\nc",
+        });
+        let flag = ExpandedFlag::new();
+        let mut card = ToolCall::running("edit_file", &input, flag.clone());
+        card.finish(false, Some(("applied".to_string(), false)));
+        let lines = card.render(80);
+        let plain: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("+1 -1 src/lib.rs"), "diff header: {plain}");
+        assert!(plain.contains("+ X"), "added row: {plain}");
+        assert!(plain.contains("- b"), "removed row: {plain}");
+    }
+
+    #[test]
+    fn arg_summary_strips_escapes() {
+        theme::set(theme::Theme::dark());
+        let input = serde_json::json!({"path": "a\x1b[31mevil.rs"});
+        let summary = args_summary("read_file", &input);
+        assert!(!summary.contains('\x1b'), "{summary:?}");
     }
 
     #[test]

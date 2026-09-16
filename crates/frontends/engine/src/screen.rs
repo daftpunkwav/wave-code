@@ -20,7 +20,8 @@ use crate::width;
 pub struct ScreenOptions {
     /// Wrap frames in CSI 2026 synchronized-output markers.
     pub synchronized: bool,
-    /// Erase the scrollback on full redraws (kimi-style `\x1b[3J`).
+    /// Erase the scrollback on full redraws (the common-terminal
+    /// `\x1b[3J` extension).
     pub clear_scrollback: bool,
 }
 
@@ -218,9 +219,12 @@ impl Screen {
             }
         }
 
-        // Erase stale rows when the visible region shrank.
+        // Erase stale rows when the visible region shrank. The cursor
+        // physically moves down one row before the erase, so the tracked
+        // row must follow or the next frame's relative moves drift.
         if new_region.len() < prev_region.len() && row + 1 < height {
             let _ = write!(out, "\r\x1b[1B\x1b[J");
+            row += 1;
         }
 
         self.synchronized_end(out);
@@ -428,6 +432,33 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("g"), "{text:?}");
         assert!(!text.contains("\x1b[2J"), "no full redraw: {text:?}");
+    }
+
+    #[test]
+    fn shrink_then_grow_stays_aligned() {
+        // Drift regression: the shrink erase moves the physical cursor
+        // down one row; the tracked row must follow or the next frame
+        // writes at the wrong viewport row.
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha", "x"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("\x1b[1B"),
+            "no downward travel expected: {text:?}"
+        );
+        assert!(
+            text.starts_with("\r\x1b[1A\x1b[Kx"),
+            "one row up, rewrite in the erased row: {text:?}"
+        );
+        assert!(text.contains("x\x1b[0m"), "{text:?}");
     }
 
     #[test]

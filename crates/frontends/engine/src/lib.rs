@@ -51,18 +51,35 @@ pub use screen::{Screen, ScreenOptions};
 mod dependency_matrix_locked {
     use std::path::Path;
 
-    /// The engine stays a pure library: its Cargo.toml must not carry
-    /// any internal (path) dependencies. Adding one is a boundary
-    /// change: update this test deliberately.
+    /// The engine stays a pure library: its `[dependencies]` keys must
+    /// all be known external crates. Matching every key (not just
+    /// `path =`) closes the `foo.workspace = true` bypass. Adding an
+    /// internal dependency is a boundary change: update deliberately.
     #[test]
     fn engine_has_no_internal_dependencies() {
+        const EXTERNAL: [&str; 4] = [
+            "crossterm",
+            "unicode-width",
+            "unicode-segmentation",
+            "pulldown-cmark",
+        ];
         let manifest = include_str!("../Cargo.toml");
+        let mut in_deps = false;
         for line in manifest.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with('#') || !trimmed.contains("path =") {
+            if trimmed.starts_with('[') {
+                in_deps = trimmed == "[dependencies]";
                 continue;
             }
-            panic!("internal dependency found: {trimmed}");
+            if !in_deps || trimmed.starts_with('#') || trimmed.is_empty() {
+                continue;
+            }
+            let raw_key = trimmed.split('=').next().map(str::trim).unwrap_or("");
+            let key = raw_key.split('.').next().unwrap_or(raw_key);
+            assert!(
+                EXTERNAL.contains(&key),
+                "unexpected dependency `{key}`: internal deps are forbidden"
+            );
         }
         let _ = Path::new("Cargo.toml");
     }

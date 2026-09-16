@@ -227,7 +227,7 @@ pub fn slice_by_column(line: &str, start: usize, len: usize) -> String {
         match token {
             Token::Escape(seq) => out.push_str(seq),
             Token::Grapheme(g) => {
-                let w = unicode_width::UnicodeWidthStr::width(g).max(1);
+                let w = unicode_width::UnicodeWidthStr::width(g);
                 let next = col + w;
                 if col >= start && next <= start + len {
                     out.push_str(g);
@@ -248,12 +248,6 @@ pub fn pad_to_width(line: &str, total: usize) -> String {
     } else {
         format!("{line}{}", " ".repeat(total - current))
     }
-}
-
-/// True for wide East Asian characters and other non-ASCII wide glyphs,
-/// which may wrap even without an intervening space.
-fn is_wide(g: &str) -> bool {
-    unicode_width::UnicodeWidthStr::width(g) > 1
 }
 
 /// Word-wrap one styled line to `max_width` visible columns. Escape
@@ -290,9 +284,6 @@ pub fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
                     lines.push(std::mem::take(&mut current));
                     used = 0;
                     current.push_str(&state.sequence());
-                    if is_wide(g) && w <= max_width {
-                        // CJK-style break: no space to drop.
-                    }
                 }
                 used += w;
                 current.push_str(g);

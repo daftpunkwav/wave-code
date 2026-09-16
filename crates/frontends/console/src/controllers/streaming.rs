@@ -43,14 +43,16 @@ impl StreamingController {
 
     fn mark_dirty(&mut self) -> bool {
         self.dirty = true;
-        // Runaway-sample guard: hard-cap the live drafts.
-        if self.assistant.len() > MAX_DRAFT_BYTES {
-            self.assistant.truncate(MAX_DRAFT_BYTES);
-        }
-        if self.thinking.len() > MAX_DRAFT_BYTES {
-            self.thinking.truncate(MAX_DRAFT_BYTES);
-        }
+        // Runaway-sample guard: hard-cap the live drafts without ever
+        // splitting a UTF-8 character (`String::truncate` would panic).
+        truncate_at_boundary(&mut self.assistant, MAX_DRAFT_BYTES);
+        truncate_at_boundary(&mut self.thinking, MAX_DRAFT_BYTES);
         self.due(Instant::now())
+    }
+
+    /// True when a draft changed since the last flush.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     /// True when dirty and the flush interval has elapsed.
@@ -91,6 +93,18 @@ impl Default for StreamingController {
     }
 }
 
+/// Cap `text` at `max` bytes on the nearest character boundary.
+fn truncate_at_boundary(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let mut cut = max;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +143,22 @@ mod tests {
         let mut controller = StreamingController::new();
         controller.push_assistant(&"x".repeat(MAX_DRAFT_BYTES + 1024));
         assert!(controller.assistant.len() <= MAX_DRAFT_BYTES);
+    }
+
+    #[test]
+    fn cjk_draft_caps_without_panicking() {
+        let mut controller = StreamingController::new();
+        // Multi-byte characters straddle the byte cap: truncation must
+        // fall back to a character boundary instead of panicking.
+        controller.push_assistant(&"你".repeat(MAX_DRAFT_BYTES / 3 + 16));
+        assert!(controller.assistant.len() <= MAX_DRAFT_BYTES);
+        assert!(
+            controller
+                .assistant
+                .is_char_boundary(controller.assistant.len())
+        );
+        controller.push_thinking(&"海".repeat(MAX_DRAFT_BYTES / 3 + 16));
+        assert!(controller.thinking.len() <= MAX_DRAFT_BYTES);
     }
 
     #[test]

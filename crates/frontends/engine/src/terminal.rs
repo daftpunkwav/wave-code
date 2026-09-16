@@ -99,14 +99,36 @@ pub enum Background {
 
 /// Query the terminal background color via OSC 11 with a bounded wait.
 ///
-/// The reply arrives as raw bytes on stdin (`ESC]11;rgb:rr/gg/bb BEL`),
-/// which crossterm's event parser does not surface, so this reads stdin
-/// directly on a worker thread with a timeout. Best-effort: `None` on
-/// any failure, and callers fall back to `COLORFGBG`/dark. Must be
-/// called while raw mode is active, before the event loop starts.
+/// Sends `ESC]11;? BEL`; the reply arrives as raw bytes on stdin
+/// (`ESC]11;rgb:rr/gg/bb BEL`), which crossterm's event parser does not
+/// surface, so this reads stdin directly on a worker thread with a
+/// timeout. Best-effort: `None` on any failure, and callers fall back
+/// to `COLORFGBG`/dark. Must be called while raw mode is active, before
+/// the event loop starts. Runs at most once per process: a probe that
+/// loses the race leaves its reader draining stdin until the byte
+/// budget, and a second probe could steal keystrokes forever.
 pub fn query_background(timeout_ms: u64) -> Option<Background> {
+    use std::io::IsTerminal as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
+
+    static PROBED: AtomicBool = AtomicBool::new(false);
+    if PROBED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+    // Piped stdin can never carry the reply; skip the wait entirely.
+    if !std::io::stdin().is_terminal() {
+        return None;
+    }
+
+    // Ask before reading: without the query no compliant terminal ever
+    // answers, and the probe would just time out.
+    {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"\x1b]11;?\x07");
+        let _ = stdout.flush();
+    }
 
     let (sender, receiver) = mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -127,7 +149,7 @@ pub fn query_background(timeout_ms: u64) -> Option<Background> {
         }
         sender.send(buffer).ok();
     });
-    let _ = &reader;
+    let _ = reader;
     let reply = receiver
         .recv_timeout(Duration::from_millis(timeout_ms))
         .ok()?;

@@ -264,7 +264,13 @@ impl Markdown {
                 Event::Text(text_event) => {
                     let styled = state.compose(self.style).paint(text_event.as_ref());
                     if state.link {
-                        if let Some(url) = &state.link_url {
+                        // Hyperlink targets must be control-character free
+                        // or the link degrades to plain styled text.
+                        let safe_url = state
+                            .link_url
+                            .as_ref()
+                            .is_some_and(|url| !url.chars().any(char::is_control));
+                        if let (true, Some(url)) = (safe_url, &state.link_url) {
                             inline.push_str(&format!("\x1b]8;;{url}\x07{styled}\x1b]8;;\x07"));
                         } else {
                             inline.push_str(&styled);
@@ -385,6 +391,16 @@ mod tests {
             lines[0]
         );
         assert!(lines[0].contains("text"));
+    }
+
+    #[test]
+    fn links_with_control_chars_degrade_to_text() {
+        let mut md = renderer();
+        let lines = md.render("[x](badurl\x1b)", 40);
+        assert!(
+            !lines[0].contains("\x1b]8;;"),
+            "unsafe url must not become a hyperlink: {lines:?}"
+        );
     }
 
     #[test]

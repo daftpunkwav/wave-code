@@ -2,6 +2,10 @@
 //!
 //! One `{"content": "…"}` object per line, loaded newest-last at
 //! startup (the editor browses newest-first) and appended on submit.
+//! The file is plaintext and append-only (like shell history): it can
+//! grow across sessions and contains whatever the user submitted, so
+//! treat it as sensitive-local data. `load` caps at [`MAX_ENTRIES`];
+//! trimming on disk happens lazily through that read path.
 
 use std::io::{BufRead as _, Write as _};
 use std::path::PathBuf;

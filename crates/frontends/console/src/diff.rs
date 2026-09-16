@@ -10,6 +10,9 @@ use crate::theme::{self, Token};
 
 /// Context lines shown around each change cluster.
 pub const CONTEXT_LINES: usize = 3;
+/// Per-side line budget for the O(n*m) LCS table; larger inputs render
+/// as a truncated summary instead of computing a diff.
+pub const MAX_DIFF_LINES: usize = 2000;
 /// Lines kept per cluster before elision (collapsed preview).
 pub const MAX_CLUSTER_LINES: usize = 10;
 

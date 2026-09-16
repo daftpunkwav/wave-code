@@ -65,6 +65,18 @@ impl Dialog {
             Self::Question(dialog) => dialog.render(width),
         }
     }
+
+    /// The dismissal answer (Esc equivalent): deny for approvals,
+    /// empty answer for questions.
+    pub fn dismiss(&self) -> Answer {
+        match self {
+            Self::Approval(dialog) => dialog.deny(),
+            Self::Question(dialog) => Answer::Question {
+                call_id: dialog.call_id.clone(),
+                answer: String::new(),
+            },
+        }
+    }
 }
 
 /// A tool approval panel.

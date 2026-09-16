@@ -542,7 +542,14 @@ impl Editor {
             return;
         };
         let first_line = self.lines.first().map(String::as_str).unwrap_or("");
-        let slash = detect_trigger(first_line, first_line.len(), TriggerKind::Slash);
+        let slash = if self.row == 0 {
+            // Slash commands are a line-0 construct; detect against the
+            // real cursor so the replacement range stays consistent.
+            let cursor_byte = grapheme_byte_offset(first_line, self.col);
+            detect_trigger(first_line, cursor_byte, TriggerKind::Slash)
+        } else {
+            None
+        };
         let cursor_line = &self.lines[self.row];
         let cursor_byte = grapheme_byte_offset(cursor_line, self.col);
         let mention = detect_trigger(cursor_line, cursor_byte, TriggerKind::Mention);
@@ -560,6 +567,12 @@ impl Editor {
         let Some(trigger) = self.popup_trigger.clone() else {
             return;
         };
+        // A stale trigger (cursor moved without a refresh) must never
+        // produce an inverted replacement range: drop the popup instead.
+        if self.col < trigger_start_col(&self.lines[self.row], trigger.start) {
+            self.close_popup();
+            return;
+        }
         let Some(completion) = self.popup.selected_completion().cloned() else {
             return;
         };
@@ -646,23 +659,28 @@ impl Editor {
             (Key::Left, m) if m.ctrl || m.alt => {
                 self.goal_col = None;
                 self.move_word_left();
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Right, m) if m.ctrl || m.alt => {
                 self.goal_col = None;
                 self.move_word_right();
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Left, _) => {
                 self.move_left();
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Right, _) => {
                 self.move_right();
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Up, _) => {
                 if self.move_up() {
+                    self.refresh_popup();
                     EditorAction::Handled
                 } else {
                     self.goal_col = None;
@@ -671,6 +689,7 @@ impl Editor {
             }
             (Key::Down, _) => {
                 if self.move_down() {
+                    self.refresh_popup();
                     EditorAction::Handled
                 } else {
                     self.goal_col = None;
@@ -680,21 +699,25 @@ impl Editor {
             (Key::Home, _) => {
                 self.goal_col = None;
                 self.col = 0;
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Char('a'), m) if m.ctrl => {
                 self.goal_col = None;
                 self.col = 0;
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::End, _) => {
                 self.goal_col = None;
                 self.col = self.graphemes(self.row).len();
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Char('e'), m) if m.ctrl => {
                 self.goal_col = None;
                 self.col = self.graphemes(self.row).len();
+                self.refresh_popup();
                 EditorAction::Handled
             }
             (Key::Char('u'), m) if m.ctrl => {
@@ -732,7 +755,9 @@ impl Editor {
         }
         let raw = self.text();
         let expanded = self.expand_markers(&raw);
-        self.remember_history(&raw);
+        // History stores the expanded text: recalling a pasted entry
+        // must resubmit the paste body, never the collapsed marker.
+        self.remember_history(&expanded);
         self.set_text("");
         self.clear_markers();
         EditorAction::Submit(expanded)
@@ -915,6 +940,11 @@ fn grapheme_byte_offset(line: &str, col: usize) -> usize {
         .nth(col)
         .map(|(byte, _)| byte)
         .unwrap_or(line.len())
+}
+
+/// Grapheme index of a byte offset in `line` (trigger range guards).
+fn trigger_start_col(line: &str, byte: usize) -> usize {
+    line[..byte].graphemes(true).count()
 }
 
 /// Grapheme index for the visual column `goal`, starting the search at
@@ -1128,6 +1158,40 @@ mod tests {
         type_string(&mut editor, "hello world ");
         editor.handle_key(KeyEvent::new(Key::Char('w'), Mods::CTRL));
         assert_eq!(editor.text(), "hello ");
+    }
+
+    #[test]
+    fn history_stores_expanded_paste_body() {
+        let mut editor = editor();
+        let big = "secret\n".repeat(12);
+        editor.insert_paste(&big);
+        let action = editor.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(matches!(action, EditorAction::Submit(_)));
+        // The recalled entry must carry the paste body, not the marker.
+        let entries = editor.history_entries();
+        assert_eq!(entries.first().map(String::as_str), Some(big.as_str()));
+        assert!(!entries[0].contains("[paste #"));
+    }
+
+    #[test]
+    fn stale_trigger_does_not_panic_on_accept() {
+        let mut editor = editor();
+        editor.set_provider(Box::new(crate::autocomplete::FuzzyProvider::new(vec![
+            crate::autocomplete::Completion {
+                label: "src/main.rs".into(),
+                description: None,
+                insert: "src/main.rs ".into(),
+            },
+        ])));
+        editor.insert_text("x @src");
+        assert!(editor.popup_open());
+        // Move the cursor left of the trigger without typing: the popup
+        // goes stale, and accepting must close it, never invert a range.
+        editor.handle_key(KeyEvent::plain(Key::Home));
+        let action = editor.handle_key(KeyEvent::plain(Key::Tab));
+        assert_eq!(action, EditorAction::Handled);
+        assert!(!editor.popup_open(), "stale popup dropped");
+        assert_eq!(editor.text(), "x @src", "buffer untouched");
     }
 
     #[test]

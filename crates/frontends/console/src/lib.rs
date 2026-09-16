@@ -38,25 +38,39 @@ pub use ui::{ConsoleUi, UiContext, run};
 mod dependency_matrix_locked {
     /// The console UI crosses to the session exclusively through the
     /// wire protocol and the actor client, and renders through
-    /// tui-engine. The internal dependency set is locked; adding one is
+    /// tui-engine. Every `[dependencies]` key is checked against the
+    /// combined whitelist (internal set + known externals), closing the
+    /// `foo.workspace = true` bypass. Adding an internal dependency is
     /// a boundary change: update this test deliberately.
     #[test]
     fn console_ui_internal_dependencies_are_locked() {
+        const INTERNAL: [&str; 3] = ["tui-engine", "wavecode-wire", "operations-actor"];
+        const EXTERNAL: [&str; 7] = [
+            "async-trait",
+            "crossterm",
+            "tokio",
+            "futures",
+            "serde_json",
+            "uuid",
+            "anyhow",
+        ];
         let manifest = include_str!("../Cargo.toml");
-        let mut internal: Vec<&str> = manifest
-            .lines()
-            .filter(|line| line.contains("path ="))
-            .map(|line| line.trim())
-            .collect();
-        internal.sort();
-        assert_eq!(
-            internal,
-            vec![
-                "operations-actor = { path = \"../../operations/actor\" }",
-                "tui-engine = { path = \"../engine\" }",
-                "wavecode-wire = { path = \"../../foundation/wire\" }",
-            ],
-            "internal deps changed: {internal:?}"
-        );
+        let mut in_deps = false;
+        for line in manifest.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_deps = trimmed == "[dependencies]";
+                continue;
+            }
+            if !in_deps || trimmed.starts_with('#') || trimmed.is_empty() {
+                continue;
+            }
+            let raw_key = trimmed.split('=').next().map(str::trim).unwrap_or("");
+            let key = raw_key.split('.').next().unwrap_or(raw_key);
+            assert!(
+                INTERNAL.contains(&key) || EXTERNAL.contains(&key),
+                "unexpected dependency `{key}`: the internal set is locked"
+            );
+        }
     }
 }

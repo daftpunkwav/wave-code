@@ -191,6 +191,19 @@ impl ConsoleUi {
         self.outbox.push(op);
     }
 
+    /// Route a dialog answer onto the outbox.
+    fn submit_answer(&mut self, answer: Option<Answer>) {
+        match answer {
+            Some(Answer::Approval { call_id, decision }) => {
+                self.enqueue(Op::ExecApproval { call_id, decision });
+            }
+            Some(Answer::Question { call_id, answer }) => {
+                self.enqueue(Op::QuestionAnswer { call_id, answer });
+            }
+            None => {}
+        }
+    }
+
     /// Drain the pending operations into the session (run loop calls).
     pub async fn flush_outbox(&mut self) {
         for op in std::mem::take(&mut self.outbox) {
@@ -255,12 +268,17 @@ impl ConsoleUi {
         )));
     }
 
-    /// Push one status line.
+    /// Push one status line. Everything entering the transcript funnels
+    /// through here or its siblings, so this is the sanitize chokepoint
+    /// for wire-sourced strings (warnings, errors, tool names, notes).
     pub fn push_status(&mut self, text: &str, is_error: bool) {
+        let text = tui_engine::sanitize::sanitize_terminal(text);
         if is_error {
-            self.transcript.push(Box::new(StatusLine::error(text)));
+            self.transcript
+                .push(Box::new(StatusLine::error(text.as_ref())));
         } else {
-            self.transcript.push(Box::new(StatusLine::new(text)));
+            self.transcript
+                .push(Box::new(StatusLine::new(text.as_ref())));
         }
     }
 
@@ -287,7 +305,7 @@ impl ConsoleUi {
     }
 
     /// Pending outbox length (tests).
-    pub fn take_outbox_len(&mut self) -> usize {
+    pub fn outbox_len(&self) -> usize {
         self.outbox.len()
     }
 
@@ -305,14 +323,16 @@ impl ConsoleUi {
                 true
             }
             EventMsg::AgentThinkingDelta { text } => {
-                self.streaming.push_thinking(text);
+                let text = tui_engine::sanitize::sanitize_terminal(text);
+                self.streaming.push_thinking(&text);
                 self.state.phase = StreamingPhase::Thinking;
                 self.activity.set_phase(StreamingPhase::Thinking);
                 true
             }
             EventMsg::AgentMessageDelta { text } => {
+                let text = tui_engine::sanitize::sanitize_terminal(text);
                 self.finalize_thinking();
-                self.streaming.push_assistant(text);
+                self.streaming.push_assistant(&text);
                 self.streaming_flushed_assistant = true;
                 self.state.phase = StreamingPhase::Composing;
                 self.activity.set_phase(StreamingPhase::Composing);
@@ -324,7 +344,8 @@ impl ConsoleUi {
                 // completion text when nothing streamed.
                 self.flush_assistant_draft();
                 if !self.streaming_flushed_assistant && !text.is_empty() {
-                    self.push_assistant_message(text);
+                    let text = tui_engine::sanitize::sanitize_terminal(text);
+                    self.push_assistant_message(&text);
                 }
                 self.streaming_flushed_assistant = false;
                 true
@@ -389,7 +410,8 @@ impl ConsoleUi {
                 true
             }
             EventMsg::PlanProposed { text } => {
-                self.push_assistant_message(text);
+                let text = tui_engine::sanitize::sanitize_terminal(text);
+                self.push_assistant_message(&text);
                 true
             }
             EventMsg::PlanApproved => {
@@ -474,24 +496,21 @@ impl ConsoleUi {
 
     /// Handle one key event; returns the flow decision.
     pub fn handle_key(&mut self, event: KeyEvent) -> Flow {
-        // A modal dialog owns the keyboard while open.
+        // A modal dialog owns the keyboard while open. Ctrl+C dismisses
+        // WITH the denial answer: dropping the dialog silently would
+        // leave the session parked forever.
         if self.dialog.is_some() {
             if event.is_ctrl_c() {
+                let answer = self.dialog.as_ref().map(Dialog::dismiss);
                 self.dialog = None;
+                self.submit_answer(answer);
                 self.push_status("dismissed", false);
                 return Flow::Continue;
             }
             let answer = self.dialog.as_mut().and_then(|d| d.handle_key(event));
             if let Some(answer) = answer {
-                match answer {
-                    Answer::Approval { call_id, decision } => {
-                        self.enqueue(Op::ExecApproval { call_id, decision });
-                    }
-                    Answer::Question { call_id, answer } => {
-                        self.enqueue(Op::QuestionAnswer { call_id, answer });
-                    }
-                }
                 self.dialog = None;
+                self.submit_answer(Some(answer));
             }
             return Flow::Continue;
         }
@@ -693,6 +712,18 @@ impl ConsoleUi {
         self.state.busy() || self.exit_armed()
     }
 
+    /// Whether a wire event batch may paint immediately: during heavy
+    /// streaming the 50 ms flush cadence throttles redraws (the tick
+    /// repaints anyway while busy).
+    pub fn render_due(&self) -> bool {
+        !self.streaming.is_dirty() || self.streaming.due(Instant::now())
+    }
+
+    /// Record that a render happened (restarts the flush cadence).
+    pub fn note_rendered(&mut self) {
+        self.streaming.flushed(Instant::now());
+    }
+
     /// Render one frame to the terminal.
     pub fn render(&mut self, out: &mut impl std::io::Write, columns: usize, rows: usize) {
         let frame = self.frame(columns, rows);
@@ -826,8 +857,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
             event = ui.next_event() => {
                 match event {
                     Some(event) => {
-                        ui.handle_wire_event(&event.msg);
-                        ui.render(&mut stdout.lock(), columns, rows);
+                        if ui.handle_wire_event(&event.msg) && ui.render_due() {
+                            ui.note_rendered();
+                            ui.render(&mut stdout.lock(), columns, rows);
+                        }
                     }
                     None => break,
                 }
@@ -948,7 +981,7 @@ mod tests {
         let mut ui = ui();
         ui.submit("hello");
         assert!(ui.state.busy(), "turn in flight");
-        assert_eq!(ui.take_outbox_len(), 1, "user_input queued on the outbox");
+        assert_eq!(ui.outbox_len(), 1, "user_input queued on the outbox");
         let frame = ui.frame(80, 24);
         let joined: String = frame
             .iter()
@@ -1082,6 +1115,52 @@ mod tests {
         ui.editor.insert_text("hello");
         assert!(!ui.steer(), "idle turn cannot steer");
         assert!(ui.editor.text() == "hello", "editor untouched");
+    }
+
+    #[test]
+    fn ctrl_c_in_dialog_denies_instead_of_dropping() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::ApprovalRequested {
+            call_id: "c9".to_string(),
+            kind: wavecode_wire::ApprovalKind::Exec,
+            detail: "ls".to_string(),
+        });
+        assert!(ui.dialog.is_some(), "approval dialog open");
+        ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL));
+        assert!(ui.dialog.is_none(), "dialog closed");
+        match ui.pending_ops().last() {
+            Some(Op::ExecApproval { call_id, decision }) => {
+                assert_eq!(call_id, "c9");
+                assert!(matches!(decision, wavecode_wire::WireDecision::Deny { .. }));
+            }
+            other => panic!("expected denial on the outbox: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_text_is_sanitized_before_rendering() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "ok\x1b[31mred".to_string(),
+        });
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "done".to_string(),
+        });
+        let frame = ui.frame(80, 24);
+        let raw: String = frame.join("\n");
+        // The wire layer strips injected SGR before rendering; the only
+        // escapes left in the frame are the theme's own 38;2 sequences,
+        // never the model's basic-color injection.
+        assert!(
+            !raw.contains("\x1b[31m"),
+            "injected SGR must be stripped: {raw:?}"
+        );
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("okred"), "text still renders: {joined}");
     }
 
     #[test]

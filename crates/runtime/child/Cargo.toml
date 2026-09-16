@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 infrastructure-base = { path = "../../infrastructure/base" }
-thiserror.workspace = true
 tokio.workspace = true
 futures.workspace = true
 

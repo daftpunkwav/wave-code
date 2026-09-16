@@ -13,14 +13,17 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
+landlock.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Win32 Job-Object FFI for the partial Windows backend (`windows.rs`): the
-# lighter `windows-sys` (raw bindings, no COMruntime) over the heavier
+# lighter `windows-sys` (raw bindings, no COM runtime) over the heavier
 # `windows` crate, with only the features the backend needs.
-windows-sys = { version = "0.59", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    # CreateJobObjectW's signature takes SECURITY_ATTRIBUTES, so the
+    # symbol itself is gated on the Win32_Security feature even though
+    # no code path names the Win32::Security module.
     "Win32_Security",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
@@ -29,8 +32,9 @@ windows-sys = { version = "0.59", features = [
 
 [dev-dependencies]
 tempfile.workspace = true
-# The tool-name classification lock test mirrors the tools builtin set
-# (capabilities production sides do not depend on each other, so tool names
-# cannot be bound at compile time — locked by a dev-dep test instead, which
-# fails when a tool is renamed or added).
+# The tool-name classification lock test mirrors the tools builtin set.
+# (History: capabilities sides once had no cross-dependencies, so tool names
+# were locked by a dev-dep test; tools now depends on this crate in
+# production, but the lock test still guards renames of the classifier
+# vocabulary.)
 wavecode-tools = { path = "../tools" }

@@ -9,10 +9,8 @@ runtime-runner = { path = "../../runtime/runner" }
 state-store = { path = "../../state/store" }
 wavecode-wire = { path = "../../foundation/wire" }
 serde_json.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true

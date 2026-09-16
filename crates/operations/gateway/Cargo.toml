@@ -18,4 +18,3 @@ state-store = { path = "../../state/store" }
 safety-gate = { path = "../../safety/gate" }
 infrastructure-base = { path = "../../infrastructure/base" }
 async-trait.workspace = true
-tokio.workspace = true

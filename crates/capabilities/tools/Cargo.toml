@@ -17,7 +17,7 @@ tokio.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 glob.workspace = true
-portable-pty = "0.9"
+portable-pty.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

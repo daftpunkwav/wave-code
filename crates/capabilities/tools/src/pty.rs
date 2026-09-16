@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::is_sensitive_env_name;
+
 use crate::shell_tool::truncate_output;
 use crate::{Result, Tool, ToolCtx, ToolOutput};
 
@@ -98,18 +100,6 @@ fn pty_size(rows: Option<u64>, cols: Option<u64>) -> PtySize {
         pixel_width: 0,
         pixel_height: 0,
     }
-}
-
-/// True when an env var name looks like a secret carrier. Mirrors
-/// `shell_tool` scrubbing (deny list plus secret shapes) for the PTY child.
-fn is_sensitive_env_name(name: &str) -> bool {
-    const MARKERS: [&str; 4] = ["_SECRET", "_TOKEN", "_PASSW", "_PRIVATE"];
-    const SUFFIXES: [&str; 2] = ["_KEY", "_PAT"];
-    const BARE: [&str; 6] = ["SECRET", "TOKEN", "PASSWORD", "PRIVATE", "KEY", "PAT"];
-    let upper = name.to_uppercase();
-    MARKERS.iter().any(|m| upper.contains(m))
-        || SUFFIXES.iter().any(|s| upper.ends_with(s))
-        || BARE.contains(&upper.as_str())
 }
 
 /// Strip deny-listed and secret-shaped variables from a PTY command.
@@ -424,6 +414,7 @@ fn run_one_shot(
     ctx: &ToolCtx,
     size: PtySize,
     timeout: Duration,
+    killer_slot: &Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
 ) -> PtyResult<(String, i32)> {
     let system = native_pty_system();
     let pair = system
@@ -439,6 +430,12 @@ fn run_one_shot(
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("pty spawn failed: {e}"))?;
+    // Publish the killer for the outer timeout arm: the internal deadline
+    // check only runs after a read returns, so a child idling without
+    // output must be killable from outside the blocked reader thread.
+    *killer_slot
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(child.clone_killer());
     drop(pair.slave);
     let mut reader = pair
         .master
@@ -637,15 +634,28 @@ impl Tool for PtyShell {
             let size = pty_size(rows, cols);
             let timeout = Duration::from_millis(timeout_ms);
             let label = command.clone();
+            let killer_slot: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>> =
+                Arc::new(Mutex::new(None));
+            let slot = killer_slot.clone();
             let run = tokio::task::spawn_blocking(move || {
-                run_one_shot(&command, &ctx_owned, size, timeout)
+                run_one_shot(&command, &ctx_owned, size, timeout, &slot)
             });
             let (output, code) =
                 match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
                     Ok(Ok(Ok(pair))) => pair,
                     Ok(Ok(Err(reason))) => return Ok(err_output(reason)),
                     Ok(Err(_join)) => return Ok(err_output("pty task failed")),
+                    // Same hygiene as the session path: kill the child (and
+                    // unblock the reader thread) instead of leaving both
+                    // behind until the shell exits on its own.
                     Err(_) => {
+                        if let Some(mut killer) = killer_slot
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .take()
+                        {
+                            let _ = killer.kill();
+                        }
                         return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
                     }
                 };
@@ -755,6 +765,42 @@ mod tests {
                     .unwrap_or(false)
             })
             .await
+    }
+
+    #[tokio::test]
+    async fn one_shot_timeout_returns_promptly_and_kills() {
+        if !pty_live().await {
+            return;
+        }
+        let (_d, c) = ctx();
+        let cmd = if cfg!(windows) {
+            "timeout /t 30 /nobreak"
+        } else {
+            "sleep 30"
+        };
+        let started = std::time::Instant::now();
+        let out = PtyShell
+            .execute(
+                serde_json::json!({"command": cmd, "timeout_ms": 1500}),
+                &c,
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(out.is_error, "expected a timeout error: {}", out.content);
+        assert!(
+            out.content.contains("timeout after 1500ms"),
+            "{}",
+            out.content
+        );
+        // Promptly: the outer timeout killed the idle child, unblocking
+        // the reader thread (the internal deadline check alone could not).
+        // The bound stays well under the child's 30s runtime (the pre-fix
+        // behavior) while tolerating a loaded test machine.
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "timeout must return promptly, took {elapsed:?}"
+        );
     }
 
     #[tokio::test]

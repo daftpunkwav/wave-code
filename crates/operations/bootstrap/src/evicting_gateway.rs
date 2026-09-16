@@ -63,16 +63,17 @@ impl<G> EvictingGateway<G> {
 
     /// Apply the eviction pass when the soft threshold is crossed. The
     /// pass is idempotent (stubs are pure functions of the call id and
-    /// tool name) and leaves short histories unchanged.
-    fn evicted(&self, request: &SampleRequest) -> SampleRequest {
-        if !should_evict_tool_results(Self::usage_estimate(request), &self.cfg) {
-            return request.clone();
+    /// tool name) and leaves short histories unchanged. Consumes the
+    /// request: the caller holds no other reference, so the pass-through
+    /// path needs no clone at all.
+    fn evicted(&self, mut request: SampleRequest) -> SampleRequest {
+        if !should_evict_tool_results(Self::usage_estimate(&request), &self.cfg) {
+            return request;
         }
         let messages: Vec<Message> = request.messages.iter().map(to_message).collect();
         let evicted = evict_old_tool_results(&messages, &self.cfg);
-        let mut out = request.clone();
-        out.messages = evicted.iter().map(from_message).collect();
-        out
+        request.messages = evicted.iter().map(from_message).collect();
+        request
     }
 }
 
@@ -129,7 +130,7 @@ fn from_message(message: &Message) -> HistoryEntry {
 #[async_trait::async_trait]
 impl<G: ModelGateway + Send + Sync> ModelGateway for EvictingGateway<G> {
     async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError> {
-        let request = self.evicted(&request);
+        let request = self.evicted(request);
         self.inner.sample(request).await
     }
 
@@ -138,7 +139,7 @@ impl<G: ModelGateway + Send + Sync> ModelGateway for EvictingGateway<G> {
         request: SampleRequest,
         on_delta: &(dyn Fn(SampleDelta) + Send + Sync),
     ) -> Result<SampleResponse, SampleError> {
-        let request = self.evicted(&request);
+        let request = self.evicted(request);
         self.inner.sample_streaming(request, on_delta).await
     }
 

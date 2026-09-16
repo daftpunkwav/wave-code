@@ -22,8 +22,10 @@ pub struct Config {
     pub model_provider: String,
     #[serde(default)]
     pub model_providers: HashMap<String, ProviderConfig>,
-    /// Permission mode (SPEC section 12, four string values: default / plan / acceptEdits /
-    /// bypassPermissions); None by default, the assembly layer falls back to default.
+    /// Permission mode (three wire names: plan / guarded / auto; the legacy
+    /// four-tier names default / acceptEdits / bypassPermissions still load
+    /// and map onto their successor with a warning). None by default; the
+    /// assembly layer falls back to guarded.
     /// P2 lands only this single field; layered merges like profiles / projects overrides stay for later milestones.
     #[serde(default)]
     pub permission_mode: Option<String>,

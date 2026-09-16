@@ -39,7 +39,7 @@ For each declared call, the runner (`crates/runtime/runner/src/lib.rs::execute_c
 3. **`PreToolUse` hook** — may block; blocked calls never reach policy or approval.
 4. **Policy** — `PolicyAdapter` reads `is_read_only`/`is_destructive` from the registry (never from names) and asks `wavecode-sandbox` for a verdict (deny rules → allow rules → mode default).
 5. **Approval** (on `Ask`) — parked on the gate with timeout-deny.
-6. **Execute** — read-only, non-destructive calls run concurrently (`join_all`); the rest serially with a per-item interrupt check.
+6. **Execute** — read-only, non-destructive calls run concurrently, capped at 8 in flight (`buffer_unordered`); the rest serially with a per-item interrupt check.
 7. **`PostToolUse`** — observe only, never blocks.
 
 Note on `validate()`: the trait carries it as a pre-execution semantic check beyond JSON Schema ("stage 0"), but no orchestration call site invokes it today — it is surface for future wiring. Tools must not rely on it for safety; containment and policy do not depend on it.

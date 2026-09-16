@@ -107,6 +107,8 @@ pub async fn evaluate<D: TurnDriver>(driver: &D, cases: &[EvalCase], system: &st
             .cloned()
             .collect();
         // A failed turn fails the case even when text happens to match.
+        // `MaxToolRounds` is deliberately a failure too: the loop hit its
+        // ceiling without converging, so text matches would be noise.
         let passed = missing.is_empty()
             && forbidden_found.is_empty()
             && matches!(outcome, StopReason::Completed);

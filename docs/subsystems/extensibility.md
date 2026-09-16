@@ -9,7 +9,7 @@ A skill is `<root>/skills/<name>/SKILL.md` — YAML frontmatter plus a Markdown 
 Frontmatter parsing uses `serde_yaml` rather than a hand-rolled scanner — a deliberate tradeoff, since skill values may hold colons, lists, and multi-line strings, and a minimal parser's edge cases degrade silently. Frontmatter fields take the SPEC section 8.1 table intersection.
 
 - **Inline** (default): the body expands into the current session's result text, with `$ARGUMENTS` replaced by the call arguments.
-- **Fork**: the skill runs in a dedicated subagent via the task service; its `allowed-tools` restrict the child's tool surface (forks without a surface stay unrestricted).
+- **Fork**: the skill runs in a dedicated subagent via the task service; its `allowed-tools` restrict the child's tool surface (forks without a surface get the registry surface minus the child-spawning tools, so no fork can ever re-spawn children).
 
 `${WAVECODE_SKILL_DIR}` expands to the skill directory so bundled reference files resolve. The model-facing skill catalog is budgeted — 1% of the context window as a character quota, downgraded truncation past the limit (drop `when_to_use` first, then truncate descriptions) — so a large skill pack cannot eat the prompt. The model invokes skills through the `skill` tool (`crates/operations/bootstrap/src/skill_tool.rs`), registered late because it needs the child service; `task_output` / `task_stop` observe and stop what forks spawned.
 

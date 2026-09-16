@@ -12,7 +12,7 @@ Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and 
 
 `crates/safety/gate/src/lib.rs` provides `ApprovalGate`: one waiter per call id (`GateError::DuplicateWaiter` otherwise), one-shot `decide` (late decisions for consumed ids return `false` and are dropped, so a stale UI click can never approve a future call), and `cancel` so an expired wait frees its id. `QuestionGate` mirrors it with free-text answers for the `ask_user` interactive-question flow.
 
-`crates/operations/bootstrap/src/gate_adapter.rs` implements the runner's `ApprovalSource` over the gate: waits are bounded by `tokio::time::timeout`; **expiry resolves to `Deny` with an explicit reason, never parks forever**. A waiter dropped mid-wait (gate cleared) also denies. A `Headless` variant denies openly for non-interactive drivers. `clear_stale` runs at every turn start.
+`crates/operations/bootstrap/src/gate_adapter.rs` implements the runner's `ApprovalSource` over the gate: waits are bounded by a deadline; **expiry resolves to `Deny` with an explicit reason, never parks forever**, and a session interrupt ends a parked wait immediately as `Interrupted` (the reservation is withdrawn so the id can park fresh). A waiter dropped mid-wait (gate cleared) also denies. A `Headless` variant denies openly for non-interactive drivers. `clear_stale` runs at the start of every session-owned turn (child turns skip it).
 
 ## The sandbox decision (`crates/capabilities/sandbox/src/lib.rs`)
 
@@ -20,7 +20,7 @@ Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and 
 
 1. **Deny rules first** — no mode exempts them, not even `auto`. Both the whole compound Bash command and its segments match, so `echo hi\ncurl …` cannot prefix-disguise past `Bash(curl *)`.
 2. **Allow rules** — bound to tool semantics via rule scope (loose input-key sniffing is not enough); for compound Bash commands only *literally exact* rules exempt, because a wildcard `*` spans command separators.
-3. In-session state-tool exemptions (`todowrite` and the merged `goal` / `plan` tools need no approval in any mode — they write harness-owned coordination state, never the repo) and interactive-question routing (`ask_user`).
+3. In-session state-tool exemptions (`todowrite` and the merged `goal` / `plan` tools need no approval in any mode — they write harness-owned coordination state, never the repo) and interactive-question routing (`ask_user`) — except `plan` with `action: "approve"`, which asks in every mode: only the user may approve a proposal.
 4. The mode's default policy.
 
 `allow_always` derives one exact, session-level allow rule from the approved call (shared through `Arc` so clones — including subagents — see it; deny-first is unaffected). Session allow rules are in-memory only; persisting them to config is not wired yet. Invalid rule entries fail construction at startup — explicit failure, never silent skips. `PolicyAdapter` (`crates/operations/bootstrap/src/policy_adapter.rs`) maps these verdicts onto the runner seam, sourcing attributes from the registry.

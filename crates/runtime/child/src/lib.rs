@@ -58,7 +58,9 @@ pub const MAX_CHILD_DEPTH: u8 = 3;
 /// Capability profile of one child task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildKind {
-    /// Full tool access, excluding any child-spawning tool.
+    /// Full tool access minus the child-spawning surfaces; the actual
+    /// narrowing is applied by the spawning service (bootstrap), which
+    /// owns the registry-derived surface policy.
     Standard,
     /// Read-only tool subset.
     ReadOnly,

@@ -77,7 +77,9 @@ pub enum Op {
 pub enum WireDecision {
     /// Approve this call only.
     AllowOnce,
-    /// Approve this call and remember it for the session.
+    /// Approve this call and remember it for the session. Reserved: no
+    /// frontend emits it yet and no persistence is wired, so a decision
+    /// carrying it currently behaves like AllowOnce.
     AllowAlways,
     /// Refuse with a reason.
     Deny {

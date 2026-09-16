@@ -729,7 +729,9 @@ where
             .await;
             None
         }
-        EventMsg::ToolCallEnd { call_id, is_error } => {
+        EventMsg::ToolCallEnd {
+            call_id, is_error, ..
+        } => {
             write_notification(
                 writer,
                 "session/update",

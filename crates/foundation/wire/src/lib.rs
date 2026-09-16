@@ -98,6 +98,37 @@ pub enum ApprovalKind {
     Write,
 }
 
+/// Bounded head of a tool result, emitted with [`EventMsg::ToolCallEnd`]
+/// for transcript rendering. The harness caps the text and never splits a
+/// UTF-8 character; `truncated` marks a cut so frontends can hint at more.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolCallPreview {
+    /// Leading portion of the tool result content.
+    pub text: String,
+    /// True when the content exceeded the preview budget.
+    pub truncated: bool,
+}
+
+impl ToolCallPreview {
+    /// Character-boundary-safe head of `content` capped at `max_bytes`.
+    pub fn head(content: &str, max_bytes: usize) -> Self {
+        if content.len() <= max_bytes {
+            return Self {
+                text: content.to_string(),
+                truncated: false,
+            };
+        }
+        let mut cut = max_bytes;
+        while !content.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        Self {
+            text: content[..cut].to_string(),
+            truncated: true,
+        }
+    }
+}
+
 /// One outbound event, correlated with a submission by `id`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
@@ -145,6 +176,11 @@ pub enum EventMsg {
         call_id: String,
         /// True when the tool reported a business failure.
         is_error: bool,
+        /// Bounded head of the tool result for transcript rendering; the
+        /// full content stays in conversation history and is never sent.
+        /// Absent from senders that predate this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output: Option<ToolCallPreview>,
     },
     /// An approval request is parked and needs a user decision.
     ApprovalRequested {
@@ -179,6 +215,13 @@ pub enum EventMsg {
         /// 0 when the provider reports no cache accounting.
         #[serde(default)]
         cache_creation_tokens: u64,
+        /// Session context window in tokens; absent from senders that
+        /// predate this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
+        /// Tokens estimated inside the context window at settle time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_used: Option<u64>,
     },
     /// Compaction started.
     CompactStarted {
@@ -305,6 +348,7 @@ mod tests {
                 EventMsg::ToolCallEnd {
                     call_id: "c".to_string(),
                     is_error: false,
+                    output: None,
                 },
                 "tool_call_end",
             ),
@@ -330,6 +374,8 @@ mod tests {
                     output_tokens: 2,
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
+                    context_window: Some(200_000),
+                    context_used: Some(3),
                 },
                 "token_count",
             ),
@@ -417,5 +463,82 @@ mod tests {
         let json = serde_json::to_string(&sub).unwrap();
         let back: Submission = serde_json::from_str(&json).unwrap();
         assert_eq!(sub, back);
+    }
+
+    #[test]
+    fn extended_fields_are_backward_compatible() {
+        // Older senders omit the new fields entirely; parsing must accept
+        // that and default to None.
+        let legacy = serde_json::json!({
+            "id": "sub-1",
+            "type": "tool_call_end",
+            "call_id": "c",
+            "is_error": false,
+        });
+        let event: Event = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            event.msg,
+            EventMsg::ToolCallEnd {
+                call_id: "c".to_string(),
+                is_error: false,
+                output: None,
+            }
+        );
+
+        let legacy = serde_json::json!({
+            "id": "sub-1",
+            "type": "token_count",
+            "input_tokens": 1,
+            "output_tokens": 2,
+        });
+        let event: Event = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            event.msg,
+            EventMsg::TokenCount {
+                input_tokens: 1,
+                output_tokens: 2,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+                context_window: None,
+                context_used: None,
+            }
+        );
+
+        // New fields are omitted on the wire when unset and round-trip
+        // when set.
+        let plain = serde_json::to_value(EventMsg::ToolCallEnd {
+            call_id: "c".to_string(),
+            is_error: false,
+            output: None,
+        })
+        .unwrap();
+        assert!(plain.get("output").is_none());
+
+        let full = EventMsg::ToolCallEnd {
+            call_id: "c".to_string(),
+            is_error: false,
+            output: Some(ToolCallPreview {
+                text: "out".to_string(),
+                truncated: true,
+            }),
+        };
+        let back: EventMsg = serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        assert_eq!(full, back);
+    }
+
+    #[test]
+    fn preview_head_respects_char_boundaries() {
+        let preview = ToolCallPreview::head("short", 16);
+        assert_eq!(preview.text, "short");
+        assert!(!preview.truncated);
+
+        let preview = ToolCallPreview::head("0123456789", 4);
+        assert_eq!(preview.text, "0123");
+        assert!(preview.truncated);
+
+        // Multi-byte characters never split mid-character.
+        let preview = ToolCallPreview::head("你好世界", 7);
+        assert_eq!(preview.text, "你好");
+        assert!(preview.truncated);
     }
 }

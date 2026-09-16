@@ -55,7 +55,9 @@ impl App {
             }
             // Failures echo the call id; outputs stay in the transcript
             // (events stay light by design); successes stay quiet.
-            M::ToolCallEnd { call_id, is_error } => {
+            M::ToolCallEnd {
+                call_id, is_error, ..
+            } => {
                 if *is_error {
                     self.flush_message();
                     self.push_item(Item::plain(format!("✗ {call_id}"), err()));
@@ -66,6 +68,7 @@ impl App {
                 output_tokens,
                 cache_read_tokens,
                 cache_creation_tokens,
+                ..
             } => {
                 self.tokens = Some((*input_tokens, *output_tokens));
                 self.cache_tokens = Some((*cache_read_tokens, *cache_creation_tokens));

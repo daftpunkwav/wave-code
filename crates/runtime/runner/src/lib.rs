@@ -28,7 +28,9 @@ use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
     check_budget, estimate_tokens,
 };
-use wavecode_wire::{ApprovalKind as WireApprovalKind, Event, EventMsg};
+use wavecode_wire::{
+    ApprovalKind as WireApprovalKind, Event, EventMsg, ToolCallPreview,
+};
 
 /// Default ceiling for tool rounds inside one run.
 ///
@@ -504,6 +506,10 @@ pub const MAX_PLAN_NUDGES: u8 = 3;
 /// Maximum Stop-hook blocks per turn before the loop proceeds anyway
 /// (default for [`RunConfig::max_stop_blocks`]).
 pub const MAX_STOP_BLOCKS: u8 = 3;
+/// Byte budget of the per-call output preview carried on the wire with
+/// [`EventMsg::ToolCallEnd`]. Full results stay in conversation history;
+/// this bound keeps event frames small for slow transports.
+const TOOL_OUTPUT_PREVIEW_BYTES: usize = 4096;
 
 /// Static run configuration, frozen per session rather than per turn.
 #[derive(Debug, Clone)]
@@ -869,7 +875,7 @@ where
         loop {
             // Checkpoint 1: loop head interrupt returns without sampling.
             if interrupt.is_triggered() {
-                settle(conv, &last_input, &state, &emit_msg);
+                settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -894,7 +900,7 @@ where
                         self.cfg.max_tool_rounds
                     ),
                 });
-                settle(conv, &last_input, &state, &emit_msg);
+                settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });
                 return StopReason::MaxToolRounds;
             }
@@ -950,7 +956,7 @@ where
                                 // Blocking failures abort; automatic
                                 // failures downgrade to a warning.
                                 if trigger == CompactTrigger::Blocking {
-                                    settle(conv, &last_input, &state, &emit_msg);
+                                    settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                                     emit_msg(EventMsg::Error {
                                         message: cause,
                                         recoverable: false,
@@ -1017,7 +1023,7 @@ where
                 Err(SampleError::PromptTooLong) => {
                     reactive_compacts += 1;
                     if reactive_compacts >= self.cfg.max_reactive_compacts {
-                        settle(conv, &last_input, &state, &emit_msg);
+                        settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                         emit_msg(EventMsg::Error {
                             message: format!(
                                 "prompt exceeds context window after {} compactions",
@@ -1032,7 +1038,7 @@ where
                         .do_compact(conv, CompactTrigger::Reactive, &emit_msg)
                         .await
                     {
-                        settle(conv, &last_input, &state, &emit_msg);
+                        settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                         emit_msg(EventMsg::Error {
                             message: cause,
                             recoverable: false,
@@ -1043,7 +1049,7 @@ where
                     continue;
                 }
                 Err(other) => {
-                    settle(conv, &last_input, &state, &emit_msg);
+                    settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                     emit_msg(EventMsg::Error {
                         message: other.to_string(),
                         recoverable: false,
@@ -1155,7 +1161,7 @@ where
             if interrupt.is_triggered() {
                 let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
                 conv.push_blocks(Role::User, result_blocks(&results));
-                settle(conv, &last_input, &state, &emit_msg);
+                settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -1171,7 +1177,7 @@ where
             state.bump_tool_round();
         }
 
-        settle(conv, &last_input, &state, &emit_msg);
+        settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
         emit_msg(EventMsg::TurnCompleted { interrupted: false });
         StopReason::Completed
     }
@@ -1529,6 +1535,10 @@ where
             emit(EventMsg::ToolCallEnd {
                 call_id: result.call_id.clone(),
                 is_error: result.is_error,
+                output: Some(ToolCallPreview::head(
+                    &result.content,
+                    TOOL_OUTPUT_PREVIEW_BYTES,
+                )),
             });
             ordered.push(result);
         }
@@ -1808,11 +1818,13 @@ fn result_blocks(results: &[ToolResult]) -> Vec<SampleBlock> {
 }
 
 /// Settle usage after sampling: no completed sample means no-op, so the
-/// carry is never covered and no TokenCount is emitted.
+/// carry is never covered and no TokenCount is emitted. `context_window`
+/// rides along so frontends can render a context meter without config.
 fn settle(
     conv: &mut Conversation,
     last_input: &Option<u64>,
     state: &TurnState,
+    context_window: u64,
     emit: &(dyn Fn(EventMsg) + Send + Sync),
 ) {
     let Some(input) = last_input else {
@@ -1829,6 +1841,8 @@ fn settle(
         output_tokens: state.total_output_tokens,
         cache_read_tokens: state.total_cache_read_tokens,
         cache_creation_tokens: state.total_cache_creation_tokens,
+        context_window: Some(context_window),
+        context_used: Some(input + state.total_output_tokens),
     });
 }
 

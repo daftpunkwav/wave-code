@@ -276,12 +276,15 @@ mod tests {
         app.handle_event(&ev(M::ToolCallEnd {
             call_id: "c1".into(),
             is_error: true,
+            output: None,
         }));
         app.handle_event(&ev(M::TokenCount {
             input_tokens: 120,
             output_tokens: 200_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            context_window: None,
+            context_used: None,
         }));
         app.handle_event(&ev(M::TurnCompleted { interrupted: false }));
         let text = draw_app(&mut app, 80, 24);

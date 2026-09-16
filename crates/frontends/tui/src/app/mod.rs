@@ -332,6 +332,8 @@ mod tests {
             output_tokens: 2,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            context_window: None,
+            context_used: None,
         }));
         assert!(!app.follow_tail, "TokenCount must not pull back to bottom");
         app.handle_event(&ev(EventMsg::TurnStarted));
@@ -723,6 +725,8 @@ mod tests {
             output_tokens: 100,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            context_window: None,
+            context_used: None,
         }));
         app.handle_event(&ev(M::TurnCompleted { interrupted: true }));
         assert!(!app.in_turn);

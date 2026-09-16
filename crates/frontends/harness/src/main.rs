@@ -172,7 +172,9 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             stderr.push_str(&format!("[tool] {} ({})\n", clean(name), clean(call_id)));
             None
         }
-        EventMsg::ToolCallEnd { call_id, is_error } => {
+        EventMsg::ToolCallEnd {
+            call_id, is_error, ..
+        } => {
             if *is_error {
                 stderr.push_str(&format!("[tool] {} reported an error\n", clean(call_id)));
             }
@@ -198,14 +200,20 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            context_window,
+            context_used,
         } => {
             let cache_part = if *cache_read_tokens > 0 || *cache_creation_tokens > 0 {
                 format!(" cache_r={cache_read_tokens} cache_w={cache_creation_tokens}")
             } else {
                 String::new()
             };
+            let context_part = match (context_used, context_window) {
+                (Some(used), Some(window)) => format!(" ctx={used}/{window}"),
+                _ => String::new(),
+            };
             stderr.push_str(&format!(
-                "[usage] in={input_tokens} out={output_tokens}{cache_part}\n"
+                "[usage] in={input_tokens} out={output_tokens}{cache_part}{context_part}\n"
             ));
             None
         }

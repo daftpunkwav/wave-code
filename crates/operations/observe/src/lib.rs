@@ -81,6 +81,7 @@ impl Metrics {
                 output_tokens,
                 cache_read_tokens,
                 cache_creation_tokens,
+                ..
             } => {
                 self.tokens_in += input_tokens;
                 self.tokens_out += output_tokens;
@@ -175,12 +176,15 @@ mod tests {
             EventMsg::ToolCallEnd {
                 call_id: "c1".to_string(),
                 is_error: true,
+                output: None,
             },
             EventMsg::TokenCount {
                 input_tokens: 100,
                 output_tokens: 25,
                 cache_read_tokens: 0,
                 cache_creation_tokens: 0,
+                context_window: None,
+                context_used: None,
             },
             EventMsg::CompactCompleted { summary_tokens: 25 },
             EventMsg::Warning {
@@ -229,6 +233,8 @@ mod tests {
                 output_tokens: 3,
                 cache_read_tokens: read,
                 cache_creation_tokens: creation,
+                context_window: None,
+                context_used: None,
             }));
         }
         metrics.record(&event(EventMsg::TurnCompleted { interrupted: false }));

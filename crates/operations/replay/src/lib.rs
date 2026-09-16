@@ -39,7 +39,9 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
                 );
                 open.insert(call_id.clone(), seq);
             }
-            EventMsg::ToolCallEnd { call_id, is_error } => {
+            EventMsg::ToolCallEnd {
+                call_id, is_error, ..
+            } => {
                 match open.remove(call_id) {
                     Some(seq) => {
                         trajectory.push_observation(seq, format!("{call_id} ended"), *is_error)
@@ -128,6 +130,7 @@ mod tests {
             event(EventMsg::ToolCallEnd {
                 call_id: "c1".to_string(),
                 is_error: true,
+                output: None,
             }),
             event(EventMsg::AgentMessageComplete {
                 text: "hi".to_string(),
@@ -147,6 +150,7 @@ mod tests {
         let trajectory = replay_to_trajectory(&[event(EventMsg::ToolCallEnd {
             call_id: "c9".to_string(),
             is_error: false,
+            output: None,
         })]);
         let replay = trajectory.replay();
         assert_eq!(replay.len(), 1);
@@ -203,6 +207,7 @@ mod tests {
             event(EventMsg::ToolCallEnd {
                 call_id: "c1".to_string(),
                 is_error: false,
+                output: None,
             }),
         ]);
         let seq = trajectory.steps()[0].seq;

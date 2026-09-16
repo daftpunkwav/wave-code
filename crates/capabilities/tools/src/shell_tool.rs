@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::is_sensitive_env_name;
+
 use crate::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Default timeout: 60 s.
@@ -92,22 +94,34 @@ pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
     }
 }
 
-/// True when an env var name looks like a secret carrier (case-insensitive).
+/// Per-stream capture cap.
 ///
-/// Fail-closed shapes: `_SECRET` / `_TOKEN` / `_PASSW` / `_PRIVATE` segments,
-/// `_KEY` / `_PAT` suffixes (AWS_SECRET_ACCESS_KEY, *_PRIVATE_KEY, GITHUB_PAT,
-/// bare API_KEY), and the bare names SECRET / TOKEN / PASSWORD / PRIVATE /
-/// KEY / PAT. A pure suffix list misses real shapes (`AWS_SECRET_ACCESS_KEY`
-/// ends in `_KEY`, not `_API_KEY`), so match segments and suffixes instead.
-/// Anything else passes so normal configuration stays visible to children.
-fn is_sensitive_env_name(name: &str) -> bool {
-    const MARKERS: [&str; 4] = ["_SECRET", "_TOKEN", "_PASSW", "_PRIVATE"];
-    const SUFFIXES: [&str; 2] = ["_KEY", "_PAT"];
-    const BARE: [&str; 6] = ["SECRET", "TOKEN", "PASSWORD", "PRIVATE", "KEY", "PAT"];
-    let upper = name.to_uppercase();
-    MARKERS.iter().any(|m| upper.contains(m))
-        || SUFFIXES.iter().any(|s| upper.ends_with(s))
-        || BARE.contains(&upper.as_str())
+/// Bounded well above [`MAX_OUTPUT_BYTES`] so the visible truncation
+/// contract is unchanged (`truncate_output` still cuts to the display cap
+/// and appends its marker), while a chatty child can no longer grow the
+/// process by output-rate x timeout: buffering stops at the cap and the
+/// rest is drained and discarded.
+const STREAM_CAPTURE_CAP: usize = MAX_OUTPUT_BYTES + 1024 * 1024;
+
+/// Collect one child output stream into at most `cap` bytes.
+///
+/// Reads run to EOF so the child never blocks on a full pipe; bytes past
+/// the cap are discarded. Read errors degrade to a truncated capture (the
+/// exit code still surfaces) instead of failing the whole call.
+async fn collect_capped<R: tokio::io::AsyncRead + Unpin>(mut stream: R, cap: usize) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let take = n.min(cap.saturating_sub(buf.len()));
+                buf.extend_from_slice(&chunk[..take]);
+            }
+        }
+    }
+    buf
 }
 
 /// Execute a shell command (a writing tool: may modify files or spawn processes, needs serial scheduling).
@@ -201,9 +215,33 @@ impl Tool for Shell {
             // Key: pairs with timeout cancellation semantics -- the child is auto-killed when the future is dropped
             // (only the shell itself; see the module docs for the orphaned-grandchildren limitation).
             .kill_on_drop(true);
-        // timeout wraps the whole run (spawn + output reads); wait_with_output drains both streams concurrently,
-        // so a full pipe buffer cannot deadlock it.
-        let run = async { cmd.spawn()?.wait_with_output().await };
+        // timeout wraps the whole run (spawn + output reads); both streams
+        // drain concurrently (join!), so a full pipe buffer cannot deadlock
+        // it, and each stream stops buffering at STREAM_CAPTURE_CAP so a
+        // chatty child cannot grow memory without bound.
+        let run = async {
+            let mut child = cmd.spawn()?;
+            let stdout = child.stdout.take().map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
+            let stderr = child.stderr.take().map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
+            let stdout = async {
+                match stdout {
+                    Some(read) => read.await,
+                    None => Vec::new(),
+                }
+            };
+            let stderr = async {
+                match stderr {
+                    Some(read) => read.await,
+                    None => Vec::new(),
+                }
+            };
+            let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
+            Ok::<std::process::Output, std::io::Error>(std::process::Output {
+                status: status?,
+                stdout,
+                stderr,
+            })
+        };
         let output = match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
             Ok(Ok(output)) => output,
             // Timeout: the run future was dropped, and kill_on_drop guarantees the process is killed.
@@ -304,6 +342,31 @@ mod tests {
             .unwrap();
         assert!(out.content.contains("stderr"));
         assert!(out.content.contains("err"));
+    }
+
+    #[tokio::test]
+    async fn chatty_output_is_capped_not_buffered_unbounded() {
+        let (_d, c) = ctx();
+        // Produce ~2MB of stdout, far past STREAM_CAPTURE_CAP: the tool
+        // must still return promptly with the usual truncation marker
+        // (the cap only bounds buffering, not the visible contract).
+        let cmd: String = if cfg!(windows) {
+            // Few iterations of long lines: totals ~1.2MB (past
+            // STREAM_CAPTURE_CAP) while staying fast (cmd for-loops are
+            // slow per iteration, and the line stays under cmd's 8k limit).
+            let line = "A".repeat(6000);
+            format!("for /l %i in (1,1,200) do @echo {line}")
+        } else {
+            "yes 0123456789012345678901234567890123456789 | head -c 2000000".to_string()
+        };
+        let out = Shell
+            .execute(serde_json::json!({"command": cmd}), &c)
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("[truncated]"));
+        // Well under the captured stream: the cap stopped buffering.
+        assert!(out.content.len() < 4 * MAX_OUTPUT_BYTES);
     }
 
     #[tokio::test]

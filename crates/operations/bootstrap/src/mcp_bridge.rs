@@ -1075,8 +1075,17 @@ pub async fn connect_all(
         lines: Vec::with_capacity(servers.len()),
         warnings: Vec::new(),
     };
-    for (name, raw) in servers {
-        let (line, warning) = connect_one(name, raw, registry).await;
+    // Connect concurrently: an unreachable server burns its whole connect
+    // timeout, and serial awaits would stack that per server on startup.
+    // `join_all` keeps result order aligned with the config order, so the
+    // report stays deterministic.
+    let outcomes = futures::future::join_all(
+        servers
+            .iter()
+            .map(|(name, raw)| connect_one(name, raw, registry)),
+    )
+    .await;
+    for (line, warning) in outcomes {
         report.lines.push(line);
         if let Some(warning) = warning {
             report.warnings.push(warning);
@@ -1537,6 +1546,11 @@ mod tests {
                 .iter()
                 .all(|l| l.contains("skipped") || l.contains("unavailable"))
         );
+        // Concurrent connection keeps the report aligned with config order.
+        assert!(report.lines[0].contains("bad__name"));
+        assert!(report.lines[1].contains("both"));
+        assert!(report.lines[2].contains("neither"));
+        assert!(report.lines[3].contains("web"));
         assert!(report.warnings.len() == 4);
         assert!(registry.get("mcp__bad__name__x").is_none());
     }

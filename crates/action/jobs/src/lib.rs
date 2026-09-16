@@ -218,7 +218,23 @@ impl JobService {
         });
         jobs.insert(id.clone(), slot.clone());
         let notifications = self.notifications.clone();
-        tokio::spawn(drive_job(id.clone(), request, slot, notifications));
+        // Panic isolation, mirroring the child runtime: a panicking driver
+        // must still record a terminal state, or the ghost Running slot
+        // would hold one of the per-owner capacity slots forever.
+        let handle = tokio::spawn(drive_job(
+            id.clone(),
+            request,
+            slot.clone(),
+            notifications.clone(),
+        ));
+        let watch_id = id.clone();
+        tokio::spawn(async move {
+            if let Err(join) = handle.await
+                && join.is_panic()
+            {
+                finish(&watch_id, &slot, &notifications, None);
+            }
+        });
         Ok(id)
     }
 

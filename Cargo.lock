@@ -2183,6 +2183,7 @@ name = "tui-engine"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "libc",
  "pulldown-cmark",
  "unicode-segmentation",
  "unicode-width",

@@ -851,8 +851,13 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                     ui.render(&mut stdout.lock(), columns, rows);
                 }
                 Some(Ok(_)) => {}
-                Some(Err(_)) => {}
-                None => break,
+                Some(Err(error)) => {
+                    eprintln!("console-ui: terminal event error: {error}");
+                }
+                None => {
+                    eprintln!("console-ui: terminal event source ended");
+                    break;
+                }
             },
             event = ui.next_event() => {
                 match event {
@@ -862,7 +867,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                             ui.render(&mut stdout.lock(), columns, rows);
                         }
                     }
-                    None => break,
+                    None => {
+                        eprintln!("console-ui: session ended");
+                        break;
+                    }
                 }
             }
             _ = tick.tick() => {

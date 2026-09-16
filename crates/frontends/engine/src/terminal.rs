@@ -6,8 +6,6 @@
 //! engine never touches the alternate screen, so native scrollback
 //! survives the session.
 
-use std::io::{Read as _, Write as _};
-
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -38,7 +36,7 @@ impl TerminalGuard {
             )
             .is_ok();
         }
-        let _ = std::io::stdout().flush();
+        // crossterm's execute! flushes internally; nothing further needed.
         Ok(Self {
             keyboard_enhanced,
             bracketed_paste,
@@ -99,22 +97,26 @@ pub enum Background {
 
 /// Query the terminal background color via OSC 11 with a bounded wait.
 ///
-/// Sends `ESC]11;? BEL`; the reply arrives as raw bytes on stdin
+/// Sends `ESC]11;? BEL` and polls stdin for the reply
 /// (`ESC]11;rgb:rr/gg/bb BEL`), which crossterm's event parser does not
-/// surface, so this reads stdin directly on a worker thread with a
-/// timeout. Best-effort: `None` on any failure, and callers fall back
-/// to `COLORFGBG`/dark. Must be called while raw mode is active, before
-/// the event loop starts. Runs at most once per process: a probe that
-/// loses the race leaves its reader draining stdin until the byte
-/// budget, and a second probe could steal keystrokes forever.
+/// surface. The poll never blocks past the timeout and never spawns a
+/// reader thread: a blocking byte-read on the console input would race
+/// crossterm's event reader for keystrokes (stolen input, then a starved
+/// event stream). Unix only — Windows console input cannot be
+/// byte-polled safely, so callers there fall back to `COLORFGBG`/dark.
+/// Best-effort: `None` on any failure. Must be called while raw mode is
+/// active, before the event loop starts, at most once per process.
 pub fn query_background(timeout_ms: u64) -> Option<Background> {
-    use std::io::IsTerminal as _;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::mpsc;
-    use std::time::Duration;
+    probe_background(timeout_ms)
+}
 
-    static PROBED: AtomicBool = AtomicBool::new(false);
-    if PROBED.swap(true, Ordering::SeqCst) {
+#[cfg(unix)]
+fn probe_background(timeout_ms: u64) -> Option<Background> {
+    use std::io::{IsTerminal as _, Read as _, Write as _};
+    use std::time::{Duration, Instant};
+
+    static PROBED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if PROBED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return None;
     }
     // Piped stdin can never carry the reply; skip the wait entirely.
@@ -122,7 +124,7 @@ pub fn query_background(timeout_ms: u64) -> Option<Background> {
         return None;
     }
 
-    // Ask before reading: without the query no compliant terminal ever
+    // Ask before polling: without the query no compliant terminal ever
     // answers, and the probe would just time out.
     {
         let mut stdout = std::io::stdout();
@@ -130,30 +132,44 @@ pub fn query_background(timeout_ms: u64) -> Option<Background> {
         let _ = stdout.flush();
     }
 
-    let (sender, receiver) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut stdin = std::io::stdin();
-        let mut buffer = Vec::new();
-        let mut byte = [0u8; 1];
-        // Read until the BEL terminator or a bounded byte budget.
-        while buffer.len() < 128 {
-            match stdin.read(&mut byte) {
-                Ok(1) => {
-                    buffer.push(byte[0]);
-                    if byte[0] == 0x07 || (byte[0] == b'\\' && buffer.ends_with(&[0x1b, b'\\'])) {
-                        break;
-                    }
-                }
-                _ => break,
-            }
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut reply: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    while reply.len() < 128 {
+        let now = Instant::now();
+        if now >= deadline {
+            return None;
         }
-        sender.send(buffer).ok();
-    });
-    let _ = reader;
-    let reply = receiver
-        .recv_timeout(Duration::from_millis(timeout_ms))
-        .ok()?;
+        let mut poll_fd = libc::pollfd {
+            fd: 0, // stdin, terminal-checked above
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let remaining = (deadline - now).as_millis() as i32;
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, remaining.max(1)) };
+        if ready <= 0 {
+            return None; // timeout or poll error: give up, read nothing
+        }
+        match std::io::stdin().read(&mut byte) {
+            Ok(1) => {
+                reply.push(byte[0]);
+                let terminated = byte[0] == 0x07 || reply.ends_with(&[0x1b, b'\\']);
+                if terminated {
+                    break;
+                }
+            }
+            _ => return None,
+        }
+    }
     parse_osc11_reply(&reply)
+}
+
+#[cfg(not(unix))]
+fn probe_background(_timeout_ms: u64) -> Option<Background> {
+    // No portable way to byte-poll Windows console input without racing
+    // crossterm's event reader; theme detection falls back to
+    // `COLORFGBG`/dark (users can `/theme` at runtime).
+    None
 }
 
 /// Parse an `ESC]11;rgb:RRRR/GGGG/BBBB BEL` (or ST-terminated) reply

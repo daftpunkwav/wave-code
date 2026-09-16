@@ -8,6 +8,9 @@ license.workspace = true
 # dependencies. Components speak ANSI strings and engine-owned Color
 # values; semantic themes live in the application layer above. tests::
 # dependency_matrix_locked pins the empty internal-dep set.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dependencies]
 crossterm.workspace = true
 unicode-width.workspace = true

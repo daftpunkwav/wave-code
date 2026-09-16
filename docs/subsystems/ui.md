@@ -94,8 +94,11 @@ is the established seam (the actor already wraps the runner).
 ## Theming
 
 19 semantic tokens, dark/light palettes (hex values locked by test),
-`light|dark|auto` resolution (OSC 11 probe → `COLORFGBG` → dark), and a
-global theme installed once at startup. Components request tokens, never
+`light|dark|auto` resolution (OSC 11 probe on Unix — a bounded `poll`,
+never a blocking reader thread, since byte-reads on the console input
+would race crossterm's event reader and steal keystrokes; Windows skips
+the probe entirely → `COLORFGBG` → dark), and a global theme installed
+once at startup. Components request tokens, never
 raw colors; the engine works on `Color`/`Style` values.
 
 ## Deliberate non-goals this generation

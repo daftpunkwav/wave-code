@@ -290,6 +290,7 @@ async fn main() -> anyhow::Result<()> {
             &handle.mcp_servers,
             &handle.skill_names,
             handle.status.as_ref(),
+            &handle.permission_mode,
         )
         .await?;
         std::process::exit(Outcome::Completed.exit_code())
@@ -361,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
                 &handle.mcp_servers,
                 &handle.skill_names,
                 handle.status.as_ref(),
+                &handle.permission_mode,
             )
             .await?;
             std::process::exit(Outcome::Completed.exit_code())
@@ -584,6 +586,7 @@ async fn run_resume(
         &handle.mcp_servers,
         &handle.skill_names,
         handle.status.as_ref(),
+        &handle.permission_mode,
     )
     .await
 }
@@ -796,12 +799,16 @@ async fn run_repl(
     mcp_servers: &[String],
     skill_names: &[String],
     status: &dyn operations_actor::StatusQueries,
+    initial_permission_mode: &str,
 ) -> anyhow::Result<()> {
     use rustyline::error::ReadlineError;
 
     let mut editor = rustyline::DefaultEditor::new()?;
     let mut turn: u64 = 0;
-    let mut permission_mode = "guarded";
+    // Start from the assembled session mode: a hardcoded default here
+    // would desync the local copy from the policy, so the first
+    // `/permissions` cycle could jump a plan session straight to auto.
+    let mut permission_mode: &str = initial_permission_mode;
     println!("wavecode repl (permission: {permission_mode}): {REPL_HELP}");
     loop {
         let line = match editor.readline("> ") {

@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
+use futures::StreamExt;
 use infrastructure_base::InterruptHandle;
 use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
@@ -75,25 +76,17 @@ pub enum StopReason {
 /// Kept in this crate (not in the session store) because they describe the
 /// execution of one run, not the persisted conversation.
 #[derive(Debug, Clone, Default)]
-pub struct TurnState {
-    /// Input tokens of the most recent sample, if reported by usage.
-    pub last_input_tokens: Option<u64>,
+pub(crate) struct TurnState {
     /// Cumulative output tokens across samples in this run.
-    pub total_output_tokens: u64,
+    pub(crate) total_output_tokens: u64,
     /// Cumulative prompt-cache read tokens across samples in this run
     /// (0 when the provider reports no cache accounting).
-    pub total_cache_read_tokens: u64,
+    pub(crate) total_cache_read_tokens: u64,
     /// Cumulative prompt-cache write tokens across samples in this run
     /// (0 when the provider reports no cache accounting).
-    pub total_cache_creation_tokens: u64,
+    pub(crate) total_cache_creation_tokens: u64,
     /// How many tool dispatch rounds have executed in this run.
-    pub tool_rounds: u32,
-    /// How many reactive compactions have run in this run.
-    pub reactive_compacts: u8,
-    /// How many plan-nudge reminders have been injected in this run.
-    pub plan_nudges: u8,
-    /// How many model continuations have been issued in this run.
-    pub continuations: u8,
+    pub(crate) tool_rounds: u32,
 }
 
 impl TurnState {
@@ -521,7 +514,8 @@ pub struct RunConfig {
     pub context_window: u64,
     /// Per-sample output cap handed to the provider.
     pub max_output_tokens: u32,
-    /// Tool dispatch rounds per turn; reaching it stops with Completed.
+    /// Tool dispatch rounds per turn; reaching it stops with
+    /// [`StopReason::MaxToolRounds`].
     pub max_tool_rounds: u32,
     /// Model continuations per turn on output truncation.
     pub max_continuations: u8,
@@ -659,6 +653,60 @@ impl RunAllowlist {
     }
 }
 
+/// Per-run interrupt overrides for turns sharing one driver.
+///
+/// A child turn registers its own handle under its run id before driving;
+/// [`RunLoop::run_turn`] consumes the entry at turn start, so a `task_stop`
+/// bridges into exactly that child turn instead of the session-wide flag.
+/// Entries are single-use: `take` removes them, and a registration that is
+/// never driven is released by the spawning service's teardown guard.
+#[derive(Clone, Default)]
+pub struct RunInterrupts {
+    inner: Arc<Mutex<HashMap<String, InterruptHandle>>>,
+}
+
+impl RunInterrupts {
+    /// Bind one run id to its own interrupt handle.
+    pub fn register(&self, run_id: &str, handle: InterruptHandle) {
+        self.lock().insert(run_id.to_string(), handle);
+    }
+
+    /// Consume one run's handle; `None` keeps the driver-wide flag.
+    fn take(&self, run_id: &str) -> Option<InterruptHandle> {
+        self.lock().remove(run_id)
+    }
+
+    /// Drop one run's handle (teardown when the turn never consumed it).
+    pub fn release(&self, run_id: &str) {
+        self.lock().remove(run_id);
+    }
+
+    /// Recover the lock after a poison; inserts are single map writes with
+    /// no half-written invariant.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, InterruptHandle>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Effective interrupt for one turn: the session-wide flag plus an
+/// optional run-scoped override.
+///
+/// Child turns observe both their own stop signal and a user interrupt of
+/// the whole session. Turn entry resets nothing for a child turn — its
+/// fresh handle arrives untriggered from the spawning service — so a
+/// child turn start can never swallow a user interrupt that races it.
+struct TurnInterrupt {
+    session: InterruptHandle,
+    run: Option<InterruptHandle>,
+}
+
+impl TurnInterrupt {
+    fn is_triggered(&self) -> bool {
+        self.session.is_triggered()
+            || self.run.as_ref().is_some_and(|handle| handle.is_triggered())
+    }
+}
+
 pub struct RunLoop<E, P, H, M, A, T, C> {
     executor: E,
     policy: P,
@@ -670,6 +718,7 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     cfg: RunConfig,
     interrupt: InterruptHandle,
     run_allowlist: RunAllowlist,
+    run_interrupts: RunInterrupts,
     inbox: InboxHandle,
 }
 
@@ -707,6 +756,7 @@ where
             cfg,
             interrupt,
             run_allowlist: RunAllowlist::default(),
+            run_interrupts: RunInterrupts::default(),
             inbox: InboxHandle::new(),
         }
     }
@@ -737,6 +787,12 @@ where
         self.run_allowlist.clone()
     }
 
+    /// Per-run interrupt registry; the child task service registers one
+    /// handle per spawned child so stop signals stay scoped to that turn.
+    pub fn run_interrupts(&self) -> RunInterrupts {
+        self.run_interrupts.clone()
+    }
+
     /// Shared inbox handle; the actor stores this on its client so
     /// frontends can steer or inject mid-turn without touching the loop.
     pub fn inbox_handle(&self) -> InboxHandle {
@@ -765,8 +821,21 @@ where
                 msg,
             })
         };
-        self.approvals.clear_stale();
-        self.interrupt.reset();
+        // A registered run-scoped handle marks a child turn: it observes
+        // its own stop signal plus the session-wide flag, but never resets
+        // or clears shared state — resetting the session flag here would
+        // swallow a user interrupt racing the child start, and clearing
+        // the gates would drop a parent approval parked mid-wait.
+        let run_interrupt = self.run_interrupts.take(&ctx.run_id);
+        let owns_session_state = run_interrupt.is_none();
+        let interrupt = TurnInterrupt {
+            session: self.interrupt.clone(),
+            run: run_interrupt,
+        };
+        if owns_session_state {
+            self.approvals.clear_stale();
+            self.interrupt.reset();
+        }
 
         // Admission runs before TurnStarted: blocked input never enters
         // history and is never sampled.
@@ -799,7 +868,7 @@ where
 
         loop {
             // Checkpoint 1: loop head interrupt returns without sampling.
-            if self.interrupt.is_triggered() {
+            if interrupt.is_triggered() {
                 settle(conv, &last_input, &state, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
@@ -814,9 +883,10 @@ where
                 applied += 1;
             }
 
-            // Round ceiling stops with Completed, never with an error.
+            // Round ceiling stops with a settled turn, never with an error.
             // Checked before the budget line so a zero ceiling melts the
-            // very first iteration.
+            // very first iteration. The stop reason names the ceiling so
+            // callers can tell it from a natural completion.
             if state.rounds_exhausted(self.cfg.max_tool_rounds) {
                 emit_msg(EventMsg::Warning {
                     message: format!(
@@ -824,7 +894,9 @@ where
                         self.cfg.max_tool_rounds
                     ),
                 });
-                break;
+                settle(conv, &last_input, &state, &emit_msg);
+                emit_msg(EventMsg::TurnCompleted { interrupted: false });
+                return StopReason::MaxToolRounds;
             }
 
             // Pre-turn budget check with per-turn once-only warning and
@@ -1080,14 +1152,16 @@ where
 
             // Checkpoint 3: pre-tool interrupt preserves pairing with
             // synthesized results instead of executing anything.
-            if self.interrupt.is_triggered() {
+            if interrupt.is_triggered() {
                 let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
                 conv.push_blocks(Role::User, result_blocks(&results));
                 settle(conv, &last_input, &state, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
-            let (results, hook_contexts) = self.execute_calls(&ctx.run_id, &calls, &emit_msg).await;
+            let (results, hook_contexts) = self
+                .execute_calls(&ctx.run_id, &calls, &interrupt, &emit_msg)
+                .await;
             conv.push_blocks(Role::User, result_blocks(&results));
             // Prompt-type hook contexts ride normal history as guidance,
             // kept separate from tool outputs by construction.
@@ -1188,6 +1262,7 @@ where
         &self,
         run_id: &str,
         calls: &[ToolCall],
+        interrupt: &TurnInterrupt,
         emit: &(dyn Fn(EventMsg) + Send + Sync),
     ) -> (Vec<ToolResult>, Vec<String>) {
         // Prompt-type hook contexts from this dispatch batch (pre- and
@@ -1322,19 +1397,30 @@ where
             }
         }
 
-        // Read-only allows run concurrently; order within the batch follows
-        // declaration order via the result map below.
-        let concurrent = futures::future::join_all(parallel.into_iter().map(|call| async move {
-            let id = call.call_id.clone();
-            let output = self.executor.execute(call.clone()).await;
-            (id, call, output)
-        }))
-        .await;
+        // Read-only allows run concurrently, but capped: a model-declared
+        // flood of fetches or searches must not exhaust file descriptors
+        // or trip remote rate limits with unbounded parallelism. Order
+        // within the batch still follows declaration order via the result
+        // map below (unordered completion, keyed insertion).
+        const READ_ONLY_CONCURRENCY: usize = 8;
+        // Own the calls up front so the queued futures carry no borrow of
+        // the declaration slice (and rustc's closure-variance inference
+        // stays out of the way).
+        let owned: Vec<ToolCall> = parallel.into_iter().cloned().collect();
+        let concurrent: Vec<(String, ToolCall, ToolResult)> = futures::stream::iter(owned)
+            .map(|call| async move {
+                let id = call.call_id.clone();
+                let output = self.executor.execute(call.clone()).await;
+                (id, call, output)
+            })
+            .buffer_unordered(READ_ONLY_CONCURRENCY)
+            .collect()
+            .await;
         for (id, call, output) in concurrent {
-            if let Some(context) = self.post_tool(call, &output, emit).await {
+            if let Some(context) = self.post_tool(&call, &output, emit).await {
                 hook_contexts.push(format!("[hook:post-tool-use {}] {}", call.name, context));
             }
-            results.insert(id, result_of(call, output));
+            results.insert(id, result_of(&call, output));
         }
 
         // Mutations, approvals, and questions run serially with an
@@ -1414,7 +1500,7 @@ where
             if !approved {
                 continue;
             }
-            if self.interrupt.is_triggered() {
+            if interrupt.is_triggered() {
                 results.insert(call.call_id.clone(), interrupted_result(call));
                 continue;
             }
@@ -1528,12 +1614,6 @@ pub trait TurnDriver: Send + Sync {
     /// extraction) that must never block exit or fail the shutdown.
     async fn end_session(&self, _transcript: &[String]) {}
 
-    /// Interrupt handle observed by driven turns, if the driver exposes
-    /// one. Composition roots bridge scoped stop signals into it.
-    fn interrupt_handle(&self) -> Option<InterruptHandle> {
-        None
-    }
-
     /// Shared mid-turn inbox of the driven loop, if it exposes one. The
     /// actor stores this handle on its client so frontends can steer or
     /// inject without owning the driver loop.
@@ -1604,10 +1684,6 @@ where
         self.model.set_model(name)
     }
 
-    fn interrupt_handle(&self) -> Option<InterruptHandle> {
-        Some(self.interrupt.clone())
-    }
-
     fn inbox_handle(&self) -> Option<InboxHandle> {
         Some(self.inbox.clone())
     }
@@ -1668,10 +1744,6 @@ where
 
     fn set_permission_mode(&self, mode: &str) -> bool {
         self.as_ref().set_permission_mode(mode)
-    }
-
-    fn interrupt_handle(&self) -> Option<InterruptHandle> {
-        self.as_ref().interrupt_handle()
     }
 
     fn inbox_handle(&self) -> Option<InboxHandle> {
@@ -1823,10 +1895,11 @@ mod run_loop_tests {
     use std::collections::{HashMap, VecDeque};
     use std::sync::Mutex;
 
+    #[derive(Clone)]
     struct FakeExecutor {
         read_only: Vec<String>,
         results: HashMap<String, ToolResult>,
-        executed: Mutex<Vec<String>>,
+        executed: std::sync::Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeExecutor {
@@ -1834,7 +1907,7 @@ mod run_loop_tests {
             Self {
                 read_only: read_only.iter().map(|s| s.to_string()).collect(),
                 results: HashMap::new(),
-                executed: Mutex::new(Vec::new()),
+                executed: std::sync::Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -2531,7 +2604,10 @@ mod run_loop_tests {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
-        assert_eq!(outcome, StopReason::Completed);
+        // The ceiling reports the declared stop reason, not a plain
+        // Completed (callers may distinguish it; the turn still settles
+        // with TurnCompleted { interrupted: false }).
+        assert_eq!(outcome, StopReason::MaxToolRounds);
         let kinds = fx.event_kinds();
         assert!(kinds.iter().any(|k| k == "warning"));
         // No completed sample means settle is a no-op: no token event.
@@ -3173,5 +3249,500 @@ mod run_loop_tests {
             .join("\n");
         assert!(history.contains("nobody answered"), "{history}");
         assert!(!run.executor.lock_executed().contains(&"ask_user".to_string()));
+    }
+
+    /// Executor that parks inside one tool call until `release` fires, so
+    /// a test can trigger a run-scoped interrupt mid-turn deterministically.
+    struct ParkExecutor {
+        release: InterruptHandle,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for ParkExecutor {
+        async fn execute(&self, call: ToolCall) -> ToolResult {
+            for _ in 0..2000 {
+                if self.release.is_triggered() {
+                    return ToolResult {
+                        call_id: call.call_id,
+                        content: "parked work finished".to_string(),
+                        is_error: false,
+                    };
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            ToolResult {
+                call_id: call.call_id,
+                content: "park executor timed out".to_string(),
+                is_error: true,
+            }
+        }
+
+        fn is_read_only(&self, _tool: &str) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn run_scoped_stop_interrupts_the_child_turn_without_touching_the_session() {
+        let fx = Fixture::new();
+        let run_handle = InterruptHandle::new();
+        let (_, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let conv = &mut Conversation::new();
+        let run = RunLoop::new(
+            ParkExecutor {
+                release: run_handle.clone(),
+            },
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+            },
+            fx.interrupt.clone(),
+        );
+        // Register on the loop's own registry — the same seam the child
+        // service uses before driving a child turn.
+        run.run_interrupts().register(&fx.ctx.run_id, run_handle.clone());
+        // The scoped stop fires while the child parks inside the tool call;
+        // the post-execute checkpoint must end the turn as Interrupted.
+        let trigger = run_handle.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            trigger.trigger();
+        });
+        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        assert_eq!(outcome, StopReason::Interrupted);
+        // The whole point of the run-scoped handle: a child stop must not
+        // look like (or become) a user interrupt of the session.
+        assert!(
+            !fx.interrupt.is_triggered(),
+            "a scoped child stop must not trip the session-wide flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_turns_observe_the_session_interrupt_without_resetting_it() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        // No model steps: if the loop sampled past checkpoint 1 the empty
+        // default response would complete the turn, so Interrupted proves
+        // the child turn observed the session-wide flag.
+        fx.interrupt.trigger();
+        let conv = &mut Conversation::new();
+        let run = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        run.run_interrupts()
+            .register(&fx.ctx.run_id, InterruptHandle::new());
+        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        assert_eq!(outcome, StopReason::Interrupted);
+        // The child turn's fresh handle starts untriggered and is never
+        // reset at entry: the user's session-wide interrupt survives the
+        // child turn start.
+        assert!(
+            fx.interrupt.is_triggered(),
+            "a child turn start must not swallow a user interrupt"
+        );
+    }
+
+    #[tokio::test]
+    async fn round_ceiling_reports_max_tool_rounds() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        let conv = &mut Conversation::new();
+        // A zero ceiling melts the very first iteration: the loop
+        // reports MaxToolRounds, not Completed.
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            0,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, "hi", "sys", &|_| {})
+        .await;
+        assert_eq!(outcome, StopReason::MaxToolRounds);
+    }
+
+    #[tokio::test]
+    async fn interrupted_approval_resolution_fills_the_slot_without_executing() {
+        let fx = Fixture::new();
+        let (exec, _, hooks, model, _, plans, compactor) = default_parts();
+        let mut verdicts = HashMap::new();
+        verdicts.insert(
+            "shell".to_string(),
+            PolicyVerdict::Ask {
+                kind: AskKind::Exec,
+                detail: "run ls".to_string(),
+            },
+        );
+        let mut resolutions = HashMap::new();
+        // The gate reports the session interrupt firing mid-wait.
+        resolutions.insert("c1".to_string(), ApprovalResolution::Interrupted);
+        let approvals = FakeApprovals {
+            resolutions,
+            answers: HashMap::new(),
+        };
+        let policy = FakePolicy { verdicts };
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let conv = &mut Conversation::new();
+        let loop_ = build_loop(
+            exec.clone(),
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let outcome = loop_.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        // The turn continues with the interrupted slot filled: pairing
+        // holds, and the tool never ran.
+        assert_eq!(outcome, StopReason::Completed);
+        assert!(!exec.lock_executed().contains(&"shell".to_string()));
+        let history = conv.snapshot().iter().map(|e| e.text()).collect::<Vec<_>>().join("
+");
+        assert!(history.contains("interrupted by user"), "{history}");
+    }
+
+    #[tokio::test]
+    async fn interrupted_question_resolution_fills_the_slot_without_executing() {
+        let fx = Fixture::new();
+        let (exec, _, hooks, model, _, plans, compactor) = default_parts();
+        let mut verdicts = HashMap::new();
+        verdicts.insert(
+            "ask_user".to_string(),
+            PolicyVerdict::Question {
+                question: "pick one".to_string(),
+                options: vec!["a".to_string()],
+            },
+        );
+        let mut answers = HashMap::new();
+        answers.insert("c1".to_string(), QuestionResolution::Interrupted);
+        let approvals = FakeApprovals {
+            resolutions: HashMap::new(),
+            answers,
+        };
+        let policy = FakePolicy { verdicts };
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "ask_user".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let loop_ = build_loop(
+            exec.clone(),
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let conv = &mut Conversation::new();
+        let outcome = loop_.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        assert_eq!(outcome, StopReason::Completed);
+        // The answer IS the tool result: an interrupted question never
+        // reaches the executor either.
+        assert!(!exec.lock_executed().contains(&"ask_user".to_string()));
+        let history = conv.snapshot().iter().map(|e| e.text()).collect::<Vec<_>>().join("
+");
+        assert!(history.contains("interrupted by user"), "{history}");
+    }
+
+    #[tokio::test]
+    async fn round_ceiling_after_a_sample_settles_usage() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        // One completed sample with a tool call: after the dispatch round
+        // the ceiling (1) melts the loop, and settle must emit TokenCount
+        // because a sample completed.
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            1,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::MaxToolRounds);
+        let kinds = fx.event_kinds();
+        assert!(kinds.contains(&"token_count".to_string()));
+        assert_eq!(kinds.last().unwrap(), "turn_completed");
+    }
+
+    /// Executor counting peak in-flight concurrency, for the capped
+    /// read-only batch. Counters are shared so the test can read them
+    /// after the loop consumes the executor.
+    type SharedCounter = std::sync::Arc<std::sync::atomic::AtomicUsize>;
+
+    struct CountingExecutor {
+        in_flight: SharedCounter,
+        max_in_flight: SharedCounter,
+        executed: SharedCounter,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for CountingExecutor {
+        async fn execute(&self, call: ToolCall) -> ToolResult {
+            let now = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ToolResult {
+                call_id: call.call_id,
+                content: "ok".to_string(),
+                is_error: false,
+            }
+        }
+
+        fn is_read_only(&self, _tool: &str) -> bool {
+            true
+        }
+    }
+
+    fn counter() -> SharedCounter {
+        std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0))
+    }
+
+    #[tokio::test]
+    async fn read_only_batches_run_capped_and_fully_execute() {
+        let fx = Fixture::new();
+        let (_, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        let (in_flight, max_in_flight, executed) = (counter(), counter(), counter());
+        let executor = CountingExecutor {
+            in_flight: in_flight.clone(),
+            max_in_flight: max_in_flight.clone(),
+            executed: executed.clone(),
+        };
+        let calls: Vec<SampleBlock> = (0..24)
+            .map(|i| SampleBlock::ToolUse {
+                call_id: format!("c{i}"),
+                name: "read_file".to_string(),
+                input: serde_json::Value::Null,
+            })
+            .collect();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: calls,
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let conv = &mut Conversation::new();
+        let outcome = RunLoop::new(
+            executor,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+            },
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, "hi", "sys", &|_| {})
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        // All 24 executed despite the cap, and the in-flight peak stayed
+        // within the batch limit.
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 24);
+        let peak = max_in_flight.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(peak <= 8, "peak in-flight: {peak}");
+    }
+
+    /// Approval source recording `clear_stale` calls, to pin the gating:
+    /// session-owned turns clear stale gate state, child turns must not.
+    struct RecordingApprovals {
+        clears: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalSource for RecordingApprovals {
+        async fn decide(
+            &self,
+            _call_id: &str,
+            _kind: AskKind,
+            _detail: &str,
+        ) -> ApprovalResolution {
+            ApprovalResolution::Deny {
+                reason: "test deny".to_string(),
+            }
+        }
+
+        async fn ask(
+            &self,
+            _call_id: &str,
+            _question: &str,
+            _options: &[String],
+        ) -> QuestionResolution {
+            QuestionResolution::Unavailable {
+                reason: "test: nobody answered".to_string(),
+            }
+        }
+
+        fn clear_stale(&self) {
+            self.clears
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_session_owned_turns_clear_stale_gate_state() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, _fake_approvals, plans, compactor) = default_parts();
+        let approvals = RecordingApprovals {
+            clears: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let run = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+            },
+            fx.interrupt.clone(),
+        );
+        // Session-owned turn: clears stale gate state like before.
+        let conv = &mut Conversation::new();
+        let outcome = run
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            run.approvals.clears.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        // Child turn (registered run handle): must not wipe a parent
+        // approval parked mid-wait on the shared gates.
+        run.run_interrupts()
+            .register(&fx.ctx.run_id, InterruptHandle::new());
+        let outcome = run
+            .run_turn(&fx.ctx, conv, "hi again", "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            run.approvals.clears.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a child turn start must not clear the shared gates"
+        );
     }
 }

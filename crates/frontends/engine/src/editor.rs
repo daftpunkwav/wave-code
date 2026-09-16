@@ -219,6 +219,21 @@ impl Editor {
         self.history.draft = None;
     }
 
+    /// Seed browsing history from persisted entries (oldest first).
+    pub fn load_history(&mut self, entries: Vec<String>) {
+        let mut entries = entries;
+        entries.reverse(); // browse newest-first
+        entries.truncate(100);
+        self.history.entries = entries;
+    }
+
+    /// Snapshot all history entries, oldest first (persistence).
+    pub fn history_entries(&self) -> Vec<String> {
+        let mut entries = self.history.entries.clone();
+        entries.reverse();
+        entries
+    }
+
     // ----- helpers ---------------------------------------------------------
 
     fn graphemes(&self, row: usize) -> Vec<&str> {

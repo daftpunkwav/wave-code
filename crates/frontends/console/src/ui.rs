@@ -8,7 +8,7 @@
 //! on an outbox the run loop flushes; steering crosses the actor
 //! inbox directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use crossterm::event::{Event as CEvent, EventStream, KeyEventKind};
 use futures::StreamExt;
 use operations_actor::{ActorClient, StatusQueries, SteerTarget, SubmitError};
+use std::collections::HashMap;
 use tui_engine::component::Component;
 use tui_engine::editor::{Editor, EditorAction, EditorStyle};
 use tui_engine::keys::{Key, KeyEvent};
@@ -23,15 +24,20 @@ use tui_engine::markdown::PlainHighlighter;
 use tui_engine::screen::Screen;
 use tui_engine::terminal::{self, TerminalGuard};
 use uuid::Uuid;
-use wavecode_wire::{Event, EventMsg, Op, Submission};
+use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
 
 use crate::chrome::footer as footer_chrome;
 use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint};
+use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
+use crate::dialogs::{Answer, ApprovalDialog, Dialog, QuestionDialog};
+use crate::history;
+use crate::messages::tool_call::{ToolCall, ToolState};
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
+use crate::slash;
 use crate::state::{AppState, StreamingPhase};
-use crate::theme;
+use crate::theme::{self, Token};
 use crate::transcript::Transcript;
 use crate::welcome::Welcome;
 
@@ -107,6 +113,12 @@ pub struct ConsoleUi {
     streaming_flushed_assistant: bool,
     activity: ActivityPane,
     expanded: ExpandedFlag,
+    /// Open tool call cards by call id (transcript entry index).
+    open_calls: HashMap<String, usize>,
+    /// Modal dialog (approvals, questions) when present.
+    dialog: Option<Dialog>,
+    /// History persistence path when a home directory is known.
+    history_path: Option<PathBuf>,
     outbox: Vec<Op>,
     exit_armed_at: Option<Instant>,
     tip_index: usize,
@@ -127,13 +139,29 @@ impl ConsoleUi {
             state,
             status: ctx.status.clone(),
             link,
-            editor: Editor::new(EditorStyle::default()),
+            editor: {
+                let mut editor = Editor::new(editor_style());
+                let mut command_names: Vec<String> =
+                    slash::COMMANDS.iter().map(|s| s.to_string()).collect();
+                command_names.extend(ctx.skill_names.iter().cloned());
+                editor.set_provider(Box::new(ConsoleProvider::new(
+                    &command_names,
+                    FileInventory::scan(&ctx.cwd),
+                )));
+                if let Some(path) = home_history_path() {
+                    editor.load_history(history::load(&path));
+                }
+                editor
+            },
             transcript: Transcript::new(),
             screen: Screen::new(),
             streaming: StreamingController::new(),
             streaming_flushed_assistant: false,
             activity: ActivityPane::new(),
             expanded: ExpandedFlag::new(),
+            open_calls: HashMap::new(),
+            dialog: None,
+            history_path: home_history_path(),
             outbox: Vec::new(),
             exit_armed_at: None,
             tip_index: 0,
@@ -301,18 +329,48 @@ impl ConsoleUi {
                 self.streaming_flushed_assistant = false;
                 true
             }
-            EventMsg::ToolCallBegin { name, .. } => {
+            EventMsg::ToolCallBegin {
+                call_id,
+                name,
+                input,
+            } => {
                 self.finalize_thinking();
                 self.flush_assistant_draft();
                 self.state.phase = StreamingPhase::Tool;
                 self.activity.set_phase(StreamingPhase::Tool);
-                self.push_status(&format!("running {name}"), false);
+                let card = ToolCall::running(name, input, self.expanded.clone());
+                self.transcript.push(Box::new(card));
+                let index = self.transcript.last_index();
+                if let Some(index) = index {
+                    self.open_calls.insert(call_id.clone(), index);
+                }
                 true
             }
-            EventMsg::ToolCallEnd { is_error, .. } => {
+            EventMsg::ToolCallEnd {
+                call_id,
+                is_error,
+                output,
+            } => {
                 self.state.phase = StreamingPhase::Composing;
                 self.activity.set_phase(StreamingPhase::Composing);
-                if *is_error {
+                if let Some(index) = self.open_calls.remove(call_id)
+                    && let Some(entry) = self.transcript.get_mut(index)
+                {
+                    let state = if *is_error {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Done
+                    };
+                    if let Some(card) = as_tool_call(entry.component.as_mut()) {
+                        let preview = output.as_ref().map(|preview| {
+                            (
+                                tui_engine::sanitize::sanitize_terminal(&preview.text).into_owned(),
+                                preview.truncated,
+                            )
+                        });
+                        card.finish(*is_error, preview);
+                    }
+                } else if *is_error {
                     self.push_status("tool call failed", true);
                 }
                 true
@@ -375,8 +433,10 @@ impl ConsoleUi {
                 if *interrupted {
                     self.push_status("interrupted", false);
                 }
-                // Trim old turns now that the frame is stable.
+                // Trim old turns now that the frame is stable; no calls
+                // span turns, so the open-call index resets with it.
                 self.transcript.trim();
+                self.open_calls.clear();
                 // Dequeue a queued message as the next turn.
                 if !self.state.queued.is_empty() {
                     let next = self.state.queued.remove(0);
@@ -401,15 +461,115 @@ impl ConsoleUi {
 
     /// Handle one key event; returns the flow decision.
     pub fn handle_key(&mut self, event: KeyEvent) -> Flow {
+        // A modal dialog owns the keyboard while open.
+        if self.dialog.is_some() {
+            if event.is_ctrl_c() {
+                self.dialog = None;
+                self.push_status("dismissed", false);
+                return Flow::Continue;
+            }
+            let answer = self.dialog.as_mut().and_then(|d| d.handle_key(event));
+            if let Some(answer) = answer {
+                match answer {
+                    Answer::Approval { call_id, decision } => {
+                        self.enqueue(Op::ExecApproval { call_id, decision });
+                    }
+                    Answer::Question { call_id, answer } => {
+                        self.enqueue(Op::QuestionAnswer { call_id, answer });
+                    }
+                }
+                self.dialog = None;
+            }
+            return Flow::Continue;
+        }
         match self.editor.handle_key(event) {
             EditorAction::Submit(text) => {
                 self.exit_armed_at = None;
-                self.submit(&text);
-                Flow::Continue
+                self.user_submit(&text)
             }
             EditorAction::Handled => Flow::Continue,
             EditorAction::Passthrough => self.handle_passthrough_key(event),
         }
+    }
+
+    /// Submit handling for editor text: slash dispatch first, then plain
+    /// user input (which persists to history).
+    fn user_submit(&mut self, text: &str) -> Flow {
+        if let Some(invocation) = slash::parse(text) {
+            return match slash::dispatch(&invocation, &self.state, self.status.as_ref()) {
+                slash::Effect::Ops(ops) => {
+                    if invocation.name == "theme" {
+                        self.apply_theme(&invocation.args);
+                    } else if invocation.name == "help" {
+                        for line in slash::help_lines() {
+                            self.push_status(&line, false);
+                        }
+                    } else if invocation.name == "model" && invocation.args.is_empty() {
+                        self.push_status(&format!("model: {}", self.state.model_name), false);
+                    } else if invocation.name == "permissions" && invocation.args.is_empty() {
+                        self.push_status(
+                            &format!("permission mode: {}", self.state.permission_mode),
+                            false,
+                        );
+                    } else if invocation.name == "memory" {
+                        let text = self
+                            .status
+                            .plan_status()
+                            .unwrap_or_else(|| "no memory index available".to_string());
+                        self.push_status(&text, false);
+                    } else if invocation.name == "snapshots" {
+                        let labels = self.status.snapshot_labels();
+                        self.push_status(
+                            &if labels.is_empty() {
+                                "no snapshots".to_string()
+                            } else {
+                                format!("{}", labels.join(", "))
+                            },
+                            false,
+                        );
+                    } else if matches!(invocation.name.as_str(), "goal" | "status") {
+                        let text = self
+                            .status
+                            .goal_status()
+                            .unwrap_or_else(|| "no durable goal set".to_string());
+                        self.push_status(&text, false);
+                    }
+                    for op in ops {
+                        self.enqueue(op);
+                    }
+                    Flow::Continue
+                }
+                slash::Effect::Exit => Flow::Exit,
+                slash::Effect::Fallthrough => {
+                    self.send_user_input(text);
+                    Flow::Continue
+                }
+            };
+        }
+        self.send_user_input(text);
+        Flow::Continue
+    }
+
+    /// Apply a `/theme light|dark` switch locally.
+    fn apply_theme(&mut self, args: &str) {
+        match args.trim() {
+            "light" => theme::set(theme::Theme::light()),
+            "dark" => theme::set(theme::Theme::dark()),
+            other => {
+                self.push_status("usage: /theme light|dark", false);
+                let _ = other;
+                return;
+            }
+        }
+        self.push_status(&format!("theme switched ({args})"), false);
+    }
+
+    /// Plain user input: persist history, render, and dispatch a turn.
+    fn send_user_input(&mut self, text: &str) {
+        if let Some(path) = &self.history_path {
+            history::append(path, text);
+        }
+        self.submit(text);
     }
 
     fn handle_passthrough_key(&mut self, event: KeyEvent) -> Flow {
@@ -528,6 +688,38 @@ impl ConsoleUi {
         let _ = out.write_all(&buffer);
         let _ = out.flush();
     }
+}
+
+/// The themed editor style (rebuild on theme switches).
+fn editor_style() -> EditorStyle {
+    let theme = theme::current();
+    EditorStyle {
+        border: theme.style(Token::Border),
+        prompt: theme.style(Token::TextDim),
+        slash_command: theme.style(Token::Primary).bold(),
+        hint: theme.style(Token::TextDim),
+        paste_marker: theme.style(Token::TextDim),
+        popup: tui_engine::select_list::SelectListStyle {
+            selected: theme.style(Token::Primary),
+            label: theme.style(Token::Text),
+            description: theme.style(Token::TextDim),
+        },
+    }
+}
+
+/// The history file for the console surface, when HOME is known.
+fn home_history_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    if home.is_empty() {
+        return None;
+    }
+    Some(history::history_path(Path::new(&home), "console"))
+}
+
+/// Downcast a transcript component to its tool card, updating state.
+/// (Engine `Component` exposes an `as_any` seam for this.)
+fn as_tool_call(component: &mut dyn tui_engine::Component) -> Option<&mut ToolCall> {
+    component.as_any_mut().downcast_mut::<ToolCall>()
 }
 
 /// Welcome info derived from state (construction-order helper).
@@ -702,7 +894,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme;
+    use crate::theme::{self, Token};
     use std::path::Path;
     use test_support::{NullStatus, TestLink};
     use tui_engine::keys::Mods;

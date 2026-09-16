@@ -22,9 +22,9 @@ pub struct Completion {
 /// Source of completions for the editor.
 pub trait CompletionProvider {
     /// Completions for the active token `token` (the text from the
-    /// trigger character up to the cursor, without the trigger itself).
-    /// Returns best matches first.
-    fn complete(&self, token: &str) -> Vec<Completion>;
+    /// trigger character up to the cursor, without the trigger itself)
+    /// under trigger `kind`. Returns best matches first.
+    fn complete(&self, kind: TriggerKind, token: &str) -> Vec<Completion>;
 }
 
 /// A provider backed by a static candidate list, ranked by fuzzy score.
@@ -40,7 +40,7 @@ impl FuzzyProvider {
 }
 
 impl CompletionProvider for FuzzyProvider {
-    fn complete(&self, token: &str) -> Vec<Completion> {
+    fn complete(&self, _kind: TriggerKind, token: &str) -> Vec<Completion> {
         let mut scored: Vec<(i64, &Completion)> = self
             .candidates
             .iter()
@@ -59,6 +59,15 @@ pub struct Trigger {
     pub start: usize,
     /// Token text after the trigger character, up to the cursor.
     pub token: String,
+    /// Which trigger character opened this context.
+    pub kind: TriggerKind,
+}
+
+impl Trigger {
+    /// The trigger kind (convenience for provider dispatch).
+    pub fn kind(&self) -> TriggerKind {
+        self.kind
+    }
 }
 
 /// Which trigger character opened the popup.
@@ -106,7 +115,7 @@ pub fn detect_trigger(line: &str, cursor: usize, kind: TriggerKind) -> Option<Tr
     if token.contains(' ') {
         return None;
     }
-    Some(Trigger { start, token })
+    Some(Trigger { start, token, kind })
 }
 
 /// Drive a popup list from a trigger + provider: compute items and bind
@@ -130,7 +139,7 @@ impl AutocompletePopup {
     /// Recompute the popup for `trigger` against `provider`.
     pub fn update(&mut self, provider: &dyn CompletionProvider, trigger: Option<Trigger>) {
         self.completions = trigger
-            .map(|t| provider.complete(&t.token))
+            .map(|t| provider.complete(t.kind(), &t.token))
             .unwrap_or_default();
         let items = self
             .completions

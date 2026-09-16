@@ -61,6 +61,10 @@ impl Component for UserMessage {
         self.lines = Some((columns, out.clone()));
         out
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 /// An assistant message rendered as markdown with a status bullet.
@@ -117,6 +121,10 @@ impl Component for AssistantMessage {
         out.push(String::new());
         self.lines = Some((columns, out.clone()));
         out
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -177,6 +185,10 @@ impl Component for StatusLine {
         }
         out.push(String::new());
         out
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

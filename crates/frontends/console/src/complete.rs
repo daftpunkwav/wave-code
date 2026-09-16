@@ -1,0 +1,169 @@
+//! Completion providers for the console: slash commands and `@` file
+//! mentions, combined into one provider for the editor.
+
+use std::path::Path;
+
+use tui_engine::autocomplete::{Completion, CompletionProvider, FuzzyProvider, TriggerKind};
+use tui_engine::fuzzy;
+
+/// File-scan bounds (reference parity): inventory cap and suggestion cap.
+pub const MAX_SCANNED: usize = 2000;
+pub const MAX_SUGGESTIONS: usize = 50;
+
+/// Directories never inventoried for `@` mentions.
+const SKIPPED_DIRS: [&str; 5] = [".git", "target", "node_modules", ".venv", "dist"];
+
+/// A bounded recursive inventory of the workspace for `@` mentions.
+pub struct FileInventory {
+    /// Repo-relative (or absolute-free) paths, sorted.
+    paths: Vec<String>,
+}
+
+impl FileInventory {
+    /// Walk `root` breadth-first, bounded by [`MAX_SCANNED`] entries.
+    /// Directories in [`SKIPPED_DIRS`] and hidden entries are skipped.
+    pub fn scan(root: &Path) -> Self {
+        let mut paths = Vec::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(root.to_path_buf());
+        while let Some(dir) = queue.pop_front() {
+            let Ok(read_dir) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read_dir.flatten() {
+                if paths.len() >= MAX_SCANNED {
+                    return Self { paths };
+                }
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let path = dir.join(&name);
+                let rel = path
+                    .strip_prefix(root)
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or(name.clone());
+                if file_type.is_dir() {
+                    if SKIPPED_DIRS.contains(&name.as_str()) {
+                        continue;
+                    }
+                    queue.push_back(path);
+                } else {
+                    paths.push(rel);
+                }
+            }
+        }
+        paths.sort();
+        Self { paths }
+    }
+
+    /// An empty inventory (non-workspace sessions).
+    pub fn empty() -> Self {
+        Self { paths: Vec::new() }
+    }
+
+    /// The inventoried paths.
+    pub fn paths(&self) -> &[String] {
+        &self.paths
+    }
+}
+
+/// Provider over slash commands and `@` file mentions.
+pub struct ConsoleProvider {
+    slash: FuzzyProvider,
+    inventory: FileInventory,
+}
+
+impl ConsoleProvider {
+    /// A provider over the given command names and file inventory.
+    pub fn new(command_names: &[String], inventory: FileInventory) -> Self {
+        let candidates = command_names
+            .iter()
+            .map(|name| Completion {
+                label: format!("/{name}"),
+                description: None,
+                insert: format!("/{name} "),
+            })
+            .collect();
+        Self {
+            slash: FuzzyProvider::new(candidates),
+            inventory,
+        }
+    }
+}
+
+impl CompletionProvider for ConsoleProvider {
+    fn complete(&self, kind: TriggerKind, token: &str) -> Vec<Completion> {
+        match kind {
+            TriggerKind::Slash => self.slash.complete(kind, token),
+            TriggerKind::Mention => {
+                let mut scored: Vec<(i64, &String)> = self
+                    .inventory
+                    .paths()
+                    .iter()
+                    .filter_map(|path| fuzzy::score(token, path).map(|s| (s, path)))
+                    .collect();
+                scored.sort_by_key(|(s, _)| *s);
+                scored
+                    .into_iter()
+                    .take(MAX_SUGGESTIONS)
+                    .map(|(_, path)| Completion {
+                        label: path.clone(),
+                        description: None,
+                        insert: format!("{path} "),
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inventory_skips_hidden_and_vendored_dirs() {
+        let temp = std::env::temp_dir().join(format!("wc-inv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(temp.join("src")).unwrap();
+        std::fs::create_dir_all(temp.join(".git")).unwrap();
+        std::fs::create_dir_all(temp.join("target")).unwrap();
+        std::fs::write(temp.join("src/lib.rs"), "").unwrap();
+        std::fs::write(temp.join(".git/config"), "").unwrap();
+        std::fs::write(temp.join("target/out.bin"), "").unwrap();
+
+        let inventory = FileInventory::scan(&temp);
+        let paths = inventory.paths();
+        assert_eq!(paths, vec!["src/lib.rs".to_string()]);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn mention_completions_rank_matches() {
+        let temp = std::env::temp_dir().join(format!("wc-inv2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        std::fs::write(temp.join("main.rs"), "").unwrap();
+        std::fs::write(temp.join("readme.md"), "").unwrap();
+
+        let provider = ConsoleProvider::new(&["help".to_string()], FileInventory::scan(&temp));
+        let completions = provider.complete(TriggerKind::Mention, "main");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].label, "main.rs");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn slash_completions_still_work_through_combined_provider() {
+        let provider = ConsoleProvider::new(
+            &["help".to_string(), "model".to_string()],
+            FileInventory::empty(),
+        );
+        let completions = provider.complete(TriggerKind::Slash, "he");
+        assert_eq!(completions[0].label, "/help");
+    }
+}

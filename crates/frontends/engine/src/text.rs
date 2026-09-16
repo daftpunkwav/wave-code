@@ -52,6 +52,10 @@ impl Component for Text {
     fn render(&mut self, _width: usize) -> Vec<String> {
         self.lines.clone()
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 /// One blank spacer line.
@@ -60,6 +64,10 @@ pub struct Spacer;
 impl Component for Spacer {
     fn render(&mut self, _width: usize) -> Vec<String> {
         vec![String::new()]
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -92,6 +100,10 @@ impl Component for Gutter {
     fn invalidate(&self) {
         self.child.invalidate();
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +128,10 @@ mod tests {
         impl Component for WidthProbe {
             fn render(&mut self, width: usize) -> Vec<String> {
                 vec![width.to_string()]
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
             }
         }
         let mut gutter = Gutter::new(Box::new(WidthProbe), 2);

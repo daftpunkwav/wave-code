@@ -108,6 +108,10 @@ impl Component for Welcome {
         }
         self.lines.clone().unwrap_or_default()
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

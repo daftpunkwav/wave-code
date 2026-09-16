@@ -16,9 +16,14 @@
 //! The inline console frontend: themed chrome over the session wire.
 
 pub mod chrome;
+pub mod complete;
 pub mod controllers;
+pub mod dialogs;
+pub mod diff;
+pub mod history;
 pub mod messages;
 pub mod panes;
+pub mod slash;
 pub mod state;
 pub mod theme;
 pub mod transcript;

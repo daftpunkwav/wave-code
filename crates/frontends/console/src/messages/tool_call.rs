@@ -1,0 +1,340 @@
+//! Tool call transcript cards: state dot, verb, tool name, key
+//! argument, result chip, and a collapsible output body.
+//!
+//! Cards carry no borders (indented rows, matching the reference);
+//! the shared Ctrl+O flag expands the result body. Per-tool argument
+//! summaries come from [`args_summary`].
+
+use crate::messages::ExpandedFlag;
+use crate::theme::{self, Token};
+use tui_engine::component::Component;
+use tui_engine::width;
+
+/// Argument values truncate to this length (head/tail aware).
+pub const MAX_ARG_LENGTH: usize = 60;
+/// Collapsed result shows at most this many lines.
+pub const OUTCOME_MAX_LINES: usize = 3;
+/// Expanded result renders at most this many wrapped lines.
+pub const MAX_EXPANDED_LINES: usize = 200;
+
+/// Lifecycle of one tool call card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolState {
+    /// Call dispatched, result pending.
+    Running,
+    /// Completed successfully.
+    Done,
+    /// Completed with an error result.
+    Failed,
+}
+
+/// Extract a human summary of the key argument for a tool input.
+pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
+    let pick = |keys: &[&str]| -> Option<String> {
+        for key in keys {
+            if let Some(value) = input.get(*key).and_then(|v| v.as_str()) {
+                return Some(value.to_string());
+            }
+        }
+        None
+    };
+    let raw = match name {
+        "read_file" | "write_file" | "edit_file" | "list_dir" => pick(&["path", "file_path"]),
+        "shell" | "pty_shell" => pick(&["command", "cmd"]),
+        "grep" => pick(&["pattern"]).map(|p| format!("“{p}”")),
+        "glob" => pick(&["pattern"]),
+        "webfetch" => pick(&["url"]),
+        "websearch" => pick(&["query"]),
+        "task" => pick(&["description", "prompt"]),
+        _ => pick(&["path", "command", "url", "query", "name", "description"]),
+    }
+    .unwrap_or_default();
+    truncate_arg(&raw, MAX_ARG_LENGTH)
+}
+
+/// Smart path shortening: deep paths keep their tail.
+fn truncate_arg(value: &str, max: usize) -> String {
+    let value = value.replace('\\', "/");
+    if width::width(&value) <= max {
+        return value;
+    }
+    let segments: Vec<&str> = value.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.len() > 2 {
+        let tail = segments[segments.len() - 2..].join("/");
+        if width::width(&tail) + 2 <= max {
+            return format!("…/{tail}");
+        }
+    }
+    let budget = max.saturating_sub(1);
+    let mut out: String = value.chars().take(budget).collect();
+    out.push('…');
+    out
+}
+
+/// The verb for a card header.
+pub fn verb(name: &str, state: ToolState) -> String {
+    let present = match name {
+        "read_file" | "read_image" => "Reading",
+        "write_file" => "Writing",
+        "edit_file" => "Editing",
+        "list_dir" => "Listing",
+        "grep" | "glob" | "websearch" => "Searching",
+        "shell" | "pty_shell" => "Running",
+        "webfetch" => "Fetching",
+        "task" => "Delegating",
+        _ => "Using",
+    };
+    let past = match name {
+        "read_file" | "read_image" => "Read",
+        "write_file" => "Wrote",
+        "edit_file" => "Edited",
+        "list_dir" => "Listed",
+        "grep" | "glob" | "websearch" => "Searched",
+        "shell" | "pty_shell" => "Ran",
+        "webfetch" => "Fetched",
+        "task" => "Delegated",
+        _ => "Used",
+    };
+    match state {
+        ToolState::Running => present.to_string(),
+        _ => past.to_string(),
+    }
+}
+
+/// A tool call card.
+pub struct ToolCall {
+    name: String,
+    args: String,
+    state: ToolState,
+    /// Result preview (head of the output, truncation flag).
+    output: Option<(String, bool)>,
+    expanded: ExpandedFlag,
+    lines: Option<(usize, ToolState, bool, Vec<String>)>,
+}
+
+impl ToolCall {
+    /// A running card for a call.
+    pub fn running(name: &str, input: &serde_json::Value, expanded: ExpandedFlag) -> Self {
+        Self {
+            name: name.to_string(),
+            args: args_summary(name, input),
+            state: ToolState::Running,
+            output: None,
+            expanded,
+            lines: None,
+        }
+    }
+
+    /// Record the end state and the bounded output preview.
+    pub fn finish(&mut self, is_error: bool, output: Option<(String, bool)>) {
+        self.state = if is_error {
+            ToolState::Failed
+        } else {
+            ToolState::Done
+        };
+        self.output = output;
+        self.lines = None;
+    }
+
+    /// True when the collapsed body hides content (footer hint).
+    pub fn has_hidden(&self) -> bool {
+        self.output
+            .as_ref()
+            .map(|(text, _)| {
+                !self.expanded.get() && width::wrap_line(text, 80).len() > OUTCOME_MAX_LINES
+            })
+            .unwrap_or(false)
+    }
+
+    fn header(&self) -> String {
+        let theme = theme::current();
+        let (dot, dot_token) = match self.state {
+            ToolState::Running => ("●", Token::Text),
+            ToolState::Done => ("●", Token::Success),
+            ToolState::Failed => ("✗", Token::Error),
+        };
+        let verb = verb(&self.name, self.state);
+        let mut line = format!(
+            "{} {} {}",
+            theme.paint(dot_token, dot),
+            theme.bold(Token::Primary, &verb),
+            theme.bold(Token::Primary, &self.name)
+        );
+        if !self.args.is_empty() {
+            line.push_str(&theme.paint(Token::TextDim, &format!(" ({})", self.args)));
+        }
+        line
+    }
+
+    fn body(&self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let Some((text, truncated)) = &self.output else {
+            return Vec::new();
+        };
+        if text.contains("<system-reminder>") {
+            return Vec::new(); // metadata envelope: never rendered
+        }
+        let expanded = self.expanded.get();
+        let budget = columns.saturating_sub(4);
+        let mut rows: Vec<String> = Vec::new();
+        for line in text.lines() {
+            for wrapped in width::wrap_line(line, budget) {
+                rows.push(format!("  {}", theme.paint(Token::TextDim, &wrapped)));
+                if !expanded && rows.len() > OUTCOME_MAX_LINES {
+                    break;
+                }
+                if expanded && rows.len() >= MAX_EXPANDED_LINES {
+                    break;
+                }
+            }
+            if rows.len()
+                >= (if expanded {
+                    MAX_EXPANDED_LINES
+                } else {
+                    OUTCOME_MAX_LINES + 1
+                })
+            {
+                break;
+            }
+        }
+        if expanded || rows.len() <= OUTCOME_MAX_LINES {
+            if *truncated && expanded {
+                rows.push(theme.paint(Token::TextDim, "  … (output truncated)"));
+            }
+            return rows;
+        }
+        let kept: Vec<String> = rows[..OUTCOME_MAX_LINES].to_vec();
+        let mut out = kept;
+        out.push(theme.paint(
+            Token::TextDim,
+            &format!(
+                "  … ({} more lines, ctrl+o to expand)",
+                text.lines().count().saturating_sub(OUTCOME_MAX_LINES)
+            ),
+        ));
+        out
+    }
+}
+
+impl Component for ToolCall {
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let expanded = self.expanded.get();
+        if let Some((cached_columns, cached_state, cached_expanded, lines)) = &self.lines
+            && *cached_columns == columns
+            && *cached_state == self.state
+            && *cached_expanded == expanded
+        {
+            return lines.clone();
+        }
+        let mut lines = vec![self.header()];
+        lines.extend(self.body(columns));
+        lines.push(String::new());
+        self.lines = Some((columns, self.state, expanded, lines.clone()));
+        lines
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme;
+    use tui_engine::width::strip_ansi;
+
+    #[test]
+    fn args_summary_picks_key_fields() {
+        let input = serde_json::json!({"path": "/a/b/c.rs"});
+        assert_eq!(args_summary("read_file", &input), "/a/b/c.rs");
+        let input = serde_json::json!({"command": "npm test"});
+        assert_eq!(args_summary("shell", &input), "npm test");
+        let input = serde_json::json!({"pattern": "TODO"});
+        assert_eq!(args_summary("grep", &input), "“TODO”");
+    }
+
+    #[test]
+    fn deep_paths_collapse_to_tail() {
+        let long = "/very/deep/tree/with/many/segments/and/a/really/long/filename.rs";
+        let input = serde_json::json!({"path": long});
+        let summary = args_summary("read_file", &input);
+        assert!(summary.starts_with("…/"), "{summary}");
+        assert!(width::width(&summary) <= MAX_ARG_LENGTH);
+    }
+
+    #[test]
+    fn verb_switches_with_state() {
+        assert_eq!(verb("shell", ToolState::Running), "Running");
+        assert_eq!(verb("shell", ToolState::Done), "Ran");
+        assert_eq!(verb("read_file", ToolState::Done), "Read");
+        assert_eq!(verb("grep", ToolState::Done), "Searched");
+    }
+
+    #[test]
+    fn card_states_and_output_body() {
+        theme::set(theme::Theme::dark());
+        let flag = ExpandedFlag::new();
+        let mut card =
+            ToolCall::running("shell", &serde_json::json!({"command": "ls"}), flag.clone());
+        let lines = card.render(80);
+        assert!(
+            strip_ansi(&lines[0]).starts_with("● Running shell (ls)"),
+            "{lines:?}"
+        );
+
+        card.finish(
+            false,
+            Some(("out1\nout2\nout3\nout4\nout5".to_string(), false)),
+        );
+        let lines = card.render(80);
+        assert!(strip_ansi(&lines[0]).starts_with("● Ran shell"));
+        let plain = strip_ansi(&lines[1]);
+        assert!(plain.contains("out1"), "{plain}");
+        assert!(
+            strip_ansi(&lines[4]).contains("more lines"),
+            "collapsed hint after 3 rows: {lines:?}"
+        );
+
+        flag.toggle();
+        let lines = card.render(80);
+        let joined: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("out5"), "expanded shows all: {joined}");
+    }
+
+    #[test]
+    fn failed_cards_show_error_dot() {
+        theme::set(theme::Theme::dark());
+        let mut card = ToolCall::running(
+            "shell",
+            &serde_json::json!({"command": "nope"}),
+            ExpandedFlag::new(),
+        );
+        card.finish(true, Some(("boom".to_string(), false)));
+        let lines = card.render(80);
+        assert!(strip_ansi(&lines[0]).starts_with("✗"), "{lines:?}");
+    }
+
+    #[test]
+    fn system_reminder_output_suppressed() {
+        theme::set(theme::Theme::dark());
+        let mut card = ToolCall::running(
+            "read_file",
+            &serde_json::json!({"path": "x"}),
+            ExpandedFlag::new(),
+        );
+        card.finish(
+            false,
+            Some((
+                "<system-reminder>secret</system-reminder>".to_string(),
+                false,
+            )),
+        );
+        let lines = card.render(80);
+        assert_eq!(lines.len(), 2, "header + spacer only: {lines:?}");
+    }
+}

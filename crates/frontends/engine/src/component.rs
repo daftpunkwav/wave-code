@@ -16,6 +16,10 @@ pub trait Component {
 
     /// Drop any cached render state; the next render recomputes.
     fn invalidate(&self) {}
+
+    /// Typed access for callers that store mixed children and must
+    /// update specific component types in place (e.g. tool cards).
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// A component that accepts keyboard input while focused.
@@ -92,6 +96,10 @@ impl Component for Container {
         for child in &self.children {
             child.invalidate();
         }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

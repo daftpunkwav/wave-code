@@ -131,6 +131,67 @@ impl ApprovalGate {
     }
 }
 
+/// Parks interactive questions keyed by tool call id.
+///
+/// Mirrors [`ApprovalGate`] with free-text answers instead of decisions:
+/// each call id admits exactly one waiter, the first `answer` takes the
+/// slot, and late answers return false so a stale UI submission can
+/// never answer a future call reusing the id.
+#[derive(Debug, Default)]
+pub struct QuestionGate {
+    pending: Mutex<HashMap<String, oneshot::Sender<String>>>,
+}
+
+impl QuestionGate {
+    /// Create an empty gate.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Recover the mutex guard after a poison; see crate docs for why.
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<String>>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Park the current run, awaiting an answer for `call_id`.
+    pub fn wait_for(&self, call_id: &str) -> Result<oneshot::Receiver<String>, GateError> {
+        let (tx, rx) = oneshot::channel();
+        let mut pending = self.lock();
+        if pending.contains_key(call_id) {
+            return Err(GateError::DuplicateWaiter(call_id.to_string()));
+        }
+        pending.insert(call_id.to_string(), tx);
+        Ok(rx)
+    }
+
+    /// Deliver an answer; false when no waiter exists (late or unknown id).
+    pub fn answer(&self, call_id: &str, answer: String) -> bool {
+        let sender = self.lock().remove(call_id);
+        match sender {
+            Some(tx) => tx.send(answer).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Withdraw one parked waiter without answering; true when anything
+    /// was parked (expiry paths, mirroring [`ApprovalGate::cancel`]).
+    pub fn cancel(&self, call_id: &str) -> bool {
+        self.lock().remove(call_id).is_some()
+    }
+
+    /// Drop all parked waiters, e.g. on run teardown.
+    pub fn clear(&self) {
+        self.lock().clear();
+    }
+
+    /// Number of currently parked waiters.
+    pub fn pending_count(&self) -> usize {
+        self.lock().len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +228,28 @@ mod tests {
         let _fresh = gate.wait_for("call-1").unwrap();
         // The withdrawn receiver resolves as dropped, never as approved.
         assert!(rx.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn question_answers_are_one_shot_and_late_answers_drop() {
+        let gate = QuestionGate::new();
+        let rx = gate.wait_for("call-1").unwrap();
+        assert_eq!(gate.pending_count(), 1);
+        assert!(gate.answer("call-1", "option two".to_string()));
+        assert_eq!(rx.await.unwrap(), "option two");
+        // Late answers for a consumed id are dropped, never stored.
+        assert!(!gate.answer("call-1", "late".to_string()));
+        assert_eq!(gate.pending_count(), 0);
+        assert!(gate.cancel("ghost") == false);
+    }
+
+    #[tokio::test]
+    async fn question_cancelled_waits_free_their_call_id() {
+        let gate = QuestionGate::new();
+        let rx = gate.wait_for("call-1").unwrap();
+        assert!(gate.cancel("call-1"));
+        // The withdrawn receiver resolves as dropped, never answered.
+        assert!(rx.await.is_err());
+        let _fresh = gate.wait_for("call-1").unwrap();
     }
 }

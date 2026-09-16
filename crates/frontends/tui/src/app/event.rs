@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use wavecode_wire::{ApprovalKind, Event};
 
 use super::App;
-use super::types::{ApprovalPopup, Item, accent, dim, err, parse_todo_input, todo_symbol, warn};
+use super::types::{ApprovalPopup, Item, QuestionPopup, accent, dim, err, parse_todo_input, todo_symbol, warn};
 use crate::text::{sanitize_terminal, truncate_chars};
 
 /// Character budget for tool call input summaries (matches legacy CLI).
@@ -129,6 +129,30 @@ impl App {
                     reason: String::new(),
                 });
             }
+            // Interactive question: blue notice line + inline popup
+            // (answers are handled on keys; the answer is the result).
+            M::QuestionRequested {
+                call_id,
+                question,
+                options,
+            } => {
+                self.flush_message();
+                let question = sanitize_terminal(question).into_owned();
+                let options: Vec<String> = options
+                    .iter()
+                    .map(|o| sanitize_terminal(o).into_owned())
+                    .collect();
+                self.push_item(Item::plain(
+                    format!("❓ Asked: {question}"),
+                    accent(),
+                ));
+                self.question = Some(QuestionPopup {
+                    call_id: call_id.clone(),
+                    question,
+                    options,
+                    input: String::new(),
+                });
+            }
             M::Warning { message } => {
                 self.flush_message();
                 let msg = sanitize_terminal(message).into_owned();
@@ -176,12 +200,12 @@ impl App {
         self.push_item(Item::plain(format!("· {text}"), dim()));
     }
 
-    /// Tool call start row: todo_write shows list state migration,
+    /// Tool call start row: todowrite shows list state migration,
     /// child_spawn shows the child input summary, others show
     /// `▸ {tool}` + input summary (legacy CLI semantics).
     fn tool_begin_item(&mut self, tool: &str, input: &serde_json::Value) {
-        if tool == "todo_write" {
-            let mut lines = vec![Line::from(Span::styled("▸ todo_write", accent()))];
+        if tool == "todowrite" {
+            let mut lines = vec![Line::from(Span::styled("▸ todowrite", accent()))];
             let empty = Vec::new();
             let todos = input
                 .get("todos")

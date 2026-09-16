@@ -1,4 +1,4 @@
-/*! @file Webfetch
+/*! @file WebFetch
  * @description HTTP(S) URL fetch tool with size, redirect caps, and HTML
  * to Markdown conversion.
  *
@@ -12,7 +12,7 @@
  * This module must not depend on: UI-layer components, filesystem writes.
  */
 
-//! `webfetch` tool (read-only): fetch a URL as text. Only `http`/`https`
+//! `web_fetch` tool (read-only): fetch a URL as text. Only `http`/`https`
 //! schemes are accepted (`file`/`ftp`/`data` URLs are business errors).
 //! Redirects are followed manually up to 5 hops; the body is streamed with
 //! a size cap (default 256 KB, hard cap 1 MB) and cut with a `[truncated]`
@@ -128,7 +128,7 @@ pub struct WebFetch;
 #[async_trait::async_trait]
 impl Tool for WebFetch {
     fn name(&self) -> &str {
-        "webfetch"
+        "web_fetch"
     }
 
     fn description(&self) -> &str {

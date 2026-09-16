@@ -7,7 +7,7 @@ pub struct ReadFile;
 #[async_trait::async_trait]
 impl Tool for ReadFile {
     fn name(&self) -> &str {
-        "read_file"
+        "read"
     }
 
     fn description(&self) -> &str {
@@ -59,7 +59,7 @@ impl Tool for ReadFile {
         };
         if meta.is_dir() {
             return Ok(err_output(format!(
-                "path is a directory, use list_dir instead: {}",
+                "path is a directory, use ls instead: {}",
                 path.display()
             )));
         }

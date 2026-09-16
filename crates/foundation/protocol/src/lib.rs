@@ -32,29 +32,33 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PermissionMode {
-    /// Write / exec / destructive tools need per-call approval (hits on allow rules skip approval).
-    #[serde(rename = "default")]
-    Default,
-    /// Only read-only tools are usable; non-read-only tools are denied straight back into the model.
+    /// Read-only exploration: only read-only tools are usable; everything
+    /// else is denied straight back into the model. The model is nudged
+    /// toward proposing a plan but may also simply answer.
     #[serde(rename = "plan")]
     Plan,
-    /// File edits (write_file / edit_file) auto-approve; shell and friends still need approval.
-    #[serde(rename = "acceptEdits")]
-    AcceptEdits,
+    /// Dangerous operations (command execution, destructive tools) need
+    /// per-call approval; file edits and other non-exec writes flow
+    /// through without asking (hits on allow rules skip approval).
+    #[serde(rename = "guarded")]
+    Guarded,
     /// Approve everything (deny rules still apply).
-    // TODO(post-P2): entering this mode requires a confirmation phrase (SPEC section 12); frontend interaction waits on the TUI.
-    #[serde(rename = "bypassPermissions")]
-    BypassPermissions,
+    #[serde(rename = "auto")]
+    Auto,
 }
 
 impl PermissionMode {
-    /// Parses a mode string from config / the frontend (same names as the serde wire form).
+    /// Parses a mode string from config / the frontend (same names as the
+    /// serde wire form). Legacy pre-3-mode names map onto their successor
+    /// so old config files keep loading: `default` / `acceptEdits` ->
+    /// Guarded, `bypassPermissions` -> Auto.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "default" => Some(Self::Default),
             "plan" => Some(Self::Plan),
-            "acceptEdits" => Some(Self::AcceptEdits),
-            "bypassPermissions" => Some(Self::BypassPermissions),
+            "guarded" => Some(Self::Guarded),
+            "auto" => Some(Self::Auto),
+            "default" | "acceptEdits" => Some(Self::Guarded),
+            "bypassPermissions" => Some(Self::Auto),
             _ => None,
         }
     }
@@ -62,10 +66,9 @@ impl PermissionMode {
     /// Wire string (shared by config and display).
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Default => "default",
             Self::Plan => "plan",
-            Self::AcceptEdits => "acceptEdits",
-            Self::BypassPermissions => "bypassPermissions",
+            Self::Guarded => "guarded",
+            Self::Auto => "auto",
         }
     }
 }
@@ -93,13 +96,11 @@ mod tests {
 
     #[test]
     fn permission_mode_wire_form_parses_and_displays() {
-        // Lock the PermissionMode wire form (matches the config `permission_mode` strings;
-        // note acceptEdits / bypassPermissions are camelCase, not snake_case).
-        let mode_cases: [(PermissionMode, &str); 4] = [
-            (PermissionMode::Default, "default"),
+        // Lock the PermissionMode wire form (matches the config `permission_mode` strings).
+        let mode_cases: [(PermissionMode, &str); 3] = [
             (PermissionMode::Plan, "plan"),
-            (PermissionMode::AcceptEdits, "acceptEdits"),
-            (PermissionMode::BypassPermissions, "bypassPermissions"),
+            (PermissionMode::Guarded, "guarded"),
+            (PermissionMode::Auto, "auto"),
         ];
         for (mode, tag) in mode_cases {
             let json = serde_json::to_string(&mode).unwrap();
@@ -107,7 +108,22 @@ mod tests {
             assert_eq!(PermissionMode::parse(tag), Some(mode));
             assert_eq!(mode.to_string(), tag);
         }
-        assert_eq!(PermissionMode::parse("Default"), None);
+        assert_eq!(PermissionMode::parse("Plan"), None);
+    }
+
+    #[test]
+    fn legacy_mode_names_migrate_onto_their_successors() {
+        // Pre-3-mode config files keep loading: old names alias onto the
+        // mode that inherited their behavior.
+        assert_eq!(PermissionMode::parse("default"), Some(PermissionMode::Guarded));
+        assert_eq!(
+            PermissionMode::parse("acceptEdits"),
+            Some(PermissionMode::Guarded)
+        );
+        assert_eq!(
+            PermissionMode::parse("bypassPermissions"),
+            Some(PermissionMode::Auto)
+        );
     }
 
     #[test]

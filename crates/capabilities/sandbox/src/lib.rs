@@ -328,6 +328,14 @@ pub enum Verdict {
     /// Needs a human approval: core emits `ApprovalRequested` and parks for
     /// the resolution.
     Ask { kind: ApprovalKind, detail: String },
+    /// Park an interactive question: core emits `QuestionRequested` and the
+    /// user's answer becomes the tool result (the tool body never runs).
+    Question {
+        /// The question text for display.
+        question: String,
+        /// Numbered answer options; empty when free text is expected.
+        options: Vec<String>,
+    },
     /// Deny: the reason feeds back to the model as an is_error ToolResult
     /// (deny rules / plan mode).
     Deny { reason: String },
@@ -439,7 +447,7 @@ impl Sandbox {
     }
 
     /// Approval verdict: deny rules first (no mode exempts them) -> allow
-    /// rule exemptions -> in-session state tool exemptions (P4, `todo_write`
+    /// rule exemptions -> in-session state tool exemptions (P4, `todowrite`
     /// needs no approval in any mode) -> the mode's default policy.
     ///
     /// `tool` / `input` feed rule matching and Ask details; `read_only` /
@@ -482,7 +490,7 @@ impl Sandbox {
         {
             return Verdict::Allow;
         }
-        // 2.5 In-session state tool exemption (P4): todo_write only mutates
+        // 2.5 In-session state tool exemption (P4): todowrite only mutates
         // the in-session todo list — no filesystem changes, no spawned
         // processes — so it allows directly in every mode (matching
         // deepagents' auto-allowed write_todos; maintaining the list in plan
@@ -491,20 +499,33 @@ impl Sandbox {
         if is_session_state(tool) {
             return Verdict::Allow;
         }
-        // 3. Mode default policy. Read-only and non-destructive allows under
-        // default/acceptEdits/bypass; plan mode only serves read-only tools
-        // and refuses the rest directly (no approval requests).
+        // 2.6 Interactive question routing (ask_user): the user's answer
+        // becomes the tool result, so route before mode policy — asking a
+        // question is read-only work and never parks on an approval gate.
+        // Invalid payloads fall through so the tool reports the schema
+        // business error itself.
+        if is_user_question(tool) {
+            if let Some(verdict) = question_verdict(input) {
+                return verdict;
+            }
+        }
+        // 3. Mode default policy.
+        //    plan: read-only only; everything else denies outright (no
+        //    approval requests). guarded: read-only tools, file edits, and
+        //    other non-exec writes flow through; command execution
+        //    (Exec approval kind) and destructive tools ask. auto: allow.
         match self.mode() {
             PermissionMode::Plan if !read_only || destructive => Verdict::Deny {
                 reason: format!(
                     "plan mode: only read-only tools are allowed; `{tool}` was blocked (no changes were made)"
                 ),
             },
-            PermissionMode::BypassPermissions => Verdict::Allow,
+            PermissionMode::Auto => Verdict::Allow,
             _ if read_only && !destructive => Verdict::Allow,
-            // acceptEdits: file edits auto-allow (shell and destructive tools
-            // still ask).
-            PermissionMode::AcceptEdits if is_file_edit(tool) && !destructive => Verdict::Allow,
+            _ if is_file_edit(tool) && !destructive => Verdict::Allow,
+            // present only records deliverables in the session manifest —
+            // no repo or process side effects, so it never asks.
+            _ if matches!(tool, "present") && !destructive => Verdict::Allow,
             _ => Verdict::Ask {
                 kind: approval_kind(tool),
                 detail: ask_detail(tool, input),
@@ -513,22 +534,63 @@ impl Sandbox {
     }
 }
 
-/// File-editing tools auto-allowed in acceptEdits mode (the builtin set; MCP
-/// write tools are not in this list in P2).
+/// File-editing tools auto-allowed in guarded mode (the builtin set; MCP
+/// write tools are not in this list).
 fn is_file_edit(tool: &str) -> bool {
-    matches!(tool, "write_file" | "edit_file")
+    matches!(tool, "write" | "edit")
 }
 
 /// In-session state tools (P4): only mutate in-session memory state with no
-/// external side effects; need no approval in any mode.
+/// external side effects; need no approval in any mode. The merged
+/// `goal` / `plan` tools write only harness-owned coordination files
+/// under the home directory (never the repo), so they ride the same
+/// exemption: maintaining goals and plans is part of planning itself.
 fn is_session_state(tool: &str) -> bool {
-    matches!(tool, "todo_write")
+    matches!(tool, "todowrite" | "goal" | "plan")
 }
 
-/// Approval kind: shell commands (local, PTY, or remote) are Exec,
-/// everything else (file writes / edits, …) is Write.
+/// Interactive-question tools: the user's answer is the tool result, so
+/// they route through the question flow instead of executing.
+fn is_user_question(tool: &str) -> bool {
+    matches!(tool, "ask_user")
+}
+
+/// Extract the question payload for [`Verdict::Question`]: a non-empty
+/// trimmed `question` plus up to four non-empty string `options`.
+/// `None` means the payload is invalid (the tool then reports the schema
+/// business error itself through normal execution).
+fn question_verdict(input: &serde_json::Value) -> Option<Verdict> {
+    let question = input.get("question")?.as_str()?.trim();
+    if question.is_empty() {
+        return None;
+    }
+    let mut options = Vec::new();
+    if let Some(items) = input.get("options").and_then(|v| v.as_array()) {
+        for item in items {
+            let text = item.as_str()?.trim();
+            if text.is_empty() {
+                return None;
+            }
+            options.push(text.to_string());
+        }
+    }
+    if options.len() > 4 {
+        return None;
+    }
+    Some(Verdict::Question {
+        question: question.to_string(),
+        options,
+    })
+}
+
+/// Approval kind: tools that run arbitrary code (local shells, inline
+/// script runtimes, background job spawns) are Exec; everything else
+/// (file writes / edits, …) is Write.
 fn approval_kind(tool: &str) -> ApprovalKind {
-    if matches!(tool, "shell" | "pty_shell" | "remote_shell") {
+    if matches!(
+        tool,
+        "shell" | "pty_shell" | "python" | "node" | "job_spawn"
+    ) {
         ApprovalKind::Exec
     } else {
         ApprovalKind::Write
@@ -572,28 +634,27 @@ mod tests {
     fn builtin_tool_names_match_classification_table() {
         let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
         // (tool name, is_file_edit, is_session_state, approval_kind)
-        let expected: [(&str, bool, bool, ApprovalKind); 21] = [
-            ("read_file", false, false, ApprovalKind::Write),
-            ("write_file", true, false, ApprovalKind::Write),
-            ("edit_file", true, false, ApprovalKind::Write),
-            ("list_dir", false, false, ApprovalKind::Write),
+        let expected: [(&str, bool, bool, ApprovalKind); 20] = [
+            ("read", false, false, ApprovalKind::Write),
+            ("write", true, false, ApprovalKind::Write),
+            ("edit", true, false, ApprovalKind::Write),
+            ("ls", false, false, ApprovalKind::Write),
             ("grep", false, false, ApprovalKind::Write),
             ("glob", false, false, ApprovalKind::Write),
             ("shell", false, false, ApprovalKind::Exec),
             ("pty_shell", false, false, ApprovalKind::Exec),
-            ("remote_shell", false, false, ApprovalKind::Exec),
-            ("run_python", false, false, ApprovalKind::Write),
-            ("run_node", false, false, ApprovalKind::Write),
-            ("document_symbols", false, false, ApprovalKind::Write),
-            ("goto_definition", false, false, ApprovalKind::Write),
-            ("hover", false, false, ApprovalKind::Write),
-            ("find_references", false, false, ApprovalKind::Write),
-            ("webfetch", false, false, ApprovalKind::Write),
+            ("python", false, false, ApprovalKind::Exec),
+            ("node", false, false, ApprovalKind::Exec),
+            ("lsp_symbols", false, false, ApprovalKind::Write),
+            ("lsp_definition", false, false, ApprovalKind::Write),
+            ("lsp_hover", false, false, ApprovalKind::Write),
+            ("lsp_references", false, false, ApprovalKind::Write),
+            ("web_fetch", false, false, ApprovalKind::Write),
             ("web_search", false, false, ApprovalKind::Write),
-            ("read_image", false, false, ApprovalKind::Write),
+            ("view", false, false, ApprovalKind::Write),
             ("present", false, false, ApprovalKind::Write),
-            ("spill_read", false, false, ApprovalKind::Write),
-            ("todo_write", false, true, ApprovalKind::Write),
+            ("spill", false, false, ApprovalKind::Write),
+            ("todowrite", false, true, ApprovalKind::Write),
         ];
         for (name, file_edit, session_state, kind) in expected {
             assert!(
@@ -715,7 +776,7 @@ mod tests {
     #[test]
     fn deny_rules_win_over_allow() {
         let sb = Sandbox::new(
-            PermissionMode::Default,
+            PermissionMode::Guarded,
             &["Bash(git *)".into()],
             &["Bash(git push *)".into()],
         )
@@ -739,15 +800,15 @@ mod tests {
     /// `decide` (including read-only ones), so deny rules fire on the full
     /// pipeline as well.
     #[test]
-    fn deny_rules_apply_even_in_bypass_mode() {
+    fn deny_rules_apply_even_in_auto_mode() {
         let sb = Sandbox::new(
-            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
             &[],
             &["File(secrets/**)".into()],
         )
         .unwrap();
         assert_eq!(
-            sb.decide("read_file", &file_input("secrets/key.pem"), true, false),
+            sb.decide("read", &file_input("secrets/key.pem"), true, false),
             Verdict::Deny {
                 reason: "denied by permission rule: File(secrets/**)".into()
             }
@@ -762,47 +823,47 @@ mod tests {
     #[test]
     fn file_rules_match_path_input() {
         let sb = Sandbox::new(
-            PermissionMode::Default,
+            PermissionMode::Guarded,
             &["File(src/**)".into()],
             &["File(src/secret.rs)".into()],
         )
         .unwrap();
         assert_eq!(
-            sb.decide("write_file", &file_input("src/main.rs"), false, false),
+            sb.decide("write", &file_input("src/main.rs"), false, false),
             Verdict::Allow
         );
         assert!(matches!(
-            sb.decide("write_file", &file_input("src/secret.rs"), false, false),
+            sb.decide("write", &file_input("src/secret.rs"), false, false),
             Verdict::Deny { .. }
         ));
-        // No rule hit: default mode asks on non-read-only.
-        assert!(matches!(
-            sb.decide("write_file", &file_input("docs/x.md"), false, false),
-            Verdict::Ask { .. }
-        ));
+        // No rule hit: guarded mode auto-allows file edits (dangerous
+        // operations are the ones that ask).
+        assert_eq!(
+            sb.decide("write", &file_input("docs/x.md"), false, false),
+            Verdict::Allow
+        );
     }
 
     #[test]
     fn invalid_rule_entry_is_startup_error() {
-        assert!(Sandbox::new(PermissionMode::Default, &["Bash(".into()], &[]).is_err());
+        assert!(Sandbox::new(PermissionMode::Guarded, &["Bash(".into()], &[]).is_err());
     }
 
     // —— decide: mode default policies ——
 
     #[test]
-    fn default_mode_asks_for_writes_allows_reads() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+    fn guarded_mode_allows_edits_and_reads_asks_for_exec_and_destructive() {
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         assert_eq!(
-            sb.decide("read_file", &file_input("a.txt"), true, false),
+            sb.decide("read", &file_input("a.txt"), true, false),
             Verdict::Allow
         );
+        // File edits flow through without asking.
         assert_eq!(
-            sb.decide("write_file", &file_input("a.txt"), false, false),
-            Verdict::Ask {
-                kind: ApprovalKind::Write,
-                detail: "write_file: a.txt".into()
-            }
+            sb.decide("write", &file_input("a.txt"), false, false),
+            Verdict::Allow
         );
+        // Command execution asks.
         assert_eq!(
             sb.decide("shell", &shell_input("cargo test"), false, false),
             Verdict::Ask {
@@ -817,7 +878,8 @@ mod tests {
         ));
     }
 
-    /// P4: in-session state tools (todo_write) need no approval in default /
+    /// P4: in-session state tools (todowrite, plus the merged goal / plan
+    /// coordination tools) need no approval in default /
     /// plan mode either (deny judging still runs before the exemption — todo
     /// input carries no command/path candidate keys, so rules cannot hit it in
     /// practice; the exemption does not reorder "deny first").
@@ -825,17 +887,25 @@ mod tests {
     fn session_state_tools_allowed_in_all_modes() {
         let input = json!({"todos": [{"content": "x", "status": "pending"}]});
         for mode in [
-            PermissionMode::Default,
+            PermissionMode::Guarded,
             PermissionMode::Plan,
-            PermissionMode::AcceptEdits,
-            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
         ] {
             let sb = Sandbox::without_rules(mode);
             assert_eq!(
-                sb.decide("todo_write", &input, false, false),
+                sb.decide("todowrite", &input, false, false),
                 Verdict::Allow,
                 "{mode:?} mode should need no approval"
             );
+            // The merged goal / plan tools ride the same exemption: they
+            // write harness-owned coordination files, never the repo.
+            for tool in ["goal", "plan"] {
+                assert_eq!(
+                    sb.decide(tool, &json!({"action": "status"}), false, false),
+                    Verdict::Allow,
+                    "{tool} in {mode:?} mode should need no approval"
+                );
+            }
         }
     }
 
@@ -844,7 +914,7 @@ mod tests {
         let sb = Sandbox::without_rules(PermissionMode::Plan);
         // Non-read-only denies directly (not Ask: plan mode sends no approval
         // requests).
-        let v = sb.decide("write_file", &file_input("a.txt"), false, false);
+        let v = sb.decide("write", &file_input("a.txt"), false, false);
         let Verdict::Deny { reason } = v else {
             panic!("plan-mode write tools should Deny: {v:?}")
         };
@@ -857,14 +927,14 @@ mod tests {
     }
 
     #[test]
-    fn accept_edits_allows_file_edits_but_asks_shell() {
-        let sb = Sandbox::without_rules(PermissionMode::AcceptEdits);
+    fn guarded_allows_file_edits_but_asks_shell() {
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         assert_eq!(
-            sb.decide("write_file", &file_input("a.txt"), false, false),
+            sb.decide("write", &file_input("a.txt"), false, false),
             Verdict::Allow
         );
         assert_eq!(
-            sb.decide("edit_file", &file_input("a.txt"), false, false),
+            sb.decide("edit", &file_input("a.txt"), false, false),
             Verdict::Allow
         );
         // Shell still asks; destructive file ops (marked destructive) ask too.
@@ -873,14 +943,14 @@ mod tests {
             Verdict::Ask { .. }
         ));
         assert!(matches!(
-            sb.decide("write_file", &file_input("a.txt"), false, true),
+            sb.decide("write", &file_input("a.txt"), false, true),
             Verdict::Ask { .. }
         ));
     }
 
     #[test]
-    fn bypass_mode_allows_everything_not_denied() {
-        let sb = Sandbox::without_rules(PermissionMode::BypassPermissions);
+    fn auto_mode_allows_everything_not_denied() {
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         assert_eq!(
             sb.decide("shell", &shell_input("rm -rf target"), false, true),
             Verdict::Allow
@@ -889,15 +959,15 @@ mod tests {
 
     #[test]
     fn mode_handle_switch_takes_effect_on_next_decide() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         let handle = sb.mode_handle();
-        assert!(matches!(
-            sb.decide("write_file", &file_input("a.txt"), false, false),
-            Verdict::Ask { .. }
-        ));
+        assert_eq!(
+            sb.decide("write", &file_input("a.txt"), false, false),
+            Verdict::Allow
+        );
         *handle.lock().unwrap() = PermissionMode::Plan;
         assert!(matches!(
-            sb.decide("write_file", &file_input("a.txt"), false, false),
+            sb.decide("write", &file_input("a.txt"), false, false),
             Verdict::Deny { .. }
         ));
         assert_eq!(sb.mode(), PermissionMode::Plan);
@@ -905,7 +975,7 @@ mod tests {
 
     #[test]
     fn ask_detail_truncates_long_input() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         let long = "x".repeat(2000);
         let v = sb.decide("shell", &shell_input(&long), false, false);
         let Verdict::Ask { detail, .. } = v else {
@@ -919,7 +989,7 @@ mod tests {
 
     #[test]
     fn allow_always_derives_exact_shell_rule() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         let rule = sb
             .allow_always("shell", &shell_input("cargo test"))
             .expect("a shell command can derive a rule");
@@ -944,7 +1014,7 @@ mod tests {
 
     #[test]
     fn allow_always_treats_wildcard_chars_as_literals() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         sb.allow_always("shell", &shell_input("ls *.rs")).unwrap();
         // The literal hit allows.
         assert_eq!(
@@ -960,24 +1030,22 @@ mod tests {
 
     #[test]
     fn allow_always_derives_file_rule_for_write_tool() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         let rule = sb
-            .allow_always("write_file", &file_input("src/main.rs"))
+            .allow_always("write", &file_input("src/main.rs"))
             .expect("a file path can derive a rule");
         assert_eq!(rule.to_string(), "File(src/main.rs)");
         assert_eq!(
-            sb.decide("write_file", &file_input("src/main.rs"), false, false),
+            sb.decide("write", &file_input("src/main.rs"), false, false),
             Verdict::Allow
         );
-        assert!(matches!(
-            sb.decide("write_file", &file_input("src/lib.rs"), false, false),
-            Verdict::Ask { .. }
-        ));
+        // Under guarded a non-rule-hit write also allows (edits auto-allow),
+        // so exactness is asserted by the derived rule string above.
     }
 
     #[test]
     fn allow_always_shared_across_clones() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         let sub_agent = sb.clone();
         sb.allow_always("shell", &shell_input("git status"))
             .unwrap();
@@ -990,7 +1058,7 @@ mod tests {
 
     #[test]
     fn allow_always_does_not_override_deny() {
-        let sb = Sandbox::new(PermissionMode::Default, &[], &["Bash(rm *)".into()]).unwrap();
+        let sb = Sandbox::new(PermissionMode::Guarded, &[], &["Bash(rm *)".into()]).unwrap();
         // Even after the user "always allows" `rm -rf build/`, the deny rule
         // still wins.
         sb.allow_always("shell", &shell_input("rm -rf build/"))
@@ -1003,10 +1071,10 @@ mod tests {
 
     #[test]
     fn allow_always_returns_none_without_candidate_text() {
-        let sb = Sandbox::without_rules(PermissionMode::Default);
+        let sb = Sandbox::without_rules(PermissionMode::Guarded);
         // Missing command / path keys.
         assert!(sb.allow_always("shell", &json!({"timeout": 30})).is_none());
-        assert!(sb.allow_always("write_file", &json!({})).is_none());
+        assert!(sb.allow_always("write", &json!({})).is_none());
         // Empty strings derive nothing (avoids degenerate empty-matching rules).
         assert!(sb.allow_always("shell", &shell_input("")).is_none());
         // The allow table stays empty.
@@ -1055,7 +1123,7 @@ mod tests {
     #[test]
     fn deny_matches_command_segments() {
         let sb = Sandbox::new(
-            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
             &[],
             &["Bash(curl *)".into()],
         )
@@ -1086,7 +1154,7 @@ mod tests {
     /// from approval too.
     #[test]
     fn allow_wildcard_does_not_exempt_compound_commands() {
-        let sb = Sandbox::new(PermissionMode::Default, &["Bash(git *)".into()], &[]).unwrap();
+        let sb = Sandbox::new(PermissionMode::Guarded, &["Bash(git *)".into()], &[]).unwrap();
         // Single-segment commands exempt as usual.
         assert!(matches!(
             sb.decide("shell", &shell_input("git status"), false, false),
@@ -1110,7 +1178,7 @@ mod tests {
     /// variation still asks.
     #[test]
     fn allow_always_exact_rule_exempts_same_compound_command() {
-        let sb = Sandbox::new(PermissionMode::Default, &["Bash(git *)".into()], &[]).unwrap();
+        let sb = Sandbox::new(PermissionMode::Guarded, &["Bash(git *)".into()], &[]).unwrap();
         let cmd = "git pull && npm test";
         assert!(matches!(
             sb.decide("shell", &shell_input(cmd), false, false),
@@ -1154,7 +1222,7 @@ mod tests {
             "the process-substitution command should stand alone as a segment: {segments:?}"
         );
         let sb = Sandbox::new(
-            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
             &[],
             &["Bash(curl *)".into()],
         )
@@ -1173,7 +1241,7 @@ mod tests {
         );
         // Allow wildcards do not exempt compound commands with process
         // substitution.
-        let allow = Sandbox::new(PermissionMode::Default, &["Bash(diff *)".into()], &[]).unwrap();
+        let allow = Sandbox::new(PermissionMode::Guarded, &["Bash(diff *)".into()], &[]).unwrap();
         assert!(matches!(
             allow.decide(
                 "shell",
@@ -1193,7 +1261,7 @@ mod tests {
     #[test]
     fn allow_rules_bind_to_tool_semantics() {
         let sb = Sandbox::new(
-            PermissionMode::Default,
+            PermissionMode::Guarded,
             &["Bash(git *)".into(), "File(docs/**)".into()],
             &[],
         )
@@ -1211,7 +1279,7 @@ mod tests {
         ));
         // File-editing tools are exempted by the File allow as usual.
         assert_eq!(
-            sb.decide("write_file", &file_input("docs/a.md"), false, false),
+            sb.decide("write", &file_input("docs/a.md"), false, false),
             Verdict::Allow
         );
         // MCP-shaped tools carrying a path key: not exempted by the File
@@ -1223,7 +1291,7 @@ mod tests {
         // The deny direction does not bind: deny rules hit any tool carrying a
         // command key (over-broad is harmless).
         let deny = Sandbox::new(
-            PermissionMode::BypassPermissions,
+            PermissionMode::Auto,
             &[],
             &["Bash(curl *)".into()],
         )

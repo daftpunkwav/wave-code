@@ -178,8 +178,7 @@ impl App {
         match self.ctx.status_queries.plan_status() {
             Some(text) => self.push_item(Item::plain(sanitize_terminal(&text).into_owned(), dim())),
             None => self.push_item(Item::plain(
-                "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)"
-                    .into(),
+                "(no reviewed plan yet; ask the agent to propose one with the plan tool)".into(),
                 dim(),
             )),
         }
@@ -192,7 +191,7 @@ impl App {
         match self.ctx.status_queries.goal_status() {
             Some(text) => self.push_item(Item::plain(sanitize_terminal(&text).into_owned(), dim())),
             None => self.push_item(Item::plain(
-                "(no durable goal yet; ask the agent to set one with the goal_set tool)".into(),
+                "(no durable goal yet; ask the agent to set one with the goal tool)".into(),
                 dim(),
             )),
         }
@@ -240,8 +239,8 @@ impl App {
         }
     }
 
-    /// `/permissions`: cycle four modes, syncing the driver side over
-    /// the wire while applying the new mode locally at once.
+    /// `/permissions`: cycle the three modes, syncing the driver side
+    /// over the wire while applying the new mode locally at once.
     fn cycle_permission_mode(&mut self) {
         let next = self.permission_mode.cycle();
         self.permission_mode = next;
@@ -250,7 +249,7 @@ impl App {
         });
         self.push_item(Item::plain(
             format!(
-                "Permission mode switched to {next} (approval policy for write/exec tools follows)"
+                "Permission mode switched to {next} (approval policy for dangerous tools follows)"
             ),
             dim(),
         ));

@@ -152,6 +152,6 @@ mod tests {
         let missing = composite.execute(call("nope")).await;
         assert!(missing.is_error);
         // Registry attributes surface for registry tools.
-        assert!(composite.is_read_only("read_file"));
+        assert!(composite.is_read_only("read"));
     }
 }

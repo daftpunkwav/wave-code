@@ -76,6 +76,12 @@ impl PolicyDecider for PolicyAdapter {
                 },
                 detail: truncate(&detail, APPROVAL_DETAIL_TRUNCATION),
             },
+            wavecode_sandbox::Verdict::Question { question, options } => {
+                PolicyVerdict::Question {
+                    question: truncate(&question, APPROVAL_DETAIL_TRUNCATION),
+                    options,
+                }
+            }
             wavecode_sandbox::Verdict::Deny { reason } => PolicyVerdict::Deny { reason },
         }
     }
@@ -100,11 +106,11 @@ mod tests {
     #[tokio::test]
     async fn read_only_tools_pass_without_rules() {
         let adapter = PolicyAdapter::new(
-            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Default),
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Guarded),
             registry(),
         );
         let verdict = adapter
-            .decide(&call("read_file", serde_json::json!({"path": "a.txt"})))
+            .decide(&call("read", serde_json::json!({"path": "a.txt"})))
             .await;
         assert_eq!(verdict, PolicyVerdict::Allow);
     }
@@ -112,7 +118,7 @@ mod tests {
     #[test]
     fn permission_modes_switch_live_and_reject_garbage() {
         let sandbox =
-            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Default);
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Guarded);
         let adapter = PolicyAdapter::new(sandbox, registry());
         assert!(adapter.set_permission_mode("plan"));
         assert!(!adapter.set_permission_mode("yolo"));
@@ -122,7 +128,7 @@ mod tests {
     async fn deny_rules_win_in_any_mode() {
         let adapter = PolicyAdapter::new(
             wavecode_sandbox::Sandbox::new(
-                wavecode_protocol::PermissionMode::BypassPermissions,
+                wavecode_protocol::PermissionMode::Auto,
                 &[],
                 &["Bash(*)".to_string()],
             )

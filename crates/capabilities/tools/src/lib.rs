@@ -1,9 +1,9 @@
 //! wavecode-tools: tool framework and built-in tool set.
 //!
 //! Shape: the [`Tool`] trait, the [`Registry`] registry, built-in file tools
-//! (`read_file` / `write_file` / `edit_file` / `list_dir`), search tools
-//! (`grep` / `glob`), the `shell` tool, and the session task-list tool (`todo_write`,
-//! P4 deepagents planning). File and search tools confine all paths
+//! (`read` / `write` / `edit` / `ls`), search tools
+//! (`grep` / `glob`), the `shell` tool, and the session task-list tool (`todowrite`,
+//! deepagents-style planning). File and search tools confine all paths
 //! under [`ToolCtx::cwd`] via `path_guard`, guarding against `..` escapes and absolute-path breakouts.
 //! Every built-in tool's execute is truly async (`tokio::fs` / `tokio::process`;
 //! grep/glob directory traversal is a sync API wrapped in `spawn_blocking` internally). Later milestones
@@ -14,14 +14,13 @@ mod html;
 mod lsp;
 mod path_guard;
 mod pty;
-mod remote;
 mod script;
 mod search;
 mod shell_tool;
 pub mod snapshot;
 mod spill_tool;
 mod todo_tool;
-mod webfetch;
+mod web_fetch;
 mod websearch;
 
 pub use fs::{Present, PresentStore, ReadImage};
@@ -161,9 +160,9 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Register the built-in tools (file / search / shell), **excluding** `todo_write`.
+    /// Register the built-in tools (file / search / shell), **excluding** `todowrite`.
     ///
-    /// `todo_write` must be injected by the caller via [`Registry::with_todo_write`], sharing the same handle
+    /// `todowrite` must be injected by the caller via [`Registry::with_todo_write`], sharing the same handle
     /// as the [`TodoStore`] in the session config.
     pub fn builtin() -> Self {
         let reg = Self {
@@ -177,18 +176,17 @@ impl Registry {
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));
         reg.register(Arc::new(pty::PtyShell));
-        reg.register(Arc::new(remote::RemoteShell));
         reg.register(Arc::new(script::PythonTool));
         reg.register(Arc::new(script::NodeTool));
         reg.register(Arc::new(lsp::DocumentSymbols::new()));
         reg.register(Arc::new(lsp::GotoDefinition::new()));
         reg.register(Arc::new(lsp::Hover::new()));
         reg.register(Arc::new(lsp::FindReferences::new()));
-        reg.register(Arc::new(webfetch::WebFetch));
+        reg.register(Arc::new(web_fetch::WebFetch));
         reg.register(Arc::new(websearch::WebSearch::new()));
         reg.register(Arc::new(fs::ReadImage));
         // Present records into a registry-scoped store (first version: no
-        // steering consumer needs the handle, unlike todo_write).
+        // steering consumer needs the handle, unlike todowrite).
         reg.register(Arc::new(fs::Present::new(fs::PresentStore::default())));
         reg.register(Arc::new(spill_tool::SpillRead::new(
             wavecode_context::default_spill_store_root(),
@@ -196,13 +194,13 @@ impl Registry {
         reg
     }
 
-    /// Register `todo_write`, sharing state with the session-level [`TodoStore`].
+    /// Register `todowrite`, sharing state with the session-level [`TodoStore`].
     pub fn with_todo_write(self, todos: TodoStore) -> Self {
         self.register(Arc::new(TodoWrite::new(todos)));
         self
     }
 
-    /// Full built-in set (including `todo_write`) with its companion [`TodoStore`] -- session assembly should
+    /// Full built-in set (including `todowrite`) with its companion [`TodoStore`] -- session assembly should
     /// store the returned store in the session config so tools and steering share one source.
     pub fn builtin_with_todos() -> (Self, TodoStore) {
         let todos = TodoStore::default();
@@ -224,8 +222,8 @@ impl Registry {
         reg
     }
 
-    /// Derive a read-only subset registry (tool surface for P5 explore-type subagents): keep only
-    /// `is_read_only()` tools (`todo_write` is not read-only and never enters the subset).
+    /// Derive a read-only subset registry (tool surface for explore-type subagents): keep only
+    /// `is_read_only()` tools (`todowrite` is not read-only and never enters the subset).
     pub fn read_only_subset(&self) -> Self {
         let reg = Self {
             tools: Mutex::new(HashMap::new()),
@@ -285,31 +283,31 @@ mod tests {
     #[test]
     fn name_subset_filters_by_name() {
         let (reg, _todos) = Registry::builtin_with_todos();
-        let sub = reg.name_subset(&["read_file".to_owned(), "grep".to_owned(), "nope".to_owned()]);
-        assert!(sub.get("read_file").is_some());
+        let sub = reg.name_subset(&["read".to_owned(), "grep".to_owned(), "nope".to_owned()]);
+        assert!(sub.get("read").is_some());
         assert!(sub.get("grep").is_some());
-        assert!(sub.get("write_file").is_none());
+        assert!(sub.get("write").is_none());
         assert!(sub.get("shell").is_none());
         assert!(
-            sub.get("todo_write").is_none(),
+            sub.get("todowrite").is_none(),
             "unlisted tools are unavailable"
         );
         // specs output is stable (sorted by name).
         let names: Vec<String> = sub.specs().into_iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["grep", "read_file"]);
+        assert_eq!(names, vec!["grep", "read"]);
     }
 
     /// Session-assembly contract: `name_subset` (skill-fork tool-surface derivation) keeps the same
-    /// `todo_write` instance -- state written through the subset tool must be visible to the session config's
-    /// [`TodoStore`] (same Arc handle); otherwise todo_write, steering, and
+    /// `todowrite` instance -- state written through the subset tool must be visible to the session config's
+    /// [`TodoStore`] (same Arc handle); otherwise todowrite, steering, and
     /// context injection would each write/read their own copy and silently diverge.
     #[tokio::test]
-    async fn todo_write_via_name_subset_shares_session_store() {
+    async fn todowrite_via_name_subset_shares_session_store() {
         let (reg, todos) = Registry::builtin_with_todos();
-        let sub = reg.name_subset(&["todo_write".to_owned()]);
+        let sub = reg.name_subset(&["todowrite".to_owned()]);
         let tool = sub
-            .get("todo_write")
-            .expect("listed todo_write should be kept");
+            .get("todowrite")
+            .expect("listed todowrite should be kept");
         let ctx = ToolCtx {
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
@@ -369,37 +367,37 @@ mod tests {
     }
 
     /// New tools are registered with the expected read-only surface:
-    /// scripts can write (not read-only), LSP navigation, webfetch, websearch,
+    /// scripts can write (not read-only), LSP navigation, web_fetch, web_search,
     /// image, spill, and present tools are read-only.
     #[test]
-    fn builtin_registers_script_lsp_and_webfetch() {
+    fn builtin_registers_script_lsp_and_web_fetch() {
         let reg = Registry::builtin();
         for name in [
-            "run_python",
-            "run_node",
-            "document_symbols",
-            "goto_definition",
-            "hover",
-            "find_references",
-            "webfetch",
+            "python",
+            "node",
+            "lsp_symbols",
+            "lsp_definition",
+            "lsp_hover",
+            "lsp_references",
+            "web_fetch",
             "web_search",
-            "read_image",
-            "spill_read",
+            "view",
+            "spill",
             "present",
         ] {
             assert!(reg.get(name).is_some(), "{name} must be registered");
         }
-        assert!(!reg.get("run_python").unwrap().is_read_only());
-        assert!(!reg.get("run_node").unwrap().is_read_only());
+        assert!(!reg.get("python").unwrap().is_read_only());
+        assert!(!reg.get("node").unwrap().is_read_only());
         for name in [
-            "document_symbols",
-            "goto_definition",
-            "hover",
-            "find_references",
-            "webfetch",
+            "lsp_symbols",
+            "lsp_definition",
+            "lsp_hover",
+            "lsp_references",
+            "web_fetch",
             "web_search",
-            "read_image",
-            "spill_read",
+            "view",
+            "spill",
             "present",
         ] {
             assert!(
@@ -410,14 +408,14 @@ mod tests {
         // Read-only explore subset picks up the navigation/fetch tools.
         let explore = reg.read_only_subset();
         for name in [
-            "document_symbols",
-            "goto_definition",
-            "hover",
-            "find_references",
-            "webfetch",
+            "lsp_symbols",
+            "lsp_definition",
+            "lsp_hover",
+            "lsp_references",
+            "web_fetch",
             "web_search",
-            "read_image",
-            "spill_read",
+            "view",
+            "spill",
             "present",
         ] {
             assert!(
@@ -425,6 +423,6 @@ mod tests {
                 "{name} must be in the explore subset"
             );
         }
-        assert!(explore.get("run_python").is_none());
+        assert!(explore.get("python").is_none());
     }
 }

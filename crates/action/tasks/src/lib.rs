@@ -117,7 +117,8 @@ pub trait TaskService: Send + Sync {
     /// existing implementors keep compiling untouched. Services backed by
     /// a depth-accounting runtime override this to spawn a depth + 1
     /// child with `parent` set to `id`, extending the lineage chain.
-    /// Unknown ids return `None`.
+    /// Continuation is defined against a recorded outcome: unknown ids
+    /// and tasks still running return `None`.
     fn continue_task(&self, _id: &str, _followup_input: String) -> Option<String> {
         None
     }

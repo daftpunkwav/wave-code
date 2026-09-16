@@ -200,6 +200,10 @@ impl Tool for TaskTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Optional explicit tool allowlist; overrides the agent definition's surface"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Optional: spawn and return the task id immediately instead of blocking up to the wait limit; observe with task_output, stop with task_stop (default false)"
                 }
             },
             "required": ["prompt"]
@@ -276,6 +280,18 @@ impl Tool for TaskTool {
             depth: 0,
             parent: None,
         });
+
+        // Fire-and-forget mode: the caller judged the result unnecessary for
+        // this turn, so return the id immediately instead of blocking.
+        if input.get("background").and_then(|v| v.as_bool()) == Some(true) {
+            return Ok(ToolOutput {
+                content: format!(
+                    "task {id} spawned in the background; observe it with \
+                     task_output or stop it with task_stop"
+                ),
+                is_error: false,
+            });
+        }
 
         // Inline wait: the value of `task` over background forks is the
         // model getting the result in the same turn. Bounded by
@@ -453,6 +469,32 @@ mod tests {
         assert_eq!(spawned[0].input, "find the bug");
         assert!(spawned[0].allowed_tools.is_empty());
         assert!(!tool.is_read_only());
+    }
+
+    #[tokio::test]
+    async fn background_true_returns_id_without_waiting() {
+        let tasks = Arc::new(FakeTasks::finishing(TaskOutcome::Completed {
+            summary: "found it".into(),
+        }));
+        let tool = TaskTool::new(tasks.clone());
+        let (_d, c) = ctx();
+        let out = tool
+            .execute(
+                serde_json::json!({"prompt": "find the bug", "background": true}),
+                &c,
+            )
+            .await
+            .unwrap();
+        // Fire-and-forget: the summary must NOT surface even though the fake
+        // child finishes immediately; the id is the result.
+        assert!(!out.is_error);
+        assert!(
+            out.content.contains("task task-1 spawned in the background"),
+            "background spawn reports the id: {}",
+            out.content
+        );
+        let spawned = tasks.spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 1);
     }
 
     #[tokio::test]

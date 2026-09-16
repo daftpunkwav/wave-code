@@ -19,6 +19,10 @@ impl App {
             self.handle_approval_key(key);
             return;
         }
+        if self.question.is_some() {
+            self.handle_question_key(key);
+            return;
+        }
         match key.code {
             KeyCode::Enter => {
                 // Popup open and input differs from the selection:
@@ -97,12 +101,18 @@ impl App {
     /// injection). Routing matches [`App::handle_key`] while the approval
     /// popup is open — every key goes to the popup: pastes enter the
     /// reason in reason mode and are ignored otherwise (the main input
-    /// hides behind the popup, so silent writes would be invisible).
+    /// hides behind the popup, so silent writes would be invisible). The
+    /// question popup takes pastes into its free-text answer for the
+    /// same reason.
     pub fn paste(&mut self, s: &str) {
         if let Some(popup) = &mut self.approval {
             if popup.reason_mode {
                 popup.reason.extend(sanitize_terminal(s).chars());
             }
+            return;
+        }
+        if let Some(popup) = &mut self.question {
+            popup.input.extend(sanitize_terminal(s).chars());
             return;
         }
         let clean = sanitize_terminal(s);

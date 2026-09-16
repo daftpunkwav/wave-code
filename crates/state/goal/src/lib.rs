@@ -13,12 +13,14 @@
 
 //! Durable goal service: one persisted objective per session.
 //!
-//! The model sets the objective (`goal_set`), mutates it under optimistic
-//! concurrency (`goal_update` requires the expected version), and advances
-//! the round driver once per round (`goal_tick`). The driver is tools-only:
-//! no loop hook calls `round_tick` automatically yet, so the model must
-//! call `goal_tick` once per round. State survives resume because the file
-//! path derives from the home directory.
+//! The model sets the objective and intermediate sub-goals (the `set`
+//! action), mutates them under optimistic concurrency (the `update`
+//! action requires the expected version), reads the whole tree (the
+//! `status` action), and advances the round driver once per round (the
+//! `tick` action). The driver is tools-only: no loop hook calls
+//! `round_tick` automatically yet, so the model must tick once per
+//! round. State survives resume because the file path derives from the
+//! home directory.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -29,6 +31,60 @@ pub const GOALS_DIR: &str = "goals";
 /// Round cap for the driver: the tick that would move past this round
 /// blocks the goal instead and reports the cap as a business error.
 pub const MAX_ROUND: u32 = 256;
+
+/// Cap on tracked sub-goals: replaces beyond it are rejected as business
+/// errors, so a runaway model cannot grow the goal file without bound.
+pub const MAX_SUB_GOALS: usize = 64;
+
+/// Progress state of one intermediate sub-goal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubGoalStatus {
+    /// The sub-goal is being worked on (the fresh default).
+    #[default]
+    InProgress,
+    /// The sub-goal has been reached.
+    Achieved,
+}
+
+impl SubGoalStatus {
+    /// Wire/display name, locked by tests below.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubGoalStatus::InProgress => "in_progress",
+            SubGoalStatus::Achieved => "achieved",
+        }
+    }
+}
+
+impl std::fmt::Display for SubGoalStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parse a wire sub-goal status name; unknown names name the valid set so
+/// the model can self-correct.
+pub fn parse_sub_goal_status(raw: &str) -> Result<SubGoalStatus, GoalError> {
+    match raw {
+        "in_progress" => Ok(SubGoalStatus::InProgress),
+        "achieved" => Ok(SubGoalStatus::Achieved),
+        _ => Err(GoalError::InvalidInput {
+            message: format!(
+                "unknown sub-goal status {raw:?}: expected one of in_progress, achieved"
+            ),
+        }),
+    }
+}
+
+/// One intermediate sub-goal under the main objective.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubGoal {
+    /// What "done" means for this intermediate step.
+    pub text: String,
+    /// Current progress of the sub-goal.
+    pub status: SubGoalStatus,
+}
 
 /// Lifecycle status of one durable goal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -41,7 +97,7 @@ pub enum GoalStatus {
     Blocked,
     /// Parked by the operator or the model; resume returns it to Active.
     Paused,
-    /// Terminal: reached. Only a fresh goal_set leaves this state.
+    /// Terminal: reached. Only a fresh set leaves this state.
     Completed,
 }
 
@@ -102,7 +158,7 @@ pub enum GoalError {
     /// Optimistic-concurrency guard failed: the caller worked from a
     /// stale snapshot and must reload before retrying.
     #[error(
-        "goal version mismatch: expected version {expected}, found version {actual}; reload with goal_status and retry"
+        "goal version mismatch: expected version {expected}, found version {actual}; reload with goal status and retry"
     )]
     VersionMismatch {
         /// Version the caller based its edit on.
@@ -141,8 +197,8 @@ pub enum GoalError {
     Io(#[from] std::io::Error),
 }
 
-/// One durable goal: objective, status, CAS version, driver round, and
-/// the last mutation time.
+/// One durable goal: objective, status, CAS version, driver round, the
+/// last mutation time, and the intermediate sub-goal list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GoalState {
     /// Current objective text (empty until the first set).
@@ -155,6 +211,10 @@ pub struct GoalState {
     pub round: u32,
     /// Last mutation time as unix seconds.
     pub updated_at: u64,
+    /// Intermediate sub-goals under the objective. Absent in files written
+    /// before sub-goals existed; `default` keeps those loads compatible.
+    #[serde(default)]
+    pub sub_goals: Vec<SubGoal>,
 }
 
 /// Wall clock for `updated_at`; never fails the mutation when the clock
@@ -220,12 +280,49 @@ impl GoalState {
     }
 
     /// Set (or replace) the objective: always allowed, resets the round
-    /// driver to zero and returns the goal to Active, so a finished goal
-    /// restarts cleanly on the next set.
+    /// driver to zero, drops the previous sub-goal list, and returns the
+    /// goal to Active, so a finished goal restarts cleanly on the next set.
     pub fn set(&mut self, objective: &str) -> Result<(), GoalError> {
         self.objective = Self::require_objective(objective)?;
         self.status = GoalStatus::Active;
         self.round = 0;
+        self.sub_goals.clear();
+        self.touch();
+        Ok(())
+    }
+
+    /// Replace the whole sub-goal list under optimistic concurrency: the
+    /// expected version must match, blank texts are rejected, and the list
+    /// is capped at [`MAX_SUB_GOALS`] so a runaway model cannot grow the
+    /// goal file without bound. Every accepted replace bumps the version.
+    pub fn replace_sub_goals(
+        &mut self,
+        expected_version: u64,
+        sub_goals: Vec<SubGoal>,
+    ) -> Result<(), GoalError> {
+        self.check_version(expected_version)?;
+        if sub_goals.len() > MAX_SUB_GOALS {
+            return Err(GoalError::InvalidInput {
+                message: format!(
+                    "too many sub-goals ({}): the cap is {MAX_SUB_GOALS}",
+                    sub_goals.len()
+                ),
+            });
+        }
+        let mut cleaned = Vec::with_capacity(sub_goals.len());
+        for SubGoal { text, status } in sub_goals {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return Err(GoalError::InvalidInput {
+                    message: "sub-goal text must not be blank".to_string(),
+                });
+            }
+            cleaned.push(SubGoal {
+                text: trimmed.to_string(),
+                status,
+            });
+        }
+        self.sub_goals = cleaned;
         self.touch();
         Ok(())
     }
@@ -252,7 +349,7 @@ impl GoalState {
         {
             return Err(GoalError::UnexpectedState {
                 action: "update",
-                expected: "a non-terminal goal (set a new objective with goal_set to restart)",
+                expected: "a non-terminal goal (set a new objective to restart)",
                 actual: self.status.as_str(),
             });
         }
@@ -291,7 +388,7 @@ impl GoalState {
     }
 
     /// Advance the round driver by one round and bump the version, so the
-    /// next `goal_update` needs the freshly reported version. Ticks on a
+    /// next update needs the freshly reported version. Ticks on a
     /// Completed goal fail openly; the tick that would move past
     /// [`MAX_ROUND`] blocks the goal and reports the cap instead.
     pub fn round_tick(&mut self) -> Result<(), GoalError> {
@@ -538,6 +635,87 @@ mod tests {
         goal.set("real").unwrap();
         assert!(goal.update(goal.version, Some("  "), None).is_err());
         assert_eq!(goal.objective, "real");
+    }
+
+    #[test]
+    fn sub_goal_status_names_are_locked() {
+        assert_eq!(SubGoalStatus::InProgress.as_str(), "in_progress");
+        assert_eq!(SubGoalStatus::Achieved.as_str(), "achieved");
+        let value = serde_json::to_value(SubGoalStatus::Achieved).unwrap();
+        assert_eq!(value, serde_json::json!("achieved"));
+        assert_eq!(
+            parse_sub_goal_status("in_progress").unwrap(),
+            SubGoalStatus::InProgress
+        );
+        let err = parse_sub_goal_status("done").unwrap_err().to_string();
+        assert!(err.contains("in_progress"), "{err}");
+        assert!(err.contains("achieved"), "{err}");
+    }
+
+    #[test]
+    fn sub_goals_replace_under_cas_and_set_clears() {
+        let mut goal = GoalState::default();
+        goal.set("ship it").unwrap();
+        // CAS mismatch is rejected and mutates nothing.
+        assert!(goal
+            .replace_sub_goals(
+                999,
+                vec![SubGoal {
+                    text: "x".into(),
+                    status: SubGoalStatus::InProgress
+                }]
+            )
+            .is_err());
+        assert!(goal.sub_goals.is_empty());
+        // The fresh version applies the whole list.
+        goal.replace_sub_goals(
+            1,
+            vec![
+                SubGoal {
+                    text: "fix the bug".into(),
+                    status: SubGoalStatus::Achieved
+                },
+                SubGoal {
+                    text: "add tests".into(),
+                    status: SubGoalStatus::InProgress
+                },
+            ],
+        )
+        .unwrap();
+        assert_eq!(goal.sub_goals.len(), 2);
+        assert_eq!(goal.sub_goals[0].status, SubGoalStatus::Achieved);
+        assert_eq!(goal.version, 2);
+        // Blank texts are rejected outright.
+        assert!(goal
+            .replace_sub_goals(
+                goal.version,
+                vec![SubGoal {
+                    text: "   ".into(),
+                    status: SubGoalStatus::InProgress
+                }]
+            )
+            .is_err());
+        // The cap rejects oversized lists.
+        let overflow = vec![
+            SubGoal {
+                text: "x".into(),
+                status: SubGoalStatus::InProgress
+            };
+            MAX_SUB_GOALS + 1
+        ];
+        assert!(goal.replace_sub_goals(goal.version, overflow).is_err());
+        // A fresh set drops the previous list (the goal restarts cleanly).
+        goal.set("next milestone").unwrap();
+        assert!(goal.sub_goals.is_empty());
+    }
+
+    #[test]
+    fn sub_goals_default_keeps_older_files_loadable() {
+        // A file written before sub-goals existed lacks the field entirely.
+        let legacy = r#"{"objective":"old","status":"active","version":3,"round":1,"updated_at":0}"#;
+        let state: GoalState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(state.objective, "old");
+        assert!(state.sub_goals.is_empty());
     }
 
     #[test]

@@ -20,6 +20,7 @@
 
 pub mod acp;
 pub mod agent_task_tool;
+pub mod ask_user_tool;
 pub mod child_service;
 pub mod compactor;
 pub mod composite;
@@ -57,8 +58,8 @@ pub use model_adapter::ModelAdapter;
 pub use native::{NativeExecutor, NativeTool};
 pub use plan_adapter::TodoPlanTracker;
 pub use plan_tools::{
-    DEFAULT_PLAN_SESSION_ID, PlanApproveTool, PlanFeedbackTool, PlanProposeTool, PlanStatusTool,
-    PlanStore, load_for_session as load_plan_for_session, render_status as render_plan_status,
+    DEFAULT_PLAN_SESSION_ID, PlanStore, PlanTool, load_for_session as load_plan_for_session,
+    render_status as render_plan_status,
 };
 pub use policy_adapter::PolicyAdapter;
 pub use session::{
@@ -67,5 +68,5 @@ pub use session::{
 };
 pub use skill_tool::SkillTool;
 pub use status_queries::SessionStatus;
-pub use task_tools::{TaskOutputTool, TaskStopTool};
+pub use task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 pub use tool_adapter::ToolAdapter;

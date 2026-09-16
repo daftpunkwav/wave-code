@@ -1,4 +1,4 @@
-//! Built-in file tools: `read_file` / `write_file` / `edit_file` / `list_dir` (+ `read_image` / `present`).
+//! Built-in file tools: `read` / `write` / `edit` / `ls` (+ `view` / `present`).
 //! All paths are confined under `ToolCtx::cwd` via [`crate::path_guard::resolve`].
 //! Failure semantics: business failures (missing file, non-unique match, missing/mistyped params, path escape)
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level io failures.
@@ -9,14 +9,14 @@ use serde_json::{Value, json};
 
 use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError};
 
-/// read_file output cap: 2000 lines / 50 KB.
+/// read output cap: 2000 lines / 50 KB.
 const MAX_LINES: usize = 2000;
 const MAX_BYTES: usize = 50 * 1024;
-/// read_file hard input cap: files over 4 MB are rejected outright to avoid loading them fully into memory.
+/// read hard input cap: files over 4 MB are rejected outright to avoid loading them fully into memory.
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
-/// write_file write cap: content over 10 MB is rejected outright.
+/// write content cap: content over 10 MB is rejected outright.
 const MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
-/// list_dir per-directory entry cap.
+/// ls per-directory entry cap.
 const MAX_ENTRIES: usize = 1000;
 
 /// Build a success output.
@@ -67,7 +67,7 @@ fn resolve_path(ctx: &ToolCtx, path: &str) -> Result<std::result::Result<PathBuf
     }
 }
 
-/// Atomic overwrite (shared by write_file / edit_file): write a temp file in the same directory first, then
+/// Atomic overwrite (shared by write / edit): write a temp file in the same directory first, then
 /// rename over the target (same-volume rename is atomic; MOVEFILE_REPLACE_EXISTING on Windows).
 /// Overwriting an existing file directly with `tokio::fs::write` would truncate the target into a half-written
 /// file with no backup if the write fails midway; with temp+rename the target holds either the old or the new content.
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_dir_marks_dirs() {
+    async fn ls_marks_dirs() {
         let (_d, c) = ctx();
         std::fs::create_dir(c.cwd.join("d1")).unwrap();
         std::fs::write(c.cwd.join("f1.txt"), "x").unwrap();
@@ -246,17 +246,17 @@ mod tests {
     async fn registry_specs_sorted_and_have_schema() {
         let reg = crate::Registry::builtin();
         let specs = reg.specs();
-        // builtin excludes todo_write (injected by session assembly via with_todo_write).
+        // builtin excludes todowrite (injected by session assembly via with_todo_write).
         // Exact counts are not asserted: concurrent milestones register more
         // builtins (pty, websearch, spill, image, present, ...); the stable
         // contract is sorted specs, object schemas, and per-tool presence.
         assert!(specs.len() >= 14);
         for name in [
-            "read_file",
-            "read_image",
+            "read",
+            "view",
             "present",
             "web_search",
-            "spill_read",
+            "spill",
         ] {
             assert!(
                 specs.iter().any(|s| s.name == name),
@@ -268,13 +268,13 @@ mod tests {
         sorted.sort();
         assert_eq!(names, sorted);
         assert!(specs.iter().all(|s| s.input_schema["type"] == "object"));
-        assert!(reg.get("read_file").unwrap().is_read_only());
-        assert!(!reg.get("write_file").unwrap().is_read_only());
-        assert!(reg.get("todo_write").is_none());
+        assert!(reg.get("read").unwrap().is_read_only());
+        assert!(!reg.get("write").unwrap().is_read_only());
+        assert!(reg.get("todowrite").is_none());
 
         let (full, _todos) = crate::Registry::builtin_with_todos();
         assert_eq!(full.specs().len(), specs.len() + 1);
-        assert!(full.get("todo_write").is_some());
+        assert!(full.get("todowrite").is_some());
     }
 
     #[tokio::test]
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_dir_truncates_over_entry_cap() {
+    async fn ls_truncates_over_entry_cap() {
         // 1005 entries: truncate to 1000 with a [truncated: N more entries] marker.
         let (_d, c) = ctx();
         for i in 0..MAX_ENTRIES + 5 {

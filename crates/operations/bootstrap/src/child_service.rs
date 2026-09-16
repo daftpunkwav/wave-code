@@ -190,14 +190,16 @@ impl TaskService for TurnChildService {
         self.runtime.stop(id)
     }
 
-    /// Spawn a depth + 1 follow-up of a tracked task.
+    /// Spawn a depth + 1 follow-up of a finished task.
     ///
     /// Rebuilds the parent request (kind, run correlation, tool scope)
     /// with the follow-up input, `depth + 1`, and `parent` set to `id`,
-    /// so the lineage chain extends by one. Unknown ids return `None`.
-    /// A follow-up past the runtime cap still returns an id, but the
-    /// runtime refuses it with an explicit Failed outcome visible in
-    /// query, matching direct over-depth spawns.
+    /// so the lineage chain extends by one. Unknown ids and tasks still
+    /// running return `None` (a follow-up is defined against the parent's
+    /// recorded outcome; a running task can only be stopped). A follow-up
+    /// past the runtime cap still returns an id, but the runtime refuses
+    /// it with an explicit Failed outcome visible in query, matching
+    /// direct over-depth spawns.
     fn continue_task(&self, id: &str, followup_input: String) -> Option<String> {
         let parent = self
             .history
@@ -205,6 +207,12 @@ impl TaskService for TurnChildService {
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
             .cloned()?;
+        // Only finished tasks continue: the tool contract promises a
+        // follow-up against a recorded outcome, so a still-running task
+        // must not silently fork a sibling generation.
+        if self.query(id)?.state != TaskState::Finished {
+            return None;
+        }
         Some(self.spawn(TaskRequest {
             kind: parent.kind,
             input: followup_input,
@@ -237,6 +245,43 @@ mod tests {
         ) -> StopReason {
             conv.push(Role::User, input);
             conv.push(Role::Assistant, format!("child saw {input}"));
+            StopReason::Completed
+        }
+
+        async fn drive_compact(
+            &self,
+            _conv: &mut Conversation,
+            _trigger: CompactTrigger,
+            _on_event: &(dyn Fn(Event) + Send + Sync),
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn drive_hook(
+            &self,
+            _point: HookPoint,
+            _payload: &str,
+            _on_event: &(dyn Fn(Event) + Send + Sync),
+        ) -> bool {
+            true
+        }
+    }
+
+    /// Driver that lingers in the turn so a spawned task is observably
+    /// Running (stopped via the cooperative stop flag).
+    struct LingeringDriver;
+
+    #[async_trait::async_trait]
+    impl TurnDriver for LingeringDriver {
+        async fn drive_turn(
+            &self,
+            _ctx: &RunContext,
+            _conv: &mut Conversation,
+            _input: &str,
+            _system: &str,
+            _on_event: &(dyn Fn(Event) + Send + Sync),
+        ) -> StopReason {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             StopReason::Completed
         }
 
@@ -402,6 +447,25 @@ mod tests {
         );
         // Root lineage stays a single-element chain.
         assert_eq!(service.query(&root).unwrap().lineage, vec![root.clone()]);
+    }
+
+    #[tokio::test]
+    async fn continue_task_refuses_still_running_tasks() {
+        let service = TurnChildService::new(
+            Arc::new(LingeringDriver),
+            Arc::new(ChildRuntime::new()),
+            "sys".to_string(),
+            RunAllowlist::default(),
+        );
+        let id = TaskService::spawn(&service, top_level("long work"));
+        // The task stays Running for the whole 30s driver sleep, so the
+        // query sees Running deterministically; continuation must refuse
+        // instead of forking a sibling generation.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(service.query(&id).unwrap().state, TaskState::Running);
+        assert_eq!(service.continue_task(&id, "x".to_string()), None);
+        // Cleanup: stop the parked child so the test ends promptly.
+        assert!(service.stop(&id));
     }
 
     #[tokio::test]

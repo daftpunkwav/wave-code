@@ -45,6 +45,14 @@ pub enum Op {
         /// The user decision.
         decision: WireDecision,
     },
+    /// Deliver the user's answer to a parked interactive question.
+    QuestionAnswer {
+        /// Tool call id parked in the question gate.
+        call_id: String,
+        /// The chosen option text or free-form answer; empty means the
+        /// user dismissed the question.
+        answer: String,
+    },
     /// Request context compaction.
     Compact,
     /// Switch the session permission mode by wire name.
@@ -145,6 +153,15 @@ pub enum EventMsg {
         /// Bounded detail string for display.
         detail: String,
     },
+    /// An interactive question is parked and needs a user answer.
+    QuestionRequested {
+        /// Tool call id parked in the question gate.
+        call_id: String,
+        /// The question text for display.
+        question: String,
+        /// Numbered answer options; empty when free text is expected.
+        options: Vec<String>,
+    },
     /// Token usage settled after a sample.
     TokenCount {
         /// Input tokens of the sample.
@@ -227,6 +244,13 @@ mod tests {
                 },
                 "exec_approval",
             ),
+            (
+                Op::QuestionAnswer {
+                    call_id: "c".to_string(),
+                    answer: "a".to_string(),
+                },
+                "question_answer",
+            ),
             (Op::Compact, "compact"),
             (
                 Op::SetPermissionMode {
@@ -289,6 +313,14 @@ mod tests {
                     detail: "d".to_string(),
                 },
                 "approval_requested",
+            ),
+            (
+                EventMsg::QuestionRequested {
+                    call_id: "c".to_string(),
+                    question: "q".to_string(),
+                    options: vec!["a".to_string()],
+                },
+                "question_requested",
             ),
             (
                 EventMsg::TokenCount {

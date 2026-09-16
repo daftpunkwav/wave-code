@@ -1,6 +1,6 @@
 /*!
  * @file HtmlToMarkdown
- * @description Lenient single-pass HTML to Markdown conversion for webfetch.
+ * @description Lenient single-pass HTML to Markdown conversion for web_fetch.
  *
  * Responsibilities:
  * - Turn structural markup (headings, lists, links, emphasis, code) into
@@ -12,13 +12,13 @@
  * crate. It is pure string transformation and unit-testable as such.
  */
 
-//! Minimal HTML → Markdown conversion for the `webfetch` tool.
+//! Minimal HTML → Markdown conversion for the `web_fetch` tool.
 //!
 //! Goal: make fetched pages readable in model context — structural markup
 //! (headings, lists, links, emphasis, code blocks) becomes Markdown, and
 //! everything that is pure presentation (scripts, styles, attributes) is
 //! dropped. This is deliberately a lenient single-pass converter, not a
-//! browser-grade parser: malformed / truncated HTML (a routine webfetch
+//! browser-grade parser: malformed / truncated HTML (a routine web_fetch
 //! outcome, given the size cap) degrades to plain text instead of failing.
 //!
 //! Scope decisions:

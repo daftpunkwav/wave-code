@@ -27,7 +27,7 @@ Honest status: `JsonlJournal` currently has no consumer outside its own crate. T
 ## Plan and goal state
 
 - `crates/state/plan/src/lib.rs`: `PlanState` is a reviewed state machine — `propose` → `approve` → `begin` → `complete` / `abandon`, with `feedback` returning to review; `PlanStatus::is_terminal` gates transitions; plans live per session under a plans root (`plan_path_for_session`, `validate_session_id`).
-- `crates/state/goal/src/lib.rs`: one durable objective per session with **CAS versioning** — every mutation bumps `GoalState::version`, and `goal_update` requires the expected version; a mismatch names both versions and tells the model to reload with `goal_status`. Statuses: Active / Blocked / Paused / Completed (terminal).
+- `crates/state/goal/src/lib.rs`: one durable objective per session with **CAS versioning** — every mutation bumps `GoalState::version`, and the goal tool's `update` action requires the expected version; a mismatch names both versions and tells the model to reload with `status`. Statuses: Active / Blocked / Paused / Completed (terminal). An optional `sub_goals` list (text + in_progress/achieved) decomposes the objective; a fresh `set` clears it.
 
 ## Replay: the structural fold (`crates/operations/replay/src/lib.rs`)
 

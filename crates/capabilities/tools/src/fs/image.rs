@@ -9,7 +9,7 @@
  * This module must not depend on: UI-layer components, network access.
  */
 
-//! `read_image` tool (read-only): load an image file as a model attachment.
+//! `view` tool (read-only): load an image file as a model attachment.
 //!
 //! The file is resolved under `cwd` via `path_guard`, sniffed by magic bytes
 //! (extension is never trusted), capped at 5 MB decoded (no downscaling;
@@ -46,7 +46,7 @@ pub struct ReadImage;
 #[async_trait::async_trait]
 impl Tool for ReadImage {
     fn name(&self) -> &str {
-        "read_image"
+        "view"
     }
 
     fn description(&self) -> &str {
@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_image_roundtrip_and_rejections() {
+    async fn view_roundtrip_and_rejections() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolCtx {
             cwd: dir.path().to_path_buf(),

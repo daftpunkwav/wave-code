@@ -1,10 +1,11 @@
 /*!
  * @file GateApprovalSource
- * @description Parks approval waits on the legacy approval gate with timeout.
+ * @description Parks approval and question waits on the safety gates with timeout.
  *
  * Responsibilities:
  * - Park the loop until a user decision arrives or the wait expires.
- * - Resolve expired waits to Deny so the loop never parks forever.
+ * - Park interactive questions until the user answers or the wait expires.
+ * - Resolve expired waits to Deny/Unavailable so the loop never parks forever.
  * - Clear stale waiters at turn start.
  *
  * This module must not depend on: runtime internals beyond its trait seam.
@@ -15,20 +16,30 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use runtime_runner::{ApprovalResolution, ApprovalSource, AskKind};
-use safety_gate::{ApprovalDecision, ApprovalGate};
+use runtime_runner::{ApprovalResolution, ApprovalSource, AskKind, QuestionResolution};
+use safety_gate::{ApprovalDecision, ApprovalGate, QuestionGate};
 
 /// Approval waits backed by a shared gate with a fixed timeout.
 #[derive(Debug, Clone)]
 pub struct GateApprovalSource {
     gate: Arc<ApprovalGate>,
+    questions: Arc<QuestionGate>,
     timeout: Duration,
 }
 
 impl GateApprovalSource {
-    /// Wrap a shared gate; waits longer than `timeout` resolve to Deny.
-    pub fn new(gate: Arc<ApprovalGate>, timeout: Duration) -> Self {
-        Self { gate, timeout }
+    /// Wrap shared gates; waits longer than `timeout` resolve to Deny /
+    /// Unavailable instead of parking forever.
+    pub fn new(
+        gate: Arc<ApprovalGate>,
+        questions: Arc<QuestionGate>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            gate,
+            questions,
+            timeout,
+        }
     }
 }
 
@@ -70,8 +81,47 @@ impl ApprovalSource for GateApprovalSource {
         }
     }
 
+    async fn ask(&self, call_id: &str, _question: &str, _options: &[String]) -> QuestionResolution {
+        let waiter = match self.questions.wait_for(call_id) {
+            Ok(rx) => rx,
+            Err(_) => {
+                return QuestionResolution::Unavailable {
+                    reason: "duplicate question wait".to_string(),
+                };
+            }
+        };
+        match tokio::time::timeout(self.timeout, waiter).await {
+            Ok(Ok(answer)) => QuestionResolution::Answered(answer),
+            // The waiter was dropped (gate cleared mid-wait): fail the
+            // question instead of hanging.
+            Ok(Err(_)) => QuestionResolution::Unavailable {
+                reason: "question gate cleared while waiting".to_string(),
+            },
+            // Expired waits fail with an explicit reason; the reservation
+            // is withdrawn so a later call reusing the id parks fresh.
+            Err(_) => {
+                self.questions.cancel(call_id);
+                QuestionResolution::Unavailable {
+                    reason: format!(
+                        "question timed out after {}s with no answer",
+                        self.timeout.as_secs()
+                    ),
+                }
+            }
+        }
+    }
+
     fn clear_stale(&self) {
         self.gate.clear();
+        self.questions.clear();
+    }
+}
+
+impl GateApprovalSource {
+    /// Deliver a user answer through the question gate; false when no
+    /// waiter exists (late or unknown id).
+    pub fn answer_question(&self, call_id: &str, answer: String) -> bool {
+        self.questions.answer(call_id, answer)
     }
 }
 
@@ -96,10 +146,28 @@ impl ApprovalSource for Approvals {
         }
     }
 
+    async fn ask(&self, call_id: &str, question: &str, options: &[String]) -> QuestionResolution {
+        match self {
+            Self::Gate(gate) => gate.ask(call_id, question, options).await,
+            Self::Headless(deny) => deny.ask(call_id, question, options).await,
+        }
+    }
+
     fn clear_stale(&self) {
         match self {
             Self::Gate(gate) => gate.clear_stale(),
             Self::Headless(deny) => deny.clear_stale(),
+        }
+    }
+}
+
+impl Approvals {
+    /// Deliver a user answer through the question gate; false when no
+    /// waiter exists (late or unknown id).
+    pub fn answer_question(&self, call_id: &str, answer: String) -> bool {
+        match self {
+            Self::Gate(gate) => gate.answer_question(call_id, answer),
+            Self::Headless(_) => false,
         }
     }
 }
@@ -131,7 +199,11 @@ mod tests {
 
     fn source(timeout: Duration) -> (GateApprovalSource, Arc<ApprovalGate>) {
         let gate = Arc::new(ApprovalGate::new());
-        (GateApprovalSource::new(gate.clone(), timeout), gate)
+        let questions = Arc::new(QuestionGate::new());
+        (
+            GateApprovalSource::new(gate.clone(), questions, timeout),
+            gate,
+        )
     }
 
     #[tokio::test]
@@ -168,6 +240,39 @@ mod tests {
             ApprovalResolution::Deny { reason } if reason.contains("non-interactive")
         ));
         HeadlessDeny.clear_stale();
+    }
+
+    #[tokio::test]
+    async fn questions_park_until_answered_and_expire_openly() {
+        let gate = Arc::new(ApprovalGate::new());
+        let questions = Arc::new(QuestionGate::new());
+        let source = GateApprovalSource::new(gate, questions.clone(), Duration::from_secs(5));
+        let driver = tokio::spawn(async move {
+            source.ask("c1", "pick one", &["a".to_string(), "b".to_string()]).await
+        });
+        // Let the waiter park before answering.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        assert!(questions.answer("c1", "b".to_string()));
+        assert_eq!(
+            driver.await.unwrap(),
+            QuestionResolution::Answered("b".to_string())
+        );
+        // Expired waits fail openly and free their id.
+        let gate = Arc::new(ApprovalGate::new());
+        let questions = Arc::new(QuestionGate::new());
+        let source = GateApprovalSource::new(gate, questions.clone(), Duration::from_millis(20));
+        let outcome = source.ask("c1", "pick one", &[]).await;
+        assert!(matches!(
+            outcome,
+            QuestionResolution::Unavailable { reason } if reason.contains("timed out")
+        ));
+        assert_eq!(questions.pending_count(), 0);
+        // Headless drivers answer nobody: the trait default applies.
+        assert!(matches!(
+            HeadlessDeny.ask("c1", "pick one", &[]).await,
+            QuestionResolution::Unavailable { .. }
+        ));
     }
 
     #[tokio::test]

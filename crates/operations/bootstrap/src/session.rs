@@ -29,7 +29,7 @@ use operations_actor::{ActorClient, SessionActor};
 use runtime_child::ChildRuntime;
 use runtime_prompt::{DEFAULT_CATALOG_BUDGET, PromptSlots, build_system};
 use runtime_runner::{RunConfig, RunLoop};
-use safety_gate::ApprovalGate;
+use safety_gate::{ApprovalGate, QuestionGate};
 use state_store::Conversation;
 
 use crate::child_service::TurnChildService;
@@ -44,7 +44,7 @@ use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
 use crate::skill_tool::SkillTool;
-use crate::task_tools::{TaskOutputTool, TaskStopTool};
+use crate::task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 use crate::tool_adapter::ToolAdapter;
 
 /// Approval wait timeout applied to parked decisions.
@@ -145,8 +145,10 @@ pub struct AssembleOptions {
 
 /// Resolve the effective permission mode: CLI override wins over config.
 ///
-/// Unknown values warn and fall back to `Default` so a typo never locks
-/// the session into a mode the policy rejected.
+/// Unknown values warn and fall back to `Guarded` so a typo never locks
+/// the session into a mode the policy rejected. Legacy pre-3-mode names
+/// parse onto their successor but warn, so silent behavior drift for old
+/// config files is at least visible in the startup warnings.
 pub fn resolve_permission_mode(
     config_value: Option<&str>,
     cli_override: Option<&str>,
@@ -155,21 +157,29 @@ pub fn resolve_permission_mode(
     if let Some(raw) = cli_override {
         return wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
             warnings.push(format!(
-                "unrecognized --permission-mode {raw:?}; falling back to default"
+                "unrecognized --permission-mode {raw:?}; falling back to guarded"
             ));
-            wavecode_protocol::PermissionMode::Default
+            wavecode_protocol::PermissionMode::Guarded
         });
     }
     config_value
         .and_then(|raw| {
-            wavecode_protocol::PermissionMode::parse(raw).or_else(|| {
+            let parsed = wavecode_protocol::PermissionMode::parse(raw);
+            if parsed.is_some()
+                && matches!(raw, "default" | "acceptEdits" | "bypassPermissions")
+            {
                 warnings.push(format!(
-                    "unrecognized permission_mode {raw:?}; falling back to default"
+                    "permission_mode {raw:?} is a legacy name; use guarded, plan, or auto"
+                ));
+            }
+            parsed.or_else(|| {
+                warnings.push(format!(
+                    "unrecognized permission_mode {raw:?}; falling back to guarded"
                 ));
                 None
             })
         })
-        .unwrap_or(wavecode_protocol::PermissionMode::Default)
+        .unwrap_or(wavecode_protocol::PermissionMode::Guarded)
 }
 
 /// Assemble a live session: config to client handle.
@@ -351,11 +361,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // Effective wire name for status displays (post-fallback, so the UI
     // never shows a mode the policy rejected).
     let permission_mode_raw = match permission_mode {
-        wavecode_protocol::PermissionMode::Default => "default".to_string(),
         wavecode_protocol::PermissionMode::Plan => "plan".to_string(),
-        wavecode_protocol::PermissionMode::AcceptEdits => "acceptEdits".to_string(),
-        wavecode_protocol::PermissionMode::BypassPermissions => "bypassPermissions".to_string(),
-        _ => "default".to_string(),
+        wavecode_protocol::PermissionMode::Guarded => "guarded".to_string(),
+        wavecode_protocol::PermissionMode::Auto => "auto".to_string(),
+        _ => "guarded".to_string(),
     };
     let sandbox = wavecode_sandbox::Sandbox::without_rules(permission_mode);
 
@@ -384,11 +393,13 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         registry.clone(),
     ));
     let approvals = Arc::new(ApprovalGate::new());
+    let questions = Arc::new(QuestionGate::new());
     let gate_source = if headless {
         crate::gate_adapter::Approvals::Headless(crate::gate_adapter::HeadlessDeny)
     } else {
         crate::gate_adapter::Approvals::Gate(GateApprovalSource::new(
             approvals.clone(),
+            questions.clone(),
             APPROVAL_TIMEOUT,
         ))
     };
@@ -455,12 +466,17 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // The `skill` model tool needs the child service, which only exists
     // after the driver is built: late registration on the shared registry
     // makes it visible to the executor, policy, and model adapters live.
-    // `task_output` / `task_stop` ride the same handle so the model can
-    // observe and stop what skills forked.
+    // `task_output` / `task_stop` / `task_continue` ride the same handle so
+    // the model can observe, stop, and continue what task and skill forked.
     let task_service = tasks.clone() as Arc<dyn action_tasks::TaskService>;
     registry.register(Arc::new(SkillTool::new(skill_set, task_service.clone())));
     registry.register(Arc::new(TaskOutputTool::new(task_service.clone())));
     registry.register(Arc::new(TaskStopTool::new(task_service.clone())));
+    registry.register(Arc::new(TaskContinueTool::new(task_service.clone())));
+    // `ask_user` parks on the shared question gate: the sandbox routes valid
+    // payloads to the question flow before mode policy, so this tool's body
+    // only runs for schema errors or bypassed gates.
+    registry.register(Arc::new(crate::ask_user_tool::AskUserTool));
     // `task` is the free-form delegation surface (named agent definitions
     // resolve per call from the tool's cwd, so registration needs only the
     // shared child handle).
@@ -509,13 +525,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     registry.register(Arc::new(crate::workflow_tools::RalphRunTool::new(
         task_service.clone(),
     )));
-    registry.register(Arc::new(crate::workflow_tools::ScheduleAddTool::new(
-        scheduler.clone(),
-    )));
-    registry.register(Arc::new(crate::workflow_tools::ScheduleListTool::new(
-        scheduler.clone(),
-    )));
-    registry.register(Arc::new(crate::workflow_tools::ScheduleRemoveTool::new(
+    registry.register(Arc::new(crate::workflow_tools::ScheduleTool::new(
         scheduler,
     )));
     // Background shell jobs for long work that must not block the turn.
@@ -550,9 +560,8 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // the same late handle: the store path derives from home
     // (`<home>/.wavecode/plans/<session>.json`) so resume in the same home
     // reopens the same plan. Corrupt content warns and starts empty, never
-    // a hard stop. The mutating tools are not read-only, but they are not
-    // destructive either (they touch plan state, not the repo), so they
-    // never park on an approval gate.
+    // a hard stop. The tool mutates plan state, not the repo, and assembly
+    // classifies it as in-session state (no approval gate in any mode).
     let (plan_state, plan_warning) = crate::plan_tools::load_for_session(
         home.as_deref(),
         crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
@@ -565,25 +574,16 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         home.as_deref(),
         crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
     ));
-    registry.register(Arc::new(crate::plan_tools::PlanProposeTool::new(
-        plan_store.clone(),
-    )));
-    registry.register(Arc::new(crate::plan_tools::PlanApproveTool::new(
-        plan_store.clone(),
-    )));
-    registry.register(Arc::new(crate::plan_tools::PlanFeedbackTool::new(
-        plan_store.clone(),
-    )));
-    registry.register(Arc::new(crate::plan_tools::PlanStatusTool::new(plan_store)));
+    registry.register(Arc::new(crate::plan_tools::PlanTool::new(plan_store)));
 
     // Durable goal service (persisted per-session objective with CAS and a
     // tools-only round driver): the store path derives from home
     // (`<home>/.wavecode/goals/<session>.json`) so resume in the same home
     // reopens the same goal. Corrupt content warns and starts empty, never
-    // a hard stop. The mutating tools are not read-only, but they are not
-    // destructive either (they touch goal state, not the repo), so they
-    // never park on an approval gate. The driver has no loop hook yet: the
-    // model calls goal_tick once per round.
+    // a hard stop. The tool mutates goal state, not the repo, and assembly
+    // classifies it as in-session state (no approval gate in any mode).
+    // The driver has no loop hook yet: the model calls the tick action
+    // once per round.
     let (goal_state, goal_warning) = crate::goal_tools::load_for_session(
         home.as_deref(),
         crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
@@ -596,26 +596,28 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         home.as_deref(),
         crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
     ));
-    registry.register(Arc::new(crate::goal_tools::GoalSetTool::new(
-        goal_store.clone(),
-    )));
-    registry.register(Arc::new(crate::goal_tools::GoalUpdateTool::new(
-        goal_store.clone(),
-    )));
-    registry.register(Arc::new(crate::goal_tools::GoalStatusTool::new(
-        goal_store.clone(),
-    )));
-    registry.register(Arc::new(crate::goal_tools::GoalTickTool::new(goal_store)));
+    registry.register(Arc::new(crate::goal_tools::GoalTool::new(goal_store)));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
+    // Plan mode adds a soft guidance paragraph: read-only exploration,
+    // prefer proposing via the plan tool, answering directly is fine.
     let tool_names: Vec<String> = registry
         .specs()
         .into_iter()
         .map(|spec| spec.name.clone())
         .collect();
+    let mut instructions = instruction_memory;
+    if permission_mode == wavecode_protocol::PermissionMode::Plan {
+        instructions.push_str(
+            "\nYou are in plan mode: only read-only tools are available. \
+             Explore first, then propose your approach with the plan tool \
+             so the user can approve it; when the request only needs an \
+             answer, simply answer. Do not attempt to modify anything.",
+        );
+    }
     let system = build_system(&PromptSlots {
         identity,
-        instructions: instruction_memory,
+        instructions,
         memory_index: memory_index.clone(),
         skill_catalog,
         tool_note: format!("Available tools: {}", tool_names.join(", ")),
@@ -642,6 +644,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         conv,
         children,
         approvals.clone(),
+        questions.clone(),
         interrupt.clone(),
         system_for_actor,
     );
@@ -919,8 +922,8 @@ api_key = "k-inline"
     #[test]
     fn cli_permission_override_wins_over_config() {
         let mut warnings = Vec::new();
-        let mode = resolve_permission_mode(Some("plan"), Some("bypassPermissions"), &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::BypassPermissions);
+        let mode = resolve_permission_mode(Some("plan"), Some("auto"), &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.is_empty());
     }
 
@@ -928,23 +931,35 @@ api_key = "k-inline"
     fn invalid_permission_values_warn_and_fall_back() {
         let mut warnings = Vec::new();
         let mode = resolve_permission_mode(Some("plan"), Some("nope"), &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Default);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
         assert!(warnings.iter().any(|w| w.contains("--permission-mode")));
         warnings.clear();
         let mode = resolve_permission_mode(Some("nope"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Default);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
         assert!(warnings.iter().any(|w| w.contains("permission_mode")));
     }
 
     #[test]
     fn config_permission_used_without_override() {
         let mut warnings = Vec::new();
-        let mode = resolve_permission_mode(Some("acceptEdits"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::AcceptEdits);
+        let mode = resolve_permission_mode(Some("guarded"), None, &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
         assert!(warnings.is_empty());
         let mode = resolve_permission_mode(None, None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Default);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
         assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn legacy_mode_names_migrate_with_a_visible_warning() {
+        let mut warnings = Vec::new();
+        let mode = resolve_permission_mode(Some("acceptEdits"), None, &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
+        assert!(warnings.iter().any(|w| w.contains("legacy name")));
+        warnings.clear();
+        let mode = resolve_permission_mode(Some("bypassPermissions"), None, &mut warnings);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
+        assert!(warnings.iter().any(|w| w.contains("legacy name")));
     }
 
     #[test]
@@ -996,7 +1011,7 @@ api_key = "k-inline"
             },
             StreamEvent::ToolUseBegin {
                 id: "c1".to_string(),
-                name: "write_file".to_string(),
+                name: "write".to_string(),
             },
             StreamEvent::ToolUseInputDelta {
                 partial_json: r#"{"path":"hello.txt","content":"wavecode-smoke-ok"}"#.to_string(),
@@ -1051,7 +1066,7 @@ api_key = "k-inline"
         );
         let policy = PolicyAdapter::new(
             wavecode_sandbox::Sandbox::without_rules(
-                wavecode_protocol::PermissionMode::BypassPermissions,
+                wavecode_protocol::PermissionMode::Auto,
             ),
             registry.clone(),
         );

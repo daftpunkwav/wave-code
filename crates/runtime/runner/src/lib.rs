@@ -158,6 +158,14 @@ pub enum PolicyVerdict {
     Allow,
     /// Ask the user; carries the approval kind and a bounded detail string.
     Ask { kind: AskKind, detail: String },
+    /// Park an interactive question: the user's answer becomes the tool
+    /// result and the tool body never executes.
+    Question {
+        /// The question text for display.
+        question: String,
+        /// Numbered answer options; empty when free text is expected.
+        options: Vec<String>,
+    },
     /// Refuse execution with a reason; reported back as an error result.
     Deny { reason: String },
 }
@@ -541,6 +549,22 @@ pub enum ApprovalResolution {
     Interrupted,
 }
 
+/// User answer delivered for one parked interactive question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuestionResolution {
+    /// The user picked an option or typed an answer; an empty string
+    /// means the question was dismissed without answering.
+    Answered(String),
+    /// Nobody could answer (headless driver or expired wait): the
+    /// question fails as a business error instead of executing.
+    Unavailable {
+        /// Human-readable reason for the UI/model.
+        reason: String,
+    },
+    /// The wait was interrupted; the call must not execute.
+    Interrupted,
+}
+
 /// Parks approval requests and delivers user decisions.
 ///
 /// Timeout handling belongs to the implementation: an expired wait must
@@ -550,6 +574,15 @@ pub enum ApprovalResolution {
 pub trait ApprovalSource: Send + Sync {
     /// Block until a decision arrives for `call_id` or the wait expires.
     async fn decide(&self, call_id: &str, kind: AskKind, detail: &str) -> ApprovalResolution;
+
+    /// Block until the user answers the parked question for `call_id`, or
+    /// the wait expires. Default: nobody can answer (headless drivers),
+    /// so implementations only override this when they can park.
+    async fn ask(&self, _call_id: &str, _question: &str, _options: &[String]) -> QuestionResolution {
+        QuestionResolution::Unavailable {
+            reason: "non-interactive session: nobody can answer questions".to_string(),
+        }
+    }
 
     /// Drop stale waiters, e.g. decisions that arrived after a turn ended.
     fn clear_stale(&self);
@@ -1274,6 +1307,18 @@ where
                     });
                     serial.push(SerialCall::Approval { call, kind, detail });
                 }
+                PolicyVerdict::Question { question, options } => {
+                    emit(EventMsg::QuestionRequested {
+                        call_id: call.call_id.clone(),
+                        question: question.clone(),
+                        options: options.clone(),
+                    });
+                    serial.push(SerialCall::Question {
+                        call,
+                        question,
+                        options,
+                    });
+                }
             }
         }
 
@@ -1292,9 +1337,9 @@ where
             results.insert(id, result_of(call, output));
         }
 
-        // Mutations and approvals run serially with an interrupt check per
-        // item; the rest fill with interrupted results instead of breaking,
-        // so every declared call still gets its slot.
+        // Mutations, approvals, and questions run serially with an
+        // interrupt check per item; the rest fill with interrupted results
+        // instead of breaking, so every declared call still gets its slot.
         for item in serial {
             let (call, approved) = match item {
                 SerialCall::Direct(call) => (call, true),
@@ -1315,6 +1360,51 @@ where
                             continue;
                         }
                         ApprovalResolution::Interrupted => {
+                            results.insert(call.call_id.clone(), interrupted_result(call));
+                            continue;
+                        }
+                    }
+                }
+                SerialCall::Question {
+                    call,
+                    question,
+                    options,
+                } => {
+                    // The answer IS the tool result: the tool body never
+                    // executes, so there is nothing to approve or run.
+                    let resolution = self
+                        .approvals
+                        .ask(&call.call_id, &question, &options)
+                        .await;
+                    match resolution {
+                        QuestionResolution::Answered(text) => {
+                            let content = if text.trim().is_empty() {
+                                "the user dismissed the question without answering".to_string()
+                            } else {
+                                text
+                            };
+                            results.insert(
+                                call.call_id.clone(),
+                                ToolResult {
+                                    call_id: call.call_id.clone(),
+                                    content,
+                                    is_error: false,
+                                },
+                            );
+                            continue;
+                        }
+                        QuestionResolution::Unavailable { reason } => {
+                            results.insert(
+                                call.call_id.clone(),
+                                ToolResult {
+                                    call_id: call.call_id.clone(),
+                                    content: reason,
+                                    is_error: true,
+                                },
+                            );
+                            continue;
+                        }
+                        QuestionResolution::Interrupted => {
                             results.insert(call.call_id.clone(), interrupted_result(call));
                             continue;
                         }
@@ -1589,7 +1679,8 @@ where
     }
 }
 
-/// Serial dispatch item: direct execution or parked approval.
+/// Serial dispatch item: direct execution, parked approval, or parked
+/// question.
 enum SerialCall<'a> {
     /// Policy allowed; execute after the interrupt check.
     Direct(&'a ToolCall),
@@ -1601,6 +1692,16 @@ enum SerialCall<'a> {
         kind: AskKind,
         /// Bounded detail string for display.
         detail: String,
+    },
+    /// Policy parked an interactive question; the user's answer becomes
+    /// the tool result without executing the tool body.
+    Question {
+        /// The parked call.
+        call: &'a ToolCall,
+        /// The question text for display.
+        question: String,
+        /// Numbered answer options; empty when free text is expected.
+        options: Vec<String>,
     },
 }
 
@@ -1866,6 +1967,7 @@ mod run_loop_tests {
 
     struct FakeApprovals {
         resolutions: HashMap<String, ApprovalResolution>,
+        answers: HashMap<String, QuestionResolution>,
     }
 
     #[async_trait::async_trait]
@@ -1877,6 +1979,14 @@ mod run_loop_tests {
                 .unwrap_or(ApprovalResolution::Deny {
                     reason: "test deny".to_string(),
                 })
+        }
+
+        async fn ask(&self, call_id: &str, _question: &str, _options: &[String]) -> QuestionResolution {
+            self.answers.get(call_id).cloned().unwrap_or(
+                QuestionResolution::Unavailable {
+                    reason: "test: nobody answered".to_string(),
+                },
+            )
         }
 
         fn clear_stale(&self) {}
@@ -2031,6 +2141,7 @@ mod run_loop_tests {
             },
             FakeApprovals {
                 resolutions: HashMap::new(),
+                answers: HashMap::new(),
             },
             FakePlans { unfinished: 0 },
             FakeCompactor {
@@ -2141,7 +2252,10 @@ mod run_loop_tests {
         let policy = FakePolicy { verdicts };
         let mut resolutions = HashMap::new();
         resolutions.insert("c1".to_string(), ApprovalResolution::AllowOnce);
-        let approvals = FakeApprovals { resolutions };
+        let approvals = FakeApprovals {
+            resolutions,
+            answers: HashMap::new(),
+        };
         model
             .steps
             .lock()
@@ -2922,5 +3036,142 @@ mod run_loop_tests {
         assert_eq!(seen_texts(&seen, 0), vec!["hi"]);
         // ... and steered the immediately following sample.
         assert!(seen_texts(&seen, 1).contains(&"FOLLOW-UP".to_string()));
+    }
+
+    #[tokio::test]
+    async fn questions_answer_without_executing() {
+        let fx = Fixture::new();
+        let (exec, _, hooks, model, _, plans, compactor) = default_parts();
+        let mut verdicts = HashMap::new();
+        verdicts.insert(
+            "ask_user".to_string(),
+            PolicyVerdict::Question {
+                question: "proceed with the risky path?".to_string(),
+                options: vec!["yes".to_string(), "no".to_string()],
+            },
+        );
+        let policy = FakePolicy { verdicts };
+        let mut answers = HashMap::new();
+        answers.insert(
+            "c1".to_string(),
+            QuestionResolution::Answered("yes".to_string()),
+        );
+        let approvals = FakeApprovals {
+            resolutions: HashMap::new(),
+            answers,
+        };
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "ask_user".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let run = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let kinds = fx.event_kinds();
+        assert!(kinds.contains(&"question_requested".to_string()));
+        // The answer is the result: the tool body never executes.
+        assert!(!run.executor.lock_executed().contains(&"ask_user".to_string()));
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("yes"), "{history}");
+    }
+
+    #[tokio::test]
+    async fn unanswered_questions_fail_openly() {
+        let fx = Fixture::new();
+        let (exec, _, hooks, model, _, plans, compactor) = default_parts();
+        let mut verdicts = HashMap::new();
+        verdicts.insert(
+            "ask_user".to_string(),
+            PolicyVerdict::Question {
+                question: "proceed?".to_string(),
+                options: Vec::new(),
+            },
+        );
+        let policy = FakePolicy { verdicts };
+        // No scripted answer: the default resolves Unavailable.
+        let approvals = FakeApprovals {
+            resolutions: HashMap::new(),
+            answers: HashMap::new(),
+        };
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "ask_user".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let conv = &mut Conversation::new();
+        let run = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        assert_eq!(outcome, StopReason::Completed);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("nobody answered"), "{history}");
+        assert!(!run.executor.lock_executed().contains(&"ask_user".to_string()));
     }
 }

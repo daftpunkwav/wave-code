@@ -8,11 +8,11 @@
  * This module must not depend on: git, the network, or UI-layer components.
  */
 
-//! `spill_read` tool (read-only): read one spilled tool output by its
+//! `spill` tool (read-only): read one spilled tool output by its
 //! `spill://` URI. The store root mirrors the snapshot tools (explicit root;
 //! session assembly passes [`wavecode_context::default_spill_store_root`] or a
 //! session-derived root). Spills live outside the working directory, so this
-//! dedicated tool (not `read_file`, which is confined to `cwd` by
+//! dedicated tool (not `read`, which is confined to `cwd` by
 //! `path_guard`) is the read path.
 
 use std::path::PathBuf;
@@ -47,7 +47,7 @@ impl SpillRead {
 #[async_trait::async_trait]
 impl Tool for SpillRead {
     fn name(&self) -> &str {
-        "spill_read"
+        "spill"
     }
 
     fn description(&self) -> &str {

@@ -1,4 +1,4 @@
-//! The `todo_write` tool: session-level task list (deepagents `write_todos` semantics,
+//! The `todowrite` tool: session-level task list (deepagents `write_todos` semantics,
 //! SPEC §11.2).
 //!
 //! Semantics: **full rewrite** (not an incremental patch) -- the model passes the complete list on every call,
@@ -67,7 +67,7 @@ pub struct TodoStore {
 }
 
 impl TodoStore {
-    /// Rewrite the whole list (todo_write semantics).
+    /// Rewrite the whole list (todowrite semantics).
     pub fn write(&self, items: Vec<TodoItem>) {
         *crate::write(&self.inner) = items;
     }
@@ -105,7 +105,7 @@ pub fn format_todos(items: &[TodoItem]) -> String {
         .join("\n")
 }
 
-/// `todo_write`: rewrite the whole session task list (deepagents planning).
+/// `todowrite`: rewrite the whole session task list (deepagents planning).
 pub struct TodoWrite {
     store: TodoStore,
 }
@@ -120,7 +120,7 @@ impl TodoWrite {
 #[async_trait::async_trait]
 impl Tool for TodoWrite {
     fn name(&self) -> &str {
-        "todo_write"
+        "todowrite"
     }
 
     fn description(&self) -> &str {
@@ -160,7 +160,7 @@ impl Tool for TodoWrite {
 
     fn is_read_only(&self) -> bool {
         // Mutates session state (the real non-read-only semantics): runs in the serial section so concurrent
-        // todo_write calls within one batch cannot race. Approval-wise it passes via the sandbox's session-state
+        // todowrite calls within one batch cannot race. Approval-wise it passes via the sandbox's session-state
         // exemption (no filesystem writes, no spawned processes); see wavecode-sandbox's is_session_state.
         false
     }

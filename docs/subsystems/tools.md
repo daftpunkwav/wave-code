@@ -26,7 +26,7 @@ Every filesystem tool resolves user paths through `path_guard::resolve(ctx, path
 
 - Lexical normalization first (drop `.`, pop `..`), then containment checks on **canonicalized** real paths on both sides (Windows `\\?\` prefixes must match).
 - Existing paths: resolved canonical path must start with the canonicalized `cwd` — this rejects symlink/junction escapes.
-- Missing paths (the `write_file` case): anchor at the nearest existing ancestor, canonicalize, re-check the prefix.
+- Missing paths (the `write` case): anchor at the nearest existing ancestor, canonicalize, re-check the prefix.
 - Component-level prefix comparison rejects sibling confusion (`../abd` inside `../abc`).
 - Documented limit: the TOCTOU window (symlink swapped between check and use) is accepted by the M1 threat model; fd-anchored access is future work.
 
@@ -48,13 +48,13 @@ Note on `validate()`: the trait carries it as a pre-execution semantic check bey
 
 `Registry::builtin()` registers (name — source):
 
-- `read_file`, `write_file`, `edit_file`, `list_dir` — `src/fs/mod.rs` (+ `fs/read.rs`, `fs/write.rs`, `fs/edit.rs`, `fs/list.rs`); writes are atomic (temp+rename) with size caps and exact-match uniqueness checks for edits.
+- `read`, `write`, `edit`, `ls` — `src/fs/mod.rs` (+ `fs/read.rs`, `fs/write.rs`, `fs/edit.rs`, `fs/list.rs`); writes are atomic (temp+rename) with size caps and exact-match uniqueness checks for edits.
 - `grep`, `glob` — `src/search/`; sync traversal wrapped in `spawn_blocking`.
 - `shell` — `src/shell_tool.rs`; spawns through `sanitize_env` (strips `deny_env` names plus sensitive-shape variables like `*_KEY`, `*_PAT`, `AWS_SECRET_ACCESS_KEY`) and the OS sandbox backend.
-- `pty_shell` — `src/pty.rs`; `remote_shell` — `src/remote.rs`.
-- `run_python`, `run_node` — `src/script.rs` (not read-only).
-- `document_symbols`, `goto_definition`, `hover`, `find_references` — `src/lsp.rs`; navigation tools are read-only.
-- `webfetch` — `src/webfetch.rs`; `web_search` — `src/websearch.rs` (DuckDuckGo backend); both read-only.
-- `read_image`, `present` — `src/fs/image.rs`, `src/fs/present.rs`; `spill_read` — `src/spill_tool.rs` (reads the context spill store).
+- `pty_shell` — `src/pty.rs`.
+- `python`, `node` — `src/script.rs` (not read-only).
+- `lsp_symbols`, `lsp_definition`, `lsp_hover`, `lsp_references` — `src/lsp.rs`; navigation tools are read-only.
+- `web_fetch` — `src/web_fetch.rs`; `web_search` — `src/websearch.rs` (DuckDuckGo backend); both read-only.
+- `view`, `present` — `src/fs/image.rs`, `src/fs/present.rs`; `spill` — `src/spill_tool.rs` (reads the context spill store).
 
-`todo_write` (`src/todo_tool.rs`) is registered separately via `with_todo_write` so the tool and the session-level `TodoStore` share one `Arc`. `lsp_diagnostics` (`src/lsp.rs`) is not in `builtin()`; session assembly registers the LSP tools with live providers in `crates/operations/bootstrap/src/session.rs` (late registration on the shared registry). `task`, `skill`, `task_output`, `task_stop`, memory/goal/plan/workflow/job tools register the same way.
+`todowrite` (`src/todo_tool.rs`) is registered separately via `with_todo_write` so the tool and the session-level `TodoStore` share one `Arc`. `lsp_diagnostics` (`src/lsp.rs`) is not in `builtin()`; session assembly registers the LSP tools with live providers in `crates/operations/bootstrap/src/session.rs` (late registration on the shared registry). `task`, `skill`, `task_output`, `task_stop`, memory/goal/plan/workflow/job tools register the same way.

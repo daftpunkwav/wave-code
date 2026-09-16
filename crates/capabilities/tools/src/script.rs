@@ -9,7 +9,7 @@
  * This module must not depend on: UI-layer components, network access.
  */
 
-//! `run_python` / `run_node` tools: execute inline scripts with a discovered
+//! `python` / `node` tools: execute inline scripts with a discovered
 //! interpreter. Scripts run non-interactively (stdin closed) with
 //! `ctx.cwd` as cwd; no path parameters are accepted, so confinement is
 //! structural rather than validated. Failure semantics mirror `shell_tool`:
@@ -165,7 +165,7 @@ pub struct PythonTool;
 #[async_trait::async_trait]
 impl Tool for PythonTool {
     fn name(&self) -> &str {
-        "run_python"
+        "python"
     }
 
     fn description(&self) -> &str {
@@ -240,7 +240,7 @@ pub struct NodeTool;
 #[async_trait::async_trait]
 impl Tool for NodeTool {
     fn name(&self) -> &str {
-        "run_node"
+        "node"
     }
 
     fn description(&self) -> &str {

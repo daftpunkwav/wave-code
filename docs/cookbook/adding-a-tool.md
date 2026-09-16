@@ -1,6 +1,6 @@
 # Cookbook: adding a tool
 
-Worked examples: `webfetch` (`crates/capabilities/tools/src/webfetch.rs`, registered in `Registry::builtin()`) and `lsp_diagnostics` (`crates/capabilities/tools/src/lsp.rs`, late-registered in session assembly).
+Worked examples: `web_fetch` (`crates/capabilities/tools/src/web_fetch.rs`, registered in `Registry::builtin()`) and `lsp_diagnostics` (`crates/capabilities/tools/src/lsp.rs`, late-registered in session assembly).
 
 ## 1. Implement the `Tool` trait
 
@@ -43,10 +43,10 @@ Tools needing a session-shared store follow the `todo_write` pattern: `with_todo
 
 ## 4. Tests to write
 
-Mirror the existing tools (`webfetch.rs` and `lsp.rs` are the reference set):
+Mirror the existing tools (`web_fetch.rs` and `lsp.rs` are the reference set):
 
-- **Registration and attributes**: extend the pattern of `builtin_registers_script_lsp_and_webfetch` (`crates/capabilities/tools/src/lib.rs`) — the tool is present, and its `is_read_only` classification matches the read-only subset expectations.
-- **Business errors are `Ok(..., is_error: true)`**: missing params, bad input, upstream "not found" — assert `is_error` and that content explains the failure (see the `webfetch` failure-path tests around its `is_error: true` returns).
+- **Registration and attributes**: extend the pattern of `builtin_registers_script_lsp_and_web_fetch` (`crates/capabilities/tools/src/lib.rs`) — the tool is present, and its `is_read_only` classification matches the read-only subset expectations.
+- **Business errors are `Ok(..., is_error: true)`**: missing params, bad input, upstream "not found" — assert `is_error` and that content explains the failure (see the `web_fetch` failure-path tests around its `is_error: true` returns).
 - **Faults stay distinguishable**: if `execute` can return `Err`, assert `ToolAdapter` surfaces it with the `tool fault:` prefix (`crates/operations/bootstrap/src/tool_adapter.rs` tests show the shape).
 - **Containment**: any path-taking tool gets a `path_guard` escape test (sibling-prefix confusion and symlink-escape tests in `crates/capabilities/tools/src/path_guard.rs` are the templates).
 - **Late registration**, if you chose it: assert the tool is reachable through a shared `Arc<Registry>` after registration (`late_registration_reaches_shared_handles` in `lib.rs`).

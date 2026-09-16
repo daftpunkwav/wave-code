@@ -30,40 +30,37 @@ pub(crate) fn err() -> Style {
 
 /// Session permission mode (local display copy).
 ///
-/// Wire names stay frozen (`default`/`plan`/`acceptEdits`/
-/// `bypassPermissions`) so the actor-side policy parses them back.
-/// The TUI cycles locally and submits each step; unknown names are
-/// rejected downstream with a warning, never applied silently.
+/// Wire names stay frozen (`plan`/`guarded`/`auto`) so the actor-side
+/// policy parses them back. The TUI cycles locally and submits each
+/// step; unknown names are rejected downstream with a warning, never
+/// applied silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
-    /// Ask for anything sensitive; the default.
-    Default,
-    /// Propose plans without executing them.
+    /// Read-only exploration; propose via the plan tool or just answer.
     Plan,
-    /// Auto-approve edits, ask for command execution.
-    AcceptEdits,
-    /// Bypass all approval prompts (explicit operator opt-in only).
-    BypassPermissions,
+    /// Ask only for dangerous operations (command execution, destructive
+    /// tools); file edits and other writes flow through.
+    Guarded,
+    /// Bypass all approval prompts (deny rules still apply).
+    Auto,
 }
 
 impl PermissionMode {
     /// Canonical wire string of the mode.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Default => "default",
             Self::Plan => "plan",
-            Self::AcceptEdits => "acceptEdits",
-            Self::BypassPermissions => "bypassPermissions",
+            Self::Guarded => "guarded",
+            Self::Auto => "auto",
         }
     }
 
     /// Next mode in the `/permissions` cycle order.
     pub fn cycle(&self) -> Self {
         match self {
-            Self::Default => Self::Plan,
-            Self::Plan => Self::AcceptEdits,
-            Self::AcceptEdits => Self::BypassPermissions,
-            Self::BypassPermissions => Self::Default,
+            Self::Plan => Self::Guarded,
+            Self::Guarded => Self::Auto,
+            Self::Auto => Self::Plan,
         }
     }
 }
@@ -174,4 +171,15 @@ pub struct ApprovalPopup {
     /// false: y/n selection; true: denial reason entry.
     pub reason_mode: bool,
     pub reason: String,
+}
+
+/// Inline interactive-question popup state.
+pub struct QuestionPopup {
+    pub call_id: String,
+    pub question: String,
+    /// Numbered answer options (select with 1-4); may be empty.
+    pub options: Vec<String>,
+    /// Free-text answer buffer (Enter submits it; an empty submit means
+    /// the question was dismissed).
+    pub input: String,
 }

@@ -10,7 +10,7 @@
  */
 
 //! `web_search` tool (read-only): search the web and return titles/URLs/snippets.
-//! No per-result fetch (the `webfetch` tool already covers fetching).
+//! No per-result fetch (the `web_fetch` tool already covers fetching).
 //!
 //! Backend tradeoff: [`DuckDuckGoBackend`] scrapes the keyless HTML endpoint
 //! (`https://html.duckduckgo.com/html/?q=...`), so search works with no API
@@ -361,7 +361,7 @@ impl Tool for WebSearch {
 
     fn description(&self) -> &str {
         "Search the web and return titles, URLs, and snippets (no per-result \
-         fetch; use webfetch to read a page). Use count to bound the hits \
+         fetch; use web_fetch to read a page). Use count to bound the hits \
          (default 5, max 10); use timeout_ms to bound the whole search \
          (default 15000 ms, clamped to max 60000 ms)."
     }

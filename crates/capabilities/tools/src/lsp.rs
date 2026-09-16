@@ -11,8 +11,8 @@
  * This module must not depend on: UI-layer components, bundled servers.
  */
 
-//! LSP navigation tools (`document_symbols` / `goto_definition` / `hover` /
-//! `find_references`): with an explicit `server_command` each call spawns the
+//! LSP navigation tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` /
+//! `lsp_references`): with an explicit `server_command` each call spawns the
 //! caller-provided language server over stdio, runs `initialize`, issues one
 //! request, then `shutdown`s. With a [`LspProviders`] registry the server for
 //! the file extension is spawned lazily once, initialized once, and reused
@@ -943,7 +943,7 @@ impl Default for DocumentSymbols {
 #[async_trait::async_trait]
 impl Tool for DocumentSymbols {
     fn name(&self) -> &str {
-        "document_symbols"
+        "lsp_symbols"
     }
 
     fn description(&self) -> &str {
@@ -1021,7 +1021,7 @@ impl Default for GotoDefinition {
 #[async_trait::async_trait]
 impl Tool for GotoDefinition {
     fn name(&self) -> &str {
-        "goto_definition"
+        "lsp_definition"
     }
 
     fn description(&self) -> &str {
@@ -1107,7 +1107,7 @@ impl Default for Hover {
 #[async_trait::async_trait]
 impl Tool for Hover {
     fn name(&self) -> &str {
-        "hover"
+        "lsp_hover"
     }
 
     fn description(&self) -> &str {
@@ -1193,7 +1193,7 @@ impl Default for FindReferences {
 #[async_trait::async_trait]
 impl Tool for FindReferences {
     fn name(&self) -> &str {
-        "find_references"
+        "lsp_references"
     }
 
     fn description(&self) -> &str {

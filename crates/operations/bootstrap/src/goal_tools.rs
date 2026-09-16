@@ -1,28 +1,35 @@
 /*!
- * @file DurableGoalTools
- * @description Model-invokable tools for the durable goal service.
+ * @file GoalTools
+ * @description Single model-invokable tool over the durable goal service.
  *
  * Responsibilities:
- * - Share one goal state handle across set/update/status/tick.
+ * - Route the goal machine's four actions: set / update / status / tick.
+ * - Share one goal state handle across all actions.
  * - Persist every mutation to the home-derived goal file (resume-safe).
  * - Report business failures as model-readable errors, never panics.
  *
  * This module must not depend on: drivers, actors, or sessions. Assembly
- * owns the store handle; the tools only mutate through it.
+ * owns the store handle; the tool only mutates through it.
  */
 
-//! Durable goal tools: thin [`Tool`] adapters over the `state-goal`
+//! Durable goal tool: a thin [`Tool`] adapter over the `state-goal`
 //! machine; the transition rules and file layout live in `state-goal`,
 //! this module only maps tool input/output and persistence.
 //!
-//! The round driver is tools-only: no loop hook calls `round_tick`
-//! automatically yet, so the model must call `goal_tick` once per round
-//! and carry the reported version into the next `goal_update`.
+//! Actions:
+//! - `set` — replace the objective (and optionally seed sub-goals);
+//!   resets the round driver and clears the previous sub-goal list.
+//! - `update` — CAS-guarded mutation of the objective, status, and/or
+//!   the whole sub-goal list (full rewrite, not a patch).
+//! - `status` — read the goal tree back (version, round, progress).
+//! - `tick` — advance the round driver once; tools-only by design, no
+//!   loop hook calls it automatically yet, so the model ticks once per
+//!   round and carries the reported version into the next `update`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use state_goal::GoalState;
+use state_goal::{GoalState, SubGoal};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Session id used when assembly has no finer identity: the path stays
@@ -97,7 +104,7 @@ fn err_output(reason: impl Into<String>) -> ToolOutput {
     }
 }
 
-/// Human rendering of the current goal for tool and slash display.
+/// Human rendering of the current goal tree for tool and slash display.
 pub fn render_status(state: &GoalState) -> String {
     let mut out = format!(
         "goal status: {} (version {}, round {})",
@@ -108,105 +115,76 @@ pub fn render_status(state: &GoalState) -> String {
     } else {
         out.push_str(&format!("\nobjective:\n{}", state.objective));
     }
+    if state.sub_goals.is_empty() {
+        return out;
+    }
+    let achieved = state
+        .sub_goals
+        .iter()
+        .filter(|s| s.status == state_goal::SubGoalStatus::Achieved)
+        .count();
+    out.push_str(&format!(
+        "\nsub-goals ({achieved}/{} achieved):",
+        state.sub_goals.len()
+    ));
+    for sub in &state.sub_goals {
+        out.push_str(&format!("\n- [{}] {}", sub.status, sub.text));
+    }
     out
 }
 
-/// Apply a mutating transition under the lock, then persist the
-/// snapshot outside the lock. Returns the rendered status or a
-/// business-failure output.
-async fn apply_transition(
-    store: &GoalStore,
-    action: &'static str,
-    transition: impl FnOnce(&mut GoalState) -> std::result::Result<(), state_goal::GoalError>,
-) -> ToolOutput {
-    let (snapshot, file, rendered) = {
-        let mut guard = store.lock();
-        if let Err(e) = transition(&mut guard) {
-            return err_output(e.to_string());
-        }
-        let rendered = render_status(&guard);
-        (guard.clone(), store.file.clone(), rendered)
+/// Parse the optional `sub_goals` input array: each item needs a
+/// non-empty `text` and an optional `status` (`in_progress`, the
+/// default, or `achieved`); unknown names are business errors. The list
+/// cap mirrors [`state_goal::MAX_SUB_GOALS`] here so an oversized list
+/// fails in parsing — before the composite set/update transition touches
+/// any state — instead of failing halfway through one.
+fn parse_sub_goals(input: &serde_json::Value) -> std::result::Result<Option<Vec<SubGoal>>, String> {
+    let Some(raw) = input.get("sub_goals") else {
+        return Ok(None);
     };
-    match store.persist(snapshot, file).await {
-        Ok(()) => ToolOutput {
-            content: rendered,
-            is_error: false,
-        },
-        Err(reason) => err_output(format!(
-            "goal {action} applied but persistence failed: {reason}"
-        )),
+    let serde_json::Value::Array(items) = raw else {
+        return Err("invalid parameter 'sub_goals' (array of {text, status?} required)".into());
+    };
+    if items.len() > state_goal::MAX_SUB_GOALS {
+        return Err(format!(
+            "too many sub-goals ({}): the cap is {}",
+            items.len(),
+            state_goal::MAX_SUB_GOALS
+        ));
     }
-}
-
-/// `goal_set`: set (or replace) the durable per-session objective.
-///
-/// Resets the round driver to zero and returns the goal to Active, so a
-/// finished goal restarts cleanly. The driver is tools-only: call
-/// `goal_tick` once per round and carry the reported version into the
-/// next `goal_update`.
-#[derive(Debug, Clone)]
-pub struct GoalSetTool {
-    store: Arc<GoalStore>,
-}
-
-impl GoalSetTool {
-    /// Share the session goal handle.
-    pub fn new(store: Arc<GoalStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for GoalSetTool {
-    fn name(&self) -> &str {
-        "goal_set"
-    }
-
-    fn description(&self) -> &str {
-        "Set the durable per-session objective, replacing any previous \
-         goal and resetting the round driver to zero. The driver is \
-         tools-only (no automatic loop hook yet): call goal_tick once per \
-         round and use the reported version for the next goal_update."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "objective": {
-                    "type": "string",
-                    "description": "The objective text to persist; blank text is rejected",
-                },
-            },
-            "required": ["objective"],
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let objective = input
-            .get("objective")
+    let mut sub_goals = Vec::with_capacity(items.len());
+    for item in items {
+        let text = item
+            .get("text")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let objective = objective.to_string();
-        Ok(apply_transition(&self.store, "set", move |goal| goal.set(&objective)).await)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            return Err("invalid sub-goal: 'text' must be a non-empty string".into());
+        }
+        let status = match item.get("status").and_then(|v| v.as_str()) {
+            None => state_goal::SubGoalStatus::default(),
+            Some(raw) => state_goal::parse_sub_goal_status(raw).map_err(|e| e.to_string())?,
+        };
+        sub_goals.push(SubGoal { text, status });
     }
+    Ok(Some(sub_goals))
 }
 
-/// `goal_update`: mutate the durable goal under optimistic concurrency.
+/// `goal`: the durable per-session objective and its sub-goal tree.
 ///
-/// The expected version must match the version `goal_status` reported;
-/// a stale version fails naming both versions so the caller reloads and
-/// retries. Objective and status apply atomically when both are given.
+/// One state machine behind four actions. Mutations persist outside the
+/// lock; the driver is tools-only (no automatic loop hook yet), so the
+/// model ticks once per round and carries the reported version into the
+/// next `update`.
 #[derive(Debug, Clone)]
-pub struct GoalUpdateTool {
+pub struct GoalTool {
     store: Arc<GoalStore>,
 }
 
-impl GoalUpdateTool {
+impl GoalTool {
     /// Share the session goal handle.
     pub fn new(store: Arc<GoalStore>) -> Self {
         Self { store }
@@ -214,38 +192,68 @@ impl GoalUpdateTool {
 }
 
 #[async_trait::async_trait]
-impl Tool for GoalUpdateTool {
+impl Tool for GoalTool {
     fn name(&self) -> &str {
-        "goal_update"
+        "goal"
     }
 
     fn description(&self) -> &str {
-        "Update the durable goal under optimistic concurrency: \
-         expected_version must equal the version goal_status reported \
-         (stale versions fail naming both versions; reload and retry). \
-         Optionally replaces the objective and/or moves the status \
-         (active, blocked, paused, completed); the terminal completed \
-         state only leaves via goal_set."
+        "Durable per-session goal: a main objective plus intermediate \
+         sub-goals that survives restarts. Actions: 'set' replaces the \
+         objective (clearing the round driver and old sub-goals; seed new \
+         sub-goals via sub_goals), 'update' mutates objective and/or \
+         status and/or rewrites the whole sub-goal list under optimistic \
+         concurrency (expected_version must equal the version the last \
+         result reported; stale versions fail naming both versions — \
+         reload with status and retry), 'status' reads the tree without \
+         mutating, 'tick' advances the round driver once per round (at \
+         the cap of 256 the goal blocks and the cap reports as an error). \
+         Status moves: active, blocked, paused, completed; the terminal \
+         completed state only leaves via set. Sub-goal statuses: \
+         in_progress, achieved."
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "expected_version": {
-                    "type": "integer",
-                    "description": "Current goal version from goal_status; stale versions are rejected",
+                "action": {
+                    "type": "string",
+                    "enum": ["set", "update", "status", "tick"],
+                    "description": "Which goal operation to run",
                 },
                 "objective": {
                     "type": "string",
-                    "description": "Replacement objective text (optional; blank is rejected)",
+                    "description": "set (required): the objective text; update (optional): replacement text; blank is rejected",
                 },
                 "status": {
                     "type": "string",
-                    "description": "Target status (optional): active, blocked, paused, or completed",
+                    "description": "update (optional): target status — active, blocked, paused, or completed",
                 },
+                "expected_version": {
+                    "type": "integer",
+                    "description": "update (required): current goal version from the last result; stale versions are rejected",
+                },
+                "sub_goals": {
+                    "type": "array",
+                    "description": "set (optional) seeds the list; update (optional) rewrites the whole list. Items: {text, status?} with status in_progress (default) or achieved",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "description": "What done means for this sub-goal (non-empty)"
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["in_progress", "achieved"]
+                            }
+                        },
+                        "required": ["text"]
+                    }
+                }
             },
-            "required": ["expected_version"],
+            "required": ["action"],
         })
     }
 
@@ -254,8 +262,50 @@ impl Tool for GoalUpdateTool {
     }
 
     async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        // A missing version can never match a real one, so it fails as a
-        // version mismatch naming both versions instead of a schema error.
+        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        match action {
+            "set" => self.action_set(&input).await,
+            "update" => self.action_update(&input).await,
+            "status" => Ok(ToolOutput {
+                content: render_status(&self.store.lock()),
+                is_error: false,
+            }),
+            "tick" => self.action_tick().await,
+            other => Ok(err_output(format!(
+                "unknown action {other:?}: expected one of set, update, status, tick"
+            ))),
+        }
+    }
+}
+
+impl GoalTool {
+    /// `set`: replace the objective and optionally seed sub-goals in the
+    /// same transition (single version bump per applied change).
+    async fn action_set(&self, input: &serde_json::Value) -> Result<ToolOutput> {
+        let objective = input
+            .get("objective")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let sub_goals = match parse_sub_goals(input) {
+            Ok(sub_goals) => sub_goals,
+            Err(reason) => return Ok(err_output(reason)),
+        };
+        Ok(apply_transition(&self.store, "set", move |goal| {
+            goal.set(&objective)?;
+            if let Some(sub_goals) = sub_goals {
+                goal.replace_sub_goals(goal.version, sub_goals)?;
+            }
+            Ok(())
+        })
+        .await)
+    }
+
+    /// `update`: CAS-guarded mutation of objective, status, and/or the
+    /// whole sub-goal list. A missing version can never match a real
+    /// one, so it fails as a version mismatch naming both versions
+    /// instead of a schema error.
+    async fn action_update(&self, input: &serde_json::Value) -> Result<ToolOutput> {
         let expected_version = input
             .get("expected_version")
             .and_then(|v| v.as_u64())
@@ -271,106 +321,33 @@ impl Tool for GoalUpdateTool {
                 Err(e) => return Ok(err_output(e.to_string())),
             },
         };
+        let sub_goals = match parse_sub_goals(input) {
+            Ok(sub_goals) => sub_goals,
+            Err(reason) => return Ok(err_output(reason)),
+        };
+        if objective.is_none() && status.is_none() && sub_goals.is_none() {
+            return Ok(err_output(
+                "update needs something to change: objective, status, expected_version, \
+                 and at least one of objective/status/sub_goals is required",
+            ));
+        }
         Ok(apply_transition(&self.store, "update", move |goal| {
-            goal.update(expected_version, objective.as_deref(), status)
+            goal.update(expected_version, objective.as_deref(), status)?;
+            // The main update bumped the version; the sub-goal rewrite
+            // CAS-checks against the freshly reported one, so both apply
+            // atomically inside this one transition.
+            if let Some(sub_goals) = sub_goals {
+                goal.replace_sub_goals(goal.version, sub_goals)?;
+            }
+            Ok(())
         })
         .await)
     }
-}
 
-/// `goal_status`: show the current goal without mutating it.
-#[derive(Debug, Clone)]
-pub struct GoalStatusTool {
-    store: Arc<GoalStore>,
-}
-
-impl GoalStatusTool {
-    /// Share the session goal handle.
-    pub fn new(store: Arc<GoalStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for GoalStatusTool {
-    fn name(&self) -> &str {
-        "goal_status"
-    }
-
-    fn description(&self) -> &str {
-        "Show the durable goal objective, status, CAS version, and round. \
-         Read-only: use it to reload the version before goal_update and \
-         to check where the goal stands before mutating it."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, _input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        Ok(ToolOutput {
-            content: render_status(&self.store.lock()),
-            is_error: false,
-        })
-    }
-}
-
-/// `goal_tick`: advance the durable-goal round driver by one round.
-///
-/// Call once per model round: the loop has no automatic hook yet, so the
-/// driver only advances through this tool. Returns the new version for
-/// the next `goal_update`; at the round cap (256) the goal transitions
-/// to blocked and the cap reports as a business error (the blocked
-/// state still persists).
-#[derive(Debug, Clone)]
-pub struct GoalTickTool {
-    store: Arc<GoalStore>,
-}
-
-impl GoalTickTool {
-    /// Share the session goal handle.
-    pub fn new(store: Arc<GoalStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for GoalTickTool {
-    fn name(&self) -> &str {
-        "goal_tick"
-    }
-
-    fn description(&self) -> &str {
-        "Advance the durable-goal round driver by one round. Call once per \
-         model round (the loop does not call it automatically yet). The \
-         returned status carries the new version for the next goal_update; \
-         at the round cap (256) the goal blocks and the cap reports as a \
-         business error."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let _ = input;
-        // The cap transition mutates (it blocks the goal) while reporting
-        // an error, so unlike apply_transition it must persist the
-        // snapshot on the cap path too.
+    /// `tick`: advance the round driver. The cap transition mutates (it
+    /// blocks the goal) while reporting an error, so unlike the other
+    /// actions it must persist the snapshot on the cap path too.
+    async fn action_tick(&self) -> Result<ToolOutput> {
         let (snapshot, file, rendered, capped) = {
             let mut guard = self.store.lock();
             match guard.round_tick() {
@@ -406,9 +383,37 @@ impl Tool for GoalTickTool {
     }
 }
 
+/// Apply a mutating transition under the lock, then persist the
+/// snapshot outside the lock. Returns the rendered status or a
+/// business-failure output.
+async fn apply_transition(
+    store: &GoalStore,
+    action: &'static str,
+    transition: impl FnOnce(&mut GoalState) -> std::result::Result<(), state_goal::GoalError>,
+) -> ToolOutput {
+    let (snapshot, file, rendered) = {
+        let mut guard = store.lock();
+        if let Err(e) = transition(&mut guard) {
+            return err_output(e.to_string());
+        }
+        let rendered = render_status(&guard);
+        (guard.clone(), store.file.clone(), rendered)
+    };
+    match store.persist(snapshot, file).await {
+        Ok(()) => ToolOutput {
+            content: rendered,
+            is_error: false,
+        },
+        Err(reason) => err_output(format!(
+            "goal {action} applied but persistence failed: {reason}"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use state_goal::SubGoalStatus;
 
     fn ctx(dir: &tempfile::TempDir) -> ToolCtx {
         ToolCtx {
@@ -423,43 +428,67 @@ mod tests {
         Arc::new(GoalStore::new(state, Some(home), "test"))
     }
 
+    fn sub_goal(text: &str, status: SubGoalStatus) -> serde_json::Value {
+        serde_json::json!({"text": text, "status": status.as_str()})
+    }
+
     #[tokio::test]
-    async fn set_update_status_tick_cycle_persists() {
+    async fn goal_actions_cycle_persists() {
         let home = tempfile::tempdir().unwrap();
         let store = store_in(home.path());
         let ctx = ctx(&home);
-        let set = GoalSetTool::new(store.clone());
-        assert!(!set.is_read_only());
-        assert!(!set.is_destructive());
-        let out = set
-            .execute(serde_json::json!({"objective": "ship the milestone"}), &ctx)
+        let goal = GoalTool::new(store.clone());
+        assert!(!goal.is_read_only());
+        assert!(!goal.is_destructive());
+        // Set seeds the objective and sub-goals in one call.
+        let out = goal
+            .execute(
+                serde_json::json!({
+                    "action": "set",
+                    "objective": "ship the milestone",
+                    "sub_goals": [sub_goal("fix the bug", SubGoalStatus::Achieved),
+                                  sub_goal("add tests", SubGoalStatus::InProgress)]
+                }),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("active"), "{}", out.content);
-        assert!(out.content.contains("version 1"), "{}", out.content);
+        // set + sub-goal seed = two version bumps.
+        assert!(out.content.contains("version 2"), "{}", out.content);
+        assert!(out.content.contains("sub-goals (1/2 achieved)"), "{}", out.content);
+        assert!(out.content.contains("[achieved] fix the bug"), "{}", out.content);
         // Tick advances the driver and hands back a fresh version.
-        let tick = GoalTickTool::new(store.clone());
-        assert!(!tick.is_read_only());
-        let out = tick.execute(serde_json::json!({}), &ctx).await.unwrap();
+        let out = goal
+            .execute(serde_json::json!({"action": "tick"}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("round 1"), "{}", out.content);
-        assert!(out.content.contains("version 2"), "{}", out.content);
-        // Update under the fresh version pauses the goal.
-        let update = GoalUpdateTool::new(store.clone());
-        let out = update
+        assert!(out.content.contains("version 3"), "{}", out.content);
+        // Update under the fresh version pauses the goal and rewrites the
+        // sub-goal list in the same transition.
+        let out = goal
             .execute(
-                serde_json::json!({"expected_version": 2, "status": "paused"}),
+                serde_json::json!({
+                    "action": "update",
+                    "expected_version": 3,
+                    "status": "paused",
+                    "sub_goals": [sub_goal("add tests", SubGoalStatus::Achieved)]
+                }),
                 &ctx,
             )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("paused"), "{}", out.content);
-        // Read-only status never mutates and reports the same state.
-        let status = GoalStatusTool::new(store.clone());
-        assert!(status.is_read_only());
-        let out = status.execute(serde_json::json!({}), &ctx).await.unwrap();
+        assert!(out.content.contains("sub-goals (1/1 achieved)"), "{}", out.content);
+        // Read-only status action never mutates and reports the same state.
+        let out = goal
+            .execute(serde_json::json!({"action": "status"}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("paused"), "{}", out.content);
         assert!(
@@ -468,13 +497,14 @@ mod tests {
             out.content
         );
         // Resume in the same home reopens the persisted goal.
-        let resumed = store_in(home.path());
-        let out = GoalStatusTool::new(resumed)
-            .execute(serde_json::json!({}), &ctx)
+        let resumed = GoalTool::new(store_in(home.path()));
+        let out = resumed
+            .execute(serde_json::json!({"action": "status"}), &ctx)
             .await
             .unwrap();
         assert!(out.content.contains("paused"), "{}", out.content);
-        assert!(out.content.contains("version 3"), "{}", out.content);
+        // set(1) + seed(2) + tick(3) + update(4) + sub-goal rewrite(5).
+        assert!(out.content.contains("version 5"), "{}", out.content);
     }
 
     #[tokio::test]
@@ -482,13 +512,16 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = store_in(home.path());
         let ctx = ctx(&home);
-        GoalSetTool::new(store.clone())
-            .execute(serde_json::json!({"objective": "v1"}), &ctx)
-            .await
-            .unwrap();
-        let out = GoalUpdateTool::new(store.clone())
+        let goal = GoalTool::new(store);
+        goal.execute(
+            serde_json::json!({"action": "set", "objective": "v1"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let out = goal
             .execute(
-                serde_json::json!({"expected_version": 999, "objective": "stale"}),
+                serde_json::json!({"action": "update", "expected_version": 999, "objective": "stale"}),
                 &ctx,
             )
             .await
@@ -501,20 +534,83 @@ mod tests {
         );
         assert!(out.content.contains("found version 1"), "{}", out.content);
         // Unknown status names fail openly without mutating.
-        let out = GoalUpdateTool::new(store.clone())
+        let out = goal
             .execute(
-                serde_json::json!({"expected_version": 1, "status": "done"}),
+                serde_json::json!({"action": "update", "expected_version": 1, "status": "done"}),
                 &ctx,
             )
             .await
             .unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("active"), "{}", out.content);
-        let out = GoalStatusTool::new(store)
-            .execute(serde_json::json!({}), &ctx)
+        let out = goal
+            .execute(serde_json::json!({"action": "status"}), &ctx)
             .await
             .unwrap();
         assert!(out.content.contains("version 1"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn update_without_changes_is_a_business_error() {
+        let home = tempfile::tempdir().unwrap();
+        let store = store_in(home.path());
+        let ctx = ctx(&home);
+        let goal = GoalTool::new(store);
+        goal.execute(
+            serde_json::json!({"action": "set", "objective": "v1"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let out = goal
+            .execute(
+                serde_json::json!({"action": "update", "expected_version": 1}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("needs something to change"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn blank_sub_goal_text_and_unknown_status_fail_openly() {
+        let home = tempfile::tempdir().unwrap();
+        let store = store_in(home.path());
+        let ctx = ctx(&home);
+        let goal = GoalTool::new(store);
+        goal.execute(
+            serde_json::json!({"action": "set", "objective": "v1"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let out = goal
+            .execute(
+                serde_json::json!({
+                    "action": "update",
+                    "expected_version": 1,
+                    "sub_goals": [{"text": "   "}]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("non-empty"), "{}", out.content);
+        let out = goal
+            .execute(
+                serde_json::json!({
+                    "action": "set",
+                    "objective": "v2",
+                    "sub_goals": [{"text": "x", "status": "done"}]
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("in_progress"), "{}", out.content);
     }
 
     #[tokio::test]
@@ -526,20 +622,22 @@ mod tests {
             version: 7,
             round: state_goal::MAX_ROUND,
             updated_at: 0,
+            sub_goals: Vec::new(),
         };
         let store = Arc::new(GoalStore::new(capped, Some(home.path()), "test"));
         let ctx = ctx(&home);
-        let out = GoalTickTool::new(store.clone())
-            .execute(serde_json::json!({}), &ctx)
+        let goal = GoalTool::new(store);
+        let out = goal
+            .execute(serde_json::json!({"action": "tick"}), &ctx)
             .await
             .unwrap();
         assert!(out.is_error, "{}", out.content);
         assert!(out.content.contains("cap"), "{}", out.content);
         assert!(out.content.contains("blocked"), "{}", out.content);
         // The blocked state persisted: resume reopens it.
-        let resumed = store_in(home.path());
-        let out = GoalStatusTool::new(resumed)
-            .execute(serde_json::json!({}), &ctx)
+        let resumed = GoalTool::new(store_in(home.path()));
+        let out = resumed
+            .execute(serde_json::json!({"action": "status"}), &ctx)
             .await
             .unwrap();
         assert!(out.content.contains("blocked"), "{}", out.content);
@@ -550,23 +648,26 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = store_in(home.path());
         let ctx = ctx(&home);
-        GoalSetTool::new(store.clone())
-            .execute(serde_json::json!({"objective": "finish me"}), &ctx)
-            .await
-            .unwrap();
+        let goal = GoalTool::new(store);
+        goal.execute(
+            serde_json::json!({"action": "set", "objective": "finish me"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
         // Complete under the fresh version, then every move off the
         // terminal state fails naming it.
-        let out = GoalUpdateTool::new(store.clone())
+        let out = goal
             .execute(
-                serde_json::json!({"expected_version": 1, "status": "completed"}),
+                serde_json::json!({"action": "update", "expected_version": 1, "status": "completed"}),
                 &ctx,
             )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
-        let out = GoalUpdateTool::new(store.clone())
+        let out = goal
             .execute(
-                serde_json::json!({"expected_version": 2, "status": "active"}),
+                serde_json::json!({"action": "update", "expected_version": 2, "status": "active"}),
                 &ctx,
             )
             .await
@@ -574,20 +675,23 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("completed"), "{}", out.content);
         // Ticking a completed goal fails without persisting a new version.
-        let out = GoalTickTool::new(store.clone())
-            .execute(serde_json::json!({}), &ctx)
+        let out = goal
+            .execute(serde_json::json!({"action": "tick"}), &ctx)
             .await
             .unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("completed"), "{}", out.content);
         // Blank objectives are rejected without mutating.
-        let out = GoalSetTool::new(store.clone())
-            .execute(serde_json::json!({"objective": "  "}), &ctx)
+        let out = goal
+            .execute(
+                serde_json::json!({"action": "set", "objective": "  "}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(out.is_error);
-        let out = GoalStatusTool::new(store)
-            .execute(serde_json::json!({}), &ctx)
+        let out = goal
+            .execute(serde_json::json!({"action": "status"}), &ctx)
             .await
             .unwrap();
         assert!(out.content.contains("completed"), "{}", out.content);

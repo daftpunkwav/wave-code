@@ -40,7 +40,7 @@ struct Args {
     model: Option<String>,
 
     /// Permission mode override winning over the configured mode
-    /// (`default`, `plan`, `acceptEdits`, `bypassPermissions`).
+    /// (`plan`, `guarded`, `auto`; legacy names still parse).
     #[arg(long, global = true)]
     permission_mode: Option<String>,
 
@@ -186,6 +186,11 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
                 clean(call_id),
                 approval_what(kind)
             ));
+            None
+        }
+        EventMsg::QuestionRequested { .. } => {
+            // Nothing here: the REPL prompt (and the exec headless gate)
+            // handle the parked question; the prompt prints the payload.
             None
         }
         EventMsg::TokenCount {
@@ -417,14 +422,14 @@ async fn run_tui_new(
 
 /// Map an assembled permission-mode wire name onto the TUI enum.
 ///
-/// Unknown names fall back to Default so the TUI never shows a mode the
+/// Unknown names fall back to Guarded so the TUI never shows a mode the
 /// policy rejected.
 fn tui_permission_mode(wire: &str) -> wavecode_tui::PermissionMode {
     match wire {
         "plan" => wavecode_tui::PermissionMode::Plan,
-        "acceptEdits" => wavecode_tui::PermissionMode::AcceptEdits,
-        "bypassPermissions" => wavecode_tui::PermissionMode::BypassPermissions,
-        _ => wavecode_tui::PermissionMode::Default,
+        "guarded" => wavecode_tui::PermissionMode::Guarded,
+        "auto" => wavecode_tui::PermissionMode::Auto,
+        _ => wavecode_tui::PermissionMode::Guarded,
     }
 }
 
@@ -660,7 +665,7 @@ fn skill_request(name: &str, args: &str) -> String {
 }
 
 /// Permission modes in `/permissions` cycle order (wire names).
-const PERMISSION_CYCLE: &[&str] = &["default", "plan", "acceptEdits", "bypassPermissions"];
+const PERMISSION_CYCLE: &[&str] = &["plan", "guarded", "auto"];
 
 /// Next mode in the cycle order, wrapping around.
 fn next_mode(current: &str) -> &'static str {
@@ -796,7 +801,7 @@ async fn run_repl(
 
     let mut editor = rustyline::DefaultEditor::new()?;
     let mut turn: u64 = 0;
-    let mut permission_mode = "default";
+    let mut permission_mode = "guarded";
     println!("wavecode repl (permission: {permission_mode}): {REPL_HELP}");
     loop {
         let line = match editor.readline("> ") {
@@ -849,20 +854,20 @@ async fn run_repl(
             // Reviewed plan mode is local display only (mirrors /mcp):
             // state comes from the assembly-side queries, so the REPL
             // renders current status without knowing the storage layout;
-            // the model mutates it through the plan_* tools.
+            // the model mutates it through the plan tool.
             Slash::Plan(_) => match status.plan_status() {
                 Some(text) => println!("{text}"),
                 None => println!(
-                    "(no reviewed plan yet; ask the agent to propose one with the plan_propose tool)"
+                    "(no reviewed plan yet; ask the agent to propose one with the plan tool)"
                 ),
             },
             // Durable goal mode is local display only (mirrors /plan):
             // state comes from the assembly-side queries; the model
-            // mutates it through the goal_* tools.
+            // mutates it through the goal tool.
             Slash::Goal(_) => match status.goal_status() {
                 Some(text) => println!("{text}"),
                 None => println!(
-                    "(no durable goal yet; ask the agent to set one with the goal_set tool)"
+                    "(no durable goal yet; ask the agent to set one with the goal tool)"
                 ),
             },
             // File-content snapshots (no git dependence): `/snapshots`
@@ -981,12 +986,53 @@ fn prompt_approval(
     }
 }
 
+/// Ask the user one parked question on the REPL editor.
+///
+/// A typed number within range selects that option; any other text goes
+/// through as a free-form answer; Ctrl-C / Ctrl-D and empty input dismiss
+/// the question (surfaced to the model as "not answered", never as a
+/// crash). Blocking here is safe: the actor parks on the gate.
+fn prompt_question(
+    editor: &mut rustyline::DefaultEditor,
+    _call_id: &str,
+    question: &str,
+    options: &[String],
+) -> anyhow::Result<String> {
+    use rustyline::error::ReadlineError;
+    println!("{question}");
+    for (index, option) in options.iter().enumerate() {
+        println!("  {}. {option}", index + 1);
+    }
+    if !options.is_empty() {
+        println!(
+            "answer with an option number (1-{}) or your own text",
+            options.len()
+        );
+    }
+    match editor.readline("> ") {
+        Ok(line) => {
+            let trimmed = line.trim();
+            if let Ok(number) = trimmed.parse::<usize>()
+                && (1..=options.len()).contains(&number)
+            {
+                return Ok(options[number - 1].clone());
+            }
+            Ok(trimmed.to_string())
+        }
+        Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => Ok(String::new()),
+        Err(e) => {
+            eprintln!("[question] input error, dismissing: {e}");
+            Ok(String::new())
+        }
+    }
+}
+
 /// Drain events until the turn ends, rendering as they arrive.
 ///
-/// Parked approvals are answered inline on the REPL editor: the gate holds
-/// the turn until this submits a decision, so REPL sessions must assemble
-/// with parking enabled (exec keeps the headless gate and never calls this
-/// with a live turn expecting answers).
+/// Parked approvals and questions are answered inline on the REPL editor:
+/// the gate holds the turn until this submits a decision or answer, so
+/// REPL sessions must assemble with parking enabled (exec keeps the
+/// headless gate and never calls this with a live turn expecting answers).
 async fn drain_turn(
     client: &mut ActorClient,
     editor: &mut rustyline::DefaultEditor,
@@ -1009,6 +1055,25 @@ async fn drain_turn(
                             op: Op::ExecApproval {
                                 call_id: call_id.clone(),
                                 decision,
+                            },
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                }
+                if let EventMsg::QuestionRequested {
+                    call_id,
+                    question,
+                    options,
+                } = &event.msg
+                {
+                    let answer =
+                        prompt_question(editor, call_id, question, options)?;
+                    client
+                        .submit(Submission {
+                            id: format!("question-{call_id}"),
+                            op: Op::QuestionAnswer {
+                                call_id: call_id.clone(),
+                                answer,
                             },
                         })
                         .await
@@ -1113,11 +1178,11 @@ mod tests {
 
     #[test]
     fn permission_modes_cycle_in_wire_order() {
-        assert_eq!(next_mode("default"), "plan");
-        assert_eq!(next_mode("plan"), "acceptEdits");
-        assert_eq!(next_mode("acceptEdits"), "bypassPermissions");
-        assert_eq!(next_mode("bypassPermissions"), "default");
-        assert_eq!(next_mode("garbage"), "plan");
+        assert_eq!(next_mode("plan"), "guarded");
+        assert_eq!(next_mode("guarded"), "auto");
+        assert_eq!(next_mode("auto"), "plan");
+        // Unknown names re-enter the cycle at the front (guarded).
+        assert_eq!(next_mode("garbage"), "guarded");
     }
 
     #[test]
@@ -1373,15 +1438,10 @@ mod tests {
     fn tui_permission_modes_follow_wire_names() {
         use wavecode_tui::PermissionMode;
         assert_eq!(tui_permission_mode("plan"), PermissionMode::Plan);
-        assert_eq!(
-            tui_permission_mode("acceptEdits"),
-            PermissionMode::AcceptEdits
-        );
-        assert_eq!(
-            tui_permission_mode("bypassPermissions"),
-            PermissionMode::BypassPermissions
-        );
-        assert_eq!(tui_permission_mode("default"), PermissionMode::Default);
-        assert_eq!(tui_permission_mode("typo"), PermissionMode::Default);
+        assert_eq!(tui_permission_mode("guarded"), PermissionMode::Guarded);
+        assert_eq!(tui_permission_mode("auto"), PermissionMode::Auto);
+        // The session only emits canonical names; anything else falls back
+        // to guarded so the TUI never displays a rejected mode.
+        assert_eq!(tui_permission_mode("typo"), PermissionMode::Guarded);
     }
 }

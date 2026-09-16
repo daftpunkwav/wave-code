@@ -17,8 +17,8 @@
 //! `workflow_run` takes a spec JSON object and returns one JSON object of
 //! step summaries keyed by step id. `ralph_run` respawns a fresh child per
 //! round with the same objective until the child reports `RALPH_DONE`.
-//! `schedule_add` / `schedule_list` / `schedule_remove` manage durable cron
-//! entries persisted under `<home>/.wavecode/schedule.json`.
+//! The `schedule` tool manages durable cron entries persisted under
+//! `<home>/.wavecode/schedule.json`.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -213,124 +213,16 @@ impl Tool for RalphRunTool {
     }
 }
 
-/// `schedule_add`: persist one cron entry, returning its `sched-N` id.
-pub struct ScheduleAddTool {
-    scheduler: Arc<Mutex<Scheduler>>,
-}
-
-impl ScheduleAddTool {
-    /// Wrap the shared durable scheduler.
-    pub fn new(scheduler: Arc<Mutex<Scheduler>>) -> Self {
-        Self { scheduler }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ScheduleAddTool {
-    fn name(&self) -> &str {
-        "schedule_add"
-    }
-
-    fn description(&self) -> &str {
-        "Persist a cron entry (five fields: minute hour day month weekday) \
-         with its task input; the entry survives restarts. Returns the \
-         sched-N id. Invalid cron expressions are rejected."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "cron": {
-                    "type": "string",
-                    "description": "Five-field cron expression, e.g. '0 9 * * *'",
-                },
-                "input": {
-                    "type": "string",
-                    "description": "Task input the host fires on schedule",
-                },
-            },
-            "required": ["cron", "input"],
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let cron = match required_str(&input, "cron") {
-            Ok(cron) => cron.to_string(),
-            Err(output) => return Ok(output),
-        };
-        let task_input = match required_str(&input, "input") {
-            Ok(task_input) => task_input.to_string(),
-            Err(output) => return Ok(output),
-        };
-        match lock_scheduler(&self.scheduler).add(&cron, &task_input) {
-            Ok(entry) => Ok(ToolOutput {
-                content: format!("scheduled {} ({})", entry.id, entry.cron),
-                is_error: false,
-            }),
-            Err(e) => Ok(ToolOutput {
-                content: e.to_string(),
-                is_error: true,
-            }),
-        }
-    }
-}
-
-/// `schedule_list`: report persisted cron entries as JSON (read-only).
-pub struct ScheduleListTool {
-    scheduler: Arc<Mutex<Scheduler>>,
-}
-
-impl ScheduleListTool {
-    /// Wrap the shared durable scheduler.
-    pub fn new(scheduler: Arc<Mutex<Scheduler>>) -> Self {
-        Self { scheduler }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for ScheduleListTool {
-    fn name(&self) -> &str {
-        "schedule_list"
-    }
-
-    fn description(&self) -> &str {
-        "List persisted cron entries as JSON. Read-only; running jobs are \
-         never persisted, so only entries appear here."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, _input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let entries = lock_scheduler(&self.scheduler).entries().to_vec();
-        Ok(ToolOutput {
-            content: serde_json::to_string_pretty(&entries).unwrap_or_else(|e| e.to_string()),
-            is_error: false,
-        })
-    }
-}
-
-/// `schedule_remove`: delete one persisted cron entry by id.
+/// `schedule`: the durable cron schedule in one tool.
 ///
-/// Destructive (it deletes persisted state), so approval-gated by default.
-pub struct ScheduleRemoveTool {
+/// One persisted entry list behind three actions. The whole tool is
+/// marked destructive because `remove` deletes persisted state, so the
+/// approval policy gates every action by name.
+pub struct ScheduleTool {
     scheduler: Arc<Mutex<Scheduler>>,
 }
 
-impl ScheduleRemoveTool {
+impl ScheduleTool {
     /// Wrap the shared durable scheduler.
     pub fn new(scheduler: Arc<Mutex<Scheduler>>) -> Self {
         Self { scheduler }
@@ -338,13 +230,18 @@ impl ScheduleRemoveTool {
 }
 
 #[async_trait::async_trait]
-impl Tool for ScheduleRemoveTool {
+impl Tool for ScheduleTool {
     fn name(&self) -> &str {
-        "schedule_remove"
+        "schedule"
     }
 
     fn description(&self) -> &str {
-        "Delete one persisted cron entry by id (e.g. sched-1). Unknown ids \
+        "Durable cron schedule. Actions: 'add' persists one cron entry \
+         (five fields: minute hour day month weekday) with its task \
+         input — the entry survives restarts and returns a sched-N id; \
+         invalid cron expressions are rejected. 'list' reports persisted \
+         entries as JSON (running jobs are never persisted). 'remove' \
+         deletes one persisted entry by id (e.g. sched-1); unknown ids \
          are explicit errors."
     }
 
@@ -352,12 +249,25 @@ impl Tool for ScheduleRemoveTool {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["add", "list", "remove"],
+                    "description": "Which schedule operation to run"
+                },
+                "cron": {
+                    "type": "string",
+                    "description": "add (required): five-field cron expression, e.g. '0 9 * * *'",
+                },
+                "input": {
+                    "type": "string",
+                    "description": "add (required): task input the host fires on schedule",
+                },
                 "id": {
                     "type": "string",
-                    "description": "Schedule entry id, e.g. sched-1",
+                    "description": "remove (required): schedule entry id, e.g. sched-1",
                 },
             },
-            "required": ["id"],
+            "required": ["action"],
         })
     }
 
@@ -366,25 +276,66 @@ impl Tool for ScheduleRemoveTool {
     }
 
     fn is_destructive(&self) -> bool {
+        // `remove` deletes persisted state; the attribute is tool-level,
+        // so the policy gates the whole family by name.
         true
     }
 
     async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let id = match required_str(&input, "id") {
-            Ok(id) => id.trim().to_string(),
-            Err(output) => return Ok(output),
-        };
-        match lock_scheduler(&self.scheduler).remove(&id) {
-            Ok(true) => Ok(ToolOutput {
-                content: format!("removed schedule {id}"),
-                is_error: false,
-            }),
-            Ok(false) => Ok(ToolOutput {
-                content: format!("unknown schedule id: {id}"),
-                is_error: true,
-            }),
-            Err(e) => Ok(ToolOutput {
-                content: e.to_string(),
+        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        match action {
+            "add" => {
+                let cron = match required_str(&input, "cron") {
+                    Ok(cron) => cron.to_string(),
+                    Err(output) => return Ok(output),
+                };
+                let task_input = match required_str(&input, "input") {
+                    Ok(task_input) => task_input.to_string(),
+                    Err(output) => return Ok(output),
+                };
+                match lock_scheduler(&self.scheduler).add(&cron, &task_input) {
+                    Ok(entry) => Ok(ToolOutput {
+                        content: format!("scheduled {} ({})", entry.id, entry.cron),
+                        is_error: false,
+                    }),
+                    Err(e) => Ok(ToolOutput {
+                        content: e.to_string(),
+                        is_error: true,
+                    }),
+                }
+            }
+            "list" => {
+                let entries = lock_scheduler(&self.scheduler).entries().to_vec();
+                Ok(ToolOutput {
+                    content: serde_json::to_string_pretty(&entries)
+                        .unwrap_or_else(|e| e.to_string()),
+                    is_error: false,
+                })
+            }
+            "remove" => {
+                let id = match required_str(&input, "id") {
+                    Ok(id) => id.trim().to_string(),
+                    Err(output) => return Ok(output),
+                };
+                match lock_scheduler(&self.scheduler).remove(&id) {
+                    Ok(true) => Ok(ToolOutput {
+                        content: format!("removed schedule {id}"),
+                        is_error: false,
+                    }),
+                    Ok(false) => Ok(ToolOutput {
+                        content: format!("unknown schedule id: {id}"),
+                        is_error: true,
+                    }),
+                    Err(e) => Ok(ToolOutput {
+                        content: e.to_string(),
+                        is_error: true,
+                    }),
+                }
+            }
+            other => Ok(ToolOutput {
+                content: format!(
+                    "unknown action {other:?}: expected one of add, list, remove"
+                ),
                 is_error: true,
             }),
         }
@@ -485,13 +436,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schedule_tools_round_trip_in_tempdir() {
+    async fn schedule_actions_round_trip_in_tempdir() {
         let home = tempfile::tempdir().unwrap();
         let scheduler = scheduler_in(home.path());
-        let add = ScheduleAddTool::new(scheduler.clone());
-        let added = add
+        let schedule = ScheduleTool::new(scheduler.clone());
+        let added = schedule
             .execute(
-                serde_json::json!({"cron": "0 9 * * *", "input": "sync"}),
+                serde_json::json!({"action": "add", "cron": "0 9 * * *", "input": "sync"}),
                 &ctx(),
             )
             .await
@@ -499,30 +450,46 @@ mod tests {
         assert!(!added.is_error, "add failed: {}", added.content);
         assert!(added.content.contains("sched-1"));
 
-        let bad = add
-            .execute(serde_json::json!({"cron": "nope", "input": "x"}), &ctx())
+        let bad = schedule
+            .execute(
+                serde_json::json!({"action": "add", "cron": "nope", "input": "x"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(bad.is_error);
 
-        let list = ScheduleListTool::new(scheduler.clone());
-        assert!(list.is_read_only());
-        let listed = list.execute(serde_json::json!({}), &ctx()).await.unwrap();
+        // list is folded into the destructive-marked tool, so the
+        // read-only attribute no longer applies family-wide.
+        assert!(schedule.is_destructive());
+        let listed = schedule
+            .execute(serde_json::json!({"action": "list"}), &ctx())
+            .await
+            .unwrap();
         let entries: serde_json::Value = serde_json::from_str(&listed.content).expect("json");
         assert_eq!(entries.as_array().expect("array").len(), 1);
 
-        let remove = ScheduleRemoveTool::new(scheduler.clone());
-        assert!(remove.is_destructive());
-        let ghost = remove
-            .execute(serde_json::json!({"id": "sched-9"}), &ctx())
+        let ghost = schedule
+            .execute(
+                serde_json::json!({"action": "remove", "id": "sched-9"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(ghost.is_error);
-        let removed = remove
-            .execute(serde_json::json!({"id": "sched-1"}), &ctx())
+        let removed = schedule
+            .execute(
+                serde_json::json!({"action": "remove", "id": "sched-1"}),
+                &ctx(),
+            )
             .await
             .unwrap();
         assert!(!removed.is_error);
+        let unknown = schedule
+            .execute(serde_json::json!({"action": "explode"}), &ctx())
+            .await
+            .unwrap();
+        assert!(unknown.is_error);
 
         // Removal persisted: a fresh load in the same home stays empty.
         let (reloaded, _) = Scheduler::load_or_default(home.path());

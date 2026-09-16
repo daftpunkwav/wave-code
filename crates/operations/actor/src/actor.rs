@@ -27,7 +27,7 @@ use infrastructure_base::{
 };
 use runtime_child::ChildRuntime;
 use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
-use safety_gate::{ApprovalDecision, ApprovalGate};
+use safety_gate::{ApprovalDecision, ApprovalGate, QuestionGate};
 use state_store::{CompactTrigger, Conversation, Role};
 use tokio::sync::mpsc;
 use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
@@ -48,6 +48,7 @@ pub struct SessionActor<D> {
     conv: Conversation,
     children: Arc<ChildRuntime>,
     approvals: Arc<ApprovalGate>,
+    questions: Arc<QuestionGate>,
     interrupt: InterruptHandle,
     system: String,
     submit_rx: mpsc::Receiver<Submission>,
@@ -69,10 +70,20 @@ where
         conv: Conversation,
         children: Arc<ChildRuntime>,
         approvals: Arc<ApprovalGate>,
+        questions: Arc<QuestionGate>,
         interrupt: InterruptHandle,
         system: String,
     ) -> ActorClient {
-        Self::spawn_inner(driver, conv, children, approvals, interrupt, system, None)
+        Self::spawn_inner(
+            driver,
+            conv,
+            children,
+            approvals,
+            questions,
+            interrupt,
+            system,
+            None,
+        )
     }
 
     /// Spawn with durable turn checkpoints.
@@ -86,6 +97,7 @@ where
         conv: Conversation,
         children: Arc<ChildRuntime>,
         approvals: Arc<ApprovalGate>,
+        questions: Arc<QuestionGate>,
         interrupt: InterruptHandle,
         system: String,
         durability: DurabilityConfig,
@@ -95,6 +107,7 @@ where
             conv,
             children,
             approvals,
+            questions,
             interrupt,
             system,
             Some(TurnDurability::from(durability)),
@@ -106,6 +119,7 @@ where
         conv: Conversation,
         children: Arc<ChildRuntime>,
         approvals: Arc<ApprovalGate>,
+        questions: Arc<QuestionGate>,
         interrupt: InterruptHandle,
         system: String,
         durability: Option<TurnDurability>,
@@ -124,6 +138,7 @@ where
                 conv,
                 children,
                 approvals,
+                questions,
                 interrupt,
                 system,
                 submit_rx,
@@ -145,6 +160,7 @@ where
             mut conv,
             children,
             approvals,
+            questions,
             interrupt,
             system,
             mut submit_rx,
@@ -231,6 +247,7 @@ where
                         &event_tx,
                         &interrupt,
                         &approvals,
+                        &questions,
                     )
                     .await
                     {
@@ -243,6 +260,12 @@ where
                 Op::Interrupt => {}
                 Op::ExecApproval { call_id, decision } => {
                     if !approvals.decide(&call_id, map_decision(decision)) {
+                        // No parked waiter: the turn ended or never asked.
+                        warn_late_approval(&event_tx, &sub.id, &call_id);
+                    }
+                }
+                Op::QuestionAnswer { call_id, answer } => {
+                    if !questions.answer(&call_id, answer) {
                         // No parked waiter: the turn ended or never asked.
                         warn_late_approval(&event_tx, &sub.id, &call_id);
                     }
@@ -299,6 +322,7 @@ where
                         &event_tx,
                         &interrupt,
                         &approvals,
+                        &questions,
                     )
                     .await
                     {
@@ -401,6 +425,7 @@ async fn supervised<F>(
     event_tx: &mpsc::UnboundedSender<Event>,
     interrupt: &InterruptHandle,
     approvals: &Arc<ApprovalGate>,
+    questions: &Arc<QuestionGate>,
 ) -> bool
 where
     F: Future<Output = ()>,
@@ -412,7 +437,7 @@ where
             maybe = submit_rx.recv() => {
                 match maybe {
                     Some(extra) => {
-                        if route_extra(extra, pending, event_tx, interrupt, approvals) {
+                        if route_extra(extra, pending, event_tx, interrupt, approvals, questions) {
                             return true;
                         }
                     }
@@ -434,6 +459,7 @@ fn route_extra(
     event_tx: &mpsc::UnboundedSender<Event>,
     interrupt: &InterruptHandle,
     approvals: &Arc<ApprovalGate>,
+    questions: &Arc<QuestionGate>,
 ) -> bool {
     match sub.op {
         Op::UserInput { .. } | Op::Compact => queue_or_reject(pending, sub, event_tx),
@@ -447,6 +473,11 @@ fn route_extra(
         }
         Op::ExecApproval { call_id, decision } => {
             if !approvals.decide(&call_id, map_decision(decision)) {
+                warn_late_approval(event_tx, &sub.id, &call_id);
+            }
+        }
+        Op::QuestionAnswer { call_id, answer } => {
+            if !questions.answer(&call_id, answer) {
                 warn_late_approval(event_tx, &sub.id, &call_id);
             }
         }
@@ -619,6 +650,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
             InterruptHandle::new(),
             "sys".to_string(),
         );
@@ -776,6 +808,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             gate.clone(),
+            Arc::new(QuestionGate::new()),
             InterruptHandle::new(),
             "sys".to_string(),
         );
@@ -917,6 +950,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
             InterruptHandle::new(),
             "sys".to_string(),
         );
@@ -972,6 +1006,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
             InterruptHandle::new(),
             "sys".to_string(),
             DurabilityConfig {
@@ -1034,6 +1069,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
             InterruptHandle::new(),
             "sys".to_string(),
             DurabilityConfig {

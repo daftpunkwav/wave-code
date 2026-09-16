@@ -22,13 +22,14 @@ const MAX_ITEMS: usize = 512;
 mod types;
 
 /// Behavior submodules: protocol events / keyboard paste / slash
-/// commands / approval popup.
+/// commands / approval popup / interactive question popup.
 mod approval;
 mod event;
 mod input;
+mod question;
 mod slash;
 
-use self::types::{ApprovalPopup, Item, err};
+use self::types::{ApprovalPopup, Item, QuestionPopup, err};
 pub use self::types::{PermissionMode, TuiContext};
 pub(crate) use self::types::{accent, dim, warn};
 
@@ -54,6 +55,8 @@ pub struct App {
     pub follow_tail: bool,
     /// Approval popup (all keys route to it while open).
     pub approval: Option<ApprovalPopup>,
+    /// Interactive question popup (all keys route to it while open).
+    pub question: Option<QuestionPopup>,
     /// Slash popup manually dismissed via Esc (reset on input change).
     slash_dismissed: bool,
     slash_selected: usize,
@@ -90,6 +93,7 @@ impl App {
             scroll: 0,
             follow_tail: true,
             approval: None,
+            question: None,
             slash_dismissed: false,
             slash_selected: 0,
             tokens: None,
@@ -202,7 +206,7 @@ mod tests {
         TuiContext {
             model_name: "m".into(),
             cwd: PathBuf::from("/tmp/x"),
-            permission_mode: PermissionMode::Default,
+            permission_mode: PermissionMode::Guarded,
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
             memory_index: String::new(),
@@ -474,11 +478,12 @@ mod tests {
         );
     }
 
-    /// /permissions: four-mode cycle with Op and local state in sync.
+    /// /permissions: three-mode cycle with Op and local state in sync.
     #[test]
-    fn permissions_cycles_four_modes() {
+    fn permissions_cycles_three_modes() {
         let mut app = App::new(ctx());
-        let expect = ["plan", "acceptEdits", "bypassPermissions", "default"];
+        // ctx() starts at guarded, so the cycle begins at auto.
+        let expect = ["auto", "plan", "guarded"];
         for want in expect {
             type_str(&mut app, "/permissions");
             app.handle_key(key(KeyCode::Enter));
@@ -734,15 +739,15 @@ mod tests {
         assert!(text.contains("(interrupted)"), "interrupt marker: {text}");
     }
 
-    /// todo_write rows: status symbols with migration marks (legacy CLI
+    /// todowrite rows: status symbols with migration marks (legacy CLI
     /// semantics).
     #[test]
-    fn todo_write_renders_status_migration() {
+    fn todowrite_renders_status_migration() {
         let mut app = App::new(ctx());
         let todo = |content: &str, status: &str| {
             ev(EventMsg::ToolCallBegin {
                 call_id: "c".into(),
-                name: "todo_write".into(),
+                name: "todowrite".into(),
                 input: serde_json::json!({"todos": [{"content": content, "status": status}]}),
             })
         };

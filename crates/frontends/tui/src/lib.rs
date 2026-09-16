@@ -182,7 +182,7 @@ mod tests {
         TuiContext {
             model_name: "claude-sonnet-4-5".into(),
             cwd: std::path::PathBuf::from("D:/proj/wavecode"),
-            permission_mode: PermissionMode::Default,
+            permission_mode: PermissionMode::Guarded,
             skill_names: vec!["commit".into()],
             mcp_server_lines: vec![],
             memory_index: String::new(),
@@ -236,7 +236,7 @@ mod tests {
         assert!(text.contains("WaveCode TUI"), "welcome row: {text}");
         assert!(text.contains("∿ Input"), "input title: {text}");
         assert!(text.contains("claude-sonnet-4-5"), "model name: {text}");
-        assert!(text.contains("default"), "permission mode: {text}");
+        assert!(text.contains("guarded"), "permission mode: {text}");
         assert!(text.contains("tokens —"), "tokens slot: {text}");
         assert!(text.contains("D:/proj/wavecode"), "cwd: {text}");
         // Three-part layout: status bar on the last row.

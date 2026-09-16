@@ -7,7 +7,7 @@ pub struct EditFile;
 #[async_trait::async_trait]
 impl Tool for EditFile {
     fn name(&self) -> &str {
-        "edit_file"
+        "edit"
     }
 
     fn description(&self) -> &str {
@@ -60,7 +60,7 @@ impl Tool for EditFile {
             Ok(p) => p,
             Err(out) => return Ok(out),
         };
-        // Input guard: symmetric with read_file, files over 4 MB are not read wholesale
+        // Input guard: symmetric with read, files over 4 MB are not read wholesale
         // (edit needs full-text matching; large files should use a chunked rewrite strategy).
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
@@ -70,7 +70,7 @@ impl Tool for EditFile {
             Err(e) => return Err(e.into()),
         };
         if meta.is_dir() {
-            // Business-level branch mirroring read_file: a directory path returns a
+            // Business-level branch mirroring read: a directory path returns a
             // self-correctable error message instead of an implementation-level Err
             // (reading a directory yields a non-NotFound io error).
             return Ok(err_output(format!(

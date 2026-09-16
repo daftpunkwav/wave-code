@@ -237,6 +237,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
+            Arc::new(safety_gate::QuestionGate::new()),
             infrastructure_base::InterruptHandle::new(),
             "sys".to_string(),
         );
@@ -381,6 +382,7 @@ mod tests {
             Conversation::new(),
             Arc::new(ChildRuntime::new()),
             Arc::new(ApprovalGate::new()),
+            Arc::new(safety_gate::QuestionGate::new()),
             infrastructure_base::InterruptHandle::new(),
             "sys".to_string(),
         );

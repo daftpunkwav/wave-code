@@ -908,7 +908,7 @@ api_key = "k-inline"
             },
             StreamEvent::ToolUseBegin {
                 id: "c1".to_string(),
-                name: "write_file".to_string(),
+                name: "write".to_string(),
             },
             StreamEvent::ToolUseInputDelta {
                 partial_json: r#"{"path":"hello.txt","content":"wavecode-acp-ok"}"#.to_string(),
@@ -1190,7 +1190,7 @@ api_key = "k-inline"
             begin
                 .pointer("/params/update/title")
                 .and_then(|v| v.as_str()),
-            Some("write_file")
+            Some("write")
         );
         let end = notes
             .iter()

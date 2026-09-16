@@ -1,17 +1,19 @@
 /*!
- * @file ReviewedPlanTools
- * @description Model-invokable tools for the reviewed plan mode.
+ * @file PlanTools
+ * @description Single model-invokable tool over the reviewed plan service.
  *
  * Responsibilities:
- * - Share one plan state handle across propose/approve/feedback/status.
+ * - Route the plan machine's four actions: propose / approve / feedback /
+ *   status.
+ * - Share one plan state handle across all actions.
  * - Persist every mutation to the home-derived plan file (resume-safe).
  * - Report business failures as model-readable errors, never panics.
  *
  * This module must not depend on: drivers, actors, or sessions. Assembly
- * owns the store handle; the tools only mutate through it.
+ * owns the store handle; the tool only mutates through it.
  */
 
-//! Reviewed plan tools: thin [`Tool`] adapters over the `state-plan`
+//! Reviewed plan tool: a thin [`Tool`] adapter over the `state-plan`
 //! machine; the transition rules and file layout live in `state-plan`,
 //! this module only maps tool input/output and persistence.
 
@@ -143,16 +145,18 @@ async fn apply_transition(
     }
 }
 
-/// `plan_propose`: present a plan for review (Draft -> Proposed).
+/// `plan`: the reviewed plan workflow in one tool.
 ///
-/// Mutates plan state, not the repo: not read-only, but not destructive
-/// either, so it never parks on an approval gate (no approval paradox).
+/// The model proposes an approach, the user approves or sends it back
+/// with feedback, and execution may start only once the plan is
+/// approved. Mutates plan state, not the repo: not read-only, but not
+/// destructive either (they touch plan state, not the repo).
 #[derive(Debug, Clone)]
-pub struct PlanProposeTool {
+pub struct PlanTool {
     store: Arc<PlanStore>,
 }
 
-impl PlanProposeTool {
+impl PlanTool {
     /// Share the session plan handle.
     pub fn new(store: Arc<PlanStore>) -> Self {
         Self { store }
@@ -160,28 +164,37 @@ impl PlanProposeTool {
 }
 
 #[async_trait::async_trait]
-impl Tool for PlanProposeTool {
+impl Tool for PlanTool {
     fn name(&self) -> &str {
-        "plan_propose"
+        "plan"
     }
 
     fn description(&self) -> &str {
-        "Propose a reviewed plan for the user to approve: explore first, \
-         then present the plan text here. The plan waits in Proposed until \
-         the user approves (plan_approve) or sends it back with feedback \
-         (plan_feedback). Only one proposal is active at a time."
+        "Reviewed plan workflow. Actions: 'propose' presents the plan \
+         text for the user to approve (Draft -> Proposed; explore first, \
+         then present the plan here — only one proposal is active at a \
+         time), 'approve' marks the pending proposal approved after the \
+         user confirms (Proposed -> Approved; execution may start only \
+         once the plan is approved), 'feedback' sends the proposal back \
+         for revision, appending the notes to the plan text (Proposed -> \
+         Draft), 'status' reads the current state without mutating."
     }
 
     fn input_schema(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["propose", "approve", "feedback", "status"],
+                    "description": "Which plan operation to run"
+                },
                 "text": {
                     "type": "string",
-                    "description": "The plan text to present for review; blank text is rejected",
-                },
+                    "description": "propose (required): the plan text to present for review; feedback (required): revision notes; blank text is rejected"
+                }
             },
-            "required": ["text"],
+            "required": ["action"],
         })
     }
 
@@ -190,144 +203,43 @@ impl Tool for PlanProposeTool {
     }
 
     async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let text = text.to_string();
-        Ok(apply_transition(&self.store, "propose", move |plan| plan.propose(&text)).await)
+        let action = input.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        match action {
+            "propose" => {
+                let text = text_param(&input, "text");
+                Ok(apply_transition(&self.store, "propose", move |plan| {
+                    plan.propose(&text)
+                })
+                .await)
+            }
+            "approve" => {
+                Ok(apply_transition(&self.store, "approve", |plan| plan.approve()).await)
+            }
+            "feedback" => {
+                let text = text_param(&input, "text");
+                Ok(apply_transition(&self.store, "feedback", move |plan| {
+                    plan.feedback(&text)
+                })
+                .await)
+            }
+            "status" => Ok(ToolOutput {
+                content: render_status(&self.store.lock()),
+                is_error: false,
+            }),
+            other => Ok(err_output(format!(
+                "unknown action {other:?}: expected one of propose, approve, feedback, status"
+            ))),
+        }
     }
 }
 
-/// `plan_approve`: approve the pending proposal (Proposed -> Approved).
-#[derive(Debug, Clone)]
-pub struct PlanApproveTool {
-    store: Arc<PlanStore>,
-}
-
-impl PlanApproveTool {
-    /// Share the session plan handle.
-    pub fn new(store: Arc<PlanStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for PlanApproveTool {
-    fn name(&self) -> &str {
-        "plan_approve"
-    }
-
-    fn description(&self) -> &str {
-        "Approve the currently proposed plan (Proposed -> Approved). Use \
-         after the user confirms the proposal; execution may start only \
-         once the plan is approved."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let _ = input;
-        Ok(apply_transition(&self.store, "approve", |plan| plan.approve()).await)
-    }
-}
-
-/// `plan_feedback`: send the proposal back with notes (Proposed -> Draft).
-#[derive(Debug, Clone)]
-pub struct PlanFeedbackTool {
-    store: Arc<PlanStore>,
-}
-
-impl PlanFeedbackTool {
-    /// Share the session plan handle.
-    pub fn new(store: Arc<PlanStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for PlanFeedbackTool {
-    fn name(&self) -> &str {
-        "plan_feedback"
-    }
-
-    fn description(&self) -> &str {
-        "Send the proposed plan back for revision with feedback notes \
-         (Proposed -> Draft). The feedback appends to the plan text so \
-         the next proposal keeps the review context."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Feedback notes for the revision; blank text is rejected",
-                },
-            },
-            "required": ["text"],
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        false
-    }
-
-    async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        let text = input.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let text = text.to_string();
-        Ok(apply_transition(&self.store, "feedback", move |plan| plan.feedback(&text)).await)
-    }
-}
-
-/// `plan_status`: show the current plan without mutating it.
-#[derive(Debug, Clone)]
-pub struct PlanStatusTool {
-    store: Arc<PlanStore>,
-}
-
-impl PlanStatusTool {
-    /// Share the session plan handle.
-    pub fn new(store: Arc<PlanStore>) -> Self {
-        Self { store }
-    }
-}
-
-#[async_trait::async_trait]
-impl Tool for PlanStatusTool {
-    fn name(&self) -> &str {
-        "plan_status"
-    }
-
-    fn description(&self) -> &str {
-        "Show the current reviewed-plan status and text. Read-only: use \
-         it to check where the plan stands before proposing or executing."
-    }
-
-    fn input_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {},
-        })
-    }
-
-    fn is_read_only(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, _input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
-        Ok(ToolOutput {
-            content: render_status(&self.store.lock()),
-            is_error: false,
-        })
-    }
+/// Read a required string parameter as an owned, untrimmed-raw string.
+fn text_param(input: &serde_json::Value, key: &str) -> String {
+    input
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -352,30 +264,36 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = store_in(home.path());
         let ctx = ctx(&home);
-        let propose = PlanProposeTool::new(store.clone());
-        assert!(!propose.is_read_only());
-        assert!(!propose.is_destructive());
-        let out = propose
-            .execute(serde_json::json!({"text": "migrate the store"}), &ctx)
+        let plan = PlanTool::new(store.clone());
+        assert!(!plan.is_read_only());
+        assert!(!plan.is_destructive());
+        let out = plan
+            .execute(
+                serde_json::json!({"action": "propose", "text": "migrate the store"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("proposed"));
-        let approve = PlanApproveTool::new(store.clone());
-        let out = approve.execute(serde_json::json!({}), &ctx).await.unwrap();
+        let out = plan
+            .execute(serde_json::json!({"action": "approve"}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("approved"));
-        // Read-only status never mutates and reports the same state.
-        let status = PlanStatusTool::new(store.clone());
-        assert!(status.is_read_only());
-        let out = status.execute(serde_json::json!({}), &ctx).await.unwrap();
+        // Status never mutates and reports the same state.
+        let out = plan
+            .execute(serde_json::json!({"action": "status"}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error);
         assert!(out.content.contains("approved"));
         assert!(out.content.contains("migrate the store"));
         // Resume in the same home reopens the persisted plan.
-        let resumed = store_in(home.path());
-        let out = PlanStatusTool::new(resumed)
-            .execute(serde_json::json!({}), &ctx)
+        let resumed = PlanTool::new(store_in(home.path()));
+        let out = resumed
+            .execute(serde_json::json!({"action": "status"}), &ctx)
             .await
             .unwrap();
         assert!(out.content.contains("approved"));
@@ -386,32 +304,45 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let store = store_in(home.path());
         let ctx = ctx(&home);
-        let approve = PlanApproveTool::new(store.clone());
+        let plan = PlanTool::new(store.clone());
         // Approving a Draft names the expected state.
-        let out = approve.execute(serde_json::json!({}), &ctx).await.unwrap();
-        assert!(out.is_error);
-        assert!(out.content.contains("proposed"), "{}", out.content);
-        PlanProposeTool::new(store.clone())
-            .execute(serde_json::json!({"text": "v1"}), &ctx)
+        let out = plan
+            .execute(serde_json::json!({"action": "approve"}), &ctx)
             .await
             .unwrap();
-        let feedback = PlanFeedbackTool::new(store.clone());
-        assert!(!feedback.is_read_only());
-        let out = feedback
-            .execute(serde_json::json!({"text": "add rollback"}), &ctx)
+        assert!(out.is_error);
+        assert!(out.content.contains("proposed"), "{}", out.content);
+        plan.execute(
+            serde_json::json!({"action": "propose", "text": "v1"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let out = plan
+            .execute(
+                serde_json::json!({"action": "feedback", "text": "add rollback"}),
+                &ctx,
+            )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("draft"));
         assert!(out.content.contains("add rollback"));
         // Blank proposals are rejected without mutating.
-        let out = PlanProposeTool::new(store.clone())
-            .execute(serde_json::json!({"text": "  "}), &ctx)
+        let out = plan
+            .execute(serde_json::json!({"action": "propose", "text": "  "}), &ctx)
             .await
             .unwrap();
         assert!(out.is_error);
-        let out = PlanStatusTool::new(store)
-            .execute(serde_json::json!({}), &ctx)
+        // Unknown actions name the valid set.
+        let out = plan
+            .execute(serde_json::json!({"action": "begin"}), &ctx)
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("propose"), "{}", out.content);
+        let out = plan
+            .execute(serde_json::json!({"action": "status"}), &ctx)
             .await
             .unwrap();
         assert!(out.content.contains("draft"));

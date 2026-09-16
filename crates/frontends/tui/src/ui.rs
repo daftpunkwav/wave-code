@@ -33,6 +33,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.approval.is_some() {
         draw_approval(f, app, area);
     }
+    if app.question.is_some() {
+        draw_question(f, app, area);
+    }
 }
 
 /// Message stream: items joined in order (blank line between items),
@@ -231,5 +234,51 @@ fn draw_approval(f: &mut Frame, app: &App, area: Rect) {
             warn(),
         )));
     }
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Inline question popup: centered, accent border; numbered options
+/// select with one keystroke, typing fills a free-text answer.
+fn draw_question(f: &mut Frame, app: &App, area: Rect) {
+    let Some(popup) = &app.question else {
+        return;
+    };
+    let width = (area.width * 3 / 4).clamp(30, 72).min(area.width);
+    let question_rows =
+        (popup.question.width() / width.saturating_sub(4).max(1) as usize + 2) as u16;
+    let height =
+        (question_rows + popup.options.len() as u16 + 7).clamp(8, area.height.saturating_sub(2).max(8));
+    let popup_area = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+    f.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(accent())
+        .title(Span::styled(" ❓ Question ", accent()));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let mut lines = vec![Line::from(Span::raw(popup.question.clone())), Line::default()];
+    for (index, option) in popup.options.iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", index + 1), accent()),
+            Span::raw(option.clone()),
+        ]));
+    }
+    if !popup.options.is_empty() {
+        lines.push(Line::default());
+    }
+    lines.push(Line::from(vec![
+        Span::raw("Your answer: "),
+        Span::styled(popup.input.clone(), accent()),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "1-4 pick option │ type a custom answer │ Enter submit │ Esc dismiss",
+        dim(),
+    )));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

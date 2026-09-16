@@ -7,12 +7,12 @@ pub struct WriteFile;
 #[async_trait::async_trait]
 impl Tool for WriteFile {
     fn name(&self) -> &str {
-        "write_file"
+        "write"
     }
 
     fn description(&self) -> &str {
         "Write a file inside the working directory, creating parent directories as needed. \
-         Overwrites the whole file; use edit_file for partial changes."
+         Overwrites the whole file; use edit for partial changes."
     }
 
     fn input_schema(&self) -> Value {
@@ -58,7 +58,7 @@ impl Tool for WriteFile {
         };
         if tokio::fs::metadata(&path).await.is_ok_and(|m| m.is_dir()) {
             // A directory path returns a self-correctable business message (same branching
-            // shape as read_file / edit_file); tokio::fs::write on a directory returns an
+            // shape as read / edit); tokio::fs::write on a directory returns an
             // implementation-level Err.
             return Ok(err_output(format!(
                 "path is a directory, cannot write: {}",

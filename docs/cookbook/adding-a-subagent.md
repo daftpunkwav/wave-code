@@ -11,7 +11,7 @@ Create `.wavecode/agents/<file>.md` in the project (or `~`-level packs via `.cla
 name: explorer
 description: Wide read-only codebase investigation; returns a summary of findings.
 tools:
-  - read_file
+  - read
   - grep
   - glob
 kind: explore
@@ -24,7 +24,7 @@ Frontmatter rules (parsed by `parse_agent_def`):
 
 - `name` — required in practice; falls back to the file stem when empty.
 - `description` — surfaces to the model as the delegation purpose; also becomes the child's identity preamble ("You are the `explorer` agent. Purpose: …").
-- `tools` — restricted tool surface; comma-separated (`tools: read_file, grep`) or a `- item` list. Empty keeps the full session surface.
+- `tools` — restricted tool surface; comma-separated (`tools: read, grep`) or a `- item` list. Empty keeps the full session surface.
 - `kind` — `explore`, `readonly`, or `read-only` select the read-only profile (`TaskKind::ReadOnly`). Anything else is `Standard`.
 - A missing `---` frontmatter block makes the whole file unparseable; it is skipped.
 

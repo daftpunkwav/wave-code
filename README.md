@@ -49,16 +49,20 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
 
 ## Permissions
 
-Four modes: `default` (approve writes/executions), `plan` (read-only),
-`acceptEdits` (file edits auto-approved), `bypassPermissions` (all approved,
-deny rules still apply). Sources in precedence order:
+Three modes: `plan` (read-only exploration; the model is nudged to propose a
+plan and may also simply answer), `guarded` (dangerous operations only —
+command execution and destructive tools ask; file edits and other writes flow
+through), `auto` (everything approved, deny rules still apply). Sources in
+precedence order:
 
 1. `--permission-mode <mode>` CLI flag (global, wins over config),
 2. `permission_mode` in config,
-3. built-in `default`.
+3. built-in `guarded`.
 
-Unknown values warn and fall back to `default`. `/permissions` in REPL/TUI
-cycles the mode for the running session.
+Legacy names still parse (`default`/`acceptEdits` → `guarded`,
+`bypassPermissions` → `auto`) with a startup warning. Unknown values warn and
+fall back to `guarded`. `/permissions` in REPL/TUI cycles the mode for the
+running session.
 
 ## Skills, memory, MCP
 

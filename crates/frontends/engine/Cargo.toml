@@ -1,0 +1,15 @@
+[package]
+name = "tui-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+# Boundary: pure rendering engine with zero internal workspace
+# dependencies. Components speak ANSI strings and engine-owned Color
+# values; semantic themes live in the application layer above. tests::
+# dependency_matrix_locked pins the empty internal-dep set.
+[dependencies]
+crossterm.workspace = true
+unicode-width.workspace = true
+unicode-segmentation.workspace = true
+pulldown-cmark.workspace = true

@@ -30,10 +30,11 @@ regex = "1"
 glob = "0.3"
 pulldown-cmark = "0.13"
 unicode-width = "0.2"
+unicode-segmentation = "1"
 libc = "0.2"
 landlock = "0.4"
 portable-pty = "0.9"
 windows-sys = "0.59"
 # P8 TUI: ratatui 0.29 pairs with crossterm 0.28 (ratatui's default backend)
 ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }

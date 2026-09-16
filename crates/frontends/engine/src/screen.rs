@@ -1,0 +1,444 @@
+//! The inline differential screen renderer (main-screen mode).
+//!
+//! Renders a logical line array into the live terminal without an
+//! alternate screen, preserving native scrollback. Each draw diffs the
+//! new line array against the previous one and rewrites only the changed
+//! range: the cursor moves to the first changed row, each row is cleared
+//! and rewritten, and stale rows below are erased. Lines that scrolled
+//! into scrollback are committed and never rewritten. Frames are wrapped
+//! in synchronized-output markers when enabled so partial frames never
+//! flicker, and every line is reset-terminated so styles never leak.
+//!
+//! Contract: callers supply lines already wrapped to `width` (all
+//! engine components do); the renderer defensively truncates.
+
+use crate::editor::CURSOR_MARKER;
+use crate::width;
+
+/// Rendering policy toggles (terminal capability probe results).
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenOptions {
+    /// Wrap frames in CSI 2026 synchronized-output markers.
+    pub synchronized: bool,
+    /// Erase the scrollback on full redraws (kimi-style `\x1b[3J`).
+    pub clear_scrollback: bool,
+}
+
+impl Default for ScreenOptions {
+    fn default() -> Self {
+        Self {
+            synchronized: true,
+            clear_scrollback: true,
+        }
+    }
+}
+
+/// The inline diff renderer. Feed it the full logical line array every
+/// frame; it writes the minimal byte diff to `out`.
+pub struct Screen {
+    prev: Vec<String>,
+    /// First logical line eligible for rewriting (everything above has
+    /// scrolled into native scrollback and is immutable).
+    base: usize,
+    /// Viewport row (0-based) where the cursor ended last draw.
+    cursor_row: usize,
+    size: (usize, usize),
+    options: ScreenOptions,
+    started: bool,
+}
+
+/// True when the renderer has never drawn (first frame writes everything).
+impl Screen {
+    /// A renderer with default options.
+    pub fn new() -> Self {
+        Self::with_options(ScreenOptions::default())
+    }
+
+    /// A renderer with explicit capability options.
+    pub fn with_options(options: ScreenOptions) -> Self {
+        Self {
+            prev: Vec::new(),
+            base: 0,
+            cursor_row: 0,
+            size: (0, 0),
+            options,
+            started: false,
+        }
+    }
+
+    /// Draw one frame: `lines` is the full logical content, `size` the
+    /// current terminal (width, height).
+    pub fn draw(
+        &mut self,
+        out: &mut impl std::io::Write,
+        lines: &[String],
+        columns: usize,
+        height: usize,
+    ) {
+        let size_changed = self.size != (columns, height);
+        if !self.started || size_changed || lines.len() < self.base || height == 0 || columns == 0 {
+            self.full_redraw(out, lines, columns, height);
+            return;
+        }
+        self.diff_draw(out, lines, columns, height);
+    }
+
+    /// Forget all state; the next draw repaints from scratch.
+    pub fn invalidate(&mut self) {
+        self.started = false;
+        self.prev.clear();
+        self.base = 0;
+        self.cursor_row = 0;
+    }
+
+    fn synchronized_start(&self, out: &mut impl std::io::Write) {
+        if self.options.synchronized {
+            let _ = out.write_all(b"\x1b[?2026h");
+        }
+    }
+
+    fn synchronized_end(&self, out: &mut impl std::io::Write) {
+        if self.options.synchronized {
+            let _ = out.write_all(b"\x1b[?2026l");
+        }
+    }
+
+    /// Write one truncated, reset-terminated line (cursor markers
+    /// stripped: they drive `place_hardware_cursor`, not the terminal).
+    fn write_line(&self, out: &mut impl std::io::Write, line: &str, columns: usize) {
+        let cleaned = if line.contains(CURSOR_MARKER) {
+            line.replace(CURSOR_MARKER, "")
+        } else {
+            line.to_string()
+        };
+        let truncated = width::truncate_to_width(&cleaned, columns);
+        let _ = out.write_all(truncated.as_bytes());
+        // Styles and hyperlinks never leak across lines.
+        let _ = out.write_all(b"\x1b[0m\x1b]8;;\x07");
+    }
+
+    fn full_redraw(
+        &mut self,
+        out: &mut impl std::io::Write,
+        lines: &[String],
+        columns: usize,
+        height: usize,
+    ) {
+        self.synchronized_start(out);
+        if self.started {
+            let _ = out.write_all(b"\x1b[2J\x1b[H");
+            if self.options.clear_scrollback {
+                let _ = out.write_all(b"\x1b[3J");
+            }
+        }
+        // Write all lines; the terminal scrolls the overflow into
+        // scrollback.
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                let _ = out.write_all(b"\r\n");
+            }
+            self.write_line(out, line, columns);
+        }
+        self.synchronized_end(out);
+        self.prev = lines.to_vec();
+        self.size = (columns, height);
+        self.base = lines.len().saturating_sub(height);
+        self.cursor_row = lines.len().min(height).saturating_sub(1);
+        self.started = true;
+        self.place_hardware_cursor(out, lines, columns, height);
+    }
+
+    fn diff_draw(
+        &mut self,
+        out: &mut impl std::io::Write,
+        lines: &[String],
+        columns: usize,
+        height: usize,
+    ) {
+        // Compare the rewrite-eligible region (viewport rows).
+        let base_at_entry = self.base;
+        let prev_region = &self.prev[base_at_entry..];
+        let new_region = &lines[base_at_entry..];
+        let mut first_changed = None;
+        let mut last_changed = 0usize;
+        let max_region = prev_region.len().max(new_region.len());
+        for index in 0..max_region {
+            if prev_region.get(index) != new_region.get(index) {
+                if first_changed.is_none() {
+                    first_changed = Some(index);
+                }
+                last_changed = index;
+            }
+        }
+        let Some(first) = first_changed else {
+            return; // identical region: nothing to paint
+        };
+
+        self.synchronized_start(out);
+        // Initial move to the first changed viewport row. CUD clamps at
+        // the bottom margin without scrolling; every row past the bottom
+        // becomes an explicit line-feed scroll instead.
+        let mut row = self.cursor_row;
+        let mut scrolled = 0usize;
+        if first > row {
+            let down = first - row;
+            let clamped = down.min(height.saturating_sub(1).saturating_sub(row));
+            if clamped > 0 {
+                let _ = write!(out, "\r\x1b[{clamped}B");
+                row += clamped;
+            }
+            for _ in 0..(down - clamped) {
+                let _ = out.write_all(b"\r\n");
+                scrolled += 1;
+            }
+        } else if first < row {
+            let up = row - first;
+            let _ = write!(out, "\r\x1b[{up}A");
+            row = first;
+        } else {
+            let _ = out.write_all(b"\r");
+        }
+
+        // Rewrite the changed range. Invariant: viewport `row` displays
+        // logical line `base_at_entry + vis - scrolled`. Removed indexes
+        // (past the new content) are cleared instead of written.
+        for vis in first..=last_changed {
+            if vis > first {
+                if row + 1 < height {
+                    let _ = out.write_all(b"\r\x1b[1B");
+                    row += 1;
+                } else {
+                    let _ = out.write_all(b"\r\n");
+                    scrolled += 1;
+                }
+            }
+            let _ = out.write_all(b"\x1b[K");
+            if vis < new_region.len() {
+                self.write_line(out, &lines[base_at_entry + vis], columns);
+            }
+        }
+
+        // Erase stale rows when the visible region shrank.
+        if new_region.len() < prev_region.len() && row + 1 < height {
+            let _ = write!(out, "\r\x1b[1B\x1b[J");
+        }
+
+        self.synchronized_end(out);
+        self.prev = lines.to_vec();
+        self.size = (columns, height);
+        self.base = base_at_entry + scrolled;
+        self.cursor_row = row;
+        self.place_hardware_cursor(out, lines, columns, height);
+    }
+
+    /// Position the hardware cursor at an embedded [`CURSOR_MARKER`] so
+    /// IME popups land in the right cell.
+    fn place_hardware_cursor(
+        &mut self,
+        out: &mut impl std::io::Write,
+        lines: &[String],
+        _columns: usize,
+        height: usize,
+    ) {
+        for (index, line) in lines.iter().enumerate().skip(self.base) {
+            if let Some(byte) = line.find(CURSOR_MARKER) {
+                let cleaned = line.replace(CURSOR_MARKER, "");
+                let col = width::width(&cleaned[..byte]);
+                let row = (index - self.base).min(height.saturating_sub(1));
+                let _ = write!(out, "\x1b[{};{}H", row + 1, col + 1);
+                self.cursor_row = row;
+                return;
+            }
+        }
+    }
+}
+
+impl Default for Screen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn draw(screen: &mut Screen, out: &mut Vec<u8>, frames: &[&str], width: usize, height: usize) {
+        let frame = lines(frames);
+        screen.draw(out, &frame, width, height);
+    }
+
+    #[test]
+    fn first_draw_writes_all_lines_with_resets() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("alpha\x1b[0m"), "reset appended: {text:?}");
+        assert!(text.contains("beta"));
+        assert!(
+            text.starts_with("alpha"),
+            "no clear on first draw: {text:?}"
+        );
+    }
+
+    #[test]
+    fn appended_lines_write_only_the_suffix() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha", "beta", "gamma"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("alpha"),
+            "unchanged lines untouched: {text:?}"
+        );
+        assert!(text.contains("gamma"));
+        assert!(text.contains("\x1b[1B"), "cursor moved down: {text:?}");
+    }
+
+    #[test]
+    fn changed_visible_line_rewrites_range() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha", "beta", "gamma"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha", "BETA", "gamma"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("BETA"), "{text:?}");
+        assert!(!text.contains("alpha\x1b[0m"), "line 0 untouched: {text:?}");
+        assert!(!text.contains("gamma\x1b[0m"), "line 2 untouched: {text:?}");
+        assert!(text.starts_with("\r\x1b[1A"), "cursor moved up: {text:?}");
+    }
+
+    #[test]
+    fn identical_frame_writes_nothing() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha"], 40, 10);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resize_triggers_full_redraw() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha"], 60, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[2J\x1b[H"), "clear + home: {text:?}");
+        assert!(text.contains("alpha"));
+    }
+
+    #[test]
+    fn synchronized_markers_wrap_frames() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: true,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[?2026h"));
+        assert!(text.ends_with("\x1b[?2026l"));
+    }
+
+    #[test]
+    fn shrinking_content_clears_stale_rows() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("\x1b[J"), "erase-to-end present: {text:?}");
+    }
+
+    #[test]
+    fn cursor_marker_positions_hardware_cursor() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(
+            &mut screen,
+            &mut out,
+            &[format!("he{CURSOR_MARKER}llo").as_str()],
+            40,
+            10,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("\x1b[1;3H"),
+            "cursor to row 1 col 3: {text:?}"
+        );
+        assert!(!text.contains("he\x1b_wllo"), "marker stripped: {text:?}");
+    }
+
+    #[test]
+    fn scroll_into_scrollback_advances_base() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(
+            &mut screen,
+            &mut out,
+            &["a", "b", "c", "d", "e", "f"],
+            40,
+            3,
+        );
+        assert_eq!(screen.base, 3, "three lines scrolled off");
+        out.clear();
+        draw(
+            &mut screen,
+            &mut out,
+            &["a", "b", "c", "d", "e", "f", "g"],
+            40,
+            3,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("g"), "{text:?}");
+        assert!(!text.contains("\x1b[2J"), "no full redraw: {text:?}");
+    }
+
+    #[test]
+    fn overlong_lines_truncate_to_width() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["0123456789"], 5, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("01234"), "truncated: {text:?}");
+    }
+}

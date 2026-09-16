@@ -28,7 +28,7 @@ use std::time::Duration;
 use operations_actor::{ActorClient, SessionActor};
 use runtime_child::ChildRuntime;
 use runtime_prompt::{DEFAULT_CATALOG_BUDGET, PromptSlots, build_system};
-use runtime_runner::{RunConfig, RunLoop};
+use runtime_runner::{RunConfig, RunInterrupts, RunLoop, ToolExecutor};
 use safety_gate::{ApprovalGate, QuestionGate};
 use state_store::Conversation;
 
@@ -49,8 +49,9 @@ use crate::tool_adapter::ToolAdapter;
 
 /// Approval wait timeout applied to parked decisions.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-/// Tool dispatch rounds per turn.
-pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 32;
+/// Tool dispatch rounds per turn; single-sourced from the runner so the
+/// loop's ceiling and the assembly default cannot drift apart.
+pub use runtime_runner::DEFAULT_MAX_TOOL_ROUNDS;
 /// Fallback identity block when the caller supplies no base prompt.
 pub const DEFAULT_IDENTITY: &str = "You are WaveCode, a precise coding agent.";
 
@@ -105,6 +106,11 @@ impl SessionHandle {
     /// appends degradation warnings; idempotent once connected. Run it
     /// after assembly and before the first turn so forked tools exist
     /// before the model samples.
+    ///
+    /// Snapshot semantics: the system prompt and the child tool-surface
+    /// policy were built during assembly, before this runs, so MCP tools
+    /// appear in the live sampling catalog but not in the prompt's tool
+    /// list, and children never inherit them.
     pub async fn connect_mcp_servers(&mut self) {
         if self.mcp_pending.is_empty() {
             return;
@@ -237,6 +243,19 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
             Err(error) => warnings.push(format!("skipping fallback provider {name:?}: {error}")),
         }
     }
+    // In-layer transient-failure retries (backoff + deadline + auth
+    // fail-fast); cross-provider failover stays in FallbackModel, so the
+    // two never amplify each other. Without this a single 5xx/429 at
+    // request establishment fails the whole turn.
+    let chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = chain
+        .into_iter()
+        .map(|model| {
+            Arc::new(wavecode_llm::retry::RetryingModel::new(
+                model,
+                wavecode_llm::retry::RetryPolicy::default(),
+            )) as Arc<dyn wavecode_llm::ChatModel>
+        })
+        .collect();
     let model: Arc<dyn wavecode_llm::ChatModel> = if chain.len() > 1 {
         Arc::new(crate::model_adapter::FallbackModel::new(chain))
     } else {
@@ -359,7 +378,9 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         &mut warnings,
     );
     // Effective wire name for status displays (post-fallback, so the UI
-    // never shows a mode the policy rejected).
+    // never shows a mode the policy rejected). The catch-all arm exists
+    // because PermissionMode is #[non_exhaustive] across crates; today it
+    // is unreachable.
     let permission_mode_raw = match permission_mode {
         wavecode_protocol::PermissionMode::Plan => "plan".to_string(),
         wavecode_protocol::PermissionMode::Guarded => "guarded".to_string(),
@@ -394,6 +415,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     ));
     let approvals = Arc::new(ApprovalGate::new());
     let questions = Arc::new(QuestionGate::new());
+    // The session interrupt feeds the approval/question gates too: a
+    // mid-wait Ctrl+C ends a parked decision as Interrupted instead of
+    // holding the turn for the full approval timeout.
+    let interrupt = infrastructure_base::InterruptHandle::new();
     let gate_source = if headless {
         crate::gate_adapter::Approvals::Headless(crate::gate_adapter::HeadlessDeny)
     } else {
@@ -401,6 +426,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             approvals.clone(),
             questions.clone(),
             APPROVAL_TIMEOUT,
+            interrupt.clone(),
         ))
     };
     let plans = TodoPlanTracker::new(todos);
@@ -409,7 +435,6 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // 6. Run loop behind the shared driver pointer.
     let native = Arc::new(Mutex::new(NativeExecutor::new()));
     let executor = CompositeExecutor::new(tools, native.clone(), registry.clone());
-    let interrupt = infrastructure_base::InterruptHandle::new();
     let worker = Arc::new(RunLoop::new(
         executor,
         policy,
@@ -433,6 +458,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // Per-run tool allowlist for fork-scoped skill surfaces; the handle
     // is Arc-backed, so grabbing it before `worker` moves is enough.
     let run_allowlist = worker.run_allowlist();
+    // Run-scoped interrupt registry: each child turn gets its own handle,
+    // so a `task_stop` bridges into that child only and never flips the
+    // session-wide flag the parent turn and siblings share.
+    let run_interrupts: RunInterrupts = worker.run_interrupts();
     let driver = {
         // Session-end memory extraction rides the driver seam: the actor
         // calls `end_session` with the final transcript on teardown. No
@@ -449,12 +478,15 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     };
 
     // 7. Child task tools register against the built driver (phase two).
+    // The system prompt and tool-surface policy attach after assembly
+    // completes (they need the full catalog); spawns only start once the
+    // actor runs, so every child observes them.
     let children = Arc::new(ChildRuntime::new());
     let tasks = Arc::new(TurnChildService::new(
         driver.clone() as Arc<dyn runtime_runner::TurnDriver>,
         children.clone(),
-        String::new(),
         run_allowlist,
+        run_interrupts,
     ));
     // Runtime plugins (service injection + middleware lifecycle): manifest
     // discovery warns-and-skips invalid plugins and never fails assembly.
@@ -624,6 +656,48 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         summary: String::new(),
     });
 
+    // Child turns ride the fully assembled registry: attach the system
+    // prompt and the tool-surface policy now that both exist. Children
+    // spawn through the same service, so without the forbidden
+    // subtraction a child could re-fork `task`/`skill`/workflow spawns
+    // and the runtime depth cap would never see the nested generations;
+    // read-only profiles additionally narrow to the read-only subset.
+    // The forbidden list is a hand-maintained copy of the spawn-tool
+    // names (they live in their tool types), so drift fails loudly here
+    // instead of silently re-opening the recursion hole. The check runs
+    // against registry plus native names — snapshotted here, after every
+    // late registration, so the native-only `child_spawn` is visible —
+    // and every listed name must exist somewhere in the assembled
+    // catalog.
+    let native_names: Vec<String> = native
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .available_tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    for name in CHILD_FORBIDDEN_TOOLS {
+        let in_registry = tool_names.iter().any(|offered| offered == name);
+        let in_native = native_names.iter().any(|offered| offered == name);
+        if !in_registry && !in_native {
+            warnings.push(format!(
+                "child-forbidden tool '{name}' is not in the tool catalog; \
+                 update CHILD_FORBIDDEN_TOOLS"
+            ));
+        }
+    }
+    tasks.set_system(system.clone());
+    tasks.set_surface(crate::child_service::ChildSurface {
+        all: tool_names.iter().cloned().collect(),
+        read_only: registry
+            .read_only_subset()
+            .specs()
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect(),
+        forbidden: CHILD_FORBIDDEN_TOOLS.iter().map(|s| s.to_string()).collect(),
+    });
+
     // 9. Actor task and client handle, sharing the child runtime with
     // the task tools so completions re-enter turns. Imported history
     // seeds the conversation before the first turn snapshot.
@@ -676,6 +750,19 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     }
 }
 
+/// Child-spawning tool surfaces a child run may never invoke. Children
+/// share the session registry, so the child service subtracts these from
+/// every spawn's surface — the runtime depth cap only stays meaningful
+/// if children cannot re-fork.
+const CHILD_FORBIDDEN_TOOLS: [&str; 6] = [
+    "task",
+    "skill",
+    "task_continue",
+    "child_spawn",
+    "workflow_run",
+    "ralph_run",
+];
+
 /// Register child task tools against a task service.
 fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChildService>) {
     let spawn_service = tasks.clone();
@@ -688,6 +775,8 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
             read_only: false,
             destructive: false,
             handler: Arc::new(move |input| {
+                // Native handlers see no run context, so parent_run_id
+                // stays empty here (correlation via lineage only).
                 let kind = match input.get("kind").and_then(|v| v.as_str()) {
                     Some("readonly") => action_tasks::TaskKind::ReadOnly,
                     _ => action_tasks::TaskKind::Standard,
@@ -907,6 +996,17 @@ api_key = "k-inline"
         assert!(handle.system.contains("Available tools:"));
         assert!(handle.memory_index.is_empty());
         assert!(handle.mcp_servers.is_empty());
+        // The forbidden-spawn-tool list matches the assembled catalog: no
+        // drift warning on the happy path (this assembles a full session
+        // with the child surface attached).
+        assert!(
+            !handle
+                .warnings
+                .iter()
+                .any(|w| w.contains("child-forbidden")),
+            "unexpected drift warning: {:?}",
+            handle.warnings
+        );
         // The client submits without network access; shutdown closes cleanly.
         handle
             .client

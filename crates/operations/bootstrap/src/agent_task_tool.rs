@@ -37,8 +37,9 @@ pub struct AgentDef {
     pub name: String,
     /// When to delegate to this agent (frontmatter `description`).
     pub description: String,
-    /// Restricted tool surface (frontmatter `tools`); empty keeps the full
-    /// session surface.
+    /// Restricted tool surface (frontmatter `tools`); an empty set falls
+    /// back to the registry surface minus the child-forbidden spawn tools
+    /// (see `ChildSurface`), so no fork can ever re-spawn children.
     pub allowed_tools: Vec<String>,
     /// `true` when the definition marks the agent read-only
     /// (`kind: explore` or `readonly`), selecting the read-only profile.

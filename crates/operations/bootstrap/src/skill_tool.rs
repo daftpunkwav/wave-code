@@ -104,8 +104,10 @@ impl Tool for SkillTool {
             SkillContext::Fork => {
                 // Fork runs on the shared driver under a per-run allowlist:
                 // a declared `allowed-tools` set restricts the child's
-                // surface, empty keeps the full session surface. The
-                // spawned id stays the correlation handle.
+                // surface; an empty set falls back to the registry surface
+                // minus the child-forbidden spawn tools (see `ChildSurface`),
+                // so no fork can ever re-spawn children. The spawned id
+                // stays the correlation handle.
                 let id = self.tasks.spawn(TaskRequest {
                     kind: TaskKind::Standard,
                     input: expanded,

@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use infrastructure_base::InterruptHandle;
 use runtime_runner::{HookPoint, InboxHandle, RunContext, StopReason, TurnDriver};
 use state_store::{CompactTrigger, Conversation};
 use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, Message, Role};
@@ -165,10 +164,6 @@ impl<D: TurnDriver> TurnDriver for SessionMemory<D> {
 
     fn set_model(&self, name: &str) -> bool {
         self.inner.set_model(name)
-    }
-
-    fn interrupt_handle(&self) -> Option<InterruptHandle> {
-        self.inner.interrupt_handle()
     }
 
     fn inbox_handle(&self) -> Option<InboxHandle> {

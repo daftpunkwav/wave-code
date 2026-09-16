@@ -26,26 +26,13 @@ use action_tasks::TaskService;
 use action_workflow::{DEFAULT_RALPH_ROUNDS, MAX_RALPH_ROUNDS};
 use runtime_scheduler::Scheduler;
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
+use crate::tool_util::required_str;
 
 /// Lock helper matching the tools-crate poison convention: a panic while
 /// holding this short critical section leaves no half-broken invariant
 /// behind, so take the guard back and keep going.
 fn lock_scheduler(store: &Arc<Mutex<Scheduler>>) -> MutexGuard<'_, Scheduler> {
     store.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Required string field helper: missing or blank becomes a business error.
-fn required_str<'a>(
-    input: &'a serde_json::Value,
-    field: &str,
-) -> std::result::Result<&'a str, ToolOutput> {
-    match input.get(field).and_then(|value| value.as_str()) {
-        Some(value) if !value.trim().is_empty() => Ok(value),
-        _ => Err(ToolOutput {
-            content: format!("missing required field: {field}"),
-            is_error: true,
-        }),
-    }
 }
 
 /// `workflow_run`: run a DAG spec, return summaries keyed by step id.

@@ -5,8 +5,12 @@
  * Responsibilities:
  * - Park the loop until a user decision arrives or the wait expires.
  * - Park interactive questions until the user answers or the wait expires.
+ * - End a parked wait immediately as Interrupted when the session
+ *   interrupt fires (reservation withdrawn, so the id can park fresh).
  * - Resolve expired waits to Deny/Unavailable so the loop never parks forever.
- * - Clear stale waiters at turn start.
+ * - Expose clear_stale for session-owned turn starts (the run loop
+ *   skips it for child turns, so a child start never wipes a parent
+ *   approval parked mid-wait).
  *
  * This module must not depend on: runtime internals beyond its trait seam.
  */
@@ -16,6 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use infrastructure_base::InterruptHandle;
 use runtime_runner::{ApprovalResolution, ApprovalSource, AskKind, QuestionResolution};
 use safety_gate::{ApprovalDecision, ApprovalGate, QuestionGate};
 
@@ -25,28 +30,75 @@ pub struct GateApprovalSource {
     gate: Arc<ApprovalGate>,
     questions: Arc<QuestionGate>,
     timeout: Duration,
+    interrupt: InterruptHandle,
 }
 
 impl GateApprovalSource {
+    /// Poll granularity while parked: a user interrupt ends the wait
+    /// within one slice instead of at the full timeout.
+    const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
     /// Wrap shared gates; waits longer than `timeout` resolve to Deny /
-    /// Unavailable instead of parking forever.
+    /// Unavailable instead of parking forever, and a session interrupt
+    /// ends them immediately as `Interrupted`.
     pub fn new(
         gate: Arc<ApprovalGate>,
         questions: Arc<QuestionGate>,
         timeout: Duration,
+        interrupt: InterruptHandle,
     ) -> Self {
         Self {
             gate,
             questions,
             timeout,
+            interrupt,
         }
     }
+
+    /// Park on `waiter` until answered, interrupted, or expired.
+    ///
+    /// The interrupt check rides short timeout slices: a mid-wait Ctrl+C
+    /// resolves to `Interrupted` (with the gate reservation withdrawn, so
+    /// a later turn can park fresh) instead of holding the turn hostage
+    /// for the full timeout.
+    async fn park<T>(&self, waiter: &mut T) -> Result<T::Output, ParkExit>
+    where
+        T: std::future::Future + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        loop {
+            if self.interrupt.is_triggered() {
+                return Err(ParkExit::Interrupted);
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(ParkExit::Expired);
+            }
+            match tokio::time::timeout(
+                remaining.min(Self::INTERRUPT_POLL_INTERVAL),
+                &mut *waiter,
+            )
+            .await
+            {
+                Ok(answer) => return Ok(answer),
+                Err(_elapsed) => continue,
+            }
+        }
+    }
+}
+
+/// Why a park ended without an answer.
+enum ParkExit {
+    /// The session interrupt fired mid-wait.
+    Interrupted,
+    /// The fixed timeout elapsed with no decision.
+    Expired,
 }
 
 #[async_trait::async_trait]
 impl ApprovalSource for GateApprovalSource {
     async fn decide(&self, call_id: &str, _kind: AskKind, _detail: &str) -> ApprovalResolution {
-        let waiter = match self.gate.wait_for(call_id) {
+        let mut waiter = match self.gate.wait_for(call_id) {
             Ok(rx) => rx,
             Err(_) => {
                 // Another waiter already parked this id; treat as denied
@@ -56,7 +108,7 @@ impl ApprovalSource for GateApprovalSource {
                 };
             }
         };
-        match tokio::time::timeout(self.timeout, waiter).await {
+        match self.park(&mut waiter).await {
             Ok(Ok(ApprovalDecision::AllowOnce)) => ApprovalResolution::AllowOnce,
             Ok(Ok(ApprovalDecision::AllowAlways)) => ApprovalResolution::AllowAlways,
             Ok(Ok(ApprovalDecision::Deny { reason })) => ApprovalResolution::Deny { reason },
@@ -65,11 +117,17 @@ impl ApprovalSource for GateApprovalSource {
             Ok(Err(_)) => ApprovalResolution::Deny {
                 reason: "approval gate cleared while waiting".to_string(),
             },
+            // Interrupted waits stay cancelable: the reservation is
+            // withdrawn so a later call reusing the id parks fresh.
+            Err(ParkExit::Interrupted) => {
+                self.gate.cancel(call_id);
+                ApprovalResolution::Interrupted
+            }
             // Expired waits deny with an explicit reason; the tool never
             // executes and the turn continues instead of parking forever.
             // The reservation is withdrawn so a later call reusing the id
             // parks fresh; late decisions then find no waiter and drop.
-            Err(_) => {
+            Err(ParkExit::Expired) => {
                 self.gate.cancel(call_id);
                 ApprovalResolution::Deny {
                     reason: format!(
@@ -82,7 +140,7 @@ impl ApprovalSource for GateApprovalSource {
     }
 
     async fn ask(&self, call_id: &str, _question: &str, _options: &[String]) -> QuestionResolution {
-        let waiter = match self.questions.wait_for(call_id) {
+        let mut waiter = match self.questions.wait_for(call_id) {
             Ok(rx) => rx,
             Err(_) => {
                 return QuestionResolution::Unavailable {
@@ -90,16 +148,20 @@ impl ApprovalSource for GateApprovalSource {
                 };
             }
         };
-        match tokio::time::timeout(self.timeout, waiter).await {
+        match self.park(&mut waiter).await {
             Ok(Ok(answer)) => QuestionResolution::Answered(answer),
             // The waiter was dropped (gate cleared mid-wait): fail the
             // question instead of hanging.
             Ok(Err(_)) => QuestionResolution::Unavailable {
                 reason: "question gate cleared while waiting".to_string(),
             },
+            Err(ParkExit::Interrupted) => {
+                self.questions.cancel(call_id);
+                QuestionResolution::Interrupted
+            }
             // Expired waits fail with an explicit reason; the reservation
             // is withdrawn so a later call reusing the id parks fresh.
-            Err(_) => {
+            Err(ParkExit::Expired) => {
                 self.questions.cancel(call_id);
                 QuestionResolution::Unavailable {
                     reason: format!(
@@ -201,7 +263,12 @@ mod tests {
         let gate = Arc::new(ApprovalGate::new());
         let questions = Arc::new(QuestionGate::new());
         (
-            GateApprovalSource::new(gate.clone(), questions, timeout),
+            GateApprovalSource::new(
+                gate.clone(),
+                questions,
+                timeout,
+                infrastructure_base::InterruptHandle::new(),
+            ),
             gate,
         )
     }
@@ -246,7 +313,12 @@ mod tests {
     async fn questions_park_until_answered_and_expire_openly() {
         let gate = Arc::new(ApprovalGate::new());
         let questions = Arc::new(QuestionGate::new());
-        let source = GateApprovalSource::new(gate, questions.clone(), Duration::from_secs(5));
+        let source = GateApprovalSource::new(
+            gate,
+            questions.clone(),
+            Duration::from_secs(5),
+            infrastructure_base::InterruptHandle::new(),
+        );
         let driver = tokio::spawn(async move {
             source.ask("c1", "pick one", &["a".to_string(), "b".to_string()]).await
         });
@@ -261,7 +333,12 @@ mod tests {
         // Expired waits fail openly and free their id.
         let gate = Arc::new(ApprovalGate::new());
         let questions = Arc::new(QuestionGate::new());
-        let source = GateApprovalSource::new(gate, questions.clone(), Duration::from_millis(20));
+        let source = GateApprovalSource::new(
+            gate,
+            questions.clone(),
+            Duration::from_millis(20),
+            infrastructure_base::InterruptHandle::new(),
+        );
         let outcome = source.ask("c1", "pick one", &[]).await;
         assert!(matches!(
             outcome,
@@ -273,6 +350,33 @@ mod tests {
             HeadlessDeny.ask("c1", "pick one", &[]).await,
             QuestionResolution::Unavailable { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn session_interrupt_ends_a_parked_wait_as_interrupted() {
+        let gate = Arc::new(ApprovalGate::new());
+        let questions = Arc::new(QuestionGate::new());
+        let interrupt = infrastructure_base::InterruptHandle::new();
+        let source = GateApprovalSource::new(
+            gate.clone(),
+            questions,
+            Duration::from_secs(30),
+            interrupt.clone(),
+        );
+        let driver = tokio::spawn(async move { source.decide("c1", AskKind::Exec, "d").await });
+        // Park the waiter, then interrupt the session mid-wait.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        interrupt.trigger();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), driver)
+                .await
+                .expect("interrupt must end the wait quickly")
+                .unwrap(),
+            ApprovalResolution::Interrupted
+        );
+        // The reservation is withdrawn: the id can park fresh afterwards.
+        assert_eq!(gate.pending_count(), 0);
     }
 
     #[tokio::test]

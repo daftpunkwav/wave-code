@@ -43,6 +43,7 @@ pub mod skill_tool;
 pub mod status_queries;
 pub mod task_tools;
 pub mod tool_adapter;
+pub mod tool_util;
 pub mod workflow_tools;
 
 pub use agent_task_tool::{AgentDef, TaskTool, discover_agent_defs};

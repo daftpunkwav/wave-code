@@ -187,6 +187,19 @@ pub trait ChatModel: Send + Sync {
     async fn stream(&self, req: ChatRequest) -> Result<EventStream>;
 }
 
+/// Forwarding implementation so boxed models erase behind the trait
+/// object: composition roots build `Arc<dyn ChatModel>` chains (retry
+/// wrappers, fallbacks) without re-wrapping each layer.
+#[async_trait::async_trait]
+impl<M> ChatModel for std::sync::Arc<M>
+where
+    M: ChatModel + ?Sized,
+{
+    async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
+        self.as_ref().stream(req).await
+    }
+}
+
 /// Unified error type for the llm crate.
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {

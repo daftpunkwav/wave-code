@@ -13,10 +13,11 @@
 //! Retry wrapper over [`crate::ChatModel`].
 //!
 //! [`RetryingModel`] clones the request per attempt (cheap: history rides
-//! an `Arc`) and retries only transport-level failures: stall timeouts,
-//! connection errors, and 5xx/server-overload shapes. Authentication,
-//! other 4xx, and [`crate::LlmError::PromptTooLong`] fail fast so bad
-//! credentials never burn retries and compaction triggers stay intact.
+//! an `Arc`) and retries only transient failures: stall timeouts,
+//! connection errors, 5xx/server-overload shapes, and rate limiting
+//! (429). Authentication, other 4xx, and
+//! [`crate::LlmError::PromptTooLong`] fail fast so bad credentials never
+//! burn retries and compaction triggers stay intact.
 //!
 //! Retry covers request establishment only ([`ChatModel::stream`]); a
 //! stream that fails mid-flight surfaces its item error unchanged (no
@@ -37,8 +38,9 @@ pub struct RetryPolicy {
     pub max_delay_ms: u64,
     /// Retry stall-timeout errors.
     pub retry_timeout: bool,
-    /// Retry 5xx / overloaded / server-error shapes.
-    pub retry_server: bool,
+    /// Retry transient API shapes: 5xx / overloaded / server-error and
+    /// rate-limit (429) responses.
+    pub retry_transient: bool,
     /// Retry connection-level transport errors.
     pub retry_connection: bool,
     /// Global budget from the first attempt; when the next backoff would
@@ -54,7 +56,7 @@ impl Default for RetryPolicy {
             base_delay_ms: 200,
             max_delay_ms: 2_000,
             retry_timeout: true,
-            retry_server: true,
+            retry_transient: true,
             retry_connection: true,
             deadline_ms: Some(30_000),
         }
@@ -81,7 +83,7 @@ impl RetryPolicy {
         match error {
             LlmError::Timeout(_) => self.retry_timeout,
             LlmError::Http(_) => self.retry_connection,
-            LlmError::Api { kind, message } => self.retry_server && is_server_error(kind, message),
+            LlmError::Api { kind, message } => self.retry_transient && is_transient_error(kind, message),
             // PromptTooLong drives compaction, Json/Sse are deterministic:
             // retrying cannot change the outcome.
             LlmError::PromptTooLong { .. } | LlmError::Sse(_) | LlmError::Json(_) => false,
@@ -123,16 +125,19 @@ pub fn is_auth_error(error: &LlmError) -> bool {
     }
 }
 
-/// True for server-side shapes worth retrying: explicit 5xx status kinds
-/// plus the well-known overload markers (both carriers checked because
-/// providers split status and message across them inconsistently).
-fn is_server_error(kind: &str, message: &str) -> bool {
+/// True for transient API shapes worth retrying: explicit 5xx status
+/// kinds, the well-known overload markers, and rate limiting (429) — all
+/// carriers are checked because providers split status and message across
+/// them inconsistently.
+fn is_transient_error(kind: &str, message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "http_500",
         "http_502",
         "http_503",
         "http_504",
         "http_529",
+        "http_429",
+        "rate_limit",
         "overloaded",
         "overloaded_error",
         "server_error",
@@ -260,7 +265,7 @@ mod tests {
             base_delay_ms: 0,
             max_delay_ms: 0,
             retry_timeout: true,
-            retry_server: true,
+            retry_transient: true,
             retry_connection: true,
             deadline_ms: None,
         }
@@ -361,7 +366,7 @@ mod tests {
         let http: LlmError = LlmError::Http("connection reset".to_string());
         let off = RetryPolicy {
             retry_timeout: false,
-            retry_server: false,
+            retry_transient: false,
             retry_connection: false,
             ..fast_policy(3)
         };

@@ -63,6 +63,28 @@ pub struct ToolCtx {
     pub deny_env: Vec<String>,
 }
 
+/// True when an env var name looks like a secret carrier (case-insensitive).
+///
+/// Fail-closed shapes: `_SECRET` / `_TOKEN` / `_PASSW` / `_PRIVATE` segments,
+/// `_KEY` / `_PAT` suffixes (AWS_SECRET_ACCESS_KEY, *_PRIVATE_KEY, GITHUB_PAT,
+/// bare API_KEY), and the bare names SECRET / TOKEN / PASSWORD / PRIVATE /
+/// KEY / PAT. A pure suffix list misses real shapes (`AWS_SECRET_ACCESS_KEY`
+/// ends in `_KEY`, not `_API_KEY`), so match segments and suffixes instead.
+/// Anything else passes so normal configuration stays visible to children.
+///
+/// The canonical copy lives here so every process-spawning surface (shell,
+/// pty, background jobs) scrubs the same shapes; point new spawn paths at
+/// this function instead of growing private copies.
+pub fn is_sensitive_env_name(name: &str) -> bool {
+    const MARKERS: [&str; 4] = ["_SECRET", "_TOKEN", "_PASSW", "_PRIVATE"];
+    const SUFFIXES: [&str; 2] = ["_KEY", "_PAT"];
+    const BARE: [&str; 6] = ["SECRET", "TOKEN", "PASSWORD", "PRIVATE", "KEY", "PAT"];
+    let upper = name.to_uppercase();
+    MARKERS.iter().any(|m| upper.contains(m))
+        || SUFFIXES.iter().any(|s| upper.ends_with(s))
+        || BARE.contains(&upper.as_str())
+}
+
 /// Tool output.
 ///
 /// `is_error = true` means a business failure (missing file, non-unique match, missing params, ...),

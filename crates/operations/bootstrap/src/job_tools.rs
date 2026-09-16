@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use action_jobs::{JobRequest, JobService};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
+use crate::tool_util::required_str;
 
 /// Owner charged against the per-owner cap: one session, one owner.
 const JOB_OWNER: &str = "session";
@@ -79,18 +80,26 @@ fn render(snapshot: &action_jobs::JobSnapshot) -> ToolOutput {
     }
 }
 
-/// Required string field helper: missing or blank becomes a business error.
-fn required_str<'a>(
-    input: &'a serde_json::Value,
-    field: &str,
-) -> std::result::Result<&'a str, ToolOutput> {
-    match input.get(field).and_then(|v| v.as_str()) {
-        Some(value) if !value.trim().is_empty() => Ok(value),
-        _ => Err(ToolOutput {
-            content: format!("missing required field: {field}"),
-            is_error: true,
-        }),
+/// Deny list for one job spawn: the session deny list plus every present
+/// env var whose name matches the secret-shape fallback.
+///
+/// The shell and pty tools scrub their spawns with the same two layers;
+/// jobs must too, or `printenv`-style commands read secrets back through
+/// `job_output`'s log tail even though the identical command via `shell`
+/// would run clean.
+fn effective_deny_env<I>(deny_env: &[String], env_names: I) -> Vec<String>
+where
+    I: IntoIterator,
+    I::Item: AsRef<str>,
+{
+    let mut deny = deny_env.to_vec();
+    for name in env_names {
+        let name = name.as_ref();
+        if !deny.iter().any(|d| d == name) && wavecode_tools::is_sensitive_env_name(name) {
+            deny.push(name.to_string());
+        }
     }
+    deny
 }
 
 /// `job_spawn`: start a shell command in the background, return `job-N`.
@@ -158,7 +167,10 @@ impl Tool for JobSpawnTool {
             owner: JOB_OWNER.to_string(),
             command,
             cwd: ctx.cwd.clone(),
-            deny_env: ctx.deny_env.clone(),
+            deny_env: effective_deny_env(
+                &ctx.deny_env,
+                std::env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()),
+            ),
             timeout_ms,
         };
         match self.jobs.spawn(request) {
@@ -371,6 +383,29 @@ impl Tool for JobOutputTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_env_gains_secret_shaped_names_without_duplicates() {
+        let deny = vec!["MINIMAX_API_KEY".to_string()];
+        let env = [
+            "GITHUB_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "MINIMAX_API_KEY", // already denied: no duplicate entry
+            "HOME",
+            "PATH",
+        ];
+        let effective = effective_deny_env(&deny, env);
+        assert!(effective.contains(&"GITHUB_TOKEN".to_string()));
+        assert!(effective.contains(&"AWS_SECRET_ACCESS_KEY".to_string()));
+        assert!(effective.contains(&"MINIMAX_API_KEY".to_string()));
+        assert_eq!(
+            effective.iter().filter(|n| *n == "MINIMAX_API_KEY").count(),
+            1,
+            "existing deny entries are not duplicated"
+        );
+        assert!(!effective.contains(&"HOME".to_string()));
+        assert!(!effective.contains(&"PATH".to_string()));
+    }
 
     /// Keep the tempdir alive across the await points of one test.
     struct Ctx {

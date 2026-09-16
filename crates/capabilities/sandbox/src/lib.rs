@@ -2,8 +2,8 @@
 //! P2 lands the policy layer).
 //!
 //! Pure logic, 100% unit-testable:
-//! - [`PermissionMode`] four tiers (a protocol type): default / plan /
-//!   acceptEdits / bypassPermissions;
+//! - [`PermissionMode`] three modes (a protocol type): plan / guarded / auto
+//!   (legacy four-tier names map onto these with a warning at assembly);
 //! - allow / deny rule parsing and matching: entries shaped like `Bash(git
 //!   *)` or `File(src/**)`, matched **deny-first**, with allow hits skipping
 //!   approval;
@@ -490,14 +490,28 @@ impl Sandbox {
         {
             return Verdict::Allow;
         }
-        // 2.5 In-session state tool exemption (P4): todowrite only mutates
+        // 2.45 In-session state tool exemption (P4): todowrite only mutates
         // the in-session todo list — no filesystem changes, no spawned
         // processes — so it allows directly in every mode (matching
         // deepagents' auto-allowed write_todos; maintaining the list in plan
         // mode is inherently planning). Still bound by the deny rules above
         // (explicit bans are never exempted).
-        if is_session_state(tool) {
+        // `plan approve` is the exception to that exemption: approving a
+        // proposal is the user's confirmation act, so the model may draft
+        // and revise freely but never self-approve — it asks first, in
+        // every mode. The action vocabulary ("approve") is owned by the
+        // bootstrap plan tool; the table test below locks the pair so a
+        // rename there cannot silently drop this carve-out.
+        let plan_approve = tool == "plan"
+            && input.get("action").and_then(serde_json::Value::as_str) == Some("approve");
+        if is_session_state(tool) && !plan_approve {
             return Verdict::Allow;
+        }
+        if plan_approve {
+            return Verdict::Ask {
+                kind: ApprovalKind::Write,
+                detail: ask_detail(tool, input),
+            };
         }
         // 2.6 Interactive question routing (ask_user): the user's answer
         // becomes the tool result, so route before mode policy — asking a
@@ -906,6 +920,34 @@ mod tests {
                     "{tool} in {mode:?} mode should need no approval"
                 );
             }
+        }
+    }
+
+    /// `plan approve` is carved out of the session-state exemption: only
+    /// the user approves a proposal. This test locks the action word so a
+    /// rename in the bootstrap plan tool cannot silently drop the
+    /// carve-out (the sandbox layer knows the vocabulary only as a
+    /// string).
+    #[test]
+    fn plan_approve_asks_in_every_mode_but_other_actions_stay_exempt() {
+        for mode in [
+            PermissionMode::Guarded,
+            PermissionMode::Plan,
+            PermissionMode::Auto,
+        ] {
+            let sb = Sandbox::without_rules(mode);
+            assert!(
+                matches!(
+                    sb.decide("plan", &json!({"action": "approve"}), false, false),
+                    Verdict::Ask { .. }
+                ),
+                "plan approve must Ask in {mode:?} mode"
+            );
+            assert_eq!(
+                sb.decide("plan", &json!({"action": "status"}), false, false),
+                Verdict::Allow,
+                "other plan actions stay exempt in {mode:?} mode"
+            );
         }
     }
 

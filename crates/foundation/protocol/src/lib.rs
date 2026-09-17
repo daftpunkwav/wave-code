@@ -37,28 +37,30 @@ pub enum PermissionMode {
     /// toward proposing a plan but may also simply answer.
     #[serde(rename = "plan")]
     Plan,
-    /// Dangerous operations (command execution, destructive tools) need
-    /// per-call approval; file edits and other non-exec writes flow
-    /// through without asking (hits on allow rules skip approval).
-    #[serde(rename = "guarded")]
-    Guarded,
-    /// Approve everything (deny rules still apply).
+    /// Everything except dangerous operations flows through; command
+    /// execution and destructive tools need per-call approval (hits on
+    /// allow rules skip approval).
     #[serde(rename = "auto")]
     Auto,
+    /// Approve everything (deny rules still apply). User-configured
+    /// denylist entries (the wave denylist) are enforced as deny rules,
+    /// so a banned command is refused outright without a prompt.
+    #[serde(rename = "wave")]
+    Wave,
 }
 
 impl PermissionMode {
     /// Parses a mode string from config / the frontend (same names as the
-    /// serde wire form). Legacy pre-3-mode names map onto their successor
-    /// so old config files keep loading: `default` / `acceptEdits` ->
-    /// Guarded, `bypassPermissions` -> Auto.
+    /// serde wire form). Legacy names map onto their successor so old
+    /// config files keep loading: `guarded` / `default` / `acceptEdits` ->
+    /// Auto, `bypassPermissions` / `yolo` -> Wave. Note that `auto` was
+    /// redefined: it used to mean "approve everything" (now `wave`) and
+    /// now means "ask only on dangerous operations".
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "plan" => Some(Self::Plan),
-            "guarded" => Some(Self::Guarded),
-            "auto" => Some(Self::Auto),
-            "default" | "acceptEdits" => Some(Self::Guarded),
-            "bypassPermissions" => Some(Self::Auto),
+            "auto" | "guarded" | "default" | "acceptEdits" => Some(Self::Auto),
+            "wave" | "bypassPermissions" | "yolo" => Some(Self::Wave),
             _ => None,
         }
     }
@@ -67,8 +69,8 @@ impl PermissionMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Plan => "plan",
-            Self::Guarded => "guarded",
             Self::Auto => "auto",
+            Self::Wave => "wave",
         }
     }
 }
@@ -99,8 +101,8 @@ mod tests {
         // Lock the PermissionMode wire form (matches the config `permission_mode` strings).
         let mode_cases: [(PermissionMode, &str); 3] = [
             (PermissionMode::Plan, "plan"),
-            (PermissionMode::Guarded, "guarded"),
             (PermissionMode::Auto, "auto"),
+            (PermissionMode::Wave, "wave"),
         ];
         for (mode, tag) in mode_cases {
             let json = serde_json::to_string(&mode).unwrap();
@@ -113,17 +115,19 @@ mod tests {
 
     #[test]
     fn legacy_mode_names_migrate_onto_their_successors() {
-        // Pre-3-mode config files keep loading: old names alias onto the
+        // Pre-rename config files keep loading: old names alias onto the
         // mode that inherited their behavior.
-        assert_eq!(PermissionMode::parse("default"), Some(PermissionMode::Guarded));
+        assert_eq!(PermissionMode::parse("guarded"), Some(PermissionMode::Auto));
+        assert_eq!(PermissionMode::parse("default"), Some(PermissionMode::Auto));
         assert_eq!(
             PermissionMode::parse("acceptEdits"),
-            Some(PermissionMode::Guarded)
+            Some(PermissionMode::Auto)
         );
         assert_eq!(
             PermissionMode::parse("bypassPermissions"),
-            Some(PermissionMode::Auto)
+            Some(PermissionMode::Wave)
         );
+        assert_eq!(PermissionMode::parse("yolo"), Some(PermissionMode::Wave));
     }
 
     #[test]

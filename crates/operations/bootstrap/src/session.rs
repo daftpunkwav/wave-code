@@ -147,13 +147,18 @@ pub struct AssembleOptions {
     /// Seed history as (from_model, text) pairs, e.g. from resume import.
     /// Empty starts a fresh conversation.
     pub initial_history: Vec<(bool, String)>,
+    /// `wave`-mode denylist entries (`Bash(pattern)` rule syntax): parsed
+    /// into sandbox deny rules so a banned command is refused in every
+    /// mode without a prompt. Malformed entries land in the startup
+    /// warnings instead of failing assembly.
+    pub wave_denylist: Vec<String>,
 }
 
 /// Resolve the effective permission mode: CLI override wins over config.
 ///
-/// Unknown values warn and fall back to `Guarded` so a typo never locks
-/// the session into a mode the policy rejected. Legacy pre-3-mode names
-/// parse onto their successor but warn, so silent behavior drift for old
+/// Unknown values warn and fall back to `Auto` so a typo never locks
+/// the session into a mode the policy rejected. Legacy mode names parse
+/// onto their successor but warn, so silent behavior drift for old
 /// config files is at least visible in the startup warnings.
 pub fn resolve_permission_mode(
     config_value: Option<&str>,
@@ -163,9 +168,9 @@ pub fn resolve_permission_mode(
     if let Some(raw) = cli_override {
         return wavecode_protocol::PermissionMode::parse(raw).unwrap_or_else(|| {
             warnings.push(format!(
-                "unrecognized --permission-mode {raw:?}; falling back to guarded"
+                "unrecognized --permission-mode {raw:?}; falling back to auto"
             ));
-            wavecode_protocol::PermissionMode::Guarded
+            wavecode_protocol::PermissionMode::Auto
         });
     }
     config_value
@@ -175,17 +180,17 @@ pub fn resolve_permission_mode(
                 && matches!(raw, "default" | "acceptEdits" | "bypassPermissions")
             {
                 warnings.push(format!(
-                    "permission_mode {raw:?} is a legacy name; use guarded, plan, or auto"
+                    "permission_mode {raw:?} is a legacy name; use plan, auto, or wave"
                 ));
             }
             parsed.or_else(|| {
                 warnings.push(format!(
-                    "unrecognized permission_mode {raw:?}; falling back to guarded"
+                    "unrecognized permission_mode {raw:?}; falling back to auto"
                 ));
                 None
             })
         })
-        .unwrap_or(wavecode_protocol::PermissionMode::Guarded)
+        .unwrap_or(wavecode_protocol::PermissionMode::Auto)
 }
 
 /// Assemble a live session: config to client handle.
@@ -203,6 +208,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         identity,
         headless,
         initial_history,
+        wave_denylist,
     } = options;
     let mut warnings = Vec::new();
 
@@ -300,6 +306,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         identity,
         headless,
         initial_history,
+        wave_denylist,
         warnings,
     }))
 }
@@ -335,6 +342,8 @@ pub(crate) struct WithModel {
     pub headless: bool,
     /// Seed history as (from_model, text) pairs.
     pub initial_history: Vec<(bool, String)>,
+    /// `wave`-mode denylist entries (Bash rule syntax).
+    pub wave_denylist: Vec<String>,
     /// Warnings accumulated before the model-independent half.
     pub warnings: Vec<String>,
 }
@@ -358,6 +367,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         identity,
         headless,
         initial_history,
+        wave_denylist,
         mut warnings,
     } = parts;
     let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
@@ -383,11 +393,30 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // is unreachable.
     let permission_mode_raw = match permission_mode {
         wavecode_protocol::PermissionMode::Plan => "plan".to_string(),
-        wavecode_protocol::PermissionMode::Guarded => "guarded".to_string(),
         wavecode_protocol::PermissionMode::Auto => "auto".to_string(),
-        _ => "guarded".to_string(),
+        wavecode_protocol::PermissionMode::Wave => "wave".to_string(),
+        _ => "auto".to_string(),
     };
-    let sandbox = wavecode_sandbox::Sandbox::without_rules(permission_mode);
+    let deny_rules: Vec<String> = wave_denylist
+        .iter()
+        .map(|entry| {
+            // Bare commands get the Bash scope; scoped entries pass through.
+            if entry.trim().starts_with("Bash(") || entry.trim().starts_with("File(") {
+                entry.clone()
+            } else {
+                format!("Bash({entry})")
+            }
+        })
+        .collect();
+    let sandbox = wavecode_sandbox::Sandbox::new(
+        permission_mode,
+        &[],
+        &deny_rules,
+    )
+    .unwrap_or_else(|error| {
+        warnings.push(format!("wave denylist rejected: {error}; continuing without it"));
+        wavecode_sandbox::Sandbox::without_rules(permission_mode)
+    });
 
     // 4. Context sources with warn-and-continue degradation.
     let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
@@ -978,6 +1007,7 @@ api_key = "k-inline"
             config_path: Some(path),
             model_override: None,
             permission_override: None,
+            wave_denylist: Vec::new(),
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
@@ -1031,11 +1061,11 @@ api_key = "k-inline"
     fn invalid_permission_values_warn_and_fall_back() {
         let mut warnings = Vec::new();
         let mode = resolve_permission_mode(Some("plan"), Some("nope"), &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.iter().any(|w| w.contains("--permission-mode")));
         warnings.clear();
         let mode = resolve_permission_mode(Some("nope"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.iter().any(|w| w.contains("permission_mode")));
     }
 
@@ -1043,10 +1073,10 @@ api_key = "k-inline"
     fn config_permission_used_without_override() {
         let mut warnings = Vec::new();
         let mode = resolve_permission_mode(Some("guarded"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.is_empty());
         let mode = resolve_permission_mode(None, None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.is_empty());
     }
 
@@ -1054,11 +1084,11 @@ api_key = "k-inline"
     fn legacy_mode_names_migrate_with_a_visible_warning() {
         let mut warnings = Vec::new();
         let mode = resolve_permission_mode(Some("acceptEdits"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Guarded);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.iter().any(|w| w.contains("legacy name")));
         warnings.clear();
         let mode = resolve_permission_mode(Some("bypassPermissions"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
+        assert_eq!(mode, wavecode_protocol::PermissionMode::Wave);
         assert!(warnings.iter().any(|w| w.contains("legacy name")));
     }
 

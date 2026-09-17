@@ -324,6 +324,9 @@ async fn new_session<W, F>(
         // instead of parking on a gate nobody reads.
         headless: true,
         initial_history: Vec::new(),
+        // ACP sessions start unconstrained; constraint rules arrive
+        // through the protocol layer instead of the console settings.
+        wave_denylist: Vec::new(),
     }) {
         Ok(handle) => handle,
         Err(e) => {
@@ -970,6 +973,7 @@ api_key = "k-inline"
                 deny_env: Vec::new(),
                 context_window: 200_000,
                 max_output_tokens: 64,
+                wave_denylist: Vec::new(),
                 // Bypass approvals: scripted tools must execute instead of
                 // dying on the headless deny gate (the same ground as the
                 // session proof test). Approval-denied runs are orthogonal

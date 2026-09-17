@@ -106,7 +106,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_tools_pass_without_rules() {
         let adapter = PolicyAdapter::new(
-            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Guarded),
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Auto),
             registry(),
         );
         let verdict = adapter
@@ -118,10 +118,11 @@ mod tests {
     #[test]
     fn permission_modes_switch_live_and_reject_garbage() {
         let sandbox =
-            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Guarded);
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Auto);
         let adapter = PolicyAdapter::new(sandbox, registry());
         assert!(adapter.set_permission_mode("plan"));
-        assert!(!adapter.set_permission_mode("yolo"));
+        assert!(adapter.set_permission_mode("wave"));
+        assert!(!adapter.set_permission_mode("garbage"));
     }
 
     #[tokio::test]

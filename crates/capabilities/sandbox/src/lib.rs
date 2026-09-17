@@ -525,16 +525,18 @@ impl Sandbox {
         }
         // 3. Mode default policy.
         //    plan: read-only only; everything else denies outright (no
-        //    approval requests). guarded: read-only tools, file edits, and
+        //    approval requests). auto: read-only tools, file edits, and
         //    other non-exec writes flow through; command execution
-        //    (Exec approval kind) and destructive tools ask. auto: allow.
+        //    (Exec approval kind) and destructive tools ask. wave: allow
+        //    (the user denylist rides the deny rules in step 1, so banned
+        //    commands never reach this branch).
         match self.mode() {
             PermissionMode::Plan if !read_only || destructive => Verdict::Deny {
                 reason: format!(
                     "plan mode: only read-only tools are allowed; `{tool}` was blocked (no changes were made)"
                 ),
             },
-            PermissionMode::Auto => Verdict::Allow,
+            PermissionMode::Wave => Verdict::Allow,
             _ if read_only && !destructive => Verdict::Allow,
             _ if is_file_edit(tool) && !destructive => Verdict::Allow,
             // present only records deliverables in the session manifest —
@@ -548,7 +550,7 @@ impl Sandbox {
     }
 }
 
-/// File-editing tools auto-allowed in guarded mode (the builtin set; MCP
+/// File-editing tools auto-allowed in auto mode (the builtin set; MCP
 /// write tools are not in this list).
 fn is_file_edit(tool: &str) -> bool {
     matches!(tool, "write" | "edit")
@@ -790,7 +792,7 @@ mod tests {
     #[test]
     fn deny_rules_win_over_allow() {
         let sb = Sandbox::new(
-            PermissionMode::Guarded,
+            PermissionMode::Auto,
             &["Bash(git *)".into()],
             &["Bash(git push *)".into()],
         )
@@ -814,9 +816,9 @@ mod tests {
     /// `decide` (including read-only ones), so deny rules fire on the full
     /// pipeline as well.
     #[test]
-    fn deny_rules_apply_even_in_auto_mode() {
+    fn deny_rules_apply_even_in_wave_mode() {
         let sb = Sandbox::new(
-            PermissionMode::Auto,
+            PermissionMode::Wave,
             &[],
             &["File(secrets/**)".into()],
         )
@@ -837,7 +839,7 @@ mod tests {
     #[test]
     fn file_rules_match_path_input() {
         let sb = Sandbox::new(
-            PermissionMode::Guarded,
+            PermissionMode::Auto,
             &["File(src/**)".into()],
             &["File(src/secret.rs)".into()],
         )
@@ -860,14 +862,14 @@ mod tests {
 
     #[test]
     fn invalid_rule_entry_is_startup_error() {
-        assert!(Sandbox::new(PermissionMode::Guarded, &["Bash(".into()], &[]).is_err());
+        assert!(Sandbox::new(PermissionMode::Auto, &["Bash(".into()], &[]).is_err());
     }
 
     // —— decide: mode default policies ——
 
     #[test]
     fn guarded_mode_allows_edits_and_reads_asks_for_exec_and_destructive() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         assert_eq!(
             sb.decide("read", &file_input("a.txt"), true, false),
             Verdict::Allow
@@ -901,7 +903,7 @@ mod tests {
     fn session_state_tools_allowed_in_all_modes() {
         let input = json!({"todos": [{"content": "x", "status": "pending"}]});
         for mode in [
-            PermissionMode::Guarded,
+            PermissionMode::Auto,
             PermissionMode::Plan,
             PermissionMode::Auto,
         ] {
@@ -931,7 +933,7 @@ mod tests {
     #[test]
     fn plan_approve_asks_in_every_mode_but_other_actions_stay_exempt() {
         for mode in [
-            PermissionMode::Guarded,
+            PermissionMode::Auto,
             PermissionMode::Plan,
             PermissionMode::Auto,
         ] {
@@ -970,7 +972,7 @@ mod tests {
 
     #[test]
     fn guarded_allows_file_edits_but_asks_shell() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         assert_eq!(
             sb.decide("write", &file_input("a.txt"), false, false),
             Verdict::Allow
@@ -991,8 +993,8 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_allows_everything_not_denied() {
-        let sb = Sandbox::without_rules(PermissionMode::Auto);
+    fn wave_mode_allows_everything_not_denied() {
+        let sb = Sandbox::without_rules(PermissionMode::Wave);
         assert_eq!(
             sb.decide("shell", &shell_input("rm -rf target"), false, true),
             Verdict::Allow
@@ -1001,7 +1003,7 @@ mod tests {
 
     #[test]
     fn mode_handle_switch_takes_effect_on_next_decide() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         let handle = sb.mode_handle();
         assert_eq!(
             sb.decide("write", &file_input("a.txt"), false, false),
@@ -1017,7 +1019,7 @@ mod tests {
 
     #[test]
     fn ask_detail_truncates_long_input() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         let long = "x".repeat(2000);
         let v = sb.decide("shell", &shell_input(&long), false, false);
         let Verdict::Ask { detail, .. } = v else {
@@ -1031,7 +1033,7 @@ mod tests {
 
     #[test]
     fn allow_always_derives_exact_shell_rule() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         let rule = sb
             .allow_always("shell", &shell_input("cargo test"))
             .expect("a shell command can derive a rule");
@@ -1056,7 +1058,7 @@ mod tests {
 
     #[test]
     fn allow_always_treats_wildcard_chars_as_literals() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         sb.allow_always("shell", &shell_input("ls *.rs")).unwrap();
         // The literal hit allows.
         assert_eq!(
@@ -1072,7 +1074,7 @@ mod tests {
 
     #[test]
     fn allow_always_derives_file_rule_for_write_tool() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         let rule = sb
             .allow_always("write", &file_input("src/main.rs"))
             .expect("a file path can derive a rule");
@@ -1087,7 +1089,7 @@ mod tests {
 
     #[test]
     fn allow_always_shared_across_clones() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         let sub_agent = sb.clone();
         sb.allow_always("shell", &shell_input("git status"))
             .unwrap();
@@ -1100,7 +1102,7 @@ mod tests {
 
     #[test]
     fn allow_always_does_not_override_deny() {
-        let sb = Sandbox::new(PermissionMode::Guarded, &[], &["Bash(rm *)".into()]).unwrap();
+        let sb = Sandbox::new(PermissionMode::Auto, &[], &["Bash(rm *)".into()]).unwrap();
         // Even after the user "always allows" `rm -rf build/`, the deny rule
         // still wins.
         sb.allow_always("shell", &shell_input("rm -rf build/"))
@@ -1113,7 +1115,7 @@ mod tests {
 
     #[test]
     fn allow_always_returns_none_without_candidate_text() {
-        let sb = Sandbox::without_rules(PermissionMode::Guarded);
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
         // Missing command / path keys.
         assert!(sb.allow_always("shell", &json!({"timeout": 30})).is_none());
         assert!(sb.allow_always("write", &json!({})).is_none());
@@ -1196,7 +1198,7 @@ mod tests {
     /// from approval too.
     #[test]
     fn allow_wildcard_does_not_exempt_compound_commands() {
-        let sb = Sandbox::new(PermissionMode::Guarded, &["Bash(git *)".into()], &[]).unwrap();
+        let sb = Sandbox::new(PermissionMode::Auto, &["Bash(git *)".into()], &[]).unwrap();
         // Single-segment commands exempt as usual.
         assert!(matches!(
             sb.decide("shell", &shell_input("git status"), false, false),
@@ -1220,7 +1222,7 @@ mod tests {
     /// variation still asks.
     #[test]
     fn allow_always_exact_rule_exempts_same_compound_command() {
-        let sb = Sandbox::new(PermissionMode::Guarded, &["Bash(git *)".into()], &[]).unwrap();
+        let sb = Sandbox::new(PermissionMode::Auto, &["Bash(git *)".into()], &[]).unwrap();
         let cmd = "git pull && npm test";
         assert!(matches!(
             sb.decide("shell", &shell_input(cmd), false, false),
@@ -1283,7 +1285,7 @@ mod tests {
         );
         // Allow wildcards do not exempt compound commands with process
         // substitution.
-        let allow = Sandbox::new(PermissionMode::Guarded, &["Bash(diff *)".into()], &[]).unwrap();
+        let allow = Sandbox::new(PermissionMode::Auto, &["Bash(diff *)".into()], &[]).unwrap();
         assert!(matches!(
             allow.decide(
                 "shell",
@@ -1303,7 +1305,7 @@ mod tests {
     #[test]
     fn allow_rules_bind_to_tool_semantics() {
         let sb = Sandbox::new(
-            PermissionMode::Guarded,
+            PermissionMode::Auto,
             &["Bash(git *)".into(), "File(docs/**)".into()],
             &[],
         )

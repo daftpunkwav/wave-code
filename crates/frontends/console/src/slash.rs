@@ -21,9 +21,12 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 14] = [
+pub const COMMANDS: [&str; 17] = [
     "help",
     "clear",
+    "copy",
+    "export",
+    "settings",
     "usage",
     "version",
     "compact",
@@ -81,6 +84,7 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
     match invocation.name.as_str() {
         "help" => Effect::Ops(Vec::new()),
         "clear" => Effect::Ops(Vec::new()), // handled by the UI caller
+        "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
         "compact" => Effect::Ops(vec![Op::Compact]),
         "model" => {
@@ -121,21 +125,22 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
     }
 }
 
-/// Cycle plan → guarded → auto → plan.
+/// Cycle plan → auto → wave → plan.
 pub fn cycle_mode(current: &str) -> String {
     match current {
-        "plan" => "guarded".to_string(),
-        "auto" => "plan".to_string(),
-        _ => "auto".to_string(),
+        "plan" => "auto".to_string(),
+        "auto" => "wave".to_string(),
+        _ => "plan".to_string(),
     }
 }
 
-/// Normalize a user-supplied mode onto the canonical wire names.
+/// Normalize a user-supplied mode onto the canonical wire names
+/// (legacy aliases included; see `PermissionMode::parse`).
 pub fn normalize_mode(input: &str) -> String {
     match input.to_lowercase().as_str() {
         "plan" => "plan".to_string(),
-        "auto" | "yolo" | "bypasspermissions" => "auto".to_string(),
-        _ => "guarded".to_string(),
+        "wave" | "yolo" | "bypasspermissions" => "wave".to_string(),
+        _ => "auto".to_string(),
     }
 }
 
@@ -153,9 +158,10 @@ pub fn help_lines() -> Vec<String> {
         "  up / down             input history".to_string(),
         "  !cmd                  run a local shell command".to_string(),
         "Commands:".to_string(),
-        "  /help /clear /usage /version /compact /model <name> /permissions [mode] /plan"
+        "  /help /clear /copy /export [path] /usage /version /compact /model <name>".to_string(),
+        "  /permissions [mode] /plan /theme <light|dark|auto> /settings /memory"
             .to_string(),
-        "  /theme <light|dark> /memory /snapshots /goal /status /exit".to_string(),
+        "  /snapshots /goal /status /exit".to_string(),
     ]
 }
 
@@ -195,6 +201,12 @@ mod tests {
         let effect = dispatch(&parse("/clear").unwrap(), &state(), status.as_ref());
         assert_eq!(effect, Effect::Ops(Vec::new()));
 
+        // Caller-handled commands dispatch as no-ops on the wire.
+        for name in ["copy", "export", "theme", "usage", "version"] {
+            let effect = dispatch(&parse(&format!("/{name}")).unwrap(), &state(), status.as_ref());
+            assert_eq!(effect, Effect::Ops(Vec::new()), "{name}");
+        }
+
         let effect = dispatch(&parse("/model fast").unwrap(), &state(), status.as_ref());
         assert_eq!(
             effect,
@@ -228,11 +240,12 @@ mod tests {
 
     #[test]
     fn mode_cycling_and_normalization() {
-        assert_eq!(cycle_mode("plan"), "guarded");
-        assert_eq!(cycle_mode("guarded"), "auto");
-        assert_eq!(cycle_mode("auto"), "plan");
-        assert_eq!(normalize_mode("YOLO"), "auto");
+        assert_eq!(cycle_mode("plan"), "auto");
+        assert_eq!(cycle_mode("auto"), "wave");
+        assert_eq!(cycle_mode("wave"), "plan");
+        assert_eq!(normalize_mode("YOLO"), "wave");
         assert_eq!(normalize_mode("plan"), "plan");
-        assert_eq!(normalize_mode("nonsense"), "guarded");
+        assert_eq!(normalize_mode("guarded"), "auto");
+        assert_eq!(normalize_mode("nonsense"), "auto");
     }
 }

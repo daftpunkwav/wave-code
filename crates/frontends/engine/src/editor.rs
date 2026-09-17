@@ -35,7 +35,8 @@ pub const CURSOR_MARKER: &str = "\x1b_wc\x07";
 pub struct EditorStyle {
     /// Border color (switched to accent colors in plan/shell modes).
     pub border: Style,
-    /// The prompt glyph (`>` or `!`).
+    /// The prompt glyph (a full square-wave cycle `⊓⊔`, or `!` in
+    /// shell mode).
     pub prompt: Style,
     /// Bold highlight for a leading `/command` token.
     pub slash_command: Style,
@@ -141,7 +142,7 @@ impl Editor {
             goal_col: None,
             last_body_width: 40,
             style,
-            prompt: ">".to_string(),
+            prompt: "⊓⊔".to_string(),
             label: None,
             argument_hint: None,
             history: History::default(),
@@ -160,7 +161,7 @@ impl Editor {
         self.provider = Some(provider);
     }
 
-    /// Set the prompt glyph (e.g. `!` in shell mode).
+    /// Set the prompt glyph (e.g. `!` for shell commands).
     pub fn set_prompt(&mut self, prompt: impl Into<String>) {
         self.prompt = prompt.into();
     }
@@ -855,7 +856,8 @@ impl Editor {
             return self.lines.clone();
         }
         let content_width = inner_width - 2; // flanking spaces around the body
-        let text_budget = content_width.saturating_sub(2); // prompt glyph + space
+        let prompt_span = width::width(&self.prompt) + 1;
+        let text_budget = content_width.saturating_sub(prompt_span).max(1);
         self.last_body_width = text_budget.max(1);
 
         let rows = self.build_visual(text_budget);
@@ -1142,7 +1144,7 @@ mod tests {
         let body = &rows[1];
         assert!(body.contains("\x1b[1m"), "bold slash token: {body:?}");
         assert!(!body.contains("\x1b[4m"), "no shell style: {body:?}");
-        assert!(plain_row(&rows, 1).contains("> /help now"), "{body:?}");
+        assert!(plain_row(&rows, 1).contains("⊓⊔ /help now"), "{body:?}");
     }
 
     #[test]
@@ -1153,7 +1155,7 @@ mod tests {
         let body = &rows[1];
         assert!(body.contains("\x1b[4m"), "underlined shell token: {body:?}");
         assert!(!body.contains("\x1b[1m"), "no slash style: {body:?}");
-        assert!(plain_row(&rows, 1).contains("> !ls -la"), "{body:?}");
+        assert!(plain_row(&rows, 1).contains("⊓⊔ !ls -la"), "{body:?}");
     }
 
     #[test]
@@ -1344,7 +1346,7 @@ mod tests {
         assert_eq!(strip_ansi(&rows[0]), "╭──────────────────╮");
         assert_eq!(
             strip_ansi(&rows[1]),
-            "│ > hi             │",
+            "│ ⊓⊔ hi            │",
             "cursor at end: {:?}",
             rows[1]
         );
@@ -1372,7 +1374,7 @@ mod tests {
         let rows = editor.render_box(20, 24);
         // Body budget: 20 - 2 - 4 - 2 = 12 → two visual rows + borders.
         assert_eq!(rows.len(), 4, "wrapped into 2 body rows: {rows:?}");
-        assert!(strip_ansi(&rows[1]).starts_with("│ > aaaaaaaaaa"));
+        assert!(strip_ansi(&rows[1]).starts_with("│ ⊓⊔ aaaaaaaaa"));
     }
 
     #[test]

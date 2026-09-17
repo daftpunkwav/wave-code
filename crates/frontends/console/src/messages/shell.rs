@@ -1,13 +1,16 @@
 //! The local shell-command transcript component (`!` REPL commands).
 //!
-//! Live: a dim bullet, the `$ command` header, and a scrolling tail of
-//! output. Finished: the exit outcome colors the bullet, output
+//! Live: a pulsing saw bullet, the `$ command` header, and a scrolling
+//! tail of output. Finished: the exit outcome colors the bullet, output
 //! collapses to a preview with an elision row, and Ctrl+O expansion is
 //! driven through the shared flag like every other expandable block.
+
+use std::time::Instant;
 
 use crate::messages::ExpandedFlag;
 use crate::theme::{self, Token};
 use tui_engine::component::Component;
+use tui_engine::loader::SAW_FRAMES;
 use tui_engine::width;
 
 /// Output tail rows shown live.
@@ -16,6 +19,8 @@ pub const LIVE_TAIL_LINES: usize = 5;
 pub const PREVIEW_LINES: usize = 10;
 /// Rolling output buffer cap (oldest rows drop and are counted).
 const BUFFER_CAP: usize = 400;
+/// Frame interval of the running saw pulse in milliseconds.
+const RUN_FRAME_INTERVAL: u128 = 130;
 
 /// One captured output row: `(stderr, text)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +38,8 @@ pub struct ShellCard {
     /// meaning killed / reaped without an exit code.
     exit: Option<Option<i32>>,
     expanded_flag: ExpandedFlag,
+    /// When the command started; the running-pulse phase reference.
+    started: Instant,
 }
 
 impl ShellCard {
@@ -44,6 +51,7 @@ impl ShellCard {
             dropped: 0,
             exit: None,
             expanded_flag,
+            started: Instant::now(),
         }
     }
 
@@ -82,11 +90,13 @@ impl Component for ShellCard {
 
         let mut out = Vec::new();
         let bullet = if running {
-            theme.paint(Token::TextDim, "● ")
+            let step = (self.started.elapsed().as_millis() / RUN_FRAME_INTERVAL) as usize;
+            let frame = SAW_FRAMES[step % SAW_FRAMES.len()];
+            theme.paint(Token::TextDim, &format!("{frame} "))
         } else if failed {
-            theme.paint(Token::Error, "✗ ")
+            theme.paint(Token::Error, &format!("{} ", crate::chrome::symbols::FAILED))
         } else {
-            theme.paint(Token::Success, "● ")
+            theme.paint(Token::Success, &format!("{} ", crate::chrome::symbols::DONE))
         };
         out.push(format!(
             "{bullet}{}",

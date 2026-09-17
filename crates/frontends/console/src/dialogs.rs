@@ -31,6 +31,8 @@ pub enum Answer {
         /// Chosen option or free text (empty = dismissed).
         answer: String,
     },
+    /// The dialog closed without producing an answer (settings).
+    Dismissed,
 }
 
 /// Which dialog is showing.
@@ -39,6 +41,8 @@ pub enum Dialog {
     Approval(ApprovalDialog),
     /// A structured question.
     Question(QuestionDialog),
+    /// The interactive settings panel.
+    Settings(SettingsDialog),
 }
 
 impl Dialog {
@@ -47,6 +51,7 @@ impl Dialog {
         match self {
             Self::Approval(dialog) => dialog.title.clone(),
             Self::Question(dialog) => dialog.title.clone(),
+            Self::Settings(dialog) => dialog.title(),
         }
     }
 
@@ -55,6 +60,7 @@ impl Dialog {
         match self {
             Self::Approval(dialog) => dialog.handle_key(event),
             Self::Question(dialog) => dialog.handle_key(event),
+            Self::Settings(dialog) => dialog.handle_key(event),
         }
     }
 
@@ -63,6 +69,7 @@ impl Dialog {
         match self {
             Self::Approval(dialog) => dialog.render(width),
             Self::Question(dialog) => dialog.render(width),
+            Self::Settings(dialog) => dialog.render(width),
         }
     }
 
@@ -75,6 +82,7 @@ impl Dialog {
                 call_id: dialog.call_id.clone(),
                 answer: String::new(),
             },
+            Self::Settings(_) => Answer::Dismissed,
         }
     }
 }
@@ -420,5 +428,155 @@ mod tests {
         assert!(joined.contains("$ echo hi"), "{joined}");
         assert!(joined.contains("Yes, allow once"), "{joined}");
         assert!(strip_ansi(&lines[0]).starts_with('╭'));
+    }
+}
+
+/// The interactive settings panel: rows of (setting, value), Up/Down to
+/// move, Left/Right or Enter to cycle the value. Changes apply
+/// immediately and persist to the settings file.
+pub struct SettingsDialog {
+    settings: crate::settings::SharedSettings,
+    title: String,
+    selected: usize,
+}
+
+/// One settings row as displayed: label plus the current value text.
+struct SettingsRow {
+    label: &'static str,
+    value: String,
+}
+
+impl SettingsDialog {
+    /// A panel bound to the shared settings handle.
+    pub fn new(settings: crate::settings::SharedSettings) -> Self {
+        Self {
+            settings,
+            title: "Settings (left/right to change, esc to close)".to_string(),
+            selected: 0,
+        }
+    }
+
+    fn title(&self) -> String {
+        self.title.clone()
+    }
+
+    /// Snapshot the rows in display order.
+    fn rows(&self) -> Vec<SettingsRow> {
+        use crate::settings::{DiffStyle, EditDisplay, ToolDisplay};
+        let view = self.settings.get();
+        vec![
+            SettingsRow {
+                label: "render user input as markdown",
+                value: if view.render_user_markdown { "on" } else { "off" }.to_string(),
+            },
+            SettingsRow {
+                label: "tool call display",
+                value: match view.tool_display {
+                    ToolDisplay::Names => "names",
+                    ToolDisplay::Summary => "summary",
+                    ToolDisplay::Full => "full",
+                }
+                .to_string(),
+            },
+            SettingsRow {
+                label: "edit tool rendering",
+                value: match view.edit_display {
+                    EditDisplay::Tool => "tool only",
+                    EditDisplay::Diff => "diff",
+                }
+                .to_string(),
+            },
+            SettingsRow {
+                label: "diff layout",
+                value: match view.diff_style {
+                    DiffStyle::Unified => "unified",
+                    DiffStyle::Split => "split",
+                }
+                .to_string(),
+            },
+            SettingsRow {
+                label: "wave denylist",
+                value: format!("{} entries (edit settings file)", view.wave_denylist.len()),
+            },
+        ]
+    }
+
+    /// Cycle the selected row's value one step (direction: +1 / -1).
+    fn cycle(&self, direction: isize) {
+        use crate::settings::{DiffStyle, EditDisplay, ToolDisplay};
+        let rows = self.rows();
+        let label = rows.get(self.selected).map(|r| r.label);
+        self.settings.update(|view| match label {
+            Some("render user input as markdown") => {
+                view.render_user_markdown = !view.render_user_markdown;
+            }
+            Some("tool call display") => {
+                view.tool_display = match (view.tool_display, direction) {
+                    (ToolDisplay::Names, 1) | (ToolDisplay::Summary, -1) => ToolDisplay::Summary,
+                    (ToolDisplay::Summary, 1) | (ToolDisplay::Full, -1) => ToolDisplay::Full,
+                    _ => ToolDisplay::Names,
+                };
+            }
+            Some("edit tool rendering") => {
+                view.edit_display = match view.edit_display {
+                    EditDisplay::Tool => EditDisplay::Diff,
+                    EditDisplay::Diff => EditDisplay::Tool,
+                };
+            }
+            Some("diff layout") => {
+                view.diff_style = match view.diff_style {
+                    DiffStyle::Unified => DiffStyle::Split,
+                    DiffStyle::Split => DiffStyle::Unified,
+                };
+            }
+            _ => {}
+        });
+    }
+
+    /// Handle one key; `Some(Answer::Dismissed)` when the panel closes.
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        let count = self.rows().len();
+        match (event.key, event.mods) {
+            (Key::Esc, _) => Some(Answer::Dismissed),
+            (Key::Up, _) => {
+                self.selected = self.selected.saturating_sub(1);
+                None
+            }
+            (Key::Down, _) => {
+                self.selected = (self.selected + 1).min(count.saturating_sub(1));
+                None
+            }
+            (Key::Left, _) => {
+                self.cycle(-1);
+                None
+            }
+            (Key::Right, _) | (Key::Enter, _) => {
+                self.cycle(1);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let rows = self.rows();
+        let mut body = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            let marker = if index == self.selected { "▍" } else { " " };
+            let label = theme.paint(Token::Text, row.label);
+            let value = if index == self.selected {
+                theme.bold(Token::Primary, &row.value)
+            } else {
+                theme.paint(Token::TextDim, &row.value)
+            };
+            body.push(format!("{marker} {label}  {value}"));
+        }
+        body.push(String::new());
+        body.push(theme.paint(
+            Token::TextMuted,
+            "the wave denylist lives in ~/.wavecode/console-settings.json",
+        ));
+        border::frame(body, columns, theme.style(Token::BorderFocus), Some(self.title.clone()))
     }
 }

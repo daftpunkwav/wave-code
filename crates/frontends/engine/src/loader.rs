@@ -1,45 +1,58 @@
 //! Spinner (loader) component: animated frame + label.
 //!
-//! Two frame sets, matching the reference timing: braille dots at 80 ms
-//! and moon phases at 120 ms. The frame is derived from elapsed time, so
-//! no background timer is needed — the render loop drives animation.
+//! Waveform frame sets matching the WaveCode sound-wave identity, one
+//! wave per activity kind: sine ripple for assistant speech (composing),
+//! triangle for thinking, saw ramp for machine work (waiting/tools).
+//! The frame is derived from elapsed time, so no background timer is
+//! needed — the render loop drives animation.
 
 use std::time::Instant;
 
 use crate::color::Style;
 use crate::component::Component;
 
-/// Braille dot spinner frames (80 ms interval).
-pub const BRAILLE_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// Braille spinner frame interval in milliseconds.
-pub const BRAILLE_INTERVAL_MS: u64 = 80;
+/// Sine ripple frames: amplitude swells and recedes (80 ms).
+pub const SINE_FRAMES: [&str; 12] = [
+    "▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂",
+];
+/// Sine spinner frame interval in milliseconds.
+pub const SINE_INTERVAL_MS: u64 = 80;
 
-/// Moon phase spinner frames (120 ms interval).
-pub const MOON_FRAMES: [&str; 8] = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"];
-/// Moon spinner frame interval in milliseconds.
-pub const MOON_INTERVAL_MS: u64 = 120;
+/// Saw ramp frames: climbs then drops back sharp (100 ms).
+pub const SAW_FRAMES: [&str; 4] = ["▁", "▃", "▅", "▇"];
+/// Saw spinner frame interval in milliseconds.
+pub const SAW_INTERVAL_MS: u64 = 100;
+
+/// Triangle frames: symmetric up-down sweep (80 ms).
+pub const TRIANGLE_FRAMES: [&str; 6] = ["▁", "▃", "▅", "▇", "▅", "▃"];
+/// Triangle spinner frame interval in milliseconds.
+pub const TRIANGLE_INTERVAL_MS: u64 = 80;
 
 /// The spinner glyph set to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpinnerStyle {
-    /// Braille dots (working/composing indicator).
-    Braille,
-    /// Moon phases (waiting/tool indicator).
-    Moon,
+    /// Sine ripple (assistant composing indicator).
+    Sine,
+    /// Saw ramp (waiting/tool indicator).
+    Saw,
+    /// Triangle sweep (thinking indicator).
+    Triangle,
 }
 
 impl SpinnerStyle {
     fn frames(self) -> &'static [&'static str] {
         match self {
-            Self::Braille => &BRAILLE_FRAMES,
-            Self::Moon => &MOON_FRAMES,
+            Self::Sine => &SINE_FRAMES,
+            Self::Saw => &SAW_FRAMES,
+            Self::Triangle => &TRIANGLE_FRAMES,
         }
     }
 
     fn interval(self) -> std::time::Duration {
         match self {
-            Self::Braille => std::time::Duration::from_millis(BRAILLE_INTERVAL_MS),
-            Self::Moon => std::time::Duration::from_millis(MOON_INTERVAL_MS),
+            Self::Sine => std::time::Duration::from_millis(SINE_INTERVAL_MS),
+            Self::Saw => std::time::Duration::from_millis(SAW_INTERVAL_MS),
+            Self::Triangle => std::time::Duration::from_millis(TRIANGLE_INTERVAL_MS),
         }
     }
 }
@@ -107,16 +120,28 @@ mod tests {
 
     #[test]
     fn frame_advances_with_elapsed_time() {
-        let mut loader = Loader::new(SpinnerStyle::Braille, "working", Style::new(), Style::new());
+        let mut loader = Loader::new(SpinnerStyle::Sine, "working", Style::new(), Style::new());
         let first = loader.current_frame();
-        assert_eq!(strip_ansi(&loader.render(80)[0]), "⠋ working");
+        assert_eq!(strip_ansi(&loader.render(80)[0]), "▁ working");
         std::thread::sleep(std::time::Duration::from_millis(90));
         assert_ne!(loader.current_frame(), first);
     }
 
     #[test]
-    fn moon_style_starts_at_new_moon() {
-        let loader = Loader::new(SpinnerStyle::Moon, "waiting", Style::new(), Style::new());
-        assert_eq!(loader.current_frame(), "🌑");
+    fn sine_style_starts_at_trough() {
+        let loader = Loader::new(SpinnerStyle::Sine, "waiting", Style::new(), Style::new());
+        assert_eq!(loader.current_frame(), "▁");
+    }
+
+    #[test]
+    fn saw_style_cycles_up_then_drops() {
+        let loader = Loader::new(SpinnerStyle::Saw, "tool", Style::new(), Style::new());
+        assert_eq!(loader.current_frame(), "▁");
+    }
+
+    #[test]
+    fn triangle_style_starts_at_trough() {
+        let loader = Loader::new(SpinnerStyle::Triangle, "thinking", Style::new(), Style::new());
+        assert_eq!(loader.current_frame(), "▁");
     }
 }

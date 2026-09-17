@@ -38,7 +38,10 @@ pub fn row1(state: &AppState, tip: Option<&str>, columns: usize) -> String {
     line.push_str("  ");
     line.push_str(&theme.paint(Token::TextDim, &crate::ui::shorten_cwd(&state.cwd, 3)));
     if let Some(branch) = &state.git_branch {
-        line.push_str(&theme.paint(Token::TextDim, &format!(" ⎇ {branch}")));
+        line.push_str(&theme.paint(
+            Token::TextDim,
+            &format!(" {} {branch}", crate::chrome::symbols::BRANCH),
+        ));
     }
     if let Some(tip) = tip {
         let used = width::width(&line);
@@ -79,15 +82,15 @@ pub fn row2(state: &AppState, hint: &TransientHint, columns: usize) -> String {
     left
 }
 
-/// The bracketed mode badge.
+/// The tinted-bar mode badge: a colored tick plus the lowercase mode.
 pub fn mode_badge(mode: &str) -> String {
     let theme = theme::current();
     let (label, token) = match mode {
-        "plan" => ("[Plan Mode]", Token::Primary),
-        "auto" => ("[Auto Approve]", Token::Warning),
-        _ => ("[Ask When Needed]", Token::Text),
+        "plan" => ("plan", Token::Primary),
+        "wave" => ("wave", Token::Warning),
+        _ => ("auto", Token::Text),
     };
-    theme.bold(token, label)
+    format!("{}{}", theme.bold(token, "▍"), theme.bold(token, label))
 }
 
 #[cfg(test)]
@@ -113,7 +116,7 @@ mod tests {
         unsafe { std::env::set_var("HOME", "/home/user") };
         let line = row1(&state(), Some("ctrl+o expand tool output"), 120);
         let plain = width::strip_ansi(&line);
-        assert!(plain.contains("[Ask When Needed]"), "{plain}");
+        assert!(plain.contains("▍auto"), "{plain}");
         assert!(plain.contains("test-model"), "{plain}");
         assert!(plain.contains("proj"), "{plain}");
         assert!(plain.contains("ctrl+o expand tool output"), "{plain}");

@@ -1,6 +1,6 @@
 //! The todo panel: session task list rendered from `todowrite` calls.
 //!
-//! Mounted between the activity pane and the queue pane. Collapsed it
+//! Mounted between the transcript and the queue pane. Collapsed it
 //! shows at most [`COLLAPSED_ROWS`] rows — every in-progress entry plus
 //! the earliest pending and latest done — folding the rest into a
 //! distribution summary row; Ctrl+T expands when the list overflows.
@@ -91,13 +91,21 @@ pub fn render_todos(todos: &[TodoEntry], expanded: bool, columns: usize) -> Vec<
 /// struck through), `○ pending` (dim).
 fn todo_row(theme: &crate::theme::Theme, entry: &TodoEntry, columns: usize) -> String {
     let (marker, marker_token, text_style) = match entry.status {
-        TodoStatus::InProgress => ("●", Token::Primary, theme.style(Token::Text).bold()),
+        TodoStatus::InProgress => (
+            crate::chrome::symbols::IN_PROGRESS,
+            Token::Primary,
+            theme.style(Token::Text).bold(),
+        ),
         TodoStatus::Completed => (
-            "✓",
+            crate::chrome::symbols::CHECK,
             Token::Success,
             theme.style(Token::TextDim).strikethrough(),
         ),
-        TodoStatus::Pending => ("○", Token::TextDim, theme.style(Token::Text)),
+        TodoStatus::Pending => (
+            crate::chrome::symbols::PENDING,
+            Token::TextDim,
+            theme.style(Token::Text),
+        ),
     };
     let body_width = columns.saturating_sub(6);
     let first = width::wrap_line(&entry.content, body_width)

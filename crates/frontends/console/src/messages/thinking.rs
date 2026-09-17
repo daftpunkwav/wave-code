@@ -1,8 +1,8 @@
 //! The thinking/reasoning transcript component.
 //!
-//! Live: a braille spinner, `thinking…`, and a scrolling tail of the
-//! last two wrapped lines (dim italic). Finalized: a status bullet with
-//! a collapsed two-line preview plus an ellipsis row; Ctrl+O expansion
+//! Live: a triangle-wave spinner, `thinking…`, and a scrolling tail of
+//! the last two wrapped lines (dim italic). Finalized: a triangle bullet
+//! with a collapsed two-line preview plus an ellipsis row; Ctrl+O expansion
 //! is driven through a shared flag so every expandable block responds
 //! in one keystroke.
 
@@ -63,7 +63,7 @@ impl Thinking {
             live: true,
             expanded_flag,
             spinner: Loader::new(
-                SpinnerStyle::Braille,
+                SpinnerStyle::Triangle,
                 "thinking…",
                 theme::current().style(Token::TextDim),
                 theme::current().style(Token::TextDim),
@@ -79,7 +79,7 @@ impl Thinking {
             live: false,
             expanded_flag,
             spinner: Loader::new(
-                SpinnerStyle::Braille,
+                SpinnerStyle::Triangle,
                 "thinking…",
                 theme::current().style(Token::TextDim),
                 theme::current().style(Token::TextDim),
@@ -159,7 +159,10 @@ impl Component for Thinking {
                     if index == 0 && row_index == 0 {
                         rows.push(format!(
                             "{}{}",
-                            theme.paint(Token::TextDim, "● "),
+                            theme.paint(
+                                Token::TextDim,
+                                &format!("{} ", crate::chrome::symbols::TRIANGLE_WAVE)
+                            ),
                             italic_dim.paint(&line)
                         ));
                     } else {
@@ -220,7 +223,7 @@ mod tests {
         block.finalize();
         let lines = block.render(60);
         assert_eq!(lines.len(), 4, "bullet row + 2 preview + hint: {lines:?}");
-        assert!(strip_ansi(&lines[0]).starts_with("● one"));
+        assert!(strip_ansi(&lines[0]).starts_with("△ one"));
         assert!(
             strip_ansi(&lines[2]).contains("… (1 more lines, ctrl+o to expand)"),
             "{lines:?}"

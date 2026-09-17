@@ -136,6 +136,10 @@ impl Markdown {
         let mut heading_level: Option<HeadingLevel> = None;
         let mut in_quote = false;
         let mut code_lang: Option<String> = None;
+        // Table collection: cells accumulate the styled inline buffer,
+        // rows accumulate on row end, the table renders on table end.
+        let mut table_rows: Vec<Vec<String>> = Vec::new();
+        let mut table_row: Vec<String> = Vec::new();
 
         macro_rules! flush_inline {
             () => {
@@ -198,10 +202,12 @@ impl Markdown {
                         }
                         out.push(self.style.fence.paint("```"));
                     }
-                    Tag::Table(_) => {}
-                    Tag::TableHead => {}
-                    Tag::TableRow => {}
-                    Tag::TableCell => {}
+                    Tag::Table(_) => {
+                        flush_inline!();
+                        table_rows = Vec::new();
+                    }
+                    Tag::TableHead | Tag::TableRow => table_row = Vec::new(),
+                    Tag::TableCell => inline = String::new(),
                     _ => {}
                 },
                 Event::End(tag_end) => match tag_end {
@@ -255,10 +261,14 @@ impl Markdown {
                         out.push(self.style.fence.paint("```"));
                         out.push(String::new());
                     }
-                    TagEnd::Table => {}
-                    TagEnd::TableHead => {}
-                    TagEnd::TableRow => out.push(String::new()),
-                    TagEnd::TableCell => inline.push_str("  "),
+                    TagEnd::Table => {
+                        flush_inline!();
+                        render_table(&table_rows, columns, &self.style, &mut out);
+                    }
+                    TagEnd::TableHead | TagEnd::TableRow => {
+                        table_rows.push(std::mem::take(&mut table_row));
+                    }
+                    TagEnd::TableCell => table_row.push(std::mem::take(&mut inline)),
                     _ => {}
                 },
                 Event::Text(text_event) => {
@@ -304,6 +314,80 @@ impl Markdown {
         }
         out
     }
+}
+
+/// Render collected table rows as a box-drawing table. Column widths
+/// come from the widest visible cell; when the table exceeds `columns`
+/// the columns shrink evenly (cells truncate). Row 0 is the header.
+fn render_table(
+    rows: &[Vec<String>],
+    columns: usize,
+    style: &MarkdownStyle,
+    out: &mut Vec<String>,
+) {
+    if rows.is_empty() || rows[0].is_empty() {
+        return;
+    }
+    let col_count = rows[0].len();
+    let border = style.fence;
+    // Natural widths per column, then an even shrink to fit the line.
+    let mut widths: Vec<usize> = vec![1; col_count];
+    for row in rows {
+        for (index, cell) in row.iter().enumerate().take(col_count) {
+            widths[index] = widths[index].max(width::width(cell));
+        }
+    }
+    let natural_total: usize = widths.iter().sum();
+    // Row width = two outer borders plus two spaces around every cell,
+    // so the columns share `columns - 2 - 2*cols`.
+    let budget = columns
+        .saturating_sub(2 + 2 * col_count)
+        .max(col_count);
+    if natural_total > budget {
+        let each = (budget / col_count).max(3);
+        for w in widths.iter_mut() {
+            *w = (*w).min(each);
+        }
+    }
+    let rule = |out: &mut Vec<String>, left: &str, mid: &str, right: &str| {
+        let segments: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
+        out.push(border.paint(&format!(
+            "{left}{}{right}",
+            segments.join(&border.paint(mid).to_string())
+        )));
+    };
+    let render_row = |out: &mut Vec<String>, row: &[String], header: bool| {
+        let mut line = String::from("│");
+        for (index, cell) in row.iter().enumerate().take(col_count) {
+            // Shrunken tables truncate overflowing cells to the column.
+            let cut = width::truncate_to_width(cell, widths[index]);
+            let cut = if width::width(&cut) < width::width(cell) {
+                let mut trimmed = width::truncate_to_width(cell, widths[index].saturating_sub(1));
+                trimmed.push('…');
+                trimmed
+            } else {
+                cut
+            };
+            let pad = widths[index].saturating_sub(width::width(&cut));
+            let styled = if header {
+                style.heading.bold().paint(&cut)
+            } else {
+                cut
+            };
+            line.push_str(&format!(" {styled}{} │", " ".repeat(pad)));
+        }
+        out.push(border.paint(&line));
+    };
+    rule(out, "┌", "┬", "┐");
+    if let Some(head) = rows.first() {
+        render_row(out, head, true);
+    }
+    rule(out, "├", "┼", "┤");
+    for row in rows.iter().skip(1) {
+        render_row(out, row, false);
+    }
+    rule(out, "└", "┴", "┘");
+    out.push(String::new());
 }
 
 #[cfg(test)]
@@ -412,15 +496,25 @@ mod tests {
     }
 
     #[test]
-    fn tables_render_as_rows() {
+    fn tables_render_as_box_drawing() {
         let mut md = renderer();
-        let lines = md.render("| a | b |\n|---|---|\n| 1 | 2 |", 40);
-        let joined: String = lines
-            .iter()
-            .map(|l| strip_ansi(l))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("a"), "{joined}");
-        assert!(joined.contains("2"), "{joined}");
+        let lines = md.render("| a | bb |\n|---|---|\n| 1 | 2 |", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0], "┌───┬────┐");
+        assert_eq!(plain[1], "│ a │ bb │");
+        assert_eq!(plain[2], "├───┼────┤");
+        assert_eq!(plain[3], "│ 1 │ 2  │");
+        assert_eq!(plain[4], "└───┴────┘");
+    }
+
+    #[test]
+    fn wide_tables_shrink_to_fit() {
+        let mut md = renderer();
+        let long = "x".repeat(60);
+        let lines = md.render(&format!("| {long} |\n|---|\n| 1 |"), 40);
+        assert!(
+            lines.iter().all(|l| width::width(l) <= 40),
+            "table fits: {lines:?}"
+        );
     }
 }

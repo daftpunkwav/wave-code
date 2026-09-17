@@ -12,17 +12,31 @@ The interactive console is two crates over the wire + actor seam:
   `operations-actor` (locked by `dependency_matrix_locked`), and never
   names capabilities or the composition root.
 
+## Wave identity
+
+Basic wave kinds map one-to-one onto activity categories; the same
+glyph always means the same kind of surface:
+
+| Wave | Category | Surfaces |
+| --- | --- | --- |
+| square `⊓` | user input (keyed-in pulses) | editor prompt, user bullet, queue pointer |
+| sine `∿` | assistant speech | assistant bullet, composing spinner |
+| triangle `△` | thinking | thinking spinner + bullet |
+| saw `◿` | machine work | tool/shell running dot, waiting/tool spinner |
+
+Result markers (`●` done, `✗` failed, `○` pending) stay neutral — they
+report outcome, not activity kind.
+
 ## Frame model
 
 One frame is the full logical line array:
 
 ```
 transcript (welcome, user/assistant messages, thinking blocks, tool cards, shell cards, status)
-activity pane            (phase spinner: moon for waiting/tool, braille for composing)
 todo panel               (todowrite mirror: ● in-progress / ✓ done / ○ pending)
 queue pane               (queued user messages + steer hint)
-editor box               (rounded frame, `>` prompt, autocomplete popup below)
-footer row 1             ([mode] model cwd ⎇ branch | rotating tip)
+editor box               (rounded frame, `⊓⊔` prompt, autocomplete popup below)
+footer row 1             (▍mode model cwd ⎇ branch · rotating tip)
 footer row 2             (transient exit hint ... context: N% (used/max))
 ```
 
@@ -65,13 +79,15 @@ receivers remain compatible.
   persistent JSONL history under `~/.wavecode/input-history/console.jsonl`.
 - Bracketed paste with large-paste collapse (`[paste #N +L lines]`
   markers expand atomically on submit).
-- Slash commands (`/help /usage /version /compact /model /permissions
-  /plan /theme /memory /snapshots /goal /status /exit`) with fuzzy
-  completion; unknown `/tokens` fall through as user input (skills).
-  `/usage` renders a severity-colored context bar plus the cumulative
-  token split accumulated from `TokenCount` samples. Mode and model
-  commands update the local chrome immediately (there is no
-  mode-changed wire event).
+- Slash commands (`/help /clear /copy /export /usage /version /compact
+  /model /permissions /plan /theme /memory /snapshots /goal /status
+  /exit`) with fuzzy completion; unknown `/tokens` fall through as user
+  input (skills). `/usage` renders a severity-colored context bar plus
+  the cumulative token split accumulated from `TokenCount` samples.
+  `/copy` puts the last assistant message on the clipboard via OSC 52;
+  `/export [path]` writes the full untrimmed user/assistant dialogue to
+  markdown. Mode and model commands update the local chrome immediately
+  (there is no mode-changed wire event).
 - `!cmd` shell mode: a leading `!` runs the command locally under the
   platform shell (`cmd /C` / `sh -c`) with live output in a transcript
   card (dim tail, `(esc to cancel)`, exit-code row on failure). The
@@ -81,19 +97,60 @@ receivers remain compatible.
   `cmd` tree via `taskkill /T`; elsewhere `start_kill`). Shell commands
   never reach the session, run concurrently with a busy turn, and only
   one runs at a time.
-- Shift+Tab cycles the permission mode (ask → auto → plan) and re-tints
-  the editor border (plan = primary, auto = warning).
+- Shift+Tab cycles the permission mode (plan → auto → wave) and
+  re-tints the editor border (plan = primary, wave = warning).
+- Permission modes: `plan` is read-only (non-read-only tools are
+  denied outright, no prompts), `auto` lets edits through and asks
+  only for command execution and destructive tools, `wave` allows
+  everything. The wave denylist (`wave_denylist` in
+  `~/.wavecode/console-settings.json`, `Bash(pattern)` rule syntax or
+  bare commands) is enforced as sandbox deny rules in every mode: a
+  banned command is refused without a prompt.
+- `/settings` opens an interactive panel (Up/Down to move, Left/Right
+  or Enter to cycle, changes persist to
+  `~/.wavecode/console-settings.json` and apply to live components):
+  user-input markdown rendering on/off, tool-call verbosity
+  (names/summary/full), edit rendering (tool only/diff), diff layout
+  (unified/split), and the wave-denylist entry count.
+- Submitted user input renders as markdown in the transcript by
+  default (the editor never renders); the setting turns it off.
+- Tables in assistant and user markdown render as box-drawing grids
+  with bold headers and even column shrink to fit the width.
 - `@` file mentions with a bounded workspace inventory (2 000 entries,
   vendored/hidden directories skipped).
 - Ctrl+C cascade: interrupt when busy, otherwise arm the double-press
-  exit (1 500 ms window, footer hint). Ctrl+O toggles expansion, Ctrl+T
-  toggles the todo panel, Ctrl+S steers the running turn (queued
-  message or editor text), Esc interrupts while busy (both interrupts
-  acknowledge with a status line).
+  exit (1 500 ms window, footer hint); Ctrl+D on an empty editor arms
+  the same cascade. Ctrl+O toggles expansion, Ctrl+T toggles the todo
+  panel, Ctrl+S steers the running turn (queued message or editor
+  text), Esc interrupts while busy (both interrupts acknowledge with a
+  status line).
+- Turn-completion notifications: one OSC 9 desktop notification per
+  finished turn unless interrupted or a queued follow-up continues the
+  session (`WAVECODE_NOTIFY=0` disables).
 - The footer shows the workspace git branch (⎇ badge), read directly
   from `.git/HEAD` (parent walk, worktree `gitdir:` file form, short
   sha when detached) at construction and on every turn start — no
   subprocess.
+- The welcome card is frameless and centered: the `slant` figlet
+  wordmark (`WAVECODE`, generated with pyfiglet) fading primary→accent
+  top to bottom, sitting directly on the braille oscilloscope trace —
+  a 1-pixel amplitude-modulated sine line that flows out of the
+  letters — above the dim-label info grid (model / dir + ⎇ branch /
+  mode + mcp + version). Below 56 columns the wordmark falls back to
+  the spaced `W A V E C O D E` line. Resizing stirs the trace: it
+  slides right with an ease-out tail for 1.4 s, then settles (a tick
+  drives the frames; `Welcome::is_rippling` reports the state). A
+  `#[ignore]` snapshot test (`welcome_snapshot`) prints it for
+  eyeballing.
+- Every semantic glyph comes from `chrome/symbols.rs` (single source):
+  `⊓⊔` square wave for user input, `∿` sine for assistant speech, `△`
+  triangle for thinking, `●`/`✓`/`○`/`✗` neutral results, `⎇` branch.
+  Motion is a single-cell pulse instead of moving blocks: the editor
+  prompt phase-flips `⊓⊔`↔`⊔⊓` every 400 ms while a turn runs (idle
+  is static; shell mode keeps `!`), the streaming assistant draft
+  breathes through the sine amplitude frames before settling on `∿`,
+  a running tool or shell card pulses the saw amplitude, queued
+  messages flip square-wave phases.
 
 ## Input sanitizing
 

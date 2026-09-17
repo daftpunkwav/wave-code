@@ -3,7 +3,7 @@
  * @description The interactive console frontend over the session wire.
  *
  * Responsibilities:
- * - Own the themed chrome: welcome card, editor, footer, and activity.
+ * - Own the themed chrome: welcome card, editor, and footer.
  * - Translate session wire events into transcript components.
  * - Translate key input into submissions, approvals, and commands.
  *
@@ -24,6 +24,7 @@ pub mod gitinfo;
 pub mod history;
 pub mod messages;
 pub mod panes;
+pub mod settings;
 pub mod slash;
 pub mod state;
 pub mod theme;
@@ -48,14 +49,16 @@ mod dependency_matrix_locked {
     #[test]
     fn console_ui_internal_dependencies_are_locked() {
         const INTERNAL: [&str; 3] = ["tui-engine", "wavecode-wire", "operations-actor"];
-        const EXTERNAL: [&str; 7] = [
+        const EXTERNAL: [&str; 9] = [
             "async-trait",
             "crossterm",
             "tokio",
             "futures",
+            "serde",
             "serde_json",
             "uuid",
             "anyhow",
+            "base64",
         ];
         let manifest = include_str!("../Cargo.toml");
         let mut in_deps = false;

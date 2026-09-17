@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-/// What the harness is doing right now; drives the activity indicator.
+/// What the harness is doing right now; drives the input pulse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamingPhase {
     /// Nothing running.
@@ -59,6 +59,15 @@ impl TokenUsage {
     }
 }
 
+/// One exported dialogue entry: who said what, in full.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialogueEntry {
+    /// True for a user message, false for an assistant message.
+    pub from_user: bool,
+    /// Full message text.
+    pub text: String,
+}
+
 /// Mutable UI state snapshot; components read it during rendering.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -66,7 +75,7 @@ pub struct AppState {
     pub model_name: String,
     /// Session working directory.
     pub cwd: PathBuf,
-    /// Permission mode wire name (`plan` / `guarded` / `auto`).
+    /// Permission mode wire name (`plan` / `auto` / `wave`).
     pub permission_mode: String,
     /// Connected MCP server names.
     pub mcp_servers: Vec<String>,
@@ -89,6 +98,9 @@ pub struct AppState {
     /// Git branch (or short detached sha) of the workspace, refreshed
     /// on turn starts; `None` outside a repository.
     pub git_branch: Option<String>,
+    /// Full user/assistant dialogue for `/export` and `/copy`; unlike
+    /// the transcript this is never trimmed.
+    pub dialogue: Vec<DialogueEntry>,
 }
 
 impl AppState {
@@ -113,12 +125,52 @@ impl AppState {
             todo_expanded: false,
             usage: TokenUsage::default(),
             git_branch: None,
+            dialogue: Vec::new(),
         }
     }
 
     /// True when a turn is in flight.
     pub fn busy(&self) -> bool {
         self.phase != StreamingPhase::Idle
+    }
+
+    /// Record one dialogue message for export.
+    pub fn push_dialogue(&mut self, from_user: bool, text: &str) {
+        self.dialogue.push(DialogueEntry {
+            from_user,
+            text: text.to_string(),
+        });
+    }
+
+    /// The most recent assistant message, for `/copy`.
+    pub fn last_assistant(&self) -> Option<&str> {
+        self.dialogue
+            .iter()
+            .rev()
+            .find(|entry| !entry.from_user)
+            .map(|entry| entry.text.as_str())
+    }
+
+    /// Render the dialogue as markdown: `## user` / `## assistant`
+    /// sections with the raw message text.
+    pub fn export_markdown(&self) -> String {
+        let mut out = String::from("# WaveCode session\n\n");
+        out.push_str(&format!("- model: {}\n", self.model_name));
+        out.push_str(&format!("- cwd: {}\n", self.cwd.display()));
+        if let Some(branch) = &self.git_branch {
+            out.push_str(&format!("- branch: {branch}\n"));
+        }
+        out.push('\n');
+        for entry in &self.dialogue {
+            out.push_str(if entry.from_user {
+                "## user\n\n"
+            } else {
+                "## assistant\n\n"
+            });
+            out.push_str(&entry.text);
+            out.push_str("\n\n");
+        }
+        out
     }
 }
 
@@ -187,5 +239,40 @@ mod tests {
         assert!(!state.busy());
         state.phase = StreamingPhase::Composing;
         assert!(state.busy());
+    }
+
+    #[test]
+    fn last_assistant_skips_user_messages() {
+        let mut state = AppState::new(
+            "m".to_string(),
+            PathBuf::from("."),
+            "guarded".to_string(),
+            Vec::new(),
+        );
+        assert!(state.last_assistant().is_none());
+        state.push_dialogue(true, "question");
+        state.push_dialogue(false, "first answer");
+        state.push_dialogue(true, "follow-up");
+        state.push_dialogue(false, "second answer");
+        assert_eq!(state.last_assistant(), Some("second answer"));
+    }
+
+    #[test]
+    fn export_markdown_has_roles_and_header() {
+        let mut state = AppState::new(
+            "test-model".to_string(),
+            PathBuf::from("/tmp"),
+            "guarded".to_string(),
+            Vec::new(),
+        );
+        state.git_branch = Some("main".to_string());
+        state.push_dialogue(true, "hello");
+        state.push_dialogue(false, "hi there");
+        let md = state.export_markdown();
+        assert!(md.starts_with("# WaveCode session"), "{md}");
+        assert!(md.contains("model: test-model"), "{md}");
+        assert!(md.contains("branch: main"), "{md}");
+        assert!(md.contains("## user\n\nhello"), "{md}");
+        assert!(md.contains("## assistant\n\nhi there"), "{md}");
     }
 }

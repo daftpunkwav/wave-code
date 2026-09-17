@@ -7,6 +7,7 @@
 //! streaming diff never flashes red before new text arrives.
 
 use crate::theme::{self, Token};
+use tui_engine::width;
 
 /// Context lines shown around each change cluster.
 pub const CONTEXT_LINES: usize = 3;
@@ -93,6 +94,8 @@ pub fn render(
     path: Option<&str>,
     incomplete: bool,
     max_rows: usize,
+    columns: usize,
+    style: crate::settings::DiffStyle,
 ) -> Vec<String> {
     if old.lines().count() > MAX_DIFF_LINES || new.lines().count() > MAX_DIFF_LINES {
         return Vec::new();
@@ -126,38 +129,110 @@ pub fn render(
     let mut body: Vec<String> = Vec::new();
     let mut old_number = 0usize;
     let mut new_number = 0usize;
-    for (index, row) in rows.iter().enumerate() {
-        let keep = marked[index];
-        match row {
-            DiffRow::Context(_) => {
-                old_number += 1;
-                new_number += 1;
-                if keep {
+    if style == crate::settings::DiffStyle::Split {
+        // Two columns: a Removed pairs with the following Added; unpair-
+        // ed halves leave the other side blank. Context spans full width.
+        let half = (usize::from(columns != 0) * columns).saturating_sub(14) / 2;
+        let half = half.max(8);
+        let mut index = 0usize;
+        while index < rows.len() {
+            let keep = marked[index];
+            match &rows[index] {
+                DiffRow::Context(_) if !keep => {
+                    old_number += 1;
+                    new_number += 1;
+                    index += 1;
+                }
+                DiffRow::Added(_) if !keep => {
+                    new_number += 1;
+                    index += 1;
+                }
+                DiffRow::Removed(_) if !keep => {
+                    old_number += 1;
+                    index += 1;
+                }
+                DiffRow::Context(_) => {
+                    old_number += 1;
+                    new_number += 1;
                     body.push(format!(
                         "{}  {}",
                         gutter(old_number, new_number),
-                        theme.paint(Token::Text, row_text(row))
+                        theme.paint(Token::Text, row_text(&rows[index]))
                     ));
+                    index += 1;
+                }
+                DiffRow::Removed(_) => {
+                    old_number += 1;
+                    let left = truncate_plain(row_text(&rows[index]), half);
+                    // Pair with an immediately following visible Added.
+                    if let Some(DiffRow::Added(_)) = rows.get(index + 1) {
+                        new_number += 1;
+                        let right = truncate_plain(row_text(&rows[index + 1]), half);
+                        body.push(format!(
+                            "{}│{}│{}",
+                            theme.paint(
+                                Token::DiffGutter,
+                                &format!("{old_number:>4} {new_number:>4} ")
+                            ),
+                            theme.paint(Token::DiffRemoved, &format!("-{left:^half$}")),
+                            theme.paint(Token::DiffAdded, &format!("+{right:^half$}")),
+                        ));
+                        index += 2;
+                    } else {
+                        body.push(format!(
+                            "{}│{}│",
+                            theme.paint(Token::DiffGutter, &format!("{old_number:>4}      ")),
+                            theme.paint(Token::DiffRemoved, &format!("-{left:^half$}")),
+                        ));
+                        index += 1;
+                    }
+                }
+                DiffRow::Added(_) => {
+                    new_number += 1;
+                    let right = truncate_plain(row_text(&rows[index]), half);
+                    body.push(format!(
+                        "{}│{}",
+                        theme.paint(Token::DiffGutter, &format!("      {new_number:>4} ")),
+                        theme.paint(Token::DiffAdded, &format!("+{right:^half$}")),
+                    ));
+                    index += 1;
                 }
             }
-            DiffRow::Added(_) => {
-                new_number += 1;
-                if keep {
-                    body.push(format!(
-                        "{}  {}",
-                        gutter(old_number, new_number),
-                        theme.paint(Token::DiffAdded, &format!("+ {}", row_text(row)))
-                    ));
+        }
+    } else {
+        for (index, row) in rows.iter().enumerate() {
+            let keep = marked[index];
+            match row {
+                DiffRow::Context(_) => {
+                    old_number += 1;
+                    new_number += 1;
+                    if keep {
+                        body.push(format!(
+                            "{}  {}",
+                            gutter(old_number, new_number),
+                            theme.paint(Token::Text, row_text(row))
+                        ));
+                    }
                 }
-            }
-            DiffRow::Removed(_) => {
-                old_number += 1;
-                if keep {
-                    body.push(format!(
-                        "{}  {}",
-                        gutter(old_number, new_number),
-                        theme.paint(Token::DiffRemoved, &format!("- {}", row_text(row)))
-                    ));
+                DiffRow::Added(_) => {
+                    new_number += 1;
+                    if keep {
+                        body.push(format!(
+                            "{}  {}",
+                            gutter(old_number, new_number),
+                            theme.paint(Token::DiffAdded, &format!("+ {}", row_text(row)))
+                        ));
+                    }
+                }
+                DiffRow::Removed(_) => {
+                    old_number += 1;
+                    if keep {
+                        body.push(format!(
+                            "{}  {}",
+                            gutter(old_number, new_number),
+                            theme.paint(Token::DiffRemoved, &format!("- {}", row_text(row)))
+                        ));
+                    }
                 }
             }
         }
@@ -194,6 +269,17 @@ pub fn render(
 fn row_text(row: &DiffRow) -> &str {
     match row {
         DiffRow::Context(text) | DiffRow::Added(text) | DiffRow::Removed(text) => text,
+    }
+}
+
+/// Width-truncated plain text for a split-diff column, with an ellipsis
+/// when anything was cut.
+fn truncate_plain(text: &str, max: usize) -> String {
+    let cut = width::truncate_to_width(text, max.saturating_sub(1));
+    if cut.chars().count() < text.chars().count() {
+        format!("{cut}…")
+    } else {
+        cut
     }
 }
 
@@ -269,7 +355,15 @@ mod tests {
     #[test]
     fn render_header_shows_counts_and_path() {
         theme::set(theme::Theme::dark());
-        let lines = render("a\nb\nc", "a\nX\nc", Some("src/lib.rs"), false, 20);
+        let lines = render(
+            "a\nb\nc",
+            "a\nX\nc",
+            Some("src/lib.rs"),
+            false,
+            20,
+            80,
+            crate::settings::DiffStyle::Unified,
+        );
         let plain = plain(&lines);
         assert!(plain[0].contains("+1"), "{plain:?}");
         assert!(plain[0].contains("-1"), "{plain:?}");
@@ -287,7 +381,15 @@ mod tests {
             "ctx\n".repeat(10).trim()
         );
         let new = old.replace("OLD", "NEW");
-        let lines = render(&old, &new, None, false, 40);
+        let lines = render(
+            &old,
+            &new,
+            None,
+            false,
+            40,
+            80,
+            crate::settings::DiffStyle::Unified,
+        );
         let plain = plain(&lines);
         assert!(
             plain.iter().any(|l| l.contains("unchanged segment")),
@@ -300,7 +402,15 @@ mod tests {
         theme::set(theme::Theme::dark());
         let old = "a\nb\nc";
         let new = "1\n2\n3";
-        let lines = render(old, new, None, false, 4);
+        let lines = render(
+            old,
+            new,
+            None,
+            false,
+            4,
+            80,
+            crate::settings::DiffStyle::Unified,
+        );
         let plain = plain(&lines);
         assert!(
             plain.iter().any(|l| l.contains("more changed lines")),

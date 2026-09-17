@@ -121,7 +121,9 @@ impl From<crossterm::event::KeyEvent> for KeyEvent {
         let key = match event.code {
             KeyCode::Char(c) => Key::Char(c),
             KeyCode::Enter => Key::Enter,
-            KeyCode::Tab => Key::Tab,
+            // Shift+Tab arrives as BackTab on most platforms, often
+            // without the SHIFT modifier; normalize onto Tab+Shift.
+            KeyCode::Tab | KeyCode::BackTab => Key::Tab,
             KeyCode::Backspace => Key::Backspace,
             KeyCode::Esc => Key::Esc,
             KeyCode::Left => Key::Left,
@@ -137,7 +139,11 @@ impl From<crossterm::event::KeyEvent> for KeyEvent {
             KeyCode::F(n) => Key::F(n),
             _ => Key::Other,
         };
-        Self { key, mods }
+        let shift = mods.shift || event.code == KeyCode::BackTab;
+        Self {
+            key,
+            mods: Mods { shift, ..mods },
+        }
     }
 }
 
@@ -150,6 +156,16 @@ mod tests {
         assert!(KeyEvent::new(Key::Char('c'), Mods::CTRL).is_ctrl_c());
         assert!(!KeyEvent::plain(Key::Char('c')).is_ctrl_c());
         assert!(KeyEvent::new(Key::Char('d'), Mods::CTRL).is_ctrl_d());
+    }
+
+    #[test]
+    fn backtab_normalizes_to_shift_tab() {
+        let event = KeyEvent::from(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::BackTab,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert_eq!(event.key, Key::Tab);
+        assert!(event.mods.shift);
     }
 
     #[test]

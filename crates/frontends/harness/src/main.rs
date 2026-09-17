@@ -40,7 +40,7 @@ struct Args {
     model: Option<String>,
 
     /// Permission mode override winning over the configured mode
-    /// (`plan`, `guarded`, `auto`; legacy names still parse).
+    /// (`plan`, `auto`, `wave`; legacy names still parse).
     #[arg(long, global = true)]
     permission_mode: Option<String>,
 
@@ -284,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
             cwd,
             home: home.clone(),
             identity: DEFAULT_IDENTITY.to_string(),
+            wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
             headless: false,
             initial_history: Vec::new(),
         })
@@ -348,6 +349,7 @@ async fn main() -> anyhow::Result<()> {
         permission_override: args.permission_mode.clone(),
         cwd,
         home: home.clone(),
+        wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
         identity: DEFAULT_IDENTITY.to_string(),
         headless,
         initial_history: Vec::new(),
@@ -407,6 +409,7 @@ async fn run_tui_new(
         identity: DEFAULT_IDENTITY.to_string(),
         headless: false,
         initial_history: Vec::new(),
+        wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
     }) {
         Ok(handle) => handle,
         Err(operations_bootstrap::SessionError::Config(e)) => {
@@ -568,6 +571,7 @@ async fn run_resume(
         // inline answers instead of denying them openly.
         headless: false,
         initial_history: history,
+        wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
     handle.connect_mcp_servers().await;
@@ -1445,9 +1449,9 @@ mod tests {
     fn permission_mode_labels_follow_wire_names() {
         use console_ui::ui::permission_mode_label;
         assert_eq!(permission_mode_label("plan"), "Plan Mode");
-        assert_eq!(permission_mode_label("auto"), "Auto Approve");
-        assert_eq!(permission_mode_label("guarded"), "Ask When Needed");
-        // Unknown names degrade to the guarded label.
-        assert_eq!(permission_mode_label("typo"), "Ask When Needed");
+        assert_eq!(permission_mode_label("auto"), "Auto Mode");
+        assert_eq!(permission_mode_label("wave"), "Wave Mode");
+        // Unknown names degrade to the auto label.
+        assert_eq!(permission_mode_label("typo"), "Auto Mode");
     }
 }

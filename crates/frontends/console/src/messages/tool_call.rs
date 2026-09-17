@@ -5,8 +5,11 @@
 //! the shared Ctrl+O flag expands the result body. Per-tool argument
 //! summaries come from [`args_summary`].
 
+use std::time::Instant;
+
 use crate::diff;
 use crate::messages::ExpandedFlag;
+use crate::settings::{EditDisplay, ToolDisplay};
 use crate::theme::{self, Token};
 use tui_engine::component::Component;
 use tui_engine::sanitize::sanitize_terminal;
@@ -18,6 +21,8 @@ pub const MAX_ARG_LENGTH: usize = 60;
 pub const OUTCOME_MAX_LINES: usize = 3;
 /// Expanded result renders at most this many wrapped lines.
 pub const MAX_EXPANDED_LINES: usize = 200;
+/// Expanded input parameters render at most this many lines.
+const INPUT_MAX_LINES: usize = 30;
 
 /// Lifecycle of one tool call card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,22 +124,43 @@ pub fn verb(name: &str, state: ToolState) -> String {
     }
 }
 
+/// The running-tool dot pulses a saw amplitude in one cell: climbs,
+/// drops back, climbs again — machine work in a single glyph.
+const RUN_FRAMES: [&str; 4] = ["▁", "▃", "▅", "▇"];
+/// Frame interval of the running-tool animation in milliseconds.
+const RUN_FRAME_INTERVAL: u128 = 130;
+
+/// The saw-ramp frame for `elapsed`.
+fn run_frame(elapsed: std::time::Duration) -> &'static str {
+    let step = (elapsed.as_millis() / RUN_FRAME_INTERVAL) as usize;
+    RUN_FRAMES[step % RUN_FRAMES.len()]
+}
+
 /// A tool call card.
 pub struct ToolCall {
     name: String,
     args: String,
+    /// The full sanitized input, kept for the expanded/Full views.
+    input: Option<serde_json::Value>,
     state: ToolState,
     /// Result preview (head of the output, truncation flag).
     output: Option<(String, bool)>,
     /// Old/new pair for edit-style tools (clustered diff preview).
     edit: Option<(String, String, Option<String>)>,
     expanded: ExpandedFlag,
-    lines: Option<(usize, ToolState, bool, Vec<String>)>,
+    settings: crate::settings::SharedSettings,
+    started: Instant,
+    lines: Option<(usize, ToolState, bool, usize, Vec<String>)>,
 }
 
 impl ToolCall {
     /// A running card for a call.
-    pub fn running(name: &str, input: &serde_json::Value, expanded: ExpandedFlag) -> Self {
+    pub fn running(
+        name: &str,
+        input: &serde_json::Value,
+        expanded: ExpandedFlag,
+        settings: crate::settings::SharedSettings,
+    ) -> Self {
         let name = sanitize_terminal(name).into_owned();
         let args = args_summary(&name, input);
         let edit = DIFF_TOOLS.contains(&name.as_str()).then(|| {
@@ -154,13 +180,19 @@ impl ToolCall {
                 .map(|s| sanitize_terminal(s).into_owned());
             (old, new, path)
         });
+        // Keep a sanitized copy of the full input for the expanded view.
+        let input = sanitize_terminal(&input.to_string()).into_owned();
+        let input = serde_json::from_str(&input).ok();
         Self {
             name,
             args,
+            input,
             state: ToolState::Running,
             output: None,
             edit,
             expanded,
+            settings,
+            started: Instant::now(),
             lines: None,
         }
     }
@@ -188,31 +220,79 @@ impl ToolCall {
 
     fn header(&self) -> String {
         let theme = theme::current();
+        // Saw-ramp window while the machine works; result dots on finish.
         let (dot, dot_token) = match self.state {
-            ToolState::Running => ("●", Token::Text),
-            ToolState::Done => ("●", Token::Success),
-            ToolState::Failed => ("✗", Token::Error),
+            ToolState::Running => (run_frame(self.started.elapsed()).to_string(), Token::Text),
+            ToolState::Done => (crate::chrome::symbols::DONE.to_string(), Token::Success),
+            ToolState::Failed => (crate::chrome::symbols::FAILED.to_string(), Token::Error),
         };
         let verb = verb(&self.name, self.state);
         let mut line = format!(
             "{} {} {}",
-            theme.paint(dot_token, dot),
+            theme.paint(dot_token, &dot),
             theme.bold(Token::Primary, &verb),
             theme.bold(Token::Primary, &self.name)
         );
-        if !self.args.is_empty() {
+        // Names verbosity stops right after the tool name.
+        if !self.args.is_empty() && self.settings.get().tool_display != ToolDisplay::Names {
             line.push_str(&theme.paint(Token::TextDim, &format!(" ({})", self.args)));
         }
         line
     }
 
+    /// Pretty-printed full input, truncated to [`INPUT_MAX_LINES`].
+    fn input_lines(&self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let Some(input) = &self.input else {
+            return Vec::new();
+        };
+        let pretty = serde_json::to_string_pretty(input).unwrap_or_default();
+        let budget = columns.saturating_sub(4);
+        let mut rows = Vec::new();
+        rows.push(theme.paint(Token::TextMuted, "  params"));
+        let mut shown = 0usize;
+        for line in pretty.lines() {
+            if shown >= INPUT_MAX_LINES {
+                let rest = pretty.lines().count() - shown;
+                rows.push(theme.paint(
+                    Token::TextMuted,
+                    &format!("  … ({rest} more lines)"),
+                ));
+                break;
+            }
+            for (index, wrapped) in width::wrap_line(line, budget).into_iter().enumerate() {
+                if shown >= INPUT_MAX_LINES {
+                    rows.push(theme.paint(Token::TextMuted, "  … (truncated)"));
+                    return rows;
+                }
+                let _ = index;
+                rows.push(theme.paint(Token::TextMuted, &format!("  {wrapped}")));
+                shown += 1;
+            }
+        }
+        rows
+    }
+
     fn body(&self, columns: usize) -> Vec<String> {
         let theme = theme::current();
+        let view = self.settings.get();
+        let show_details = self.expanded.get() || view.tool_display == ToolDisplay::Full;
         // Edit-style calls lead with the clustered diff preview.
         if let Some((old, new, path)) = &self.edit {
+            if view.edit_display == EditDisplay::Tool && !show_details {
+                return Vec::new();
+            }
             let incomplete = self.state == ToolState::Running;
-            let budget = if self.expanded.get() { 200 } else { 10 };
-            let mut rows = diff::render(old, new, path.as_deref(), incomplete, budget);
+            let budget = if show_details { 200 } else { 10 };
+            let mut rows = diff::render(
+                old,
+                new,
+                path.as_deref(),
+                incomplete,
+                budget,
+                columns,
+                view.diff_style,
+            );
             if rows.is_empty() {
                 // Oversized edit: summarize instead of computing a diff.
                 rows.push(theme.paint(Token::TextDim, "  (edit too large for an inline preview)"));
@@ -223,31 +303,38 @@ impl ToolCall {
                 && let Some((text, _)) = &self.output
             {
                 let reason = text.lines().next().unwrap_or("edit failed");
-                rows.push(theme.paint(Token::Error, &format!("  ✗ {reason}")));
+                rows.push(theme.paint(
+                    Token::Error,
+                    &format!("  {} {reason}", crate::chrome::symbols::FAILED),
+                ));
             }
             return rows;
         }
+        let mut rows = Vec::new();
+        // The full call parameters, shown expanded or at Full verbosity.
+        if show_details {
+            rows.extend(self.input_lines(columns));
+        }
         let Some((text, truncated)) = &self.output else {
-            return Vec::new();
+            return rows;
         };
         if text.contains("<system-reminder>") {
             return Vec::new(); // metadata envelope: never rendered
         }
-        let expanded = self.expanded.get();
         let budget = columns.saturating_sub(4);
-        let mut rows: Vec<String> = Vec::new();
+        let mut out_rows: Vec<String> = Vec::new();
         for line in text.lines() {
             for wrapped in width::wrap_line(line, budget) {
-                rows.push(format!("  {}", theme.paint(Token::TextDim, &wrapped)));
-                if !expanded && rows.len() > OUTCOME_MAX_LINES {
+                out_rows.push(format!("  {}", theme.paint(Token::TextDim, &wrapped)));
+                if !show_details && out_rows.len() > OUTCOME_MAX_LINES {
                     break;
                 }
-                if expanded && rows.len() >= MAX_EXPANDED_LINES {
+                if show_details && out_rows.len() >= MAX_EXPANDED_LINES {
                     break;
                 }
             }
-            if rows.len()
-                >= (if expanded {
+            if out_rows.len()
+                >= (if show_details {
                     MAX_EXPANDED_LINES
                 } else {
                     OUTCOME_MAX_LINES + 1
@@ -256,39 +343,49 @@ impl ToolCall {
                 break;
             }
         }
-        if expanded || rows.len() <= OUTCOME_MAX_LINES {
-            if *truncated && expanded {
-                rows.push(theme.paint(Token::TextDim, "  … (output truncated)"));
+        if show_details || out_rows.len() <= OUTCOME_MAX_LINES {
+            if *truncated && show_details {
+                out_rows.push(theme.paint(Token::TextDim, "  … (output truncated)"));
             }
+            rows.extend(out_rows);
             return rows;
         }
-        let kept: Vec<String> = rows[..OUTCOME_MAX_LINES].to_vec();
-        let mut out = kept;
-        out.push(theme.paint(
+        let kept: Vec<String> = out_rows[..OUTCOME_MAX_LINES].to_vec();
+        rows.extend(kept);
+        rows.push(theme.paint(
             Token::TextDim,
             &format!(
                 "  … ({} more lines, ctrl+o to expand)",
                 text.lines().count().saturating_sub(OUTCOME_MAX_LINES)
             ),
         ));
-        out
+        rows
     }
 }
 
 impl Component for ToolCall {
     fn render(&mut self, columns: usize) -> Vec<String> {
         let expanded = self.expanded.get();
-        if let Some((cached_columns, cached_state, cached_expanded, lines)) = &self.lines
+        // The running animation is part of the cache key so live ticks
+        // repaint; finished cards pin frame 0 forever.
+        let frame = if self.state == ToolState::Running {
+            (self.started.elapsed().as_millis() / RUN_FRAME_INTERVAL) as usize
+        } else {
+            0
+        };
+        if let Some((cached_columns, cached_state, cached_expanded, cached_frame, lines)) =
+            &self.lines
             && *cached_columns == columns
             && *cached_state == self.state
             && *cached_expanded == expanded
+            && *cached_frame == frame
         {
             return lines.clone();
         }
         let mut lines = vec![self.header()];
         lines.extend(self.body(columns));
         lines.push(String::new());
-        self.lines = Some((columns, self.state, expanded, lines.clone()));
+        self.lines = Some((columns, self.state, expanded, frame, lines.clone()));
         lines
     }
 
@@ -338,10 +435,15 @@ mod tests {
         theme::set(theme::Theme::dark());
         let flag = ExpandedFlag::new();
         let mut card =
-            ToolCall::running("shell", &serde_json::json!({"command": "ls"}), flag.clone());
+            ToolCall::running(
+                "shell",
+                &serde_json::json!({"command": "ls"}),
+                flag.clone(),
+                crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
+            );
         let lines = card.render(80);
         assert!(
-            strip_ansi(&lines[0]).starts_with("● Running shell (ls)"),
+            strip_ansi(&lines[0]).starts_with("▁ Running shell (ls)"),
             "{lines:?}"
         );
 
@@ -377,7 +479,12 @@ mod tests {
             "new_string": "a\nX\nc",
         });
         let flag = ExpandedFlag::new();
-        let mut card = ToolCall::running("edit", &input, flag.clone());
+        let mut card = ToolCall::running(
+            "edit",
+            &input,
+            flag.clone(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
+        );
         card.finish(false, Some(("applied".to_string(), false)));
         let lines = card.render(80);
         let plain: String = lines
@@ -399,7 +506,12 @@ mod tests {
             "old_string": big,
             "new_string": big,
         });
-        let mut card = ToolCall::running("edit", &input, ExpandedFlag::new());
+        let mut card = ToolCall::running(
+            "edit",
+            &input,
+            ExpandedFlag::new(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
+        );
         card.finish(false, Some(("applied".to_string(), false)));
         let lines = card.render(80);
         let plain: String = lines
@@ -419,7 +531,12 @@ mod tests {
             "old_string": "a\nb",
             "new_string": "a\nc",
         });
-        let mut card = ToolCall::running("edit", &input, ExpandedFlag::new());
+        let mut card = ToolCall::running(
+            "edit",
+            &input,
+            ExpandedFlag::new(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
+        );
         card.finish(true, Some(("old_string not found".to_string(), false)));
         let lines = card.render(80);
         let plain: String = lines
@@ -446,6 +563,7 @@ mod tests {
             "shell",
             &serde_json::json!({"command": "nope"}),
             ExpandedFlag::new(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
         );
         card.finish(true, Some(("boom".to_string(), false)));
         let lines = card.render(80);
@@ -459,6 +577,7 @@ mod tests {
             "read",
             &serde_json::json!({"path": "x"}),
             ExpandedFlag::new(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
         );
         card.finish(
             false,

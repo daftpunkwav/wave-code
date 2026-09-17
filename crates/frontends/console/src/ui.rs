@@ -17,7 +17,7 @@
 //! dispatch, and the session event pump.
 //!
 //! Frame layout (inline mode, native scrollback): transcript lines,
-//! live thinking block, live assistant draft, activity pane, queue
+//! live thinking block, live assistant draft, queue
 //! pane, the editor box, then the two footer rows — all inside a
 //! one-column gutter. Operations destined for the session are queued
 //! on an outbox the run loop flushes; steering crosses the actor
@@ -42,7 +42,8 @@ use uuid::Uuid;
 use wavecode_wire::{Event, EventMsg, Op, Submission};
 
 use crate::chrome::footer as footer_chrome;
-use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint, render_todos};
+use crate::chrome::notify;
+use crate::chrome::{TIP_ROTATE_INTERVAL, TransientHint, render_todos};
 use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
 use crate::controllers::shell::{ShellEvent, ShellJob};
@@ -129,7 +130,6 @@ pub struct ConsoleUi {
     /// True when the current message arrived via deltas (its completion
     /// then carries no new text).
     streaming_flushed_assistant: bool,
-    activity: ActivityPane,
     expanded: ExpandedFlag,
     /// Open tool call cards by call id (transcript entry index).
     open_calls: HashMap<String, usize>,
@@ -147,6 +147,13 @@ pub struct ConsoleUi {
     exit_armed_at: Option<Instant>,
     tip_index: usize,
     tip_rotated_at: Instant,
+    /// Session start, the phase reference for editor animations.
+    started_at: Instant,
+    /// Shared UI preferences; `/settings` mutates them live.
+    settings: crate::settings::SharedSettings,
+    /// Terminal sequence queued by UI logic, flushed straight to stdout
+    /// by the run loop (notifications, clipboard writes).
+    pending_sequence: Option<String>,
     version: String,
 }
 
@@ -181,7 +188,6 @@ impl ConsoleUi {
             screen: Screen::new(),
             streaming: StreamingController::new(),
             streaming_flushed_assistant: false,
-            activity: ActivityPane::new(),
             expanded: ExpandedFlag::new(),
             open_calls: HashMap::new(),
             dialog: None,
@@ -193,6 +199,9 @@ impl ConsoleUi {
             exit_armed_at: None,
             tip_index: 0,
             tip_rotated_at: Instant::now(),
+            started_at: Instant::now(),
+            settings: crate::settings::SharedSettings::load(),
+            pending_sequence: None,
             version: version.into(),
         };
         let info = welcome_info_of(&ui.state, &ui.version);
@@ -211,7 +220,6 @@ impl ConsoleUi {
         self.push_user_message(&text);
         self.enqueue(Op::UserInput { text });
         self.state.phase = StreamingPhase::Waiting;
-        self.activity.set_phase(StreamingPhase::Waiting);
     }
 
     /// Run a local `!` shell command, rendering its output live in the
@@ -299,6 +307,9 @@ impl ConsoleUi {
     /// Route a dialog answer onto the outbox.
     fn submit_answer(&mut self, answer: Option<Answer>) {
         match answer {
+            Some(Answer::Dismissed) => {
+                self.dialog = None;
+            }
             Some(Answer::Approval { call_id, decision }) => {
                 self.enqueue(Op::ExecApproval { call_id, decision });
             }
@@ -368,14 +379,17 @@ impl ConsoleUi {
         landed
     }
 
-    /// Push one user message.
+    /// Push one user message (markdown per the user-render setting).
     pub fn push_user_message(&mut self, text: &str) {
+        self.state.push_dialogue(true, text);
+        let markdown = self.settings.get().render_user_markdown;
         self.transcript
-            .push_new_turn(Box::new(UserMessage::new(text)));
+            .push_new_turn(Box::new(UserMessage::new(text, markdown)));
     }
 
     /// Push one assistant markdown message.
     pub fn push_assistant_message(&mut self, text: &str) {
+        self.state.push_dialogue(false, text);
         self.transcript.push(Box::new(AssistantMessage::new(
             text,
             Box::new(PlainHighlighter),
@@ -433,7 +447,6 @@ impl ConsoleUi {
         match msg {
             EventMsg::TurnStarted => {
                 self.state.phase = StreamingPhase::Waiting;
-                self.activity.set_phase(StreamingPhase::Waiting);
                 // Cheap .git/HEAD read: catches checkout/branch switches.
                 self.state.git_branch = crate::gitinfo::branch(&self.state.cwd);
                 true
@@ -442,7 +455,6 @@ impl ConsoleUi {
                 let text = tui_engine::sanitize::sanitize_terminal(text);
                 self.streaming.push_thinking(&text);
                 self.state.phase = StreamingPhase::Thinking;
-                self.activity.set_phase(StreamingPhase::Thinking);
                 true
             }
             EventMsg::AgentMessageDelta { text } => {
@@ -451,7 +463,6 @@ impl ConsoleUi {
                 self.streaming.push_assistant(&text);
                 self.streaming_flushed_assistant = true;
                 self.state.phase = StreamingPhase::Composing;
-                self.activity.set_phase(StreamingPhase::Composing);
                 true
             }
             EventMsg::AgentMessageComplete { text } => {
@@ -474,7 +485,6 @@ impl ConsoleUi {
                 self.finalize_thinking();
                 self.flush_assistant_draft();
                 self.state.phase = StreamingPhase::Tool;
-                self.activity.set_phase(StreamingPhase::Tool);
                 if name == "todowrite"
                     && let Some(todos) = parse_todos(input)
                 {
@@ -482,7 +492,8 @@ impl ConsoleUi {
                     // still renders its own success row.
                     self.state.todos = todos;
                 }
-                let card = ToolCall::running(name, input, self.expanded.clone());
+                let card =
+                    ToolCall::running(name, input, self.expanded.clone(), self.settings.clone());
                 self.transcript.push(Box::new(card));
                 let index = self.transcript.last_index();
                 if let Some(index) = index {
@@ -496,7 +507,6 @@ impl ConsoleUi {
                 output,
             } => {
                 self.state.phase = StreamingPhase::Composing;
-                self.activity.set_phase(StreamingPhase::Composing);
                 if let Some(index) = self.open_calls.remove(call_id)
                     && let Some(entry) = self.transcript.get_mut(index)
                 {
@@ -569,7 +579,6 @@ impl ConsoleUi {
                 self.push_status(&format!("error: {message}"), true);
                 if !*recoverable {
                     self.state.phase = StreamingPhase::Idle;
-                    self.activity.set_phase(StreamingPhase::Idle);
                 }
                 true
             }
@@ -578,16 +587,21 @@ impl ConsoleUi {
                 self.flush_assistant_draft();
                 self.streaming.clear();
                 self.state.phase = StreamingPhase::Idle;
-                self.activity.set_phase(StreamingPhase::Idle);
                 if *interrupted {
                     self.push_status("interrupted", false);
+                }
+                // Desktop attention ping for finished turns; queued
+                // follow-ups keep the session visibly active.
+                let queued_next = !self.state.queued.is_empty();
+                if !*interrupted && !queued_next && notify::enabled() {
+                    self.pending_sequence = Some(notify::sequence("turn finished"));
                 }
                 // Trim old turns now that the frame is stable; no calls
                 // span turns, so the open-call index resets with it.
                 self.transcript.trim();
                 self.open_calls.clear();
                 // Dequeue a queued message as the next turn.
-                if !self.state.queued.is_empty() {
+                if queued_next {
                     let next = self.state.queued.remove(0);
                     self.submit(&next);
                 }
@@ -646,8 +660,8 @@ impl ConsoleUi {
             }
             return Flow::Continue;
         }
-        // Shift+Tab cycles the permission mode globally (kimi parity):
-        // guarded → auto → plan → guarded.
+        // Shift+Tab cycles the permission mode globally:
+        // plan → auto → wave → plan.
         if event.key == Key::Tab && event.mods.shift {
             let next = slash::cycle_mode(&self.state.permission_mode);
             self.apply_permission_mode(&next);
@@ -726,10 +740,18 @@ impl ConsoleUi {
                             self.transcript.clear();
                             self.streaming.clear();
                             self.open_calls.clear();
+                            self.state.dialogue.clear();
                             self.screen.invalidate();
                         }
                     } else if invocation.name == "theme" {
                         self.apply_theme(&invocation.args);
+                    } else if invocation.name == "copy" {
+                        self.copy_last_assistant();
+                    } else if invocation.name == "export" {
+                        self.export_markdown(&invocation.args);
+                    } else if invocation.name == "settings" {
+                        let dialog = crate::dialogs::SettingsDialog::new(self.settings.clone());
+                        self.dialog = Some(Dialog::Settings(dialog));
                     } else if invocation.name == "help" {
                         for line in slash::help_lines() {
                             self.push_status(&line, false);
@@ -802,18 +824,68 @@ impl ConsoleUi {
         Flow::Continue
     }
 
-    /// Apply a `/theme light|dark` switch locally.
+    /// Apply a `/theme light|dark|auto` switch locally.
     fn apply_theme(&mut self, args: &str) {
         match args.trim() {
             "light" => theme::set(theme::Theme::light()),
             "dark" => theme::set(theme::Theme::dark()),
+            // Re-query the terminal background (OSC 11) and pick dark
+            // or light from the answer.
+            "auto" => theme::set(theme::detect::resolve(None)),
             other => {
-                self.push_status("usage: /theme light|dark", false);
+                self.push_status("usage: /theme light|dark|auto", false);
                 let _ = other;
                 return;
             }
         }
         self.push_status(&format!("theme switched ({args})"), false);
+    }
+
+    /// `/copy`: put the last assistant message on the clipboard via
+    /// OSC 52 (the terminal owns the system clipboard).
+    fn copy_last_assistant(&mut self) {
+        use base64::Engine as _;
+        match self.state.last_assistant() {
+            Some(text) => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+                let seq = format!("\x1b]52;c;{encoded}\x07");
+                self.pending_sequence = Some(seq);
+                let preview: String = text.chars().take(40).collect();
+                self.push_status(&format!("copied to clipboard: {preview}…"), false);
+            }
+            None => self.push_status("no assistant message to copy", false),
+        }
+    }
+
+    /// `/export [path]`: write the full user/assistant dialogue to a
+    /// markdown file (cwd by default, timestamped name).
+    fn export_markdown(&mut self, args: &str) {
+        let target = match args.trim() {
+            "" => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.state
+                    .cwd
+                    .join(format!("wavecode-export-{stamp}.md"))
+            }
+            arg => PathBuf::from(arg),
+        };
+        let markdown = self.state.export_markdown();
+        match std::fs::write(&target, markdown) {
+            Ok(()) => self.push_status(
+                &format!(
+                    "exported {} messages to {}",
+                    self.state.dialogue.len(),
+                    target.display()
+                ),
+                false,
+            ),
+            Err(error) => {
+                self.push_status(&format!("export failed: {error}"), true);
+            }
+        }
     }
 
     /// Plain user input: persist history, render, and dispatch a turn.
@@ -917,6 +989,7 @@ impl ConsoleUi {
     /// Assemble the full frame at (columns, rows).
     pub fn frame(&mut self, columns: usize, rows: usize) -> Vec<String> {
         let inner = columns.saturating_sub(GUTTER * 2);
+        self.animate_editor_prompt();
         let mut lines = Vec::new();
         lines.extend(self.transcript.render(inner));
         // Live thinking block (moves to the transcript when finalized).
@@ -928,16 +1001,15 @@ impl ConsoleUi {
         // Live assistant draft.
         if !self.streaming.assistant.is_empty() {
             let mut draft =
-                AssistantMessage::new(self.streaming.assistant.clone(), Box::new(PlainHighlighter));
+                AssistantMessage::streaming(self.streaming.assistant.clone(), Box::new(PlainHighlighter));
             lines.extend(Component::render(&mut draft, inner));
         }
-        lines.extend(self.activity.render(inner));
         lines.extend(render_todos(
             &self.state.todos,
             self.state.todo_expanded,
             inner,
         ));
-        lines.extend(panes::render_queue(&self.state.queued, inner));
+        lines.extend(panes::render_queue(&self.state.queued, inner, Instant::now()));
         lines.extend(self.editor.render_box(inner, rows));
         lines.extend(self.footer(inner));
         let pad = " ".repeat(GUTTER);
@@ -947,10 +1019,37 @@ impl ConsoleUi {
             .collect()
     }
 
+    /// Flip the editor's square-wave prompt while a turn runs: high↔low
+    /// phase every 400 ms (a calm pulse); idle restores the resting
+    /// cycle. Shell mode keeps its `!` marker regardless.
+    fn animate_editor_prompt(&mut self) {
+        if self.shell_chrome {
+            self.editor.set_prompt("!");
+            return;
+        }
+        let ticking = self.state.busy()
+            && (self.started_at.elapsed().as_millis() / 400) % 2 == 1;
+        self.editor
+            .set_prompt(if ticking { "⊔⊓" } else { "⊓⊔" });
+    }
+
+    /// Take the queued terminal sequence, if any.
+    pub fn take_pending_sequence(&mut self) -> Option<String> {
+        self.pending_sequence.take()
+    }
+
     /// True when an animation tick must repaint (busy phases animate,
-    /// shell output arrives asynchronously).
-    pub fn needs_tick_render(&self) -> bool {
-        self.state.busy() || self.exit_armed() || self.shell.is_some()
+    /// shell output arrives asynchronously, the welcome ripple flows).
+    pub fn needs_tick_render(&mut self) -> bool {
+        self.state.busy() || self.exit_armed() || self.shell.is_some() || self.welcome_rippling()
+    }
+
+    /// True while the welcome wave is still flowing after a resize.
+    fn welcome_rippling(&mut self) -> bool {
+        self.transcript
+            .get_mut(0)
+            .and_then(|entry| entry.component.as_any_mut().downcast_ref::<crate::welcome::Welcome>())
+            .is_some_and(|welcome| welcome.is_rippling())
     }
 
     /// Whether a wire event batch may paint immediately: during heavy
@@ -996,7 +1095,8 @@ fn editor_style() -> EditorStyle {
     let theme = theme::current();
     EditorStyle {
         border: theme.style(Token::Border),
-        prompt: theme.style(Token::TextDim),
+        // The square-wave prompt carries the brand color.
+        prompt: theme.style(Token::Primary).bold(),
         slash_command: theme.style(Token::Primary).bold(),
         shell_command: theme.style(Token::ShellMode),
         hint: theme.style(Token::TextDim),
@@ -1055,6 +1155,7 @@ fn welcome_info_of(state: &AppState, version: &str) -> crate::welcome::WelcomeIn
         mode: crate::ui::permission_mode_label(&state.permission_mode).to_string(),
         cwd: state.cwd.to_string_lossy().to_string(),
         mcp_servers: state.mcp_servers.clone(),
+        branch: state.git_branch.clone(),
     }
 }
 
@@ -1085,8 +1186,8 @@ pub fn shorten_cwd(path: &std::path::Path, keep: usize) -> String {
 pub fn permission_mode_label(mode: &str) -> &'static str {
     match mode {
         "plan" => "Plan Mode",
-        "auto" => "Auto Approve",
-        _ => "Ask When Needed",
+        "wave" => "Wave Mode",
+        _ => "Auto Mode",
     }
 }
 
@@ -1122,6 +1223,11 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
             abort_reason = Some(format!("session submission failed: {error}"));
             break;
         }
+            // Terminal sequences queued by handlers go straight out;
+            // they are invisible and never disturb the diff renderer.
+            if let Some(seq) = ui.take_pending_sequence() {
+                notify::emit_raw(&seq);
+            }
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(CEvent::Key(key))) => {
@@ -1264,7 +1370,7 @@ mod tests {
             &UiContext {
                 model_name: "test-model".to_string(),
                 cwd: PathBuf::from("/home/user/work/proj/sub"),
-                permission_mode: "guarded".to_string(),
+                permission_mode: "auto".to_string(),
                 skill_names: Vec::new(),
                 mcp_servers: vec!["fs".to_string()],
                 status: Arc::new(NullStatus),
@@ -1282,9 +1388,9 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("WaveCode"), "brand: {joined}");
-        assert!(joined.contains("1 servers"), "mcp count: {joined}");
-        assert!(joined.contains("Directory:"), "{joined}");
+        assert!(joined.contains(crate::welcome::LOGO[0]), "brand: {joined}");
+        assert!(joined.contains("mcp 1"), "mcp count: {joined}");
+        assert!(joined.contains("dir"), "{joined}");
     }
 
     #[test]
@@ -1314,7 +1420,10 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("❯ second"), "queue pane: {joined}");
+        assert!(
+            joined.contains("⊓⊔ second") || joined.contains("⊔⊓ second"),
+            "queue pane: {joined}"
+        );
         assert!(joined.contains("ctrl-s to steer"), "steer hint: {joined}");
     }
 
@@ -1403,7 +1512,7 @@ mod tests {
     #[test]
     fn shift_tab_cycles_permission_mode() {
         let mut ui = ui();
-        assert_eq!(ui.state.permission_mode, "guarded");
+        assert_eq!(ui.state.permission_mode, "auto");
         ui.handle_key(KeyEvent {
             key: Key::Tab,
             mods: Mods {
@@ -1412,11 +1521,11 @@ mod tests {
                 alt: false,
             },
         });
-        assert_eq!(ui.state.permission_mode, "auto");
+        assert_eq!(ui.state.permission_mode, "wave");
         assert!(
             matches!(
                 ui.pending_ops().last(),
-                Some(Op::SetPermissionMode { mode }) if mode == "auto"
+                Some(Op::SetPermissionMode { mode }) if mode == "wave"
             ),
             "op enqueued"
         );
@@ -1902,7 +2011,7 @@ mod tests {
             &UiContext {
                 model_name: "test-model".to_string(),
                 cwd: PathBuf::from("/test"),
-                permission_mode: "guarded".to_string(),
+                permission_mode: "auto".to_string(),
                 skill_names: Vec::new(),
                 mcp_servers: Vec::new(),
                 status: Arc::new(NullStatus),

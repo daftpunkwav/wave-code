@@ -49,8 +49,8 @@ receivers remain compatible.
 | `AgentThinkingDelta` | live thinking block (spinner + last 2 lines, dim italic) |
 | `AgentMessageDelta` | thinking finalizes; assistant draft streams (delta batches mark the draft dirty; the frame repaints when the 50 ms flush interval elapses, or on the 100 ms tick) |
 | `AgentMessageComplete` | draft (or completion text) lands as a markdown message |
-| `ToolCallBegin` / `ToolCallEnd` | tool card open/close (state dot, verb, key arg, outcome); `edit_file` cards lead with a clustered LCS diff preview (2 000-line budget per side) |
-| `ApprovalRequested` | approval dialog (1/2 quick-select, Enter, Esc = deny) |
+| `ToolCallBegin` / `ToolCallEnd` | tool card open/close (state dot, verb, key arg, outcome); `edit` cards lead with a clustered LCS diff preview (2 000-line budget per side, summary line beyond; failures show the apply error under the diff) |
+| `ApprovalRequested` | approval dialog (1/2 quick-select, Enter, Esc = deny, Ctrl+C = deny) |
 | `QuestionRequested` | question dialog (numbered options + free text) |
 | `TokenCount` | footer context meter |
 | `Compact*` / `Plan*` / `Goal*` | status lines |

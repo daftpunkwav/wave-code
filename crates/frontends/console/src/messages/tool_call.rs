@@ -31,6 +31,9 @@ pub enum ToolState {
 }
 
 /// Extract a human summary of the key argument for a tool input.
+/// Names follow the real registry (`read`/`edit`/`ls`/`web_fetch`/...,
+/// see `capabilities/tools`); unknown tools fall through to a generic
+/// key scan.
 pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
     let pick = |keys: &[&str]| -> Option<String> {
         for key in keys {
@@ -41,14 +44,22 @@ pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
         None
     };
     let raw = match name {
-        "read_file" | "write_file" | "edit_file" | "list_dir" => pick(&["path", "file_path"]),
+        "read" | "write" | "edit" | "ls" | "view" | "present" => pick(&["path"]),
         "shell" | "pty_shell" => pick(&["command", "cmd"]),
         "grep" => pick(&["pattern"]).map(|p| format!("“{p}”")),
         "glob" => pick(&["pattern"]),
-        "webfetch" => pick(&["url"]),
-        "websearch" => pick(&["query"]),
-        "task" => pick(&["description", "prompt"]),
-        _ => pick(&["path", "command", "url", "query", "name", "description"]),
+        "web_fetch" => pick(&["url"]),
+        "web_search" => pick(&["query"]),
+        "python" | "node" => pick(&["code"]),
+        _ => pick(&[
+            "path",
+            "command",
+            "url",
+            "query",
+            "code",
+            "name",
+            "description",
+        ]),
     }
     .unwrap_or_default();
     truncate_arg(sanitize_terminal(&raw).as_ref(), MAX_ARG_LENGTH)
@@ -74,30 +85,32 @@ fn truncate_arg(value: &str, max: usize) -> String {
 }
 
 /// Old/new text pairs worth a clustered diff preview.
-const DIFF_TOOLS: [&str; 1] = ["edit_file"];
+const DIFF_TOOLS: [&str; 1] = ["edit"];
 
-/// The verb for a card header.
+/// The verb for a card header. Names follow the real registry; MCP
+/// tools (`mcp__server__tool`) and anything unknown degrade to
+/// Using/Used.
 pub fn verb(name: &str, state: ToolState) -> String {
     let present = match name {
-        "read_file" | "read_image" => "Reading",
-        "write_file" => "Writing",
-        "edit_file" => "Editing",
-        "list_dir" => "Listing",
-        "grep" | "glob" | "websearch" => "Searching",
-        "shell" | "pty_shell" => "Running",
-        "webfetch" => "Fetching",
-        "task" => "Delegating",
+        "read" | "view" => "Reading",
+        "write" => "Writing",
+        "edit" => "Editing",
+        "ls" => "Listing",
+        "grep" | "glob" | "web_search" => "Searching",
+        "shell" | "pty_shell" | "python" | "node" => "Running",
+        "web_fetch" => "Fetching",
+        "present" => "Presenting",
         _ => "Using",
     };
     let past = match name {
-        "read_file" | "read_image" => "Read",
-        "write_file" => "Wrote",
-        "edit_file" => "Edited",
-        "list_dir" => "Listed",
-        "grep" | "glob" | "websearch" => "Searched",
-        "shell" | "pty_shell" => "Ran",
-        "webfetch" => "Fetched",
-        "task" => "Delegated",
+        "read" | "view" => "Read",
+        "write" => "Wrote",
+        "edit" => "Edited",
+        "ls" => "Listed",
+        "grep" | "glob" | "web_search" => "Searched",
+        "shell" | "pty_shell" | "python" | "node" => "Ran",
+        "web_fetch" => "Fetched",
+        "present" => "Presented",
         _ => "Used",
     };
     match state {
@@ -204,6 +217,14 @@ impl ToolCall {
                 // Oversized edit: summarize instead of computing a diff.
                 rows.push(theme.paint(Token::TextDim, "  (edit too large for an inline preview)"));
             }
+            // A failed edit's reason lives in the output preview; the
+            // diff alone would hide why the apply did not land.
+            if self.state == ToolState::Failed
+                && let Some((text, _)) = &self.output
+            {
+                let reason = text.lines().next().unwrap_or("edit failed");
+                rows.push(theme.paint(Token::Error, &format!("  ✗ {reason}")));
+            }
             return rows;
         }
         let Some((text, truncated)) = &self.output else {
@@ -285,7 +306,7 @@ mod tests {
     #[test]
     fn args_summary_picks_key_fields() {
         let input = serde_json::json!({"path": "/a/b/c.rs"});
-        assert_eq!(args_summary("read_file", &input), "/a/b/c.rs");
+        assert_eq!(args_summary("read", &input), "/a/b/c.rs");
         let input = serde_json::json!({"command": "npm test"});
         assert_eq!(args_summary("shell", &input), "npm test");
         let input = serde_json::json!({"pattern": "TODO"});
@@ -296,7 +317,7 @@ mod tests {
     fn deep_paths_collapse_to_tail() {
         let long = "/very/deep/tree/with/many/segments/and/a/really/long/filename.rs";
         let input = serde_json::json!({"path": long});
-        let summary = args_summary("read_file", &input);
+        let summary = args_summary("read", &input);
         assert!(summary.starts_with("…/"), "{summary}");
         assert!(width::width(&summary) <= MAX_ARG_LENGTH);
     }
@@ -305,7 +326,10 @@ mod tests {
     fn verb_switches_with_state() {
         assert_eq!(verb("shell", ToolState::Running), "Running");
         assert_eq!(verb("shell", ToolState::Done), "Ran");
-        assert_eq!(verb("read_file", ToolState::Done), "Read");
+        assert_eq!(verb("read", ToolState::Done), "Read");
+        assert_eq!(verb("edit", ToolState::Done), "Edited");
+        assert_eq!(verb("edit", ToolState::Running), "Editing");
+        assert_eq!(verb("unknown_tool", ToolState::Done), "Used");
         assert_eq!(verb("grep", ToolState::Done), "Searched");
     }
 
@@ -353,7 +377,7 @@ mod tests {
             "new_string": "a\nX\nc",
         });
         let flag = ExpandedFlag::new();
-        let mut card = ToolCall::running("edit_file", &input, flag.clone());
+        let mut card = ToolCall::running("edit", &input, flag.clone());
         card.finish(false, Some(("applied".to_string(), false)));
         let lines = card.render(80);
         let plain: String = lines
@@ -367,10 +391,51 @@ mod tests {
     }
 
     #[test]
+    fn oversized_edit_degrades_to_summary() {
+        theme::set(theme::Theme::dark());
+        let big = "x\n".repeat(diff::MAX_DIFF_LINES + 1);
+        let input = serde_json::json!({
+            "path": "big.rs",
+            "old_string": big,
+            "new_string": big,
+        });
+        let mut card = ToolCall::running("edit", &input, ExpandedFlag::new());
+        card.finish(false, Some(("applied".to_string(), false)));
+        let lines = card.render(80);
+        let plain: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("too large for an inline preview"), "{plain}");
+        assert!(!plain.contains("+0"), "no empty diff header: {plain}");
+    }
+
+    #[test]
+    fn failed_edit_shows_reason_under_diff() {
+        theme::set(theme::Theme::dark());
+        let input = serde_json::json!({
+            "path": "a.rs",
+            "old_string": "a\nb",
+            "new_string": "a\nc",
+        });
+        let mut card = ToolCall::running("edit", &input, ExpandedFlag::new());
+        card.finish(true, Some(("old_string not found".to_string(), false)));
+        let lines = card.render(80);
+        let plain: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("- b"), "diff still shows: {plain}");
+        assert!(plain.contains("old_string not found"), "reason: {plain}");
+    }
+
+    #[test]
     fn arg_summary_strips_escapes() {
         theme::set(theme::Theme::dark());
         let input = serde_json::json!({"path": "a\x1b[31mevil.rs"});
-        let summary = args_summary("read_file", &input);
+        let summary = args_summary("read", &input);
         assert!(!summary.contains('\x1b'), "{summary:?}");
     }
 
@@ -391,7 +456,7 @@ mod tests {
     fn system_reminder_output_suppressed() {
         theme::set(theme::Theme::dark());
         let mut card = ToolCall::running(
-            "read_file",
+            "read",
             &serde_json::json!({"path": "x"}),
             ExpandedFlag::new(),
         );

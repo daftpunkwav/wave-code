@@ -84,6 +84,9 @@ pub fn counts(rows: &[DiffRow]) -> (usize, usize) {
 
 /// Render the clustered, colored diff card (header row included).
 /// `max_rows` bounds the body; overflow gains an elision hint row.
+/// Inputs over [`MAX_DIFF_LINES`] lines per side return an empty vec —
+/// the O(n*m) LCS table must not allocate on the UI thread — and the
+/// caller shows a summary instead.
 pub fn render(
     old: &str,
     new: &str,
@@ -91,6 +94,9 @@ pub fn render(
     incomplete: bool,
     max_rows: usize,
 ) -> Vec<String> {
+    if old.lines().count() > MAX_DIFF_LINES || new.lines().count() > MAX_DIFF_LINES {
+        return Vec::new();
+    }
     let theme = theme::current();
     let rows = compute_rows(old, new, incomplete);
     let (added, removed) = counts(&rows);

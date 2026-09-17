@@ -283,7 +283,16 @@ fn translate_block(block: &ContentBlock) -> serde_json::Value {
             }
         },
         ContentBlock::ToolUse { id, name, input } => {
-            serde_json::json!({"type": "tool_use", "id": id, "name": name, "input": input})
+            // History may still hold a pre-normalization non-object input
+            // (a legacy session or a value stored before the parse-side
+            // guard); coercing here keeps the request legal instead of
+            // failing with a 400 on tool_use.input.
+            serde_json::json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": crate::normalize_tool_input(input.clone()),
+            })
         }
         ContentBlock::ToolResult {
             tool_use_id,
@@ -500,6 +509,32 @@ mod tests {
         assert_eq!(v["messages"][1]["content"][0]["type"], "tool_use");
         assert_eq!(v["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(v["tools"][0]["name"], "read_file");
+    }
+
+    /// A non-object tool input (legacy session or pre-normalization value)
+    /// is wrapped at the wire boundary so the request stays legal instead of
+    /// failing with a 400 on tool_use.input.
+    #[test]
+    fn non_object_tool_input_is_wrapped_on_the_wire() {
+        let req = ChatRequest {
+            model: "MiniMax-M3".into(),
+            system: "sys".into(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "write".into(),
+                    input: serde_json::json!("just a string"),
+                }],
+            }]),
+            tools: vec![],
+            max_tokens: 8192,
+        };
+        let v = build_request_body(&req, false, None);
+        assert_eq!(
+            v["messages"][0]["content"][0]["input"],
+            serde_json::json!({"_raw": "just a string"})
+        );
     }
 
     /// Prompt caching injects exactly the three documented breakpoints

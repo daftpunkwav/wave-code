@@ -297,7 +297,9 @@ fn translate_assistant(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
                     "function": {
                         "name": name,
                         // Compact JSON string, never dropped even when empty or null.
-                        "arguments": input.to_string(),
+                        // Normalized so gateways validating arguments as an object
+                        // never see a legacy non-object payload either.
+                        "arguments": crate::normalize_tool_input(input.clone()).to_string(),
                     },
                 }));
             }
@@ -683,6 +685,28 @@ mod tests {
         assert_eq!(
             assistant["tool_calls"][0]["function"]["arguments"],
             serde_json::json!({"path": "a.txt"}).to_string()
+        );
+    }
+
+    /// A non-object tool input (legacy session or pre-normalization value)
+    /// is wrapped before the arguments string is built so gateways that
+    /// validate arguments as an object never see a bare payload.
+    #[test]
+    fn non_object_tool_input_is_wrapped_in_arguments() {
+        let messages = translate_messages(
+            "",
+            &[Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "write".to_string(),
+                    input: serde_json::json!("just a string"),
+                }],
+            }],
+        );
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!({"_raw": "just a string"}).to_string()
         );
     }
 

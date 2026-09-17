@@ -348,13 +348,21 @@ impl ModelGateway for ModelAdapter {
     }
 }
 
-/// Parse accumulated tool input; unparseable input stays a string so the
-/// tool validation layer fails honestly instead of receiving invented JSON.
+/// Parse accumulated tool input into the object form tools and provider
+/// wires require. An empty buffer means "no arguments"; a non-object or
+/// unparseable payload is coerced via [`wavecode_llm::normalize_tool_input`]
+/// so tool validation fails honestly on the coerced shape instead of the
+/// block poisoning session history with a wire-illegal `tool_use.input`
+/// (a permanent http_400 on replay).
 fn parse_tool_input(buf: &str) -> serde_json::Value {
-    if buf.is_empty() {
-        return serde_json::Value::Null;
+    if buf.trim().is_empty() {
+        return serde_json::Value::Object(serde_json::Map::new());
     }
-    serde_json::from_str(buf).unwrap_or_else(|_| serde_json::Value::String(buf.to_string()))
+    match serde_json::from_str(buf) {
+        Ok(value @ serde_json::Value::Object(_)) => value,
+        Ok(other) => wavecode_llm::normalize_tool_input(other),
+        Err(_) => wavecode_llm::normalize_tool_input(serde_json::Value::String(buf.to_string())),
+    }
 }
 
 /// Map provider errors: only the context-window signal is retryable via
@@ -453,6 +461,70 @@ mod tests {
             }
         );
         assert_eq!(response.output_tokens, Some(2));
+    }
+
+    #[test]
+    fn parse_tool_input_keeps_every_shape_wire_legal() {
+        let empty = serde_json::Map::new();
+        // No deltas at all means "no arguments", never a null input.
+        assert_eq!(parse_tool_input(""), serde_json::json!(empty));
+        assert_eq!(parse_tool_input("  "), serde_json::json!(empty));
+        assert_eq!(parse_tool_input("null"), serde_json::json!(empty));
+        // Well-formed objects pass through untouched.
+        assert_eq!(
+            parse_tool_input(r#"{"path":"a.txt"}"#),
+            serde_json::json!({"path": "a.txt"})
+        );
+        // Valid JSON of a non-object type is wrapped, not replayed bare.
+        assert_eq!(
+            parse_tool_input(r#""bare string""#),
+            serde_json::json!({"_raw": "bare string"})
+        );
+        assert_eq!(
+            parse_tool_input("[1,2]"),
+            serde_json::json!({"_raw": [1, 2]})
+        );
+        // Unparseable fragments keep their text for honest validation.
+        assert_eq!(
+            parse_tool_input(r#"{"path": "#),
+            serde_json::json!({"_raw": r#"{"path": "#})
+        );
+    }
+
+    /// A model that streams a non-object tool input must not poison the
+    /// history: the stored block stays an object so replaying it never
+    /// fails the whole request with a 400 on tool_use.input.
+    #[tokio::test]
+    async fn non_object_tool_input_is_wrapped_into_an_object() {
+        let response = adapter(vec![
+            StreamEvent::ToolUseBegin {
+                id: "c1".to_string(),
+                name: "write".to_string(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#""just a string""#.to_string(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "end_turn".to_string(),
+                usage: Usage {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    ..Usage::default()
+                },
+            },
+        ])
+        .sample(request())
+        .await
+        .unwrap();
+        assert_eq!(
+            response.blocks,
+            vec![SampleBlock::ToolUse {
+                call_id: "c1".to_string(),
+                name: "write".to_string(),
+                input: serde_json::json!({"_raw": "just a string"}),
+            }]
+        );
     }
 
     #[tokio::test]

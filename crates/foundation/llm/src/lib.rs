@@ -123,6 +123,26 @@ pub enum ContentBlock {
     },
 }
 
+/// Key used by [`normalize_tool_input`] when wrapping a non-object payload.
+pub const TOOL_INPUT_RAW_KEY: &str = "_raw";
+
+/// Coerce a tool-use `input` into the object form every tool-calling wire
+/// requires. Models occasionally emit a non-object JSON value (a bare
+/// string, number, array, or a truncated fragment); replaying such a block
+/// verbatim makes the whole request fail with a 400 on `tool_use.input`
+/// and permanently poisons the session history. `null` means "no arguments"
+/// and becomes an empty object; any other non-object payload is wrapped
+/// verbatim under [`TOOL_INPUT_RAW_KEY`], keeping the block wire-legal while
+/// tool validation still fails honestly on the wrapped shape instead of
+/// inventing matching arguments.
+pub fn normalize_tool_input(input: serde_json::Value) -> serde_json::Value {
+    match input {
+        value @ serde_json::Value::Object(_) => value,
+        serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+        other => serde_json::json!({ TOOL_INPUT_RAW_KEY: other }),
+    }
+}
+
 /// One conversation message.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
@@ -269,6 +289,38 @@ pub type Result<T> = std::result::Result<T, LlmError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The public normalization contract: objects pass through untouched,
+    /// null means "no arguments", and every other non-object payload is
+    /// wrapped verbatim so the wire never sees a bare value.
+    #[test]
+    fn normalize_tool_input_coerces_every_shape_to_an_object() {
+        // Objects pass through untouched.
+        let obj = serde_json::json!({"path": "a.txt", "nested": {"k": [1]}});
+        assert_eq!(normalize_tool_input(obj.clone()), obj);
+        // null means "no arguments", never a wrapped null.
+        assert_eq!(
+            normalize_tool_input(serde_json::Value::Null),
+            serde_json::json!({})
+        );
+        // Any other non-object payload is wrapped verbatim.
+        assert_eq!(
+            normalize_tool_input(serde_json::json!("bare string")),
+            serde_json::json!({"_raw": "bare string"})
+        );
+        assert_eq!(
+            normalize_tool_input(serde_json::json!([1, 2])),
+            serde_json::json!({"_raw": [1, 2]})
+        );
+        assert_eq!(
+            normalize_tool_input(serde_json::json!(42)),
+            serde_json::json!({"_raw": 42})
+        );
+        assert_eq!(
+            normalize_tool_input(serde_json::json!(true)),
+            serde_json::json!({"_raw": true})
+        );
+    }
 
     #[test]
     fn classify_maps_known_too_long_shapes() {

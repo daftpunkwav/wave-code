@@ -83,10 +83,15 @@ impl RetryPolicy {
         match error {
             LlmError::Timeout(_) => self.retry_timeout,
             LlmError::Http(_) => self.retry_connection,
-            LlmError::Api { kind, message } => self.retry_transient && is_transient_error(kind, message),
-            // PromptTooLong drives compaction, Json/Sse are deterministic:
+            LlmError::Api { kind, message } => {
+                self.retry_transient && is_transient_error(kind, message)
+            }
+            // PromptTooLong drives compaction, Json/Sse are deterministic, ClientInit is configuration:
             // retrying cannot change the outcome.
-            LlmError::PromptTooLong { .. } | LlmError::Sse(_) | LlmError::Json(_) => false,
+            LlmError::PromptTooLong { .. }
+            | LlmError::Sse(_)
+            | LlmError::Json(_)
+            | LlmError::ClientInit(_) => false,
         }
     }
 }
@@ -121,7 +126,8 @@ pub fn is_auth_error(error: &LlmError) -> bool {
         LlmError::Timeout(_)
         | LlmError::PromptTooLong { .. }
         | LlmError::Sse(_)
-        | LlmError::Json(_) => false,
+        | LlmError::Json(_)
+        | LlmError::ClientInit(_) => false,
     }
 }
 

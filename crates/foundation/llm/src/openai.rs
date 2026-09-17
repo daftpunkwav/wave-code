@@ -46,15 +46,21 @@ pub struct OpenAIClient {
 }
 
 impl OpenAIClient {
-    /// Creates a new client; `model` is sent as the wire model on every request.
-    pub fn new(base_url: String, api_key: String, model: String) -> Self {
-        Self {
+    /// Creates a new client fallibly, returning an error if HTTP client or TLS init fails.
+    pub fn try_new(base_url: String, api_key: String, model: String) -> Result<Self> {
+        Ok(Self {
             base_url,
             api_key,
             model,
-            http: build_http_client(),
+            http: build_http_client()?,
             reasoning_effort: None,
-        }
+        })
+    }
+
+    /// Creates a new client; `model` is sent as the wire model on every request.
+    pub fn new(base_url: String, api_key: String, model: String) -> Self {
+        Self::try_new(base_url, api_key, model)
+            .expect("TLS backend initialization failed; verify system certificates are installed")
     }
 
     /// Set the best-effort reasoning effort (e.g. "low"); builder style so
@@ -72,13 +78,12 @@ impl OpenAIClient {
 /// - Redirects are disabled: the endpoint has no legitimate redirect semantics,
 ///   and reqwest would otherwise carry the `Authorization` bearer token to a
 ///   cross-origin target.
-fn build_http_client() -> reqwest::Client {
+fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        // Same as reqwest's own `Client::new()`: only TLS init failure can reach this path.
-        .expect("failed to build HTTP client")
+        .map_err(|e| LlmError::ClientInit(e.to_string()))
 }
 
 #[async_trait::async_trait]
@@ -800,6 +805,13 @@ mod tests {
         )
         .with_reasoning_effort("low");
         assert_eq!(tuned.reasoning_effort.as_deref(), Some("low"));
+
+        let ok_client = OpenAIClient::try_new(
+            "https://example.test".to_string(),
+            "key".to_string(),
+            "deepseek-chat".to_string(),
+        );
+        assert!(ok_client.is_ok());
     }
 
     /// Drives the byte-level decoder over canned chunks (no network).

@@ -1,3 +1,15 @@
+/*!
+ * @file WavecodeLlm
+ * @description Unified multi-provider LLM abstraction layer and streaming event parser.
+ *
+ * Responsibilities:
+ * - Define unified message, tool, event, and error types across LLM backends.
+ * - Provide unified ChatModel trait and streaming SSE abstractions.
+ * - Enforce clean error taxonomy and fallible client initialization.
+ *
+ * This crate must not depend on: runtime, capabilities, config, or frontends.
+ */
+
 //! wavecode-llm - multi-provider abstraction layer.
 //!
 //! Defines the unified Messages request / streaming event interface (SSE). M1 covers:
@@ -227,6 +239,9 @@ pub enum LlmError {
     /// JSON serialization / deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    /// HTTP client initialization failure (e.g. TLS backend init error).
+    #[error("failed to initialize HTTP client: {0}")]
+    ClientInit(String),
 }
 
 /// Single construction point for API errors (shared by anthropic non-2xx responses and SSE error events):

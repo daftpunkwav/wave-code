@@ -1,3 +1,15 @@
+/*!
+ * @file SlashCommands
+ * @description Registry, parsing, and dispatch effects for interactive slash commands.
+ *
+ * Responsibilities:
+ * - Parse slash command invocations from input buffer.
+ * - Dispatch commands to UI effects (e.g. /clear, /theme, /help) or session wire operations.
+ * - Provide command auto-completion and help descriptions.
+ *
+ * This module must not depend on: runtime or capability crates.
+ */
+
 //! Slash commands: registry, parsing, and dispatch effects.
 //!
 //! Commands return the side effect for the UI to run; unknown tokens
@@ -9,8 +21,9 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 13] = [
+pub const COMMANDS: [&str; 14] = [
     "help",
+    "clear",
     "usage",
     "version",
     "compact",
@@ -67,6 +80,7 @@ pub enum Effect {
 pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQueries) -> Effect {
     match invocation.name.as_str() {
         "help" => Effect::Ops(Vec::new()),
+        "clear" => Effect::Ops(Vec::new()), // handled by the UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
         "compact" => Effect::Ops(vec![Op::Compact]),
         "model" => {
@@ -139,7 +153,8 @@ pub fn help_lines() -> Vec<String> {
         "  up / down             input history".to_string(),
         "  !cmd                  run a local shell command".to_string(),
         "Commands:".to_string(),
-        "  /help /usage /version /compact /model <name> /permissions [mode] /plan".to_string(),
+        "  /help /clear /usage /version /compact /model <name> /permissions [mode] /plan"
+            .to_string(),
         "  /theme <light|dark> /memory /snapshots /goal /status /exit".to_string(),
     ]
 }
@@ -176,6 +191,9 @@ mod tests {
         let status = Arc::new(support::NullStatus);
         let effect = dispatch(&parse("/compact").unwrap(), &state(), status.as_ref());
         assert_eq!(effect, Effect::Ops(vec![Op::Compact]));
+
+        let effect = dispatch(&parse("/clear").unwrap(), &state(), status.as_ref());
+        assert_eq!(effect, Effect::Ops(Vec::new()));
 
         let effect = dispatch(&parse("/model fast").unwrap(), &state(), status.as_ref());
         assert_eq!(

@@ -1,3 +1,18 @@
+/*!
+ * @file ConsoleUi
+ * @description Terminal UI orchestrator driving layout assembly, input event loop, and session wire bridge.
+ *
+ * Responsibilities:
+ * - Render inline frames using differential screen algorithms to preserve terminal scrollback.
+ * - Map terminal key events, paste actions, and resizes to UI and session actions.
+ * - Pump session events and display live thinking, tool execution cards, and assistant drafts.
+ * - Safely recover terminal state on abnormal exits or BrokenPipe failures.
+ *
+ * This module must not depend on: LLM clients or tool implementations.
+ * It reads local input history and scans the working directory for
+ * completion candidates, but never executes tools or touches the network.
+ */
+
 //! The console UI orchestrator: owns the frame assembly, input
 //! dispatch, and the session event pump.
 //!
@@ -295,16 +310,25 @@ impl ConsoleUi {
     }
 
     /// Drain the pending operations into the session (run loop calls).
-    pub async fn flush_outbox(&mut self) {
-        for op in std::mem::take(&mut self.outbox) {
+    ///
+    /// Preserves unsent operations in `self.outbox` if a submission fails,
+    /// ensuring state resilience and preventing silent loss of user operations.
+    pub async fn flush_outbox(&mut self) -> Result<(), SubmitError> {
+        let pending = std::mem::take(&mut self.outbox);
+        for (i, op) in pending.iter().enumerate() {
             let submission = Submission {
                 id: Uuid::new_v4().to_string(),
-                op,
+                op: op.clone(),
             };
             if let Err(error) = self.link.submit(submission).await {
                 self.push_status(&format!("submission failed: {error}"), true);
+                let mut unsent = pending[i..].to_vec();
+                unsent.append(&mut self.outbox);
+                self.outbox = unsent;
+                return Err(error);
             }
         }
+        Ok(())
     }
 
     /// Await the next session event.
@@ -511,8 +535,10 @@ impl ConsoleUi {
                 true
             }
             EventMsg::CompactCompleted { summary_tokens } => {
-                self.push_status("context compacted", false);
-                let _ = summary_tokens;
+                self.push_status(
+                    &format!("context compacted ({summary_tokens} summary tokens)"),
+                    false,
+                );
                 true
             }
             EventMsg::PlanProposed { text } => {
@@ -685,7 +711,24 @@ impl ConsoleUi {
         if let Some(invocation) = slash::parse(text) {
             return match slash::dispatch(&invocation, &self.state, self.status.as_ref()) {
                 slash::Effect::Ops(ops) => {
-                    if invocation.name == "theme" {
+                    if invocation.name == "clear" {
+                        if self.state.busy() {
+                            self.push_status(
+                                "cannot clear screen while a turn is running (press Esc to interrupt)",
+                                false,
+                            );
+                        } else if self.shell.is_some() {
+                            self.push_status(
+                                "cannot clear screen while a shell command is running (press Esc to cancel)",
+                                false,
+                            );
+                        } else {
+                            self.transcript.clear();
+                            self.streaming.clear();
+                            self.open_calls.clear();
+                            self.screen.invalidate();
+                        }
+                    } else if invocation.name == "theme" {
                         self.apply_theme(&invocation.args);
                     } else if invocation.name == "help" {
                         for line in slash::help_lines() {
@@ -923,12 +966,17 @@ impl ConsoleUi {
     }
 
     /// Render one frame to the terminal.
-    pub fn render(&mut self, out: &mut impl std::io::Write, columns: usize, rows: usize) {
+    pub fn render(
+        &mut self,
+        out: &mut impl std::io::Write,
+        columns: usize,
+        rows: usize,
+    ) -> std::io::Result<()> {
         let frame = self.frame(columns, rows);
         let mut buffer: Vec<u8> = Vec::with_capacity(16 * 1024);
         self.screen.draw(&mut buffer, &frame, columns, rows);
-        let _ = out.write_all(&buffer);
-        let _ = out.flush();
+        out.write_all(&buffer)?;
+        out.flush()
     }
 }
 
@@ -1055,7 +1103,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
 
     let (mut columns, mut rows) = terminal::size().unwrap_or((80, 24));
     let mut ui = ConsoleUi::new(Box::new(client), &ctx, env!("CARGO_PKG_VERSION"));
-    ui.render(&mut std::io::stdout().lock(), columns, rows);
+    if let Err(e) = ui.render(&mut std::io::stdout().lock(), columns, rows) {
+        guard.leave();
+        return Err(anyhow::anyhow!("initial render failed: {e}"));
+    }
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -1067,24 +1118,33 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
 
     while flow == Flow::Continue && abort_reason.is_none() {
         let stdout = std::io::stdout();
-        ui.flush_outbox().await;
+        if let Err(error) = ui.flush_outbox().await {
+            abort_reason = Some(format!("session submission failed: {error}"));
+            break;
+        }
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(CEvent::Key(key))) => {
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
                         flow = ui.handle_key(KeyEvent::from(key));
-                        ui.render(&mut stdout.lock(), columns, rows);
+                        if let Err(e) = ui.render(&mut stdout.lock(), columns, rows) {
+                            abort_reason = Some(format!("terminal render error: {e}"));
+                        }
                     }
                 }
                 Some(Ok(CEvent::Paste(text))) => {
                     ui.editor.insert_paste(&text);
-                    ui.render(&mut stdout.lock(), columns, rows);
+                    if let Err(e) = ui.render(&mut stdout.lock(), columns, rows) {
+                        abort_reason = Some(format!("terminal render error: {e}"));
+                    }
                 }
                 Some(Ok(CEvent::Resize(w, h))) => {
                     columns = w as usize;
                     rows = h as usize;
                     ui.screen.invalidate();
-                    ui.render(&mut stdout.lock(), columns, rows);
+                    if let Err(e) = ui.render(&mut stdout.lock(), columns, rows) {
+                        abort_reason = Some(format!("terminal render error: {e}"));
+                    }
                 }
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
@@ -1099,7 +1159,9 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                     Some(event) => {
                         if ui.handle_wire_event(&event.msg) && ui.render_due() {
                             ui.note_rendered();
-                            ui.render(&mut stdout.lock(), columns, rows);
+                            if let Err(e) = ui.render(&mut stdout.lock(), columns, rows) {
+                                abort_reason = Some(format!("terminal render error: {e}"));
+                            }
                         }
                     }
                     None => {
@@ -1111,8 +1173,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                 // Spinner animation, streaming flush cadence, and the
                 // live shell card.
                 let shell_changed = ui.poll_shell();
-                if shell_changed || ui.needs_tick_render() {
-                    ui.render(&mut stdout.lock(), columns, rows);
+                if (shell_changed || ui.needs_tick_render())
+                    && let Err(e) = ui.render(&mut stdout.lock(), columns, rows)
+                {
+                    abort_reason = Some(format!("terminal render error: {e}"));
                 }
             }
         }
@@ -1790,5 +1854,170 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         assert!(ui.shell.is_none(), "shell cancelled by ctrl+c");
+    }
+
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed",
+            ))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "closed",
+            ))
+        }
+    }
+
+    #[test]
+    fn render_propagates_write_error() {
+        let mut ui = ui();
+        let mut writer = FailingWriter;
+        let res = ui.render(&mut writer, 80, 24);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().kind(), std::io::ErrorKind::BrokenPipe);
+    }
+
+    struct FailingLink;
+    #[async_trait]
+    impl SessionLink for FailingLink {
+        async fn submit(&self, _submission: Submission) -> Result<(), SubmitError> {
+            Err(SubmitError::ActorExited)
+        }
+        async fn next_event(&mut self) -> Option<Event> {
+            None
+        }
+        fn steer(&self, _text: &str, _target: SteerTarget) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_outbox_propagates_link_error() {
+        let mut ui = ConsoleUi::new(
+            Box::new(FailingLink),
+            &UiContext {
+                model_name: "test-model".to_string(),
+                cwd: PathBuf::from("/test"),
+                permission_mode: "guarded".to_string(),
+                skill_names: Vec::new(),
+                mcp_servers: Vec::new(),
+                status: Arc::new(NullStatus),
+            },
+            "0.1.0",
+        );
+        ui.enqueue(Op::Interrupt);
+        let res = ui.flush_outbox().await;
+        assert_eq!(res, Err(SubmitError::ActorExited));
+        assert_eq!(
+            ui.outbox.len(),
+            1,
+            "unsent operations must be preserved in outbox"
+        );
+    }
+
+    #[test]
+    fn clear_command_empties_transcript() {
+        let mut ui = ui();
+        ui.submit("hello assistant");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(!ui.state.busy());
+        assert!(!ui.transcript.is_empty());
+        ui.user_submit("/clear");
+        assert!(ui.transcript.is_empty());
+    }
+
+    #[test]
+    fn clear_command_is_rejected_while_busy() {
+        let mut ui = ui();
+        ui.submit("hello assistant");
+        assert!(ui.state.busy());
+        ui.user_submit("/clear");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("hello assistant"),
+            "user message must remain while busy"
+        );
+        assert!(
+            joined.contains("cannot clear screen"),
+            "busy hint must be shown"
+        );
+    }
+
+    #[test]
+    fn clear_command_drops_pending_streaming_draft() {
+        let mut ui = ui();
+        ui.submit("hello assistant");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        ui.streaming.push_assistant("stale draft");
+        ui.user_submit("/clear");
+        assert!(ui.transcript.is_empty());
+        assert!(
+            ui.streaming.is_empty(),
+            "streaming drafts must not survive a clear"
+        );
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("stale draft"),
+            "cleared draft must not render"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_command_is_rejected_while_shell_runs() {
+        let sleep = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let mut ui = ui();
+        ui.user_submit(&format!("!{sleep}"));
+        assert!(ui.shell.is_some(), "shell job started");
+        ui.user_submit("/clear");
+        assert!(
+            !ui.transcript.is_empty(),
+            "refused clear must keep the transcript"
+        );
+        assert!(
+            ui.shell.is_some(),
+            "refused clear must not drop the running shell"
+        );
+        assert!(ui.shell_card.is_some(), "live card index must stay valid");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("(esc to cancel)"),
+            "live shell card must survive a refused clear"
+        );
+        assert!(
+            joined.contains("cannot clear screen"),
+            "shell hint must be shown"
+        );
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        for _ in 0..200 {
+            ui.poll_shell();
+            if ui.shell.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(ui.shell.is_none(), "shell cancelled during cleanup");
     }
 }

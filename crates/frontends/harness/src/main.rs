@@ -763,9 +763,9 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
 
 /// Flush buffered streams with locked handles.
 ///
-/// Returns true on a closed stdout pipe; panicking `print!` would turn
-/// `| head` into a crash, while `writeln!` lets a broken pipe read as a
-/// clean end. Stderr failures stay hard errors.
+/// Returns true on a closed pipe (stdout or stderr); panicking `print!`
+/// would turn `| head` into a crash, while `writeln!` lets a broken pipe
+/// read as a clean end.
 fn flush_buffers(stdout_text: &str, stderr_text: &str) -> std::io::Result<bool> {
     let mut out = std::io::stdout().lock();
     match out
@@ -777,8 +777,14 @@ fn flush_buffers(stdout_text: &str, stderr_text: &str) -> std::io::Result<bool> 
         Err(e) => return Err(e),
     }
     let mut err = std::io::stderr().lock();
-    err.write_all(stderr_text.as_bytes())?;
-    err.flush()?;
+    match err
+        .write_all(stderr_text.as_bytes())
+        .and_then(|()| err.flush())
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(true),
+        Err(e) => return Err(e),
+    }
     Ok(false)
 }
 

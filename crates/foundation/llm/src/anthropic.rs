@@ -1,3 +1,15 @@
+/*!
+ * @file AnthropicClient
+ * @description Anthropic Messages API streaming HTTP client.
+ *
+ * Responsibilities:
+ * - Build and send streaming requests to the Anthropic Messages endpoint.
+ * - Manage prompt-caching breakpoints and extended thinking configurations.
+ * - Provide fallible client construction (try_new) and safe TLS initialization.
+ *
+ * This module must not depend on: runtime, config, or UI-layer components.
+ */
+
 //! Anthropic Messages API streaming HTTP client.
 //!
 //! `POST {base_url}/v1/messages` starts an SSE streaming request; byte chunks flow through
@@ -32,15 +44,21 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    /// Creates a new client (prompt caching on, thinking off).
-    pub fn new(base_url: String, api_key: String) -> Self {
-        Self {
+    /// Creates a new client fallibly, returning an error if HTTP client or TLS init fails.
+    pub fn try_new(base_url: String, api_key: String) -> Result<Self> {
+        Ok(Self {
             base_url,
             api_key,
-            http: build_http_client(),
+            http: build_http_client()?,
             prompt_caching: true,
             thinking_budget: None,
-        }
+        })
+    }
+
+    /// Creates a new client (prompt caching on, thinking off).
+    pub fn new(base_url: String, api_key: String) -> Self {
+        Self::try_new(base_url, api_key)
+            .expect("TLS backend initialization failed; verify system certificates are installed")
     }
 
     /// Enable extended thinking with the given token budget. The budget is
@@ -68,13 +86,12 @@ impl AnthropicClient {
 /// - Redirects are disabled: the Messages API endpoint has no legitimate redirect semantics,
 ///   so a redirect is an error; reqwest follows redirects by default and would carry `x-api-key`
 ///   to a cross-origin target (verified with a PoC), which must be ruled out.
-fn build_http_client() -> reqwest::Client {
+fn build_http_client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        // Same as reqwest's own `Client::new()`: only TLS init failure can reach this path.
-        .expect("failed to build HTTP client")
+        .map_err(|e| LlmError::ClientInit(e.to_string()))
 }
 
 #[async_trait::async_trait]
@@ -339,6 +356,15 @@ mod tests {
     use crate::sse::find_subsequence;
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
+
+    #[test]
+    fn try_new_constructs_client() {
+        let client = AnthropicClient::try_new(
+            "https://api.anthropic.com".to_string(),
+            "sk-ant-test".to_string(),
+        );
+        assert!(client.is_ok());
+    }
 
     /// Stall guard: the first chunk passes through, then the upstream hangs - ends with Err
     /// within the idle timeout, and the timing is real (returns far below the generous upper bound).

@@ -1,3 +1,15 @@
+/*!
+ * @file Transcript
+ * @description Turn-based visual transcript buffer for the interactive console.
+ *
+ * Responsibilities:
+ * - Maintain ordered sequence of rendered message components.
+ * - Group entries into discrete conversational turns.
+ * - Support windowed trimming for bounded memory and clear operations.
+ *
+ * This module must not depend on: runtime, network, or actor internal state.
+ */
+
 //! The transcript: ordered message components grouped into turns, with
 //! windowed trimming so long sessions stay bounded.
 //!
@@ -23,7 +35,8 @@ pub struct Entry {
 #[derive(Default)]
 pub struct Transcript {
     entries: Vec<Entry>,
-    /// Turn counter for the next entry (monotonic).
+    /// Turn counter for the next entry (monotonic within a view lifetime;
+    /// reset to zero by `clear` alongside the entries).
     next_turn: usize,
 }
 
@@ -93,6 +106,13 @@ impl Transcript {
             lines.extend(entry.component.render(columns));
         }
         lines
+    }
+
+    /// Clear all transcript entries and reset the turn counter so the
+    /// next view lifetime starts numbering from zero.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.next_turn = 0;
     }
 }
 

@@ -127,6 +127,7 @@ pub fn help_lines() -> Vec<String> {
     vec![
         "Keybindings:".to_string(),
         "  shift+enter / ctrl+j  newline (backslash+enter also works)".to_string(),
+        "  shift+tab             cycle permission mode (ask/auto/plan)".to_string(),
         "  ctrl+o                expand tool output and thinking".to_string(),
         "  ctrl+s                steer a running turn".to_string(),
         "  ctrl+c                interrupt; double-press exits".to_string(),

@@ -162,6 +162,12 @@ impl Editor {
         self.prompt = prompt.into();
     }
 
+    /// Restyle the frame border (permission-mode accent: plan →
+    /// primary, auto → warning). Takes effect on the next render.
+    pub fn set_border_style(&mut self, border: Style) {
+        self.style.border = border;
+    }
+
     /// Set the top-border label (e.g. ` ! shell mode `).
     pub fn set_label(&mut self, label: Option<String>) {
         self.label = label;

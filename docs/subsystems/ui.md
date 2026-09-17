@@ -66,7 +66,11 @@ receivers remain compatible.
   markers expand atomically on submit).
 - Slash commands (`/help /compact /model /permissions /plan /theme
   /memory /snapshots /goal /status /exit`) with fuzzy completion;
-  unknown `/tokens` fall through as user input (skills).
+  unknown `/tokens` fall through as user input (skills). Mode and model
+  commands update the local chrome immediately (there is no
+  mode-changed wire event).
+- Shift+Tab cycles the permission mode (ask → auto → plan) and re-tints
+  the editor border (plan = primary, auto = warning).
 - `@` file mentions with a bounded workspace inventory (2 000 entries,
   vendored/hidden directories skipped).
 - Ctrl+C cascade: interrupt when busy, otherwise arm the double-press

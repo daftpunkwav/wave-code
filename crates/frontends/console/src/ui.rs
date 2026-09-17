@@ -514,6 +514,14 @@ impl ConsoleUi {
             }
             return Flow::Continue;
         }
+        // Shift+Tab cycles the permission mode globally (kimi parity):
+        // guarded → auto → plan → guarded.
+        if event.key == Key::Tab && event.mods.shift {
+            let next = slash::cycle_mode(&self.state.permission_mode);
+            self.apply_permission_mode(&next);
+            self.enqueue(Op::SetPermissionMode { mode: next });
+            return Flow::Continue;
+        }
         match self.editor.handle_key(event) {
             EditorAction::Submit(text) => {
                 self.exit_armed_at = None;
@@ -522,6 +530,20 @@ impl ConsoleUi {
             EditorAction::Handled => Flow::Continue,
             EditorAction::Passthrough => self.handle_passthrough_key(event),
         }
+    }
+
+    /// Apply a permission-mode change to local state and chrome (the
+    /// caller enqueues the wire op; there is no mode-changed event).
+    fn apply_permission_mode(&mut self, mode: &str) {
+        self.state.permission_mode = mode.to_string();
+        let theme = theme::current();
+        let border = match mode {
+            "plan" => theme.style(Token::Primary),
+            "auto" => theme.style(Token::Warning),
+            _ => theme.style(Token::Border),
+        };
+        self.editor.set_border_style(border);
+        self.push_status(&format!("permission mode: {mode}"), false);
     }
 
     /// Submit handling for editor text: slash dispatch first, then plain
@@ -567,6 +589,19 @@ impl ConsoleUi {
                         self.push_status(&text, false);
                     }
                     for op in ops {
+                        // Mode/model changes have no wire echo; the
+                        // requesting UI is the source of truth for its
+                        // own chrome.
+                        match &op {
+                            Op::SetPermissionMode { mode } => {
+                                self.apply_permission_mode(mode);
+                            }
+                            Op::SetModel { name } => {
+                                self.state.model_name = name.clone();
+                                self.push_status(&format!("model: {name}"), false);
+                            }
+                            _ => {}
+                        }
                         self.enqueue(op);
                     }
                     Flow::Continue
@@ -1099,6 +1134,64 @@ mod tests {
         );
         assert!(!ui.exit_armed(), "interrupt does not arm exit");
         assert!(matches!(ui.pending_ops().last(), Some(Op::Interrupt)));
+    }
+
+    #[test]
+    fn shift_tab_cycles_permission_mode() {
+        let mut ui = ui();
+        assert_eq!(ui.state.permission_mode, "guarded");
+        ui.handle_key(KeyEvent {
+            key: Key::Tab,
+            mods: Mods {
+                shift: true,
+                ctrl: false,
+                alt: false,
+            },
+        });
+        assert_eq!(ui.state.permission_mode, "auto");
+        assert!(
+            matches!(
+                ui.pending_ops().last(),
+                Some(Op::SetPermissionMode { mode }) if mode == "auto"
+            ),
+            "op enqueued"
+        );
+        ui.handle_key(KeyEvent {
+            key: Key::Tab,
+            mods: Mods {
+                shift: true,
+                ctrl: false,
+                alt: false,
+            },
+        });
+        assert_eq!(ui.state.permission_mode, "plan");
+    }
+
+    #[test]
+    fn plan_command_updates_local_mode() {
+        let mut ui = ui();
+        let flow = ui.user_submit("/plan");
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(ui.state.permission_mode, "plan");
+        assert!(
+            matches!(
+                ui.pending_ops().last(),
+                Some(Op::SetPermissionMode { mode }) if mode == "plan"
+            ),
+            "wire op enqueued: {:?}",
+            ui.pending_ops()
+        );
+    }
+
+    #[test]
+    fn model_command_updates_local_model() {
+        let mut ui = ui();
+        ui.user_submit("/model fast-model");
+        assert_eq!(ui.state.model_name, "fast-model");
+        assert!(matches!(
+            ui.pending_ops().last(),
+            Some(Op::SetModel { name }) if name == "fast-model"
+        ));
     }
 
     #[test]

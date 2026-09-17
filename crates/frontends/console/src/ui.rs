@@ -30,8 +30,10 @@ use crate::chrome::footer as footer_chrome;
 use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint};
 use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
+use crate::controllers::shell::{ShellEvent, ShellJob};
 use crate::dialogs::{Answer, ApprovalDialog, Dialog, QuestionDialog};
 use crate::history;
+use crate::messages::shell::ShellCard;
 use crate::messages::tool_call::ToolCall;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
@@ -117,6 +119,12 @@ pub struct ConsoleUi {
     open_calls: HashMap<String, usize>,
     /// Modal dialog (approvals, questions) when present.
     dialog: Option<Dialog>,
+    /// Running local shell command (`!` mode), when present.
+    shell: Option<ShellJob>,
+    /// Transcript index of the live shell card.
+    shell_card: Option<usize>,
+    /// True while the editor chrome is tinted for shell mode.
+    shell_chrome: bool,
     /// History persistence path when a home directory is known.
     history_path: Option<PathBuf>,
     outbox: Vec<Op>,
@@ -161,6 +169,9 @@ impl ConsoleUi {
             expanded: ExpandedFlag::new(),
             open_calls: HashMap::new(),
             dialog: None,
+            shell: None,
+            shell_card: None,
+            shell_chrome: false,
             history_path: home_history_path(),
             outbox: Vec::new(),
             exit_armed_at: None,
@@ -184,6 +195,83 @@ impl ConsoleUi {
         self.enqueue(Op::UserInput { text });
         self.state.phase = StreamingPhase::Waiting;
         self.activity.set_phase(StreamingPhase::Waiting);
+    }
+
+    /// Run a local `!` shell command, rendering its output live in the
+    /// transcript. Shell commands run client-side and never reach the
+    /// session; only one runs at a time.
+    fn run_shell(&mut self, command: &str) {
+        let command = command.trim();
+        if command.is_empty() {
+            self.push_status("usage: !<command>", false);
+            return;
+        }
+        if self.shell.is_some() {
+            self.push_status("a shell command is already running (esc cancels it)", true);
+            return;
+        }
+        match ShellJob::spawn(command) {
+            Ok(job) => {
+                let card = ShellCard::running(command, self.expanded.clone());
+                self.transcript.push(Box::new(card));
+                self.shell_card = self.transcript.last_index();
+                self.shell = Some(job);
+            }
+            Err(error) => {
+                self.push_status(&format!("shell command failed to start: {error}"), true)
+            }
+        }
+    }
+
+    /// Drain pending shell output into the live card; returns true when
+    /// the frame changed (run loop tick calls this).
+    pub fn poll_shell(&mut self) -> bool {
+        let Some(job) = self.shell.as_mut() else {
+            return false;
+        };
+        let mut events = Vec::new();
+        while let Some(event) = job.try_recv() {
+            events.push(event);
+        }
+        let mut done: Option<Option<i32>> = None;
+        let mut changed = !events.is_empty();
+        for event in events {
+            match event {
+                ShellEvent::Out(line) => self.push_shell_output(&line, false),
+                ShellEvent::Err(line) => self.push_shell_output(&line, true),
+                ShellEvent::Done(code) => done = Some(code),
+            }
+        }
+        if let Some(code) = done {
+            if let Some(card) = self.shell_card_mut() {
+                card.finish(code);
+            }
+            self.shell = None;
+            self.shell_card = None;
+            changed = true;
+        }
+        changed
+    }
+
+    fn shell_card_mut(&mut self) -> Option<&mut ShellCard> {
+        let index = self.shell_card?;
+        let entry = self.transcript.get_mut(index)?;
+        entry.component.as_any_mut().downcast_mut::<ShellCard>()
+    }
+
+    fn push_shell_output(&mut self, line: &str, stderr: bool) {
+        if let Some(card) = self.shell_card_mut() {
+            card.push_output(line, stderr);
+        }
+    }
+
+    /// Kill the running shell command; the card finalizes via the
+    /// `Done(None)` event the job reports after its pipes drain.
+    fn cancel_shell(&mut self) {
+        if let Some(job) = &self.shell {
+            job.cancel();
+        }
+        self.push_status("cancelling shell command", false);
     }
 
     /// Queue one operation for the run loop to submit.
@@ -525,30 +613,57 @@ impl ConsoleUi {
         match self.editor.handle_key(event) {
             EditorAction::Submit(text) => {
                 self.exit_armed_at = None;
-                self.user_submit(&text)
+                let flow = self.user_submit(&text);
+                self.refresh_editor_chrome();
+                flow
             }
-            EditorAction::Handled => Flow::Continue,
+            EditorAction::Handled => {
+                self.refresh_editor_chrome();
+                Flow::Continue
+            }
             EditorAction::Passthrough => self.handle_passthrough_key(event),
         }
+    }
+
+    /// Re-tint the editor border for the current buffer/mode state:
+    /// shell violet with a `! shell mode` label while the buffer starts
+    /// with `!`, otherwise the permission-mode color.
+    fn refresh_editor_chrome(&mut self) {
+        let shell = self.editor.text().starts_with('!');
+        if shell == self.shell_chrome {
+            return;
+        }
+        let theme = theme::current();
+        if shell {
+            self.editor.set_border_style(theme.style(Token::ShellMode));
+            self.editor.set_label(Some("! shell mode".to_string()));
+        } else {
+            self.editor
+                .set_border_style(mode_border_style(&self.state.permission_mode));
+            self.editor.set_label(None);
+        }
+        self.shell_chrome = shell;
     }
 
     /// Apply a permission-mode change to local state and chrome (the
     /// caller enqueues the wire op; there is no mode-changed event).
     fn apply_permission_mode(&mut self, mode: &str) {
         self.state.permission_mode = mode.to_string();
-        let theme = theme::current();
-        let border = match mode {
-            "plan" => theme.style(Token::Primary),
-            "auto" => theme.style(Token::Warning),
-            _ => theme.style(Token::Border),
-        };
-        self.editor.set_border_style(border);
+        self.editor.set_border_style(mode_border_style(mode));
         self.push_status(&format!("permission mode: {mode}"), false);
     }
 
-    /// Submit handling for editor text: slash dispatch first, then plain
-    /// user input (which persists to history).
+    /// Submit handling for editor text: `!` shell commands first, then
+    /// slash dispatch, then plain user input (which persists to
+    /// history).
     fn user_submit(&mut self, text: &str) -> Flow {
+        if let Some(command) = text.strip_prefix('!') {
+            if let Some(path) = &self.history_path {
+                history::append(path, text);
+            }
+            self.run_shell(command);
+            return Flow::Continue;
+        }
         if let Some(invocation) = slash::parse(text) {
             return match slash::dispatch(&invocation, &self.state, self.status.as_ref()) {
                 slash::Effect::Ops(ops) => {
@@ -642,6 +757,10 @@ impl ConsoleUi {
     fn handle_passthrough_key(&mut self, event: KeyEvent) -> Flow {
         match (event.key, event.mods) {
             (Key::Char('c'), m) if m.ctrl => self.handle_ctrl_c(),
+            (Key::Esc, _) if self.shell.is_some() => {
+                self.cancel_shell();
+                Flow::Continue
+            }
             (Key::Char('d'), m) if m.ctrl && self.editor.is_empty() => {
                 if self.exit_armed() {
                     Flow::Exit
@@ -675,6 +794,11 @@ impl ConsoleUi {
     }
 
     fn handle_ctrl_c(&mut self) -> Flow {
+        // Ctrl+C cancels the running shell command before anything else.
+        if self.shell.is_some() {
+            self.cancel_shell();
+            return Flow::Continue;
+        }
         if self.exit_armed() {
             return Flow::Exit;
         }
@@ -742,9 +866,10 @@ impl ConsoleUi {
             .collect()
     }
 
-    /// True when an animation tick must repaint (busy phases animate).
+    /// True when an animation tick must repaint (busy phases animate,
+    /// shell output arrives asynchronously).
     pub fn needs_tick_render(&self) -> bool {
-        self.state.busy() || self.exit_armed()
+        self.state.busy() || self.exit_armed() || self.shell.is_some()
     }
 
     /// Whether a wire event batch may paint immediately: during heavy
@@ -769,6 +894,17 @@ impl ConsoleUi {
     }
 }
 
+/// The editor border color for a permission mode (plan accent, auto
+/// warning, otherwise the default border).
+fn mode_border_style(mode: &str) -> tui_engine::color::Style {
+    let theme = theme::current();
+    match mode {
+        "plan" => theme.style(Token::Primary),
+        "auto" => theme.style(Token::Warning),
+        _ => theme.style(Token::Border),
+    }
+}
+
 /// The themed editor style (rebuild on theme switches).
 fn editor_style() -> EditorStyle {
     let theme = theme::current();
@@ -776,6 +912,7 @@ fn editor_style() -> EditorStyle {
         border: theme.style(Token::Border),
         prompt: theme.style(Token::TextDim),
         slash_command: theme.style(Token::Primary).bold(),
+        shell_command: theme.style(Token::ShellMode),
         hint: theme.style(Token::TextDim),
         paste_marker: theme.style(Token::TextDim),
         popup: tui_engine::select_list::SelectListStyle {
@@ -910,8 +1047,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                 }
             }
             _ = tick.tick() => {
-                // Spinner animation and streaming flush cadence.
-                if ui.needs_tick_render() {
+                // Spinner animation, streaming flush cadence, and the
+                // live shell card.
+                let shell_changed = ui.poll_shell();
+                if shell_changed || ui.needs_tick_render() {
                     ui.render(&mut stdout.lock(), columns, rows);
                 }
             }
@@ -1324,5 +1463,128 @@ mod tests {
                 "line exceeds width: {line:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn shell_command_runs_and_lands_in_transcript() {
+        let mut ui = ui();
+        let flow = ui.user_submit("!echo shell-ui-ok");
+        assert_eq!(flow, Flow::Continue);
+        assert!(
+            ui.pending_ops().is_empty(),
+            "shell commands never reach the session: {:?}",
+            ui.pending_ops()
+        );
+        assert!(ui.shell.is_some(), "shell job running");
+        // Drain until the job completes (bounded wait).
+        for _ in 0..200 {
+            ui.poll_shell();
+            if ui.shell.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(ui.shell.is_none(), "shell job finished");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("$ echo shell-ui-ok"), "{joined}");
+        assert!(joined.contains("shell-ui-ok"), "{joined}");
+        assert!(
+            !joined.contains("(esc to cancel)"),
+            "card finalized: {joined}"
+        );
+    }
+
+    #[test]
+    fn empty_bang_reports_usage() {
+        let mut ui = ui();
+        ui.user_submit("!");
+        assert!(ui.shell.is_none());
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("usage: !<command>"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn esc_cancels_running_shell() {
+        let sleep = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let mut ui = ui();
+        ui.user_submit(&format!("!{sleep}"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        for _ in 0..200 {
+            ui.poll_shell();
+            if ui.shell.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(ui.shell.is_none(), "shell cancelled");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("terminated"), "{joined}");
+    }
+
+    #[test]
+    fn shell_buffer_tints_editor_chrome() {
+        let mut ui = ui();
+        ui.handle_key(KeyEvent::plain(Key::Char('!')));
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("! shell mode"), "{joined}");
+        ui.handle_key(KeyEvent::plain(Key::Backspace));
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("! shell mode"), "{joined}");
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_cancels_shell_before_exiting() {
+        let sleep = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let mut ui = ui();
+        ui.user_submit(&format!("!{sleep}"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // First Ctrl+C cancels the shell instead of arming exit.
+        assert_eq!(
+            ui.handle_key(KeyEvent::new(Key::Char('c'), Mods::CTRL)),
+            Flow::Continue
+        );
+        assert!(!ui.exit_armed(), "shell cancel does not arm exit");
+        for _ in 0..200 {
+            ui.poll_shell();
+            if ui.shell.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(ui.shell.is_none(), "shell cancelled by ctrl+c");
     }
 }

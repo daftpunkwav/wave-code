@@ -39,6 +39,8 @@ pub struct EditorStyle {
     pub prompt: Style,
     /// Bold highlight for a leading `/command` token.
     pub slash_command: Style,
+    /// Highlight for a leading `!command` token (shell mode).
+    pub shell_command: Style,
     /// Dim ghost text for argument hints.
     pub hint: Style,
     /// Dim styling for collapsed paste markers.
@@ -53,6 +55,7 @@ impl Default for EditorStyle {
             border: Style::new(),
             prompt: Style::new(),
             slash_command: Style::new().bold(),
+            shell_command: Style::new(),
             hint: Style::new().dim(),
             paste_marker: Style::new().dim(),
             popup: crate::select_list::SelectListStyle {
@@ -884,10 +887,18 @@ impl Editor {
             } else {
                 format!("{} ", " ".repeat(prompt_width))
             };
-            let mut body = format!("{prefix}{}", row.text);
+            let mut text = row.text.clone();
             if is_cursor_row {
-                body = insert_cursor_marker(&body, cursor_col + prompt_width + 1);
+                // `cursor_col` is already the cursor's visible column
+                // within this row.
+                text = insert_cursor_marker(&text, cursor_col);
             }
+            // Leading `/command` and `!command` tokens are painted on
+            // the very first row only.
+            if row.line == 0 && row.start == 0 {
+                text = paint_leading_token(&text, &self.style);
+            }
+            let body = format!("{prefix}{text}");
             let mut padded = width::pad_to_width(&body, content_width);
             if width::width(&padded) > content_width {
                 padded = width::truncate_to_width(&padded, content_width);
@@ -938,6 +949,22 @@ impl Editor {
         }
         out.extend(popup_rows);
     }
+}
+
+/// Paint the first whitespace-delimited token of the input's first row:
+/// `/command` in the slash style, `!command` in the shell style. Any
+/// other leading character returns the row untouched.
+fn paint_leading_token(text: &str, style: &EditorStyle) -> String {
+    let token_end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let (token, rest) = text.split_at(token_end);
+    let painted = if token.starts_with('/') {
+        style.slash_command.paint(token)
+    } else if token.starts_with('!') {
+        style.shell_command.paint(token)
+    } else {
+        return text.to_string();
+    };
+    format!("{painted}{rest}")
 }
 
 /// Byte offset of grapheme index `col` in `line`.
@@ -1089,6 +1116,77 @@ mod tests {
         let action = editor.handle_key(KeyEvent::plain(Key::Enter));
         assert_eq!(action, EditorAction::Submit("hello".to_string()));
         assert!(editor.is_empty());
+    }
+
+    /// A style painted only via one distinctive SGR attribute so tests
+    /// can assert which span it wrapped.
+    fn marked_style() -> EditorStyle {
+        EditorStyle {
+            slash_command: Style::new().bold(),
+            shell_command: Style::new().underline(),
+            ..EditorStyle::default()
+        }
+    }
+
+    /// Plain-text view of one editor body row (borders kept, cursor
+    /// marker stripped — the screen layer removes it at draw time).
+    fn plain_row(rows: &[String], index: usize) -> String {
+        strip_ansi(&rows[index]).replace(CURSOR_MARKER, "")
+    }
+
+    #[test]
+    fn leading_slash_token_is_painted() {
+        let mut editor = Editor::new(marked_style());
+        type_string(&mut editor, "/help now");
+        let rows = editor.render_box(40, 4);
+        let body = &rows[1];
+        assert!(body.contains("\x1b[1m"), "bold slash token: {body:?}");
+        assert!(!body.contains("\x1b[4m"), "no shell style: {body:?}");
+        assert!(plain_row(&rows, 1).contains("> /help now"), "{body:?}");
+    }
+
+    #[test]
+    fn leading_shell_token_is_painted() {
+        let mut editor = Editor::new(marked_style());
+        type_string(&mut editor, "!ls -la");
+        let rows = editor.render_box(40, 4);
+        let body = &rows[1];
+        assert!(body.contains("\x1b[4m"), "underlined shell token: {body:?}");
+        assert!(!body.contains("\x1b[1m"), "no slash style: {body:?}");
+        assert!(plain_row(&rows, 1).contains("> !ls -la"), "{body:?}");
+    }
+
+    #[test]
+    fn plain_text_has_no_token_paint() {
+        let mut editor = Editor::new(marked_style());
+        type_string(&mut editor, "hello world");
+        let rows = editor.render_box(40, 4);
+        let body = &rows[1];
+        assert!(
+            !body.contains("\x1b[1m") && !body.contains("\x1b[4m"),
+            "unpainted body: {body:?}"
+        );
+    }
+
+    #[test]
+    fn token_paint_stays_on_first_row() {
+        let mut editor = Editor::new(marked_style());
+        type_string(&mut editor, "/cmd");
+        let _ = editor.handle_key(KeyEvent::new(
+            Key::Enter,
+            Mods {
+                shift: true,
+                ..Mods::NONE
+            },
+        ));
+        type_string(&mut editor, "more");
+        let rows = editor.render_box(40, 6);
+        let body = &rows[2];
+        assert!(
+            !body.contains("\x1b[1m"),
+            "continuation rows stay unpainted: {body:?}"
+        );
+        assert!(plain_row(&rows, 2).contains("more"), "{body:?}");
     }
 
     #[test]

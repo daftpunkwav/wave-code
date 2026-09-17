@@ -133,7 +133,7 @@ pub fn help_lines() -> Vec<String> {
         "  ctrl+c                interrupt; double-press exits".to_string(),
         "  esc                   interrupt the running turn".to_string(),
         "  up / down             input history".to_string(),
-        "  !cmd                  (reserved) shell mode".to_string(),
+        "  !cmd                  run a local shell command".to_string(),
         "Commands:".to_string(),
         "  /help /compact /model <name> /permissions [mode] /plan /theme <light|dark>".to_string(),
         "  /memory /snapshots /goal /status /exit".to_string(),

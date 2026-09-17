@@ -181,6 +181,7 @@ impl ConsoleUi {
             version: version.into(),
         };
         let info = welcome_info_of(&ui.state, &ui.version);
+        ui.state.git_branch = crate::gitinfo::branch(&ui.state.cwd);
         ui.transcript.push_new_turn(Box::new(Welcome::new(info)));
         ui
     }
@@ -409,6 +410,8 @@ impl ConsoleUi {
             EventMsg::TurnStarted => {
                 self.state.phase = StreamingPhase::Waiting;
                 self.activity.set_phase(StreamingPhase::Waiting);
+                // Cheap .git/HEAD read: catches checkout/branch switches.
+                self.state.git_branch = crate::gitinfo::branch(&self.state.cwd);
                 true
             }
             EventMsg::AgentThinkingDelta { text } => {

@@ -27,7 +27,8 @@ pub enum TransientHint {
     None,
 }
 
-/// Build footer row 1: mode badge, model, shortened cwd, rotating tip.
+/// Build footer row 1: mode badge, model, shortened cwd, git branch,
+/// rotating tip.
 pub fn row1(state: &AppState, tip: Option<&str>, columns: usize) -> String {
     let theme = theme::current();
     let mut line = String::new();
@@ -36,6 +37,9 @@ pub fn row1(state: &AppState, tip: Option<&str>, columns: usize) -> String {
     line.push_str(&theme.paint(Token::Text, &state.model_name));
     line.push_str("  ");
     line.push_str(&theme.paint(Token::TextDim, &crate::ui::shorten_cwd(&state.cwd, 3)));
+    if let Some(branch) = &state.git_branch {
+        line.push_str(&theme.paint(Token::TextDim, &format!(" ⎇ {branch}")));
+    }
     if let Some(tip) = tip {
         let used = width::width(&line);
         let tip_text = theme.paint(Token::TextMuted, &format!(" | {tip}"));
@@ -122,6 +126,18 @@ mod tests {
         let line = row1(&state(), Some("ctrl+o expand tool output"), 40);
         let plain = width::strip_ansi(&line);
         assert!(!plain.contains("ctrl+o expand"), "tip dropped: {plain}");
+    }
+
+    #[test]
+    fn row1_shows_git_branch_when_known() {
+        theme::set(theme::Theme::dark());
+        let mut with_branch = state();
+        with_branch.git_branch = Some("feat/console-ui".to_string());
+        let line = row1(&with_branch, None, 120);
+        let plain = width::strip_ansi(&line);
+        assert!(plain.contains("⎇ feat/console-ui"), "{plain}");
+        let bare = row1(&state(), None, 120);
+        assert!(!width::strip_ansi(&bare).contains("⎇"), "{bare}");
     }
 
     #[test]

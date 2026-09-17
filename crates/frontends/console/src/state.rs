@@ -86,6 +86,9 @@ pub struct AppState {
     pub todo_expanded: bool,
     /// Cumulative token usage across the session.
     pub usage: TokenUsage,
+    /// Git branch (or short detached sha) of the workspace, refreshed
+    /// on turn starts; `None` outside a repository.
+    pub git_branch: Option<String>,
 }
 
 impl AppState {
@@ -109,6 +112,7 @@ impl AppState {
             todos: Vec::new(),
             todo_expanded: false,
             usage: TokenUsage::default(),
+            git_branch: None,
         }
     }
 

@@ -38,10 +38,12 @@ pub use ui::{ConsoleUi, UiContext, run};
 mod dependency_matrix_locked {
     /// The console UI crosses to the session exclusively through the
     /// wire protocol and the actor client, and renders through
-    /// tui-engine. Every `[dependencies]` key is checked against the
-    /// combined whitelist (internal set + known externals), closing the
-    /// `foo.workspace = true` bypass. Adding an internal dependency is
-    /// a boundary change: update this test deliberately.
+    /// tui-engine. Every key in every dependency table (`[dependencies]`,
+    /// target sections, dev/build) is checked against the combined
+    /// whitelist (internal set + known externals), closing both the
+    /// `foo.workspace = true` bypass and the target-section bypass.
+    /// Adding an internal dependency is a boundary change: update this
+    /// test deliberately.
     #[test]
     fn console_ui_internal_dependencies_are_locked() {
         const INTERNAL: [&str; 3] = ["tui-engine", "wavecode-wire", "operations-actor"];
@@ -59,7 +61,7 @@ mod dependency_matrix_locked {
         for line in manifest.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('[') {
-                in_deps = trimmed == "[dependencies]";
+                in_deps = trimmed.contains("dependencies");
                 continue;
             }
             if !in_deps || trimmed.starts_with('#') || trimmed.is_empty() {

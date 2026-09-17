@@ -828,8 +828,11 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flow = Flow::Continue;
+    // Abnormal-termination reason, reported AFTER the terminal is
+    // restored: printing in raw mode would ladder across the last frame.
+    let mut abort_reason: Option<String> = None;
 
-    while flow == Flow::Continue {
+    while flow == Flow::Continue && abort_reason.is_none() {
         let stdout = std::io::stdout();
         ui.flush_outbox().await;
         tokio::select! {
@@ -852,11 +855,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                 }
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
-                    eprintln!("console-ui: terminal event error: {error}");
+                    abort_reason = Some(format!("terminal event error: {error}"));
                 }
                 None => {
-                    eprintln!("console-ui: terminal event source ended");
-                    break;
+                    abort_reason = Some("terminal event source ended".to_string());
                 }
             },
             event = ui.next_event() => {
@@ -868,8 +870,7 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                         }
                     }
                     None => {
-                        eprintln!("console-ui: session ended");
-                        break;
+                        abort_reason = Some("session ended unexpectedly".to_string());
                     }
                 }
             }
@@ -882,7 +883,10 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
         }
     }
     guard.leave();
-    Ok(())
+    match abort_reason {
+        Some(reason) => Err(anyhow::anyhow!(reason)),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -1156,9 +1160,9 @@ mod tests {
         });
         let frame = ui.frame(80, 24);
         let raw: String = frame.join("\n");
-        // The wire layer strips injected SGR before rendering; the only
-        // escapes left in the frame are the theme's own 38;2 sequences,
-        // never the model's basic-color injection.
+        // The UI entry points strip injected SGR before rendering; the
+        // only escapes left in the frame are the theme's own 38;2
+        // sequences, never the model's basic-color injection.
         assert!(
             !raw.contains("\x1b[31m"),
             "injected SGR must be stripped: {raw:?}"

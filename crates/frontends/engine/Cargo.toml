@@ -7,12 +7,15 @@ license.workspace = true
 # Boundary: pure rendering engine with zero internal workspace
 # dependencies. Components speak ANSI strings and engine-owned Color
 # values; semantic themes live in the application layer above. tests::
-# dependency_matrix_locked pins the empty internal-dep set.
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
+# dependency_matrix_locked pins the empty internal-dep set (across every
+# dependency table, target sections included).
 [dependencies]
 crossterm.workspace = true
 unicode-width.workspace = true
 unicode-segmentation.workspace = true
 pulldown-cmark.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# poll(2) for the bounded OSC 11 background probe (unix only; Windows
+# skips the probe — console input cannot be byte-polled safely there).
+libc.workspace = true

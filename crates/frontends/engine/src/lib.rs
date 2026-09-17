@@ -51,24 +51,28 @@ pub use screen::{Screen, ScreenOptions};
 mod dependency_matrix_locked {
     use std::path::Path;
 
-    /// The engine stays a pure library: its `[dependencies]` keys must
-    /// all be known external crates. Matching every key (not just
-    /// `path =`) closes the `foo.workspace = true` bypass. Adding an
-    /// internal dependency is a boundary change: update deliberately.
+    /// The engine stays a pure library: every dependency table
+    /// (`[dependencies]`, target sections, dev/build) must carry only
+    /// known external crates. Matching every key in every table (not
+    /// just `path =` in `[dependencies]`) closes both the
+    /// `foo.workspace = true` bypass and the target-section bypass.
+    /// Adding an internal dependency is a boundary change: update
+    /// deliberately.
     #[test]
     fn engine_has_no_internal_dependencies() {
-        const EXTERNAL: [&str; 4] = [
+        const EXTERNAL: [&str; 5] = [
             "crossterm",
             "unicode-width",
             "unicode-segmentation",
             "pulldown-cmark",
+            "libc",
         ];
         let manifest = include_str!("../Cargo.toml");
         let mut in_deps = false;
         for line in manifest.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('[') {
-                in_deps = trimmed == "[dependencies]";
+                in_deps = trimmed.contains("dependencies");
                 continue;
             }
             if !in_deps || trimmed.starts_with('#') || trimmed.is_empty() {

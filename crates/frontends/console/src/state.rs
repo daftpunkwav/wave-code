@@ -38,6 +38,27 @@ pub struct TodoEntry {
     pub status: TodoStatus,
 }
 
+/// Cumulative session token usage, accumulated from `TokenCount`
+/// samples (each sample reports its own input/output split).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    /// Sum of sample input tokens.
+    pub input: u64,
+    /// Sum of sample output tokens.
+    pub output: u64,
+    /// Sum of prompt-cache read tokens.
+    pub cache_read: u64,
+    /// Sum of prompt-cache write tokens.
+    pub cache_creation: u64,
+}
+
+impl TokenUsage {
+    /// Input + output (cache traffic excluded, matching billing totals).
+    pub fn total(self) -> u64 {
+        self.input + self.output
+    }
+}
+
 /// Mutable UI state snapshot; components read it during rendering.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -63,6 +84,8 @@ pub struct AppState {
     pub todos: Vec<TodoEntry>,
     /// Todo panel expansion (Ctrl+T toggles when the list overflows).
     pub todo_expanded: bool,
+    /// Cumulative token usage across the session.
+    pub usage: TokenUsage,
 }
 
 impl AppState {
@@ -85,6 +108,7 @@ impl AppState {
             expanded: false,
             todos: Vec::new(),
             todo_expanded: false,
+            usage: TokenUsage::default(),
         }
     }
 

@@ -35,6 +35,7 @@ use crate::dialogs::{Answer, ApprovalDialog, Dialog, QuestionDialog};
 use crate::history;
 use crate::messages::shell::ShellCard;
 use crate::messages::tool_call::ToolCall;
+use crate::messages::usage::UsagePanel;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
 use crate::slash;
@@ -487,10 +488,17 @@ impl ConsoleUi {
                 true
             }
             EventMsg::TokenCount {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
                 context_used,
                 context_window,
-                ..
             } => {
+                self.state.usage.input += input_tokens;
+                self.state.usage.output += output_tokens;
+                self.state.usage.cache_read += cache_read_tokens;
+                self.state.usage.cache_creation += cache_creation_tokens;
                 self.state.context_used = *context_used;
                 self.state.context_window = *context_window;
                 true
@@ -680,6 +688,15 @@ impl ConsoleUi {
                         for line in slash::help_lines() {
                             self.push_status(&line, false);
                         }
+                    } else if invocation.name == "usage" {
+                        let panel = UsagePanel::new(
+                            self.state.context_used,
+                            self.state.context_window,
+                            self.state.usage,
+                        );
+                        self.transcript.push(Box::new(panel));
+                    } else if invocation.name == "version" {
+                        self.push_status(&format!("WaveCode v{}", self.version), false);
                     } else if invocation.name == "model" && invocation.args.is_empty() {
                         self.push_status(&format!("model: {}", self.state.model_name), false);
                     } else if invocation.name == "permissions" && invocation.args.is_empty() {
@@ -790,6 +807,7 @@ impl ConsoleUi {
             }
             (Key::Esc, _) if self.state.busy() => {
                 self.enqueue(Op::Interrupt);
+                self.push_status("interrupting the turn", false);
                 Flow::Continue
             }
             (Key::Up, _) => {
@@ -815,6 +833,7 @@ impl ConsoleUi {
         }
         if self.state.busy() {
             self.enqueue(Op::Interrupt);
+            self.push_status("interrupting the turn", false);
             self.exit_armed_at = None;
             return Flow::Continue;
         }
@@ -1471,6 +1490,68 @@ mod tests {
             right.trim_end().ends_with("context: 42% (82.0k/195k)"),
             "footer line 2: {right:?}"
         );
+    }
+
+    #[test]
+    fn usage_command_renders_panel_from_accumulated_samples() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::TokenCount {
+            input_tokens: 6_000,
+            output_tokens: 1_500,
+            cache_read_tokens: 50_000,
+            cache_creation_tokens: 1_000,
+            context_window: Some(200_000),
+            context_used: Some(60_000),
+        });
+        ui.handle_wire_event(&EventMsg::TokenCount {
+            input_tokens: 6_000,
+            output_tokens: 1_500,
+            cache_read_tokens: 50_000,
+            cache_creation_tokens: 1_000,
+            context_window: Some(200_000),
+            context_used: Some(84_000),
+        });
+        ui.user_submit("/usage");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("● usage"), "{joined}");
+        assert!(joined.contains("42% (82.0k/195k)"), "{joined}");
+        assert!(joined.contains("read 97.7k"), "{joined}");
+        assert!(
+            joined.contains("total") && joined.contains("14.6k"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn version_command_prints_version() {
+        let mut ui = ui();
+        ui.user_submit("/version");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("WaveCode v0.1.0"), "{joined}");
+    }
+
+    #[test]
+    fn interrupt_acknowledges_in_transcript() {
+        let mut ui = ui();
+        ui.submit("go");
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("interrupting the turn"), "{joined}");
     }
 
     #[test]

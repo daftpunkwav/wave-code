@@ -9,8 +9,10 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 11] = [
+pub const COMMANDS: [&str; 13] = [
     "help",
+    "usage",
+    "version",
     "compact",
     "model",
     "permissions",
@@ -65,6 +67,7 @@ pub enum Effect {
 pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQueries) -> Effect {
     match invocation.name.as_str() {
         "help" => Effect::Ops(Vec::new()),
+        "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
         "compact" => Effect::Ops(vec![Op::Compact]),
         "model" => {
             if invocation.args.is_empty() {
@@ -129,14 +132,15 @@ pub fn help_lines() -> Vec<String> {
         "  shift+enter / ctrl+j  newline (backslash+enter also works)".to_string(),
         "  shift+tab             cycle permission mode (ask/auto/plan)".to_string(),
         "  ctrl+o                expand tool output and thinking".to_string(),
+        "  ctrl+t                expand the todo panel".to_string(),
         "  ctrl+s                steer a running turn".to_string(),
         "  ctrl+c                interrupt; double-press exits".to_string(),
         "  esc                   interrupt the running turn".to_string(),
         "  up / down             input history".to_string(),
         "  !cmd                  run a local shell command".to_string(),
         "Commands:".to_string(),
-        "  /help /compact /model <name> /permissions [mode] /plan /theme <light|dark>".to_string(),
-        "  /memory /snapshots /goal /status /exit".to_string(),
+        "  /help /usage /version /compact /model <name> /permissions [mode] /plan".to_string(),
+        "  /theme <light|dark> /memory /snapshots /goal /status /exit".to_string(),
     ]
 }
 

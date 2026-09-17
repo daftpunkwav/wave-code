@@ -46,9 +46,12 @@ pub struct Screen {
     size: (usize, usize),
     options: ScreenOptions,
     started: bool,
+    /// A full repaint must erase and home first: the cursor may sit
+    /// anywhere (invalidate/resize paths), and writing from there would
+    /// duplicate the frame below the old one.
+    needs_clear: bool,
 }
 
-/// True when the renderer has never drawn (first frame writes everything).
 impl Screen {
     /// A renderer with default options.
     pub fn new() -> Self {
@@ -64,6 +67,7 @@ impl Screen {
             size: (0, 0),
             options,
             started: false,
+            needs_clear: false,
         }
     }
 
@@ -84,9 +88,11 @@ impl Screen {
         self.diff_draw(out, lines, columns, height);
     }
 
-    /// Forget all state; the next draw repaints from scratch.
+    /// Forget all state; the next draw repaints from scratch, erasing
+    /// the screen first (the cursor is wherever the last frame left it).
     pub fn invalidate(&mut self) {
         self.started = false;
+        self.needs_clear = true;
         self.prev.clear();
         self.base = 0;
         self.cursor_row = 0;
@@ -126,12 +132,17 @@ impl Screen {
         height: usize,
     ) {
         self.synchronized_start(out);
-        if self.started {
+        // The very first draw appends below the shell prompt; every
+        // other full repaint (resize, invalidate) starts from wherever
+        // the last frame left the cursor and must erase + home first,
+        // or the frame duplicates below the old one.
+        if self.started || self.needs_clear {
             let _ = out.write_all(b"\x1b[2J\x1b[H");
             if self.options.clear_scrollback {
                 let _ = out.write_all(b"\x1b[3J");
             }
         }
+        self.needs_clear = false;
         // Write all lines; the terminal scrolls the overflow into
         // scrollback.
         for (index, line) in lines.iter().enumerate() {
@@ -355,6 +366,25 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with("\x1b[2J\x1b[H"), "clear + home: {text:?}");
         assert!(text.contains("alpha"));
+    }
+
+    #[test]
+    fn invalidate_draw_clears_and_homes_first() {
+        // Repaint-after-invalidate starts from wherever the last frame
+        // left the cursor; without erase + home the new frame duplicates
+        // below the old one (the double-welcome bug).
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+        screen.invalidate();
+        out.clear();
+        draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[2J\x1b[H"), "erase + home: {text:?}");
+        assert_eq!(text.matches("alpha").count(), 1, "single copy: {text:?}");
     }
 
     #[test]

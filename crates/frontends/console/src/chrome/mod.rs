@@ -2,6 +2,8 @@
 
 pub mod activity;
 pub mod footer;
+pub mod todo;
 
 pub use activity::ActivityPane;
 pub use footer::{TIP_ROTATE_INTERVAL, TIPS, TransientHint, mode_badge, row1, row2};
+pub use todo::render_todos;

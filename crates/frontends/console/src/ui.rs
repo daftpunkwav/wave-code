@@ -27,7 +27,7 @@ use uuid::Uuid;
 use wavecode_wire::{Event, EventMsg, Op, Submission};
 
 use crate::chrome::footer as footer_chrome;
-use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint};
+use crate::chrome::{ActivityPane, TIP_ROTATE_INTERVAL, TransientHint, render_todos};
 use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
 use crate::controllers::shell::{ShellEvent, ShellJob};
@@ -38,7 +38,7 @@ use crate::messages::tool_call::ToolCall;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
 use crate::slash;
-use crate::state::{AppState, StreamingPhase};
+use crate::state::{AppState, StreamingPhase, TodoEntry, TodoStatus};
 use crate::theme::{self, Token};
 use crate::transcript::Transcript;
 use crate::welcome::Welcome;
@@ -447,6 +447,13 @@ impl ConsoleUi {
                 self.flush_assistant_draft();
                 self.state.phase = StreamingPhase::Tool;
                 self.activity.set_phase(StreamingPhase::Tool);
+                if name == "todowrite"
+                    && let Some(todos) = parse_todos(input)
+                {
+                    // The todo list mirrors into the panel; the call card
+                    // still renders its own success row.
+                    self.state.todos = todos;
+                }
                 let card = ToolCall::running(name, input, self.expanded.clone());
                 self.transcript.push(Box::new(card));
                 let index = self.transcript.last_index();
@@ -773,6 +780,10 @@ impl ConsoleUi {
                 self.expanded.toggle();
                 Flow::Continue
             }
+            (Key::Char('t'), m) if m.ctrl => {
+                self.state.todo_expanded = !self.state.todo_expanded;
+                Flow::Continue
+            }
             (Key::Char('s'), m) if m.ctrl => {
                 self.steer();
                 Flow::Continue
@@ -856,6 +867,11 @@ impl ConsoleUi {
             lines.extend(Component::render(&mut draft, inner));
         }
         lines.extend(self.activity.render(inner));
+        lines.extend(render_todos(
+            &self.state.todos,
+            self.state.todo_expanded,
+            inner,
+        ));
         lines.extend(panes::render_queue(&self.state.queued, inner));
         lines.extend(self.editor.render_box(inner, rows));
         lines.extend(self.footer(inner));
@@ -936,6 +952,29 @@ fn home_history_path() -> Option<PathBuf> {
 /// (Engine `Component` exposes an `as_any` seam for this.)
 fn as_tool_call(component: &mut dyn tui_engine::Component) -> Option<&mut ToolCall> {
     component.as_any_mut().downcast_mut::<ToolCall>()
+}
+
+/// Parse a `todowrite` tool input into panel entries: `{"todos": [{"content",
+/// "status"}]}`. `None` on any shape mismatch leaves the current list in
+/// place; content is sanitized here (wire-sourced text).
+fn parse_todos(input: &serde_json::Value) -> Option<Vec<TodoEntry>> {
+    let items = input.get("todos")?.as_array()?;
+    let mut todos = Vec::with_capacity(items.len());
+    for item in items {
+        let content = item.get("content")?.as_str()?;
+        let status = match item.get("status")?.as_str()? {
+            "pending" => TodoStatus::Pending,
+            "in_progress" => TodoStatus::InProgress,
+            "completed" => TodoStatus::Completed,
+            _ => return None,
+        };
+        let content = tui_engine::sanitize::sanitize_terminal(content);
+        todos.push(TodoEntry {
+            content: content.into_owned(),
+            status,
+        });
+    }
+    Some(todos)
 }
 
 /// Welcome info derived from state (construction-order helper).
@@ -1463,6 +1502,87 @@ mod tests {
                 "line exceeds width: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn todowrite_updates_panel() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::ToolCallBegin {
+            call_id: "t1".to_string(),
+            name: "todowrite".to_string(),
+            input: serde_json::json!({
+                "todos": [
+                    {"content": "probe\x1b[2Jclean", "status": "in_progress"},
+                    {"content": "second", "status": "pending"}
+                ]
+            }),
+        });
+        assert_eq!(ui.state.todos.len(), 2);
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Todo"), "panel header: {joined}");
+        assert!(joined.contains("probeclean"), "sanitized content: {joined}");
+        assert!(joined.contains("second"), "{joined}");
+    }
+
+    #[test]
+    fn todowrite_shape_mismatch_keeps_old_list() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::ToolCallBegin {
+            call_id: "t1".to_string(),
+            name: "todowrite".to_string(),
+            input: serde_json::json!({
+                "todos": [{"content": "ok", "status": "pending"}]
+            }),
+        });
+        ui.handle_wire_event(&EventMsg::ToolCallBegin {
+            call_id: "t2".to_string(),
+            name: "todowrite".to_string(),
+            input: serde_json::json!({
+                "todos": [{"content": "bad", "status": "sideways"}]
+            }),
+        });
+        assert_eq!(ui.state.todos.len(), 1);
+        assert_eq!(ui.state.todos[0].content, "ok");
+    }
+
+    #[test]
+    fn empty_todowrite_hides_panel() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::ToolCallBegin {
+            call_id: "t1".to_string(),
+            name: "todowrite".to_string(),
+            input: serde_json::json!({
+                "todos": [{"content": "only", "status": "pending"}]
+            }),
+        });
+        ui.handle_wire_event(&EventMsg::ToolCallBegin {
+            call_id: "t2".to_string(),
+            name: "todowrite".to_string(),
+            input: serde_json::json!({"todos": []}),
+        });
+        assert!(ui.state.todos.is_empty());
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains("Todo"), "panel hidden: {joined}");
+    }
+
+    #[test]
+    fn ctrl_t_toggles_todo_expansion() {
+        let mut ui = ui();
+        assert!(!ui.state.todo_expanded);
+        ui.handle_key(KeyEvent::new(Key::Char('t'), Mods::CTRL));
+        assert!(ui.state.todo_expanded);
+        ui.handle_key(KeyEvent::new(Key::Char('t'), Mods::CTRL));
+        assert!(!ui.state.todo_expanded);
     }
 
     #[tokio::test]

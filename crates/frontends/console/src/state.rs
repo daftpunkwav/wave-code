@@ -18,6 +18,26 @@ pub enum StreamingPhase {
     Tool,
 }
 
+/// Completion state of one todo entry (mirrors the `todowrite` tool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TodoStatus {
+    /// Not started.
+    Pending,
+    /// Currently being worked on.
+    InProgress,
+    /// Finished.
+    Completed,
+}
+
+/// One todo entry, as rewritten wholesale by `todowrite` calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoEntry {
+    /// What to do (single line).
+    pub content: String,
+    /// Current completion state.
+    pub status: TodoStatus,
+}
+
 /// Mutable UI state snapshot; components read it during rendering.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -39,6 +59,10 @@ pub struct AppState {
     pub queued: Vec<String>,
     /// Tool output expansion flag (Ctrl+O toggles).
     pub expanded: bool,
+    /// Session todo list (`todowrite` rewrites it wholesale).
+    pub todos: Vec<TodoEntry>,
+    /// Todo panel expansion (Ctrl+T toggles when the list overflows).
+    pub todo_expanded: bool,
 }
 
 impl AppState {
@@ -59,6 +83,8 @@ impl AppState {
             context_window: None,
             queued: Vec::new(),
             expanded: false,
+            todos: Vec::new(),
+            todo_expanded: false,
         }
     }
 

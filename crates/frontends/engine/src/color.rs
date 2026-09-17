@@ -59,6 +59,8 @@ pub struct Style {
     pub italic: bool,
     /// Underlined text.
     pub underline: bool,
+    /// Struck-through text (completed todo rows).
+    pub strikethrough: bool,
     /// Reversed video (used for the in-box cursor).
     pub reverse: bool,
 }
@@ -72,6 +74,7 @@ impl Style {
             dim: false,
             italic: false,
             underline: false,
+            strikethrough: false,
             reverse: false,
         }
     }
@@ -106,6 +109,12 @@ impl Style {
         self
     }
 
+    /// Enable strikethrough.
+    pub const fn strikethrough(mut self) -> Self {
+        self.strikethrough = true;
+        self
+    }
+
     /// SGR parameter list for this style, or the empty string when the
     /// style is the default (no sequence emitted at all).
     pub fn sgr(&self) -> String {
@@ -124,6 +133,9 @@ impl Style {
         }
         if self.underline {
             params.push("4".to_string());
+        }
+        if self.strikethrough {
+            params.push("9".to_string());
         }
         if self.reverse {
             params.push("7".to_string());

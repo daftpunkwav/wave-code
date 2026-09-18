@@ -89,6 +89,12 @@ receivers remain compatible.
   clipboard via OSC 52; `/export [path]` writes the full untrimmed
   user/assistant dialogue to markdown. Mode and model commands update
   the local chrome immediately (there is no mode-changed wire event).
+- `/compact [instruction]` compresses the context now, optionally
+  steering the summary (`CompactTrigger::Manual` carries the focus to
+  the model summarizer). The transcript shows a live compaction card
+  (saw-wave pulse, elapsed seconds) that settles into
+  `● compacted: context <before>, summary <N> tokens`, where `before`
+  is the most recent sample's context usage.
 - `/undo [n]` drops the last n conversation turns (default 1,
   idle-only): the wire `Rewind` op truncates the actor's conversation,
   the `HistoryRewound` event trims dialogue and transcript, and the

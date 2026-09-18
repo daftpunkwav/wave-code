@@ -51,6 +51,7 @@ use crate::controllers::shell::{ShellEvent, ShellJob};
 use crate::dialogs::{Answer, ApprovalDialog, Dialog, ModelEntryView, QuestionDialog, SessionRow};
 use crate::history;
 use crate::messages::shell::ShellCard;
+use crate::messages::compaction::CompactionCard;
 use crate::messages::tool_call::ToolCall;
 use crate::messages::usage::UsagePanel;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
@@ -186,6 +187,10 @@ pub struct ConsoleUi {
     shell: Option<ShellJob>,
     /// Transcript index of the live shell card.
     shell_card: Option<usize>,
+    /// Transcript index of the live compaction card.
+    compaction_card: Option<usize>,
+    /// Context usage when the running compaction started.
+    compaction_before: Option<u64>,
     /// True while the editor chrome is tinted for shell mode.
     shell_chrome: bool,
     /// History persistence path when a home directory is known.
@@ -272,6 +277,8 @@ impl ConsoleUi {
             dialog: None,
             shell: None,
             shell_card: None,
+            compaction_card: None,
+            compaction_before: None,
             shell_chrome: false,
             history_path: home_history_path(),
             outbox: Vec::new(),
@@ -384,6 +391,22 @@ impl ConsoleUi {
         let index = self.shell_card?;
         let entry = self.transcript.get_mut(index)?;
         entry.component.as_any_mut().downcast_mut::<ShellCard>()
+    }
+
+    /// Borrow the live compaction card for in-place finalization.
+    fn compaction_card_mut(&mut self) -> Option<&mut CompactionCard> {
+        let index = self.compaction_card?;
+        let entry = self.transcript.get_mut(index)?;
+        entry
+            .component
+            .as_any_mut()
+            .downcast_mut::<CompactionCard>()
+    }
+
+    /// True while a compaction card is still live (its pulse needs
+    /// animation ticks).
+    fn compaction_running(&self) -> bool {
+        self.compaction_card.is_some()
     }
 
     fn push_shell_output(&mut self, line: &str, stderr: bool) {
@@ -748,14 +771,22 @@ impl ConsoleUi {
                 true
             }
             EventMsg::CompactStarted { trigger } => {
-                self.push_status(&format!("compacting context ({trigger})"), false);
+                let trigger = tui_engine::sanitize::sanitize_terminal(trigger);
+                let card = CompactionCard::running(&trigger);
+                self.transcript.push(Box::new(card));
+                self.compaction_card = self.transcript.last_index();
+                // The most recent sample is the "before" figure the
+                // finished card reports.
+                self.compaction_before = self.state.context_used;
                 true
             }
             EventMsg::CompactCompleted { summary_tokens } => {
-                self.push_status(
-                    &format!("context compacted ({summary_tokens} summary tokens)"),
-                    false,
-                );
+                let before = self.compaction_before;
+                if let Some(card) = self.compaction_card_mut() {
+                    card.finish(*summary_tokens, before);
+                }
+                self.compaction_card = None;
+                self.compaction_before = None;
                 true
             }
             EventMsg::HistoryRewound { turns } => {
@@ -814,8 +845,15 @@ impl ConsoleUi {
                 }
                 // Trim old turns now that the frame is stable; no calls
                 // span turns, so the open-call index resets with it.
-                self.transcript.trim();
+                let dropped = self.transcript.trim();
                 self.open_calls.clear();
+                // Live-card indices shift with the dropped entries.
+                if let Some(index) = self.shell_card.as_mut() {
+                    *index = index.saturating_sub(dropped);
+                }
+                if let Some(index) = self.compaction_card.as_mut() {
+                    *index = index.saturating_sub(dropped);
+                }
                 // Dequeue a queued message as the next turn.
                 if queued_next {
                     let next = self.state.queued.remove(0);
@@ -1203,6 +1241,9 @@ impl ConsoleUi {
         self.transcript.clear();
         self.streaming.clear();
         self.open_calls.clear();
+        self.shell_card = None;
+        self.compaction_card = None;
+        self.compaction_before = None;
         self.state.dialogue.clear();
         let info = welcome_info_of(&self.state, &self.version);
         self.transcript.push_new_turn(Box::new(Welcome::new(info)));
@@ -1999,6 +2040,7 @@ verify from the repository.";
         self.state.busy()
             || self.exit_armed()
             || self.shell.is_some()
+            || self.compaction_running()
             || self.btw_running
             || self.welcome_rippling()
     }

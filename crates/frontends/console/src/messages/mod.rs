@@ -1,5 +1,6 @@
 //! Transcript message components.
 
+pub mod compaction;
 pub mod shell;
 pub mod simple;
 pub mod thinking;

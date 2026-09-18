@@ -201,6 +201,11 @@ pub struct ConsoleUi {
     /// Terminal sequence queued by UI logic, flushed straight to stdout
     /// by the run loop (notifications, clipboard writes).
     pending_sequence: Option<String>,
+    /// Terminal focus state from focus-reporting events. Starts `false`
+    /// so terminals without focus reporting keep the always-notify
+    /// behavior; once a FocusGained arrives, turn-finished notifications
+    /// pause while the user is looking at the terminal.
+    terminal_focused: bool,
     /// Session launch requested by a dialog (`/new`, `/sessions`),
     /// drained by the run loop through the session factory.
     pending_launch: Option<LaunchSpec>,
@@ -267,6 +272,7 @@ impl ConsoleUi {
             started_at: Instant::now(),
             settings: crate::settings::SharedSettings::load(),
             pending_sequence: None,
+            terminal_focused: false,
             pending_launch: None,
             factory: None,
             model_entries: ctx.model_entries.clone(),
@@ -781,10 +787,12 @@ impl ConsoleUi {
                 // Journal the completed turn (text snapshot) so
                 // /sessions + resume can replay it later.
                 self.journal_turn(*interrupted);
-                // Desktop attention ping for finished turns; queued
-                // follow-ups keep the session visibly active.
+                // Desktop attention ping for finished turns, but only when
+                // the user is not looking at the terminal (focus reporting
+                // events track that); queued follow-ups keep the session
+                // visibly active.
                 let queued_next = !self.state.queued.is_empty();
-                if !*interrupted && !queued_next && notify::enabled() {
+                if !*interrupted && !queued_next && notify::enabled() && !self.terminal_focused {
                     self.pending_sequence = Some(notify::sequence("turn finished"));
                 }
                 // Trim old turns now that the frame is stable; no calls
@@ -2056,6 +2064,12 @@ pub async fn run_with_factory(
                         abort_reason = Some(format!("terminal render error: {e}"));
                     }
                 }
+                Some(Ok(CEvent::FocusGained)) => {
+                    ui.terminal_focused = true;
+                }
+                Some(Ok(CEvent::FocusLost)) => {
+                    ui.terminal_focused = false;
+                }
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
                     abort_reason = Some(format!("terminal event error: {error}"));
@@ -2251,6 +2265,32 @@ mod tests {
         ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
         assert!(ui.state.busy(), "queued message starts the next turn");
         assert!(ui.state.queued.is_empty());
+    }
+
+    #[test]
+    fn turn_finished_notification_respects_focus() {
+        let mut ui = ui();
+        // Default (no focus event seen yet): notify as before — terminals
+        // without focus reporting must not silently lose notifications.
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(
+            ui.take_pending_sequence().is_some(),
+            "unfocused default notifies"
+        );
+        // Focused terminal: the user is watching, no ping.
+        ui.terminal_focused = true;
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(
+            ui.take_pending_sequence().is_none(),
+            "focused terminals must not be pinged"
+        );
+        // Focus lost again: notifications resume.
+        ui.terminal_focused = false;
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(
+            ui.take_pending_sequence().is_some(),
+            "focus lost resumes pings"
+        );
     }
 
     #[test]

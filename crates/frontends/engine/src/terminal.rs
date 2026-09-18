@@ -7,8 +7,8 @@
 //! survives the session.
 
 use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{Clear, ClearType};
 
@@ -16,14 +16,17 @@ use crossterm::terminal::{Clear, ClearType};
 pub struct TerminalGuard {
     keyboard_enhanced: bool,
     bracketed_paste: bool,
+    focus_reporting: bool,
 }
 
 impl TerminalGuard {
-    /// Enter raw mode and enable bracketed paste plus (when supported)
-    /// the Kitty keyboard protocol. Restores everything on `leave`/drop.
+    /// Enter raw mode and enable bracketed paste, focus reporting, and
+    /// (when supported) the Kitty keyboard protocol. Restores everything
+    /// on `leave`/drop.
     pub fn enter() -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
         let bracketed_paste = crossterm::execute!(std::io::stdout(), EnableBracketedPaste).is_ok();
+        let focus_reporting = crossterm::execute!(std::io::stdout(), EnableFocusChange).is_ok();
         let mut keyboard_enhanced = false;
         if crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
             keyboard_enhanced = crossterm::execute!(
@@ -40,6 +43,7 @@ impl TerminalGuard {
         Ok(Self {
             keyboard_enhanced,
             bracketed_paste,
+            focus_reporting,
         })
     }
 
@@ -55,6 +59,12 @@ impl TerminalGuard {
         self.bracketed_paste
     }
 
+    /// True when focus reporting is active (focus changes arrive as
+    /// `Event::FocusGained`/`Event::FocusLost`).
+    pub fn focus_reporting(&self) -> bool {
+        self.focus_reporting
+    }
+
     /// Restore every mode taken by [`Self::enter`].
     pub fn leave(&mut self) {
         if self.keyboard_enhanced {
@@ -64,6 +74,10 @@ impl TerminalGuard {
         if self.bracketed_paste {
             let _ = crossterm::execute!(std::io::stdout(), DisableBracketedPaste);
             self.bracketed_paste = false;
+        }
+        if self.focus_reporting {
+            let _ = crossterm::execute!(std::io::stdout(), DisableFocusChange);
+            self.focus_reporting = false;
         }
         let _ = crossterm::execute!(
             std::io::stdout(),

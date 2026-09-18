@@ -55,6 +55,16 @@ pub enum Op {
     },
     /// Request context compaction.
     Compact,
+    /// Rewind the conversation by whole user turns (idle `/undo` path).
+    ///
+    /// Drops the last `turns` user messages and everything after each,
+    /// as far as the history allows. Compaction summaries and any
+    /// entries before the first user message are never dropped. Only
+    /// valid while idle; mid-turn submissions are rejected downstream.
+    Rewind {
+        /// How many user turns to drop.
+        turns: u32,
+    },
     /// Switch the session permission mode by wire name.
     SetPermissionMode {
         /// Mode wire name, e.g. `plan` or `acceptEdits`.
@@ -88,9 +98,8 @@ pub enum Op {
 pub enum WireDecision {
     /// Approve this call only.
     AllowOnce,
-    /// Approve this call and remember it for the session. Reserved: no
-    /// frontend emits it yet and no persistence is wired, so a decision
-    /// carrying it currently behaves like AllowOnce.
+    /// Approve this call and remember it for the session (the console
+    /// approval dialog wires it to session rules).
     AllowAlways,
     /// Refuse with a reason.
     Deny {
@@ -244,6 +253,14 @@ pub enum EventMsg {
         /// Token estimate of the summary message.
         summary_tokens: u64,
     },
+    /// A rewind landed: the conversation no longer contains the
+    /// dropped turns.
+    HistoryRewound {
+        /// User turns actually removed (fewer than requested when the
+        /// history ran out; never 0 — an empty rewind is reported as
+        /// a warning instead of this event).
+        turns: u32,
+    },
     /// A reviewed plan was proposed and awaits approval (display routing).
     PlanProposed {
         /// Proposed plan text for transcript rendering.
@@ -308,6 +325,7 @@ mod tests {
                 "question_answer",
             ),
             (Op::Compact, "compact"),
+            (Op::Rewind { turns: 1 }, "rewind"),
             (
                 Op::SetPermissionMode {
                     mode: "plan".to_string(),
@@ -406,6 +424,7 @@ mod tests {
                 EventMsg::CompactCompleted { summary_tokens: 10 },
                 "compact_completed",
             ),
+            (EventMsg::HistoryRewound { turns: 1 }, "history_rewound"),
             (
                 EventMsg::PlanProposed {
                     text: "x".to_string(),

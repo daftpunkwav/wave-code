@@ -16,7 +16,7 @@ Loaders count skipped corrupt lines instead of failing: `load_all` / `load_repor
 
 The new-stack session registry gives the turn journal a home and an identity:
 
-- `~/.wavecode/sessions/<session-id>.jsonl`: one `JsonlJournal` per session; every completed console turn appends a full text snapshot of the dialogue (`record_turn`), so the **latest record alone suffices for resume** (`load_session_history`).
+- `~/.wavecode/sessions/<session-id>.jsonl`: one `JsonlJournal` per session; every completed console turn appends a full text snapshot of the dialogue (`record_turn`), so the **latest record alone suffices for resume** (`load_session_history`). `/undo` appends the truncated dialogue the same way (`record_rewind`, outcome `Rewound`), so resume replays the rewound conversation without rewriting history.
 - `~/.wavecode/sessions/index.json`: one `SessionMeta` (id, title, cwd, created/updated timestamps, turn count) per session; `list_sessions` reads it newest-first, `set_title` renames, `fork_session` seeds a fresh journal with a caller-supplied snapshot. Broken index files degrade to empty and heal on the next write.
 - Session ids validate against the same whitelist as legacy thread ids (`is_valid_session_id`): path escapes from CLI arguments or picker payloads are rejected.
 

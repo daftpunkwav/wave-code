@@ -28,7 +28,7 @@ use infrastructure_base::{
 use runtime_child::ChildRuntime;
 use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
 use safety_gate::{ApprovalDecision, ApprovalGate, QuestionGate};
-use state_store::{CompactTrigger, Conversation, Role};
+use state_store::{CompactTrigger, Conversation, Role, Usage};
 use tokio::sync::mpsc;
 use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
 
@@ -324,6 +324,28 @@ where
                         return;
                     }
                 }
+                Op::Rewind { turns } => {
+                    // Rewind rewrites shared history, so it is idle-only
+                    // by contract: the frontend gates it, and running it
+                    // against an active snapshot would race the turn.
+                    let removed = rewind_conversation(&mut conv, turns);
+                    if removed == 0 {
+                        let _ = event_tx.send(Event {
+                            id: sub.id.clone(),
+                            msg: EventMsg::Warning {
+                                message: "nothing to rewind".to_string(),
+                            },
+                        });
+                    } else {
+                        // Stale usage must not outlive the dropped turns;
+                        // the next sample settles real numbers again.
+                        conv.settle(Usage::default());
+                        let _ = event_tx.send(Event {
+                            id: sub.id.clone(),
+                            msg: EventMsg::HistoryRewound { turns: removed },
+                        });
+                    }
+                }
                 Op::Shutdown => {
                     interrupt.trigger();
                     finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
@@ -370,6 +392,27 @@ where
             }
         }
     }
+}
+
+/// Drop the last `turns` user turns from the conversation: each user
+/// entry and everything after it, up to the next user entry. Entries
+/// before the first user entry (compaction summaries) are never
+/// dropped. Returns the number of turns actually removed.
+fn rewind_conversation(conv: &mut Conversation, turns: u32) -> u32 {
+    let entries = conv.snapshot();
+    let user_positions: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.role == Role::User)
+        .map(|(index, _)| index)
+        .collect();
+    let drop = (turns as usize).min(user_positions.len());
+    if drop == 0 {
+        return 0;
+    }
+    let cutoff = user_positions[user_positions.len() - drop];
+    conv.replace(entries[..cutoff].to_vec());
+    drop as u32
 }
 
 /// Run session lifecycle hooks, tagging warnings with the synthetic id.
@@ -469,6 +512,16 @@ fn route_extra(
 ) -> bool {
     match sub.op {
         Op::UserInput { .. } | Op::Compact => queue_or_reject(pending, sub, event_tx),
+        Op::Rewind { .. } => {
+            // Never race the active snapshot: rewind waits for idle.
+            tracing::warn!(id = %sub.id, "rewind rejected mid-turn");
+            let _ = event_tx.send(Event {
+                id: sub.id,
+                msg: EventMsg::Warning {
+                    message: "rewind rejected: a turn is running".to_string(),
+                },
+            });
+        }
         Op::Interrupt => interrupt.trigger(),
         Op::SetPermissionMode { .. } | Op::SetModel { .. } | Op::SetThinking { .. } => {
             // Mode/model/thinking switches apply at the next turn
@@ -661,6 +714,156 @@ mod tests {
             "sys".to_string(),
         );
         (client, release)
+    }
+
+    /// A conversation with `n` user turns, each one user+assistant.
+    fn seeded_conversation(turns: usize) -> Conversation {
+        let mut conv = Conversation::new();
+        for i in 0..turns {
+            conv.push(Role::User, format!("question {i}"));
+            conv.push(Role::Assistant, format!("answer {i}"));
+        }
+        conv
+    }
+
+    fn rewind(turns: u32) -> Submission {
+        Submission {
+            id: "rewind-1".to_string(),
+            op: Op::Rewind { turns },
+        }
+    }
+
+    /// Drain events until `keep` (inclusive) returns it; events before
+    /// it are dropped.
+    async fn event_matching(client: &mut ActorClient, keep: impl Fn(&EventMsg) -> bool) -> Event {
+        loop {
+            let event =
+                tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+                    .await
+                    .unwrap()
+                    .expect("event stream must stay open");
+            if keep(&event.msg) {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rewind_drops_requested_user_turns() {
+        let driver = FakeDriver {
+            inputs: Mutex::new(Vec::new()),
+            hold: false,
+            release: Arc::new(Notify::new()),
+            ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
+        };
+        let mut client = SessionActor::spawn(
+            driver,
+            seeded_conversation(3),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+        );
+        client.submit(rewind(1)).await.unwrap();
+        let event = event_matching(&mut client, |msg| {
+            matches!(msg, EventMsg::HistoryRewound { .. })
+        })
+        .await;
+        assert_eq!(
+            event.msg,
+            EventMsg::HistoryRewound { turns: 1 },
+            "exactly the requested turn is removed"
+        );
+        // Teardown: shut down cleanly and drain the stream to closure;
+        // the shrink itself is pinned by the event count above.
+        client
+            .submit(Submission {
+                id: "bye".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+        while tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+    }
+
+    #[tokio::test]
+    async fn rewind_beyond_history_drops_every_user_turn() {
+        let driver = FakeDriver {
+            inputs: Mutex::new(Vec::new()),
+            hold: false,
+            release: Arc::new(Notify::new()),
+            ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
+        };
+        let mut client = SessionActor::spawn(
+            driver,
+            seeded_conversation(1),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+        );
+        client.submit(rewind(5)).await.unwrap();
+        let event = event_matching(&mut client, |msg| {
+            matches!(msg, EventMsg::HistoryRewound { .. })
+        })
+        .await;
+        assert_eq!(event.msg, EventMsg::HistoryRewound { turns: 1 });
+    }
+
+    #[tokio::test]
+    async fn rewind_with_nothing_to_drop_warns() {
+        let driver = FakeDriver {
+            inputs: Mutex::new(Vec::new()),
+            hold: false,
+            release: Arc::new(Notify::new()),
+            ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
+        };
+        let mut client = SessionActor::spawn(
+            driver,
+            Conversation::new(),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+        );
+        client.submit(rewind(1)).await.unwrap();
+        let event =
+            event_matching(&mut client, |msg| matches!(msg, EventMsg::Warning { .. })).await;
+        assert!(
+            matches!(event.msg, EventMsg::Warning { ref message } if message.contains("nothing to rewind")),
+            "{:?}",
+            event.msg
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_turn_rewind_is_rejected_with_a_warning() {
+        let (mut client, release) = spawn_actor(true);
+        client
+            .submit(user_input("s0", "long running"))
+            .await
+            .unwrap();
+        // Hold the turn inside the driver, then attempt the rewind.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        client.submit(rewind(1)).await.unwrap();
+        let event =
+            event_matching(&mut client, |msg| matches!(msg, EventMsg::Warning { .. })).await;
+        assert!(
+            matches!(event.msg, EventMsg::Warning { ref message } if message.contains("rewind rejected")),
+            "{:?}",
+            event.msg
+        );
+        release.notify_one();
     }
 
     fn user_input(id: &str, text: &str) -> Submission {
@@ -1071,11 +1274,10 @@ mod tests {
             .await
             .unwrap();
         // The compact is held inside the driver once its start event lands.
-        let started =
-            tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
-                .await
-                .unwrap()
-                .unwrap();
+        let started = tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(started.msg, EventMsg::CompactStarted { .. }));
         client
             .submit(Submission {

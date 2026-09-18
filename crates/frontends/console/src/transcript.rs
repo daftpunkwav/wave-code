@@ -99,6 +99,23 @@ impl Transcript {
         self.entries.drain(..keep).count()
     }
 
+    /// Drop the newest `turns` turns (everything at or after turn id
+    /// `next_turn - turns`). Returns the number of entries dropped so
+    /// callers can report the visual impact. Older entries (including
+    /// the welcome card) are never touched.
+    pub fn rewind_turns(&mut self, turns: usize) -> usize {
+        if turns == 0 {
+            return 0;
+        }
+        let cut_from = self.next_turn.saturating_sub(turns);
+        let keep = self
+            .entries
+            .iter()
+            .position(|entry| entry.turn >= cut_from)
+            .unwrap_or(self.entries.len());
+        self.entries.drain(keep..).count()
+    }
+
     /// Render every entry to lines at `columns`.
     pub fn render(&mut self, columns: usize) -> Vec<String> {
         let mut lines = Vec::new();
@@ -164,6 +181,23 @@ mod tests {
             transcript.push_new_turn(status(&format!("u{turn}")));
         }
         assert_eq!(transcript.trim(), 0);
+    }
+
+    #[test]
+    fn rewind_turns_drops_the_newest_turns_only() {
+        let mut transcript = Transcript::new();
+        transcript.push_new_turn(status("welcome"));
+        transcript.push_new_turn(status("u1"));
+        transcript.push(status("a1"));
+        transcript.push_new_turn(status("u2"));
+        transcript.push(status("a2"));
+        // Rewinding one turn removes u2/a2; the welcome and turn one stay.
+        let dropped = transcript.rewind_turns(1);
+        assert_eq!(dropped, 2);
+        let turns: Vec<usize> = transcript.entries.iter().map(|e| e.turn).collect();
+        assert_eq!(turns, vec![0, 1, 1], "welcome and turn one remain");
+        // Zero turns is a no-op.
+        assert_eq!(transcript.rewind_turns(0), 0);
     }
 
     #[test]

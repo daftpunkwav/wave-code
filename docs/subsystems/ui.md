@@ -82,13 +82,19 @@ receivers remain compatible.
 - Slash commands (`/help /new /clear /sessions /resume /fork /title
   /model /effort /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
-  /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
+  /undo /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
   through as user input (skills). `/usage` renders a severity-colored
   context bar plus the cumulative token split accumulated from
   `TokenCount` samples. `/copy` puts the last assistant message on the
   clipboard via OSC 52; `/export [path]` writes the full untrimmed
   user/assistant dialogue to markdown. Mode and model commands update
   the local chrome immediately (there is no mode-changed wire event).
+- `/undo [n]` drops the last n conversation turns (default 1,
+  idle-only): the wire `Rewind` op truncates the actor's conversation,
+  the `HistoryRewound` event trims dialogue and transcript, and the
+  truncated dialogue is journaled as the newest snapshot so resume
+  replays the rewound conversation. Conversation-level only — file
+  changes the dropped turns already made are not undone.
 - Sessions: every interactive launch journals completed turns (text
   snapshots) under `~/.wavecode/sessions/<uuid>.jsonl` with a shared
   `index.json` (title, cwd, timestamps, turn count). `/sessions` (alias
@@ -230,9 +236,7 @@ raw colors; the engine works on `Color`/`Style` values.
 
 Background tasks, plan approval flow, and syntax highlighting in code
 blocks (`PlainHighlighter` stands in; the seam exists) need wire or
-backend support that does not exist yet; the approval dialog only
-offers decisions the backend implements (`AllowOnce` / `Deny` —
-`AllowAlways` is reserved but unwired). Cross-provider live model
+backend support that does not exist yet. Cross-provider live model
 switches need session re-assembly by design (base URL and credentials
 are baked into the provider client), so the picker persists a default
 for the next launch instead.

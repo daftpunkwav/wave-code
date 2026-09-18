@@ -198,6 +198,46 @@ pub fn record_turn(
     Ok(meta)
 }
 
+/// Record a rewind: append the truncated dialogue as the newest
+/// journal snapshot (resume replays the latest record alone) and pull
+/// the index turn count back by `turns_removed`.
+pub fn record_rewind(
+    home: &Path,
+    id: &str,
+    cwd: &str,
+    history: &[(bool, String)],
+    turns_removed: u32,
+) -> Result<SessionMeta, SessionError> {
+    let path = journal_path(home, id)?;
+    std::fs::create_dir_all(sessions_dir(home))?;
+    let journal = JsonlJournal::new(path);
+    journal.append_turn(&crate::TurnRecord {
+        run_id: id.to_string(),
+        input: String::new(),
+        history: history.to_vec(),
+        outcome: "Rewound".to_string(),
+    })?;
+    let now = now_secs();
+    let existing = list_sessions(home).into_iter().find(|entry| entry.id == id);
+    let meta = match existing {
+        Some(mut meta) => {
+            meta.updated_at = now;
+            meta.turns = meta.turns.saturating_sub(turns_removed);
+            meta
+        }
+        None => SessionMeta {
+            id: id.to_string(),
+            title: default_title(history),
+            cwd: cwd.to_string(),
+            created_at: now,
+            updated_at: now,
+            turns: 0,
+        },
+    };
+    upsert_index(home, meta.clone())?;
+    Ok(meta)
+}
+
 /// Rename a session; returns the updated meta (`None` when unknown).
 pub fn set_title(home: &Path, id: &str, title: &str) -> Result<Option<SessionMeta>, SessionError> {
     let title = title.trim();
@@ -340,5 +380,27 @@ mod tests {
         // Recording heals the index by upserting over the broken file.
         record_turn(home, "s-2", "/tmp", "hi", &history(), "Completed").unwrap();
         assert_eq!(list_sessions(home).len(), 1);
+    }
+
+    #[test]
+    fn rewind_appends_a_truncated_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        record_turn(home, "s-1", "/tmp", "one", &history(), "Completed").unwrap();
+        let two = vec![
+            (false, "one".to_string()),
+            (true, "hi there".to_string()),
+            (false, "two".to_string()),
+            (true, "more".to_string()),
+        ];
+        record_turn(home, "s-1", "/tmp", "two", &two, "Completed").unwrap();
+        let rewound = vec![(false, "one".to_string()), (true, "hi there".to_string())];
+        let meta = record_rewind(home, "s-1", "/tmp", &rewound, 1).unwrap();
+        // Resume replays the rewound dialogue, not the dropped turn.
+        assert_eq!(load_session_history(home, "s-1").unwrap(), rewound);
+        // The index turn count follows the rewind.
+        assert_eq!(meta.turns, 1);
+        let listed = list_sessions(home);
+        assert_eq!(listed[0].turns, 1);
     }
 }

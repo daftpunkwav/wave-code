@@ -235,6 +235,10 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
             stderr.push_str(&format!("[compact completed: {summary_tokens} tokens]\n"));
             None
         }
+        EventMsg::HistoryRewound { turns } => {
+            stderr.push_str(&format!("[history rewound: {turns} turns]\n"));
+            None
+        }
         EventMsg::PlanProposed { text } => {
             stderr.push_str(&format!("[plan proposed]\n{}\n", clean(text)));
             None

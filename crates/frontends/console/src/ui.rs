@@ -745,6 +745,10 @@ impl ConsoleUi {
                 );
                 true
             }
+            EventMsg::HistoryRewound { turns } => {
+                self.apply_rewound(*turns);
+                true
+            }
             EventMsg::PlanProposed { text } => {
                 let text = tui_engine::sanitize::sanitize_terminal(text);
                 self.push_assistant_message(&text);
@@ -1073,6 +1077,8 @@ impl ConsoleUi {
                         self.fork_session();
                     } else if invocation.name == "title" {
                         self.set_session_title(&invocation.args);
+                    } else if invocation.name == "undo" {
+                        self.rewind_turns_command(&invocation.args);
                     } else if invocation.name == "init" {
                         self.init_project();
                     } else if invocation.name == "mcp" {
@@ -1327,6 +1333,94 @@ impl ConsoleUi {
                 self.push_status("usage: /title <title>", false);
             }
             Err(error) => self.push_status(&format!("rename failed: {error}"), true),
+        }
+    }
+
+    /// `/undo [n]`: drop the last n conversation turns (default 1).
+    /// The agent stops seeing the dropped turns; file changes they
+    /// already made stay. Idle-only, and the landed event trims the
+    /// transcript (`apply_rewound`).
+    fn rewind_turns_command(&mut self, args: &str) {
+        let trimmed = args.trim();
+        let turns = if trimmed.is_empty() {
+            1
+        } else {
+            match trimmed.parse::<u32>() {
+                Ok(turns) => turns,
+                Err(_) => {
+                    self.push_status("usage: /undo [n] — drop the last n turns (default 1)", true);
+                    return;
+                }
+            }
+        };
+        if self.state.busy() {
+            self.push_status(
+                "cannot rewind while a turn is running (press Esc to interrupt)",
+                false,
+            );
+            return;
+        }
+        if self.shell.is_some() {
+            self.push_status(
+                "cannot rewind while a shell command is running (press Esc to cancel)",
+                false,
+            );
+            return;
+        }
+        self.enqueue(Op::Rewind { turns });
+    }
+
+    /// Apply a landed rewind: trim dialogue and transcript, journal the
+    /// truncated snapshot, and state what the rewind does not do.
+    fn apply_rewound(&mut self, turns: u32) {
+        if turns == 0 {
+            self.push_status("nothing to rewind", false);
+            return;
+        }
+        let removed = self.state.rewind_dialogue(turns);
+        if removed == 0 {
+            // The actor dropped turns this view never held (a session
+            // resumed by CLI flag seeds the conversation without
+            // replaying it here). Journaling the untouched dialogue
+            // would append a snapshot with less history than the
+            // newest record already has, so the journal stands.
+            self.push_status("rewound on the session; nothing to trim here", false);
+            return;
+        }
+        let dropped_entries = self.transcript.rewind_turns(removed);
+        // Dropped tool cards free their open-call indices.
+        self.open_calls.clear();
+        self.journal_rewind(removed as u32);
+        self.push_status(
+            &format!(
+                "rewound {removed} turn(s) ({dropped_entries} transcript entries); \
+                 file changes already made are not undone"
+            ),
+            false,
+        );
+    }
+
+    /// Append the truncated dialogue as the newest journal snapshot so
+    /// a later resume replays the rewound conversation.
+    fn journal_rewind(&mut self, turns_removed: u32) {
+        let Some(home) = self.state.home.clone() else {
+            return;
+        };
+        let history: Vec<(bool, String)> = self
+            .state
+            .dialogue
+            .iter()
+            // Dialogue flags users; the journal flags the model side.
+            .map(|entry| (!entry.from_user, entry.text.clone()))
+            .collect();
+        if let Err(error) = state_persistence::sessions::record_rewind(
+            &home,
+            &self.state.session_id,
+            &self.state.cwd.to_string_lossy(),
+            &history,
+            turns_removed,
+        ) {
+            self.push_status(&format!("rewind journaling failed: {error}"), true);
         }
     }
 
@@ -2265,6 +2359,72 @@ mod tests {
         ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
         assert!(ui.state.busy(), "queued message starts the next turn");
         assert!(ui.state.queued.is_empty());
+    }
+
+    #[test]
+    fn undo_enqueues_rewind_and_rewound_trims_the_transcript() {
+        let mut ui = ui();
+        // Two completed turns in the books.
+        ui.submit("one");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "answer one".to_string(),
+        });
+        ui.submit("two");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "answer two".to_string(),
+        });
+        // `/undo` while idle queues one Rewind op.
+        let flow = ui.user_submit("/undo");
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(
+            ui.pending_ops().last(),
+            Some(&Op::Rewind { turns: 1 }),
+            "bare /undo rewinds one turn"
+        );
+        // Busy turns refuse the rewind.
+        ui.submit("three");
+        let before = ui.outbox_len();
+        ui.user_submit("/undo");
+        assert_eq!(ui.outbox_len(), before, "no rewind while busy");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        // The landed event trims dialogue and transcript of one turn.
+        ui.handle_wire_event(&EventMsg::HistoryRewound { turns: 1 });
+        assert_eq!(ui.state.dialogue.len(), 4, "five entries minus one turn");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("answer two"), "older turns stay: {joined}");
+        assert!(
+            !joined.contains("three"),
+            "rewound turn leaves the transcript: {joined}"
+        );
+        assert!(
+            joined.contains("rewound 1 turn"),
+            "status line confirms: {joined}"
+        );
+    }
+
+    #[test]
+    fn undo_rejects_bad_counts_and_landed_zero() {
+        let mut ui = ui();
+        ui.user_submit("/undo two");
+        assert!(
+            ui.pending_ops().is_empty(),
+            "non-numeric counts never reach the wire"
+        );
+        ui.handle_wire_event(&EventMsg::HistoryRewound { turns: 0 });
+        let frame = ui.frame(80, 24);
+        let joined = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("nothing to rewind"), "{joined}");
     }
 
     #[test]

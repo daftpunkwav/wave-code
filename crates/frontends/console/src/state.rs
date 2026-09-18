@@ -159,6 +159,26 @@ impl AppState {
         });
     }
 
+    /// Drop the last `turns` user messages and everything after each
+    /// from the exportable dialogue. Returns the number of user
+    /// messages actually removed (fewer when the dialogue runs out).
+    pub fn rewind_dialogue(&mut self, turns: u32) -> usize {
+        let user_positions: Vec<usize> = self
+            .dialogue
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.from_user)
+            .map(|(index, _)| index)
+            .collect();
+        let drop = (turns as usize).min(user_positions.len());
+        if drop == 0 {
+            return 0;
+        }
+        let cutoff = user_positions[user_positions.len() - drop];
+        self.dialogue.truncate(cutoff);
+        drop
+    }
+
     /// The most recent assistant message, for `/copy`.
     pub fn last_assistant(&self) -> Option<&str> {
         self.dialogue
@@ -272,6 +292,32 @@ mod tests {
         state.push_dialogue(true, "follow-up");
         state.push_dialogue(false, "second answer");
         assert_eq!(state.last_assistant(), Some("second answer"));
+    }
+
+    #[test]
+    fn rewind_dialogue_drops_whole_user_turns() {
+        let mut state = AppState::new(
+            "m".to_string(),
+            PathBuf::from("."),
+            "guarded".to_string(),
+            Vec::new(),
+        );
+        state.push_dialogue(true, "q1");
+        state.push_dialogue(false, "a1");
+        state.push_dialogue(true, "q2");
+        state.push_dialogue(false, "a2");
+        state.push_dialogue(true, "q3");
+        state.push_dialogue(false, "a3");
+        // Dropping two turns removes q2/a2 and q3/a3, keeps turn one.
+        let removed = state.rewind_dialogue(2);
+        assert_eq!(removed, 2);
+        let texts: Vec<&str> = state.dialogue.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, vec!["q1", "a1"]);
+        // Dropping more turns than exist removes what is there.
+        assert_eq!(state.rewind_dialogue(5), 1);
+        assert!(state.dialogue.is_empty());
+        // Nothing to drop reports zero.
+        assert_eq!(state.rewind_dialogue(1), 0);
     }
 
     #[test]

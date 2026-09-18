@@ -21,7 +21,7 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 28] = [
+pub const COMMANDS: [&str; 29] = [
     "help",
     "btw",
     "new",
@@ -47,6 +47,7 @@ pub const COMMANDS: [&str; 28] = [
     "snapshots",
     "goal",
     "compact",
+    "undo",
     "copy",
     "export",
     "exit",
@@ -97,7 +98,7 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
         "clear" | "new" => Effect::Ops(Vec::new()), // handled by the UI caller
         "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
-        "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" => {
+        "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" | "undo" => {
             // Dialogs and local panels: the caller owns the behavior.
             Effect::Ops(Vec::new())
         }
@@ -211,6 +212,7 @@ pub fn help_lines() -> Vec<String> {
         "  /snapshots — file-content snapshot labels".to_string(),
         "  /goal — durable goal status".to_string(),
         "  /compact — compress the context now".to_string(),
+        "  /undo [n] — drop the last n turns from the conversation (default 1)".to_string(),
         "  /copy — copy the last assistant message".to_string(),
         "  /export [path] — write the dialogue to markdown".to_string(),
         "  /exit, /quit — end the session".to_string(),
@@ -302,7 +304,7 @@ mod tests {
 
         // Caller-handled commands dispatch as no-ops on the wire.
         for name in [
-            "btw", "new", "sessions", "resume", "fork", "title", "init", "mcp", "status",
+            "btw", "new", "sessions", "resume", "fork", "title", "init", "mcp", "status", "undo",
         ] {
             let effect = dispatch(
                 &parse(&format!("/{name}")).unwrap(),

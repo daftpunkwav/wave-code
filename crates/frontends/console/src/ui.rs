@@ -837,6 +837,15 @@ impl ConsoleUi {
                 self.push_status(&format!("error: {message}"), true);
                 if !*recoverable {
                     self.state.phase = StreamingPhase::Idle;
+                    // Same reasoning as TurnCompleted: the gates are
+                    // gone, so a parked modal must not linger.
+                    if matches!(
+                        self.dialog,
+                        Some(Dialog::Approval(_) | Dialog::Question(_))
+                    ) {
+                        self.dialog = None;
+                        self.push_status("request dismissed (turn failed)", false);
+                    }
                 }
                 true
             }
@@ -845,6 +854,16 @@ impl ConsoleUi {
                 self.flush_assistant_draft();
                 self.streaming.clear();
                 self.state.phase = StreamingPhase::Idle;
+                // Parked gates died with the turn: a stale approval or
+                // question modal could only answer into "late approval"
+                // warnings, so it goes with the turn.
+                if matches!(
+                    self.dialog,
+                    Some(Dialog::Approval(_) | Dialog::Question(_))
+                ) {
+                    self.dialog = None;
+                    self.push_status("request dismissed (turn ended)", false);
+                }
                 if *interrupted {
                     self.push_status("interrupted", false);
                 }
@@ -2802,6 +2821,33 @@ mod tests {
         ui.handle_key(KeyEvent::plain(Key::Esc));
         ui.handle_key(KeyEvent::plain(Key::Esc));
         assert!(ui.dialog.is_none(), "empty dialogue opens nothing");
+    }
+
+    #[test]
+    fn dead_turn_dismisses_a_parked_approval_modal() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::ApprovalRequested {
+            call_id: "c1".to_string(),
+            kind: wavecode_wire::ApprovalKind::Exec,
+            detail: "run this".to_string(),
+        });
+        assert!(ui.dialog.is_some(), "approval open");
+        // The turn ends (interrupt); the parked gate is gone.
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: true });
+        assert!(ui.dialog.is_none(), "stale modal dismissed");
+        let frame = ui.frame(80, 24);
+        let joined = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("request dismissed"), "{joined}");
+        // User dialogs (settings) are never touched by turn events.
+        ui.user_submit("/settings");
+        assert!(ui.dialog.is_some(), "settings open");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(ui.dialog.is_some(), "settings survive the turn end");
+        ui.dialog = None;
     }
 
     #[test]

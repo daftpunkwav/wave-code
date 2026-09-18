@@ -188,6 +188,12 @@ receivers remain compatible.
   platform shell (`/editor <cmd>` setting, else `$VISUAL`/`$EDITOR`),
   and the saved text replaces the draft; an empty save keeps the
   original.
+- A wire-driven modal (approval or question) never outlives its turn:
+  on `TurnCompleted` — and on non-recoverable errors — the dialog is
+  dismissed with a status line, because the parked gate died with the
+  turn and answering would only produce a "late approval" warning.
+  User-opened dialogs (settings, pickers) are never touched by turn
+  events.
 - Turn-completion notifications: one OSC 9 desktop notification per
   finished turn unless interrupted or a queued follow-up continues the
   session (`WAVECODE_NOTIFY=0` disables). `WAVECODE_NOTIFY_STYLE`

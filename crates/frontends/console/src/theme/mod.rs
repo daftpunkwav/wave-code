@@ -2,6 +2,7 @@
 
 pub mod active;
 pub mod colors;
+pub mod custom;
 pub mod detect;
 
 pub use active::{Theme, current, set};

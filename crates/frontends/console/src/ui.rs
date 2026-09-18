@@ -1771,19 +1771,50 @@ verify from the repository.";
 
     /// Apply a `/theme light|dark|auto` switch locally.
     fn apply_theme(&mut self, args: &str) {
-        match args.trim() {
+        let name = args.trim();
+        match name {
             "light" => theme::set(theme::Theme::light()),
             "dark" => theme::set(theme::Theme::dark()),
             // Re-query the terminal background (OSC 11) and pick dark
             // or light from the answer.
             "auto" => theme::set(theme::detect::resolve(None)),
-            other => {
-                self.push_status("usage: /theme light|dark|auto", false);
-                let _ = other;
+            "" => {
+                let custom = self
+                    .state
+                    .home
+                    .as_deref()
+                    .map(theme::custom::list)
+                    .unwrap_or_default();
+                if custom.is_empty() {
+                    self.push_status("usage: /theme light|dark|auto (or a custom theme name)", false);
+                } else {
+                    self.push_status(
+                        &format!("usage: /theme light|dark|auto|<{}>", custom.join("|")),
+                        false,
+                    );
+                }
                 return;
             }
+            custom => {
+                // Everything else names a file in ~/.wavecode/themes/.
+                let Some(home) = self.state.home.clone() else {
+                    self.push_status("custom themes need a home directory", true);
+                    return;
+                };
+                match theme::custom::load(&home, custom) {
+                    Ok(resolved) => theme::set(resolved),
+                    Err(error) => {
+                        self.push_status(&format!("theme {custom:?} failed: {error}"), true);
+                        return;
+                    }
+                }
+            }
         }
-        self.push_status(&format!("theme switched ({args})"), false);
+        // Chrome built at construction carries colors by value: the
+        // editor (and its popup) must be rebuilt for the new palette.
+        self.editor.set_style(editor_style());
+        self.screen.invalidate();
+        self.push_status(&format!("theme switched ({name})"), false);
     }
 
     /// `/copy`: put the last assistant message on the clipboard via

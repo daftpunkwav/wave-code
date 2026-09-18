@@ -254,6 +254,13 @@ the probe entirely → `COLORFGBG` → dark), and a global theme installed
 once at startup. Components request tokens, never
 raw colors; the engine works on `Color`/`Style` values.
 
+Custom themes live in `~/.wavecode/themes/<name>.json`: a `base`
+(`dark`/`light`) plus any subset of the 19 tokens as `#rrggbb`
+overrides. Unknown token names and malformed colors are rejected (a
+typo must not silently render as the base), path escapes never reach
+the filesystem, and `/theme <name>` applies one live — the editor and
+popup styles are rebuilt from the new palette, as for the built-ins.
+
 ## Deliberate non-goals this generation
 
 Background tasks and a plan approval flow need wire or

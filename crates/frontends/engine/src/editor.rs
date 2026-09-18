@@ -156,6 +156,11 @@ impl Editor {
         }
     }
 
+    /// Swap the styling (theme switches rebuild it).
+    pub fn set_style(&mut self, style: EditorStyle) {
+        self.style = style;
+    }
+
     /// Replace the completion provider (slash commands, files, skills).
     pub fn set_provider(&mut self, provider: Box<dyn CompletionProvider>) {
         self.provider = Some(provider);

@@ -127,7 +127,8 @@ impl Markdown {
     }
 
     fn render_uncached(&self, text: &str, columns: usize) -> Vec<String> {
-        let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+        let options =
+            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
         let parser = Parser::new_ext(text, options);
         let mut out: Vec<String> = Vec::new();
         let mut inline = String::new();
@@ -304,7 +305,11 @@ impl Markdown {
                 Event::InlineMath(math) | Event::DisplayMath(math) => {
                     inline.push_str(&self.style.code.paint(math.as_ref()));
                 }
-                Event::FootnoteReference(_) | Event::TaskListMarker(_) => {}
+                Event::TaskListMarker(checked) => {
+                    // Lands right after the item bullet, before the text.
+                    inline.push_str(if checked { "[x] " } else { "[ ] " });
+                }
+                Event::FootnoteReference(_) => {}
             }
         }
         flush_inline!();
@@ -340,9 +345,7 @@ fn render_table(
     let natural_total: usize = widths.iter().sum();
     // Row width = two outer borders plus two spaces around every cell,
     // so the columns share `columns - 2 - 2*cols`.
-    let budget = columns
-        .saturating_sub(2 + 2 * col_count)
-        .max(col_count);
+    let budget = columns.saturating_sub(2 + 2 * col_count).max(col_count);
     if natural_total > budget {
         let each = (budget / col_count).max(3);
         for w in widths.iter_mut() {
@@ -505,6 +508,15 @@ mod tests {
         assert_eq!(plain[2], "├───┼────┤");
         assert_eq!(plain[3], "│ 1 │ 2  │");
         assert_eq!(plain[4], "└───┴────┘");
+    }
+
+    #[test]
+    fn task_lists_render_checkboxes() {
+        let mut md = renderer();
+        let lines = md.render("- [x] done\n- [ ] pending", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0], "• [x] done");
+        assert_eq!(plain[1], "• [ ] pending");
     }
 
     #[test]

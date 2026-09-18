@@ -240,7 +240,7 @@ mod tests {
         // Late answers for a consumed id are dropped, never stored.
         assert!(!gate.answer("call-1", "late".to_string()));
         assert_eq!(gate.pending_count(), 0);
-        assert!(gate.cancel("ghost") == false);
+        assert!(!gate.cancel("ghost"));
     }
 
     #[tokio::test]

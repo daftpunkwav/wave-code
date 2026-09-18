@@ -518,10 +518,10 @@ impl Sandbox {
         // question is read-only work and never parks on an approval gate.
         // Invalid payloads fall through so the tool reports the schema
         // business error itself.
-        if is_user_question(tool) {
-            if let Some(verdict) = question_verdict(input) {
-                return verdict;
-            }
+        if is_user_question(tool)
+            && let Some(verdict) = question_verdict(input)
+        {
+            return verdict;
         }
         // 3. Mode default policy.
         //    plan: read-only only; everything else denies outright (no

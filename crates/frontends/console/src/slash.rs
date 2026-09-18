@@ -21,23 +21,34 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 17] = [
+pub const COMMANDS: [&str; 28] = [
     "help",
+    "btw",
+    "new",
     "clear",
-    "copy",
-    "export",
+    "sessions",
+    "resume",
+    "fork",
+    "title",
+    "model",
+    "effort",
+    "permissions",
+    "auto",
+    "wave",
+    "plan",
+    "init",
+    "mcp",
     "settings",
+    "theme",
     "usage",
     "version",
-    "compact",
-    "model",
-    "permissions",
-    "plan",
-    "theme",
+    "status",
     "memory",
     "snapshots",
     "goal",
-    "status",
+    "compact",
+    "copy",
+    "export",
     "exit",
 ];
 
@@ -83,16 +94,29 @@ pub enum Effect {
 pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQueries) -> Effect {
     match invocation.name.as_str() {
         "help" => Effect::Ops(Vec::new()),
-        "clear" => Effect::Ops(Vec::new()), // handled by the UI caller
+        "clear" | "new" => Effect::Ops(Vec::new()), // handled by the UI caller
         "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
+        "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" => {
+            // Dialogs and local panels: the caller owns the behavior.
+            Effect::Ops(Vec::new())
+        }
         "compact" => Effect::Ops(vec![Op::Compact]),
         "model" => {
             if invocation.args.is_empty() {
-                Effect::Ops(Vec::new())
+                Effect::Ops(Vec::new()) // opens the picker
             } else {
                 Effect::Ops(vec![Op::SetModel {
                     name: invocation.args.clone(),
+                }])
+            }
+        }
+        "effort" => {
+            if invocation.args.is_empty() {
+                Effect::Ops(Vec::new()) // shows the current level
+            } else {
+                Effect::Ops(vec![Op::SetThinking {
+                    effort: invocation.args.trim().to_lowercase(),
                 }])
             }
         }
@@ -104,6 +128,13 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
             };
             Effect::Ops(vec![Op::SetPermissionMode { mode }])
         }
+        // Direct mode shortcuts (kimi parity: /yolo, /auto).
+        "auto" => Effect::Ops(vec![Op::SetPermissionMode {
+            mode: "auto".to_string(),
+        }]),
+        "wave" => Effect::Ops(vec![Op::SetPermissionMode {
+            mode: "wave".to_string(),
+        }]),
         "plan" => Effect::Ops(vec![Op::SetPermissionMode {
             mode: "plan".to_string(),
         }]),
@@ -117,7 +148,7 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
             let _ = status.snapshot_labels();
             Effect::Ops(Vec::new())
         }
-        "goal" | "status" => {
+        "goal" => {
             let _ = status.goal_status();
             Effect::Ops(Vec::new())
         }
@@ -144,24 +175,45 @@ pub fn normalize_mode(input: &str) -> String {
     }
 }
 
-/// The help lines shown by `/help`.
+/// The help content: keybinding rows followed by one command row per
+/// line, each `name — description`. Rendered by the scrollable help
+/// panel; plain lines so the panel stays width-agnostic.
 pub fn help_lines() -> Vec<String> {
     vec![
-        "Keybindings:".to_string(),
-        "  shift+enter / ctrl+j  newline (backslash+enter also works)".to_string(),
-        "  shift+tab             cycle permission mode (ask/auto/plan)".to_string(),
-        "  ctrl+o                expand tool output and thinking".to_string(),
-        "  ctrl+t                expand the todo panel".to_string(),
-        "  ctrl+s                steer a running turn".to_string(),
-        "  ctrl+c                interrupt; double-press exits".to_string(),
-        "  esc                   interrupt the running turn".to_string(),
-        "  up / down             input history".to_string(),
-        "  !cmd                  run a local shell command".to_string(),
-        "Commands:".to_string(),
-        "  /help /clear /copy /export [path] /usage /version /compact /model <name>".to_string(),
-        "  /permissions [mode] /plan /theme <light|dark|auto> /settings /memory"
-            .to_string(),
-        "  /snapshots /goal /status /exit".to_string(),
+        "Keybindings".to_string(),
+        "  shift+enter / ctrl+j   newline (backslash+enter also works)".to_string(),
+        "  shift+tab              cycle permission mode (plan/auto/wave)".to_string(),
+        "  ctrl+o                 expand tool output and thinking".to_string(),
+        "  ctrl+t                 expand the todo panel".to_string(),
+        "  ctrl+s                 steer a running turn".to_string(),
+        "  ctrl+c                 interrupt; double-press exits".to_string(),
+        "  esc                    interrupt the running turn".to_string(),
+        "  up / down              input history".to_string(),
+        "  !cmd                   run a local shell command".to_string(),
+        "  @path                  mention a file".to_string(),
+        "Commands".to_string(),
+        "  /help — this panel".to_string(),
+        "  /new — start a fresh session (new context, new journal)".to_string(),
+        "  /clear — clear the screen only (context is kept)".to_string(),
+        "  /sessions, /resume — pick and resume a past session".to_string(),
+        "  /fork — snapshot this session into a resumable copy".to_string(),
+        "  /title <title> — rename the session (no args to show)".to_string(),
+        "  /model — open the model picker; /model <name> switches directly".to_string(),
+        "  /effort <off|low|medium|high> — reasoning effort level".to_string(),
+        "  /permissions — open the mode picker; /plan /auto /wave switch directly".to_string(),
+        "  /init — ask the agent to write AGENTS.md for this repo".to_string(),
+        "  /mcp — list configured MCP servers".to_string(),
+        "  /settings — rendering, tool display, diff layout".to_string(),
+        "  /theme <light|dark|auto> — switch the theme".to_string(),
+        "  /usage — token usage and context window".to_string(),
+        "  /status — session, model, mode, and context summary".to_string(),
+        "  /memory — reviewed-plan status".to_string(),
+        "  /snapshots — file-content snapshot labels".to_string(),
+        "  /goal — durable goal status".to_string(),
+        "  /compact — compress the context now".to_string(),
+        "  /copy — copy the last assistant message".to_string(),
+        "  /export [path] — write the dialogue to markdown".to_string(),
+        "  /exit, /quit — end the session".to_string(),
     ]
 }
 
@@ -203,7 +255,11 @@ mod tests {
 
         // Caller-handled commands dispatch as no-ops on the wire.
         for name in ["copy", "export", "theme", "usage", "version"] {
-            let effect = dispatch(&parse(&format!("/{name}")).unwrap(), &state(), status.as_ref());
+            let effect = dispatch(
+                &parse(&format!("/{name}")).unwrap(),
+                &state(),
+                status.as_ref(),
+            );
             assert_eq!(effect, Effect::Ops(Vec::new()), "{name}");
         }
 
@@ -222,6 +278,39 @@ mod tests {
                 mode: "plan".to_string()
             }])
         );
+
+        // Direct mode shortcuts.
+        for (name, mode) in [("/auto", "auto"), ("/wave", "wave")] {
+            let effect = dispatch(&parse(name).unwrap(), &state(), status.as_ref());
+            assert_eq!(
+                effect,
+                Effect::Ops(vec![Op::SetPermissionMode {
+                    mode: mode.to_string()
+                }]),
+                "{name}"
+            );
+        }
+
+        // Reasoning-effort shortcut reaches the new wire op.
+        let effect = dispatch(&parse("/effort HIGH").unwrap(), &state(), status.as_ref());
+        assert_eq!(
+            effect,
+            Effect::Ops(vec![Op::SetThinking {
+                effort: "high".to_string()
+            }])
+        );
+
+        // Caller-handled commands dispatch as no-ops on the wire.
+        for name in [
+            "btw", "new", "sessions", "resume", "fork", "title", "init", "mcp", "status",
+        ] {
+            let effect = dispatch(
+                &parse(&format!("/{name}")).unwrap(),
+                &state(),
+                status.as_ref(),
+            );
+            assert_eq!(effect, Effect::Ops(Vec::new()), "{name}");
+        }
 
         let effect = dispatch(&parse("/exit").unwrap(), &state(), status.as_ref());
         assert_eq!(effect, Effect::Exit);

@@ -73,6 +73,18 @@ pub struct DialogueEntry {
 pub struct AppState {
     /// Model display name.
     pub model_name: String,
+    /// Provider id the current model samples through.
+    pub provider_id: String,
+    /// Current reasoning-effort level (provider-specific; `None` when
+    /// unset or unsupported).
+    pub thinking_effort: Option<String>,
+    /// Session id (uuid; rotates on `/new`).
+    pub session_id: String,
+    /// Session display title (`/title`), when set.
+    pub session_title: Option<String>,
+    /// Home directory backing the session journal (`None` disables
+    /// journaling, resume, fork, and title persistence).
+    pub home: Option<PathBuf>,
     /// Session working directory.
     pub cwd: PathBuf,
     /// Permission mode wire name (`plan` / `auto` / `wave`).
@@ -113,6 +125,11 @@ impl AppState {
     ) -> Self {
         Self {
             model_name,
+            provider_id: String::new(),
+            thinking_effort: None,
+            session_id: String::new(),
+            session_title: None,
+            home: None,
             cwd,
             permission_mode,
             mcp_servers,

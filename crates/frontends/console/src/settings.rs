@@ -64,6 +64,14 @@ pub struct UiSettings {
     /// `wave`-mode command denylist: any shell command whose text
     /// contains one of these substrings is denied outright (no prompt).
     pub wave_denylist: Vec<String>,
+    /// Saved default model (wire name) from the `/model` picker; applied
+    /// by the harness at startup (CLI `--model` still wins).
+    pub default_model: Option<String>,
+    /// Saved default provider id alongside [`UiSettings::default_model`].
+    pub default_provider: Option<String>,
+    /// Saved default reasoning-effort level (e.g. `low`); `None` and
+    /// `off` both mean the parameter stays unset.
+    pub default_effort: Option<String>,
 }
 
 impl Default for UiSettings {
@@ -74,6 +82,9 @@ impl Default for UiSettings {
             edit_display: EditDisplay::Diff,
             diff_style: DiffStyle::Unified,
             wave_denylist: Vec::new(),
+            default_model: None,
+            default_provider: None,
+            default_effort: None,
         }
     }
 }
@@ -122,12 +133,30 @@ impl UiSettings {
 /// The shared handle every component reads at render time, so
 /// `/settings` changes apply without rebuilding anything.
 #[derive(Clone)]
-pub struct SharedSettings(Arc<Mutex<UiSettings>>);
+pub struct SharedSettings {
+    inner: Arc<Mutex<UiSettings>>,
+    /// False only in tests: mutations stay in memory and never touch
+    /// the user's settings file.
+    persist: bool,
+}
 
 impl SharedSettings {
     /// A shared handle holding `settings`.
     pub fn new(settings: UiSettings) -> Self {
-        Self(Arc::new(Mutex::new(settings)))
+        Self {
+            inner: Arc::new(Mutex::new(settings)),
+            persist: true,
+        }
+    }
+
+    /// A handle that never writes the settings file (tests only:
+    /// picker tests must not rewrite the real user settings).
+    #[cfg(test)]
+    pub(crate) fn without_persistence(settings: UiSettings) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(settings)),
+            persist: false,
+        }
     }
 
     /// Load from disk and share.
@@ -137,13 +166,15 @@ impl SharedSettings {
 
     /// Snapshot the current values.
     pub fn get(&self) -> UiSettings {
-        self.0.lock().expect("settings lock").clone()
+        self.inner.lock().expect("settings lock").clone()
     }
 
     /// Apply `edit` to the current values and persist the result.
     pub fn update(&self, edit: impl FnOnce(&mut UiSettings)) {
-        let mut guard = self.0.lock().expect("settings lock");
+        let mut guard = self.inner.lock().expect("settings lock");
         edit(&mut guard);
-        guard.save();
+        if self.persist {
+            guard.save();
+        }
     }
 }

@@ -46,8 +46,9 @@ use crate::chrome::notify;
 use crate::chrome::{TIP_ROTATE_INTERVAL, TransientHint, render_todos};
 use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
+use crate::controllers::btw::BtwJob;
 use crate::controllers::shell::{ShellEvent, ShellJob};
-use crate::dialogs::{Answer, ApprovalDialog, Dialog, QuestionDialog};
+use crate::dialogs::{Answer, ApprovalDialog, Dialog, ModelEntryView, QuestionDialog, SessionRow};
 use crate::history;
 use crate::messages::shell::ShellCard;
 use crate::messages::tool_call::ToolCall;
@@ -97,6 +98,12 @@ impl SessionLink for ActorClient {
 pub struct UiContext {
     /// Model display name.
     pub model_name: String,
+    /// Provider id the model samples through.
+    pub provider_id: String,
+    /// Current reasoning-effort level (`None` = unset/unsupported).
+    pub thinking_effort: Option<String>,
+    /// Thinking levels the picker offers; empty hides the row.
+    pub thinking_levels: Vec<String>,
     /// Session working directory.
     pub cwd: PathBuf,
     /// Permission-mode wire name.
@@ -107,7 +114,47 @@ pub struct UiContext {
     pub mcp_servers: Vec<String>,
     /// Session status queries (plan, goal, snapshots).
     pub status: Arc<dyn StatusQueries>,
+    /// Session id (journal identity; rotates on `/new`).
+    pub session_id: String,
+    /// Session title carried over a resume, when known.
+    pub session_title: Option<String>,
+    /// Model catalog for the `/model` picker (config `[models]` table
+    /// plus the configured default, converted by the harness).
+    pub model_entries: Vec<ModelEntryView>,
+    /// Home directory for the session journal; `None` disables
+    /// journaling, resume, fork, and title persistence.
+    pub home: Option<PathBuf>,
 }
+
+/// What the UI asks the factory to launch: a fresh session (`history`
+/// empty and no id), a resumed one (id + text history), or a read-only
+/// side session (`/btw`).
+pub struct LaunchSpec {
+    /// Session id to resume; `None` starts a fresh session.
+    pub session_id: Option<String>,
+    /// Seed history as (from_model, text) pairs.
+    pub history: Vec<(bool, String)>,
+    /// True assembles a read-only side session (`/btw`): approvals and
+    /// destructive work are impossible by mode, never by trust.
+    pub readonly: bool,
+    /// Model the launch should sample with (e.g. the live `/model`
+    /// choice); `None` falls back to the launch-time defaults.
+    pub model_override: Option<String>,
+}
+
+/// A launched session: live link plus the facts the UI keeps.
+pub struct SessionLaunch {
+    /// Live session link (actor client in production).
+    pub link: Box<dyn SessionLink>,
+    /// Session facts for the replacement UI state.
+    pub ctx: UiContext,
+    /// Seed history to replay into the transcript.
+    pub history: Vec<(bool, String)>,
+}
+
+/// Assembles sessions on demand (resume, `/new`); implemented by the
+/// harness so the UI never depends on the composition root.
+pub type SessionFactory = dyn Fn(&LaunchSpec) -> Result<SessionLaunch, String> + Send + Sync;
 
 /// What the run loop should do after handling one input batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +201,24 @@ pub struct ConsoleUi {
     /// Terminal sequence queued by UI logic, flushed straight to stdout
     /// by the run loop (notifications, clipboard writes).
     pending_sequence: Option<String>,
+    /// Session launch requested by a dialog (`/new`, `/sessions`),
+    /// drained by the run loop through the session factory.
+    pending_launch: Option<LaunchSpec>,
+    /// On-demand session factory (resume, `/new`); `None` in tests and
+    /// when the harness cannot re-assemble.
+    factory: Option<std::sync::Arc<SessionFactory>>,
+    /// Model catalog for the `/model` picker.
+    model_entries: Vec<ModelEntryView>,
+    /// Thinking levels the picker offers (empty hides the row).
+    thinking_levels: Vec<String>,
+    /// Active `/btw` side session, when present.
+    btw: Option<BtwJob>,
+    /// `/btw` question/answer pairs (question first).
+    btw_log: Vec<(bool, String)>,
+    /// Streaming tail of the current btw answer.
+    btw_buffer: String,
+    /// True while the btw side turn is running.
+    btw_running: bool,
     version: String,
 }
 
@@ -202,12 +267,30 @@ impl ConsoleUi {
             started_at: Instant::now(),
             settings: crate::settings::SharedSettings::load(),
             pending_sequence: None,
+            pending_launch: None,
+            factory: None,
+            model_entries: ctx.model_entries.clone(),
+            thinking_levels: ctx.thinking_levels.clone(),
+            btw: None,
+            btw_log: Vec::new(),
+            btw_buffer: String::new(),
+            btw_running: false,
             version: version.into(),
         };
-        let info = welcome_info_of(&ui.state, &ui.version);
+        ui.state.provider_id = ctx.provider_id.clone();
+        ui.state.thinking_effort = ctx.thinking_effort.clone();
+        ui.state.session_id = ctx.session_id.clone();
+        ui.state.session_title = ctx.session_title.clone();
+        ui.state.home = ctx.home.clone();
         ui.state.git_branch = crate::gitinfo::branch(&ui.state.cwd);
+        let info = welcome_info_of(&ui.state, &ui.version);
         ui.transcript.push_new_turn(Box::new(Welcome::new(info)));
         ui
+    }
+
+    /// Attach the session factory (run loop calls once after build).
+    pub fn set_factory(&mut self, factory: std::sync::Arc<SessionFactory>) {
+        self.factory = Some(factory);
     }
 
     /// Submit user text: queued while busy, sent otherwise.
@@ -316,7 +399,112 @@ impl ConsoleUi {
             Some(Answer::Question { call_id, answer }) => {
                 self.enqueue(Op::QuestionAnswer { call_id, answer });
             }
+            Some(Answer::ModelSelected {
+                label,
+                provider,
+                model,
+                effort,
+                session_only,
+            }) => {
+                self.apply_model_selection(label, provider, model, effort, session_only);
+            }
+            Some(Answer::PermissionSelected { mode }) => {
+                self.apply_permission_mode(&mode);
+                self.enqueue(Op::SetPermissionMode { mode });
+            }
+            Some(Answer::ResumeSession { id }) => {
+                self.request_resume(&id);
+            }
             None => {}
+        }
+    }
+
+    /// Apply a picker selection: live switch within the same provider,
+    /// persistence for the default (Enter), and a restart hint when the
+    /// provider differs (cross-provider needs re-assembly).
+    fn apply_model_selection(
+        &mut self,
+        label: String,
+        provider: String,
+        model: String,
+        effort: Option<String>,
+        session_only: bool,
+    ) {
+        if label == self.state.model_name
+            && provider == self.state.provider_id
+            && effort == self.state.thinking_effort
+        {
+            self.push_status("already using this model", false);
+            return;
+        }
+        let same_provider = provider == self.state.provider_id;
+        if same_provider {
+            self.state.model_name = label.clone();
+            self.enqueue(Op::SetModel {
+                name: model.clone(),
+            });
+            // Effort belongs to the selected model; without the live
+            // model switch it must not leak onto the current one.
+            if let Some(level) = &effort
+                && self.state.thinking_effort.as_deref() != Some(level.as_str())
+            {
+                self.state.thinking_effort = Some(level.clone());
+                self.enqueue(Op::SetThinking {
+                    effort: level.clone(),
+                });
+            }
+        }
+        if session_only {
+            if same_provider {
+                self.push_status(
+                    &format!("switched to model {label} (this session only)"),
+                    false,
+                );
+            } else {
+                // A different provider cannot go live mid-session, and
+                // session-only would persist nothing; point at Enter.
+                self.push_status(
+                    "switching provider needs a restart — use Enter to save it as the default",
+                    true,
+                );
+            }
+            return;
+        }
+        // Persist the default so the next launch picks it up (the
+        // harness applies settings.default_model before config).
+        self.settings.update(|view| {
+            view.default_model = Some(model);
+            view.default_provider = Some(provider.clone());
+            view.default_effort = effort;
+        });
+        let scope = if same_provider {
+            format!("{label} as default")
+        } else {
+            format!("{label} ({provider}) as default; restart to apply")
+        };
+        self.push_status(&format!("saved {scope}"), false);
+    }
+
+    /// Queue a resume through the session factory.
+    fn request_resume(&mut self, id: &str) {
+        if self.factory.is_none() {
+            self.push_status("resume is unavailable in this surface", true);
+            return;
+        }
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("resume is unavailable without a home directory", true);
+            return;
+        };
+        match state_persistence::sessions::load_session_history(&home, id) {
+            Ok(history) => {
+                self.pending_launch = Some(LaunchSpec {
+                    session_id: Some(id.to_string()),
+                    history,
+                    readonly: false,
+                    model_override: Some(self.state.model_name.clone()),
+                });
+            }
+            Err(error) => self.push_status(&format!("resume failed: {error}"), true),
         }
     }
 
@@ -590,6 +778,9 @@ impl ConsoleUi {
                 if *interrupted {
                     self.push_status("interrupted", false);
                 }
+                // Journal the completed turn (text snapshot) so
+                // /sessions + resume can replay it later.
+                self.journal_turn(*interrupted);
                 // Desktop attention ping for finished turns; queued
                 // follow-ups keep the session visibly active.
                 let queued_next = !self.state.queued.is_empty();
@@ -711,6 +902,117 @@ impl ConsoleUi {
         self.push_status(&format!("permission mode: {mode}"), false);
     }
 
+    /// Best-effort journal write for one completed turn: text snapshot
+    /// of the dialogue under the current session id. No home or no
+    /// session id (tests, headless surfaces) skips silently.
+    fn journal_turn(&mut self, interrupted: bool) {
+        let Some(home) = self.state.home.clone() else {
+            return;
+        };
+        let session_id = self.state.session_id.clone();
+        if session_id.is_empty() {
+            return;
+        }
+        let input = self
+            .state
+            .dialogue
+            .iter()
+            .rev()
+            .find(|entry| entry.from_user)
+            .map(|entry| entry.text.clone())
+            .unwrap_or_default();
+        let history: Vec<(bool, String)> = self
+            .state
+            .dialogue
+            .iter()
+            // Dialogue flags users; the journal flags the model side.
+            .map(|entry| (!entry.from_user, entry.text.clone()))
+            .collect();
+        let cwd = self.state.cwd.to_string_lossy().to_string();
+        let outcome = if interrupted {
+            "Interrupted"
+        } else {
+            "Completed"
+        };
+        let _ = state_persistence::sessions::record_turn(
+            &home,
+            &session_id,
+            &cwd,
+            &input,
+            &history,
+            outcome,
+        );
+    }
+
+    /// Drain a pending session launch through the factory (run loop
+    /// calls once per iteration). Returns true when a session was
+    /// swapped in (the caller must repaint). Failures land as status
+    /// lines.
+    fn take_pending_launch(&mut self) -> bool {
+        let Some(spec) = self.pending_launch.take() else {
+            return false;
+        };
+        let Some(factory) = &self.factory else {
+            return false;
+        };
+        match factory(&spec) {
+            Ok(launch) => {
+                self.replace_session(launch);
+                true
+            }
+            Err(error) => {
+                self.push_status(&format!("session launch failed: {error}"), true);
+                false
+            }
+        }
+    }
+
+    /// Swap in a freshly launched session: replace link and state,
+    /// replay the seed history, and start a clean transcript.
+    fn replace_session(&mut self, launch: SessionLaunch) {
+        let ctx = launch.ctx;
+        self.link = launch.link;
+        self.status = ctx.status.clone();
+        let mut state = AppState::new(
+            ctx.model_name.clone(),
+            ctx.cwd.clone(),
+            ctx.permission_mode.clone(),
+            ctx.mcp_servers.clone(),
+        );
+        state.provider_id = ctx.provider_id.clone();
+        state.thinking_effort = ctx.thinking_effort.clone();
+        state.session_id = ctx.session_id.clone();
+        state.session_title = ctx.session_title.clone();
+        state.home = ctx.home.clone();
+        state.git_branch = crate::gitinfo::branch(&state.cwd);
+        self.state = state;
+        self.model_entries = ctx.model_entries.clone();
+        self.thinking_levels = ctx.thinking_levels.clone();
+        self.outbox.clear();
+        self.open_calls.clear();
+        self.reset_transcript();
+        for (from_model, text) in &launch.history {
+            if *from_model {
+                self.push_assistant_message(text);
+            } else {
+                self.push_user_message(text);
+            }
+        }
+        self.screen.invalidate();
+        self.push_status(
+            &format!(
+                "session {} ({})",
+                if ctx.session_title.is_some() {
+                    "restored"
+                } else {
+                    "started"
+                },
+                short_id(&self.state.session_id)
+            ),
+            false,
+        );
+    }
+
     /// Submit handling for editor text: `!` shell commands first, then
     /// slash dispatch, then plain user input (which persists to
     /// history).
@@ -726,23 +1028,9 @@ impl ConsoleUi {
             return match slash::dispatch(&invocation, &self.state, self.status.as_ref()) {
                 slash::Effect::Ops(ops) => {
                     if invocation.name == "clear" {
-                        if self.state.busy() {
-                            self.push_status(
-                                "cannot clear screen while a turn is running (press Esc to interrupt)",
-                                false,
-                            );
-                        } else if self.shell.is_some() {
-                            self.push_status(
-                                "cannot clear screen while a shell command is running (press Esc to cancel)",
-                                false,
-                            );
-                        } else {
-                            self.transcript.clear();
-                            self.streaming.clear();
-                            self.open_calls.clear();
-                            self.state.dialogue.clear();
-                            self.screen.invalidate();
-                        }
+                        self.clear_screen();
+                    } else if invocation.name == "new" {
+                        self.start_new_session();
                     } else if invocation.name == "theme" {
                         self.apply_theme(&invocation.args);
                     } else if invocation.name == "copy" {
@@ -753,9 +1041,41 @@ impl ConsoleUi {
                         let dialog = crate::dialogs::SettingsDialog::new(self.settings.clone());
                         self.dialog = Some(Dialog::Settings(dialog));
                     } else if invocation.name == "help" {
-                        for line in slash::help_lines() {
-                            self.push_status(&line, false);
+                        self.dialog = Some(Dialog::Help(crate::dialogs::HelpPanel::new(
+                            slash::help_lines(),
+                        )));
+                    } else if invocation.name == "model" && invocation.args.is_empty() {
+                        self.dialog = Some(Dialog::Model(crate::dialogs::ModelPickerDialog::new(
+                            self.model_entries.clone(),
+                            self.state.model_name.clone(),
+                            self.state.thinking_effort.clone(),
+                            self.thinking_levels.clone(),
+                        )));
+                    } else if invocation.name == "permissions" && invocation.args.is_empty() {
+                        self.dialog = Some(Dialog::Permissions(
+                            crate::dialogs::PermissionPickerDialog::new(
+                                &self.state.permission_mode,
+                            ),
+                        ));
+                    } else if matches!(invocation.name.as_str(), "sessions" | "resume")
+                        && invocation.args.is_empty()
+                    {
+                        self.open_session_picker();
+                    } else if invocation.name == "fork" {
+                        self.fork_session();
+                    } else if invocation.name == "title" {
+                        self.set_session_title(&invocation.args);
+                    } else if invocation.name == "init" {
+                        self.init_project();
+                    } else if invocation.name == "mcp" {
+                        self.list_mcp_servers();
+                    } else if invocation.name == "effort" && invocation.args.is_empty() {
+                        match &self.state.thinking_effort {
+                            Some(level) => self.push_status(&format!("thinking: {level}"), false),
+                            None => self.push_status("thinking: off (unset)", false),
                         }
+                    } else if invocation.name == "btw" {
+                        self.handle_btw(&invocation.args);
                     } else if invocation.name == "usage" {
                         let panel = UsagePanel::new(
                             self.state.context_used,
@@ -765,13 +1085,8 @@ impl ConsoleUi {
                         self.transcript.push(Box::new(panel));
                     } else if invocation.name == "version" {
                         self.push_status(&format!("WaveCode v{}", self.version), false);
-                    } else if invocation.name == "model" && invocation.args.is_empty() {
-                        self.push_status(&format!("model: {}", self.state.model_name), false);
-                    } else if invocation.name == "permissions" && invocation.args.is_empty() {
-                        self.push_status(
-                            &format!("permission mode: {}", self.state.permission_mode),
-                            false,
-                        );
+                    } else if invocation.name == "model" {
+                        // Non-empty args already dispatched to Op::SetModel.
                     } else if invocation.name == "memory" {
                         let text = self
                             .status
@@ -788,12 +1103,14 @@ impl ConsoleUi {
                             },
                             false,
                         );
-                    } else if matches!(invocation.name.as_str(), "goal" | "status") {
+                    } else if invocation.name == "goal" {
                         let text = self
                             .status
                             .goal_status()
                             .unwrap_or_else(|| "no durable goal set".to_string());
                         self.push_status(&text, false);
+                    } else if invocation.name == "status" {
+                        self.push_session_status();
                     }
                     for op in ops {
                         // Mode/model changes have no wire echo; the
@@ -806,6 +1123,15 @@ impl ConsoleUi {
                             Op::SetModel { name } => {
                                 self.state.model_name = name.clone();
                                 self.push_status(&format!("model: {name}"), false);
+                            }
+                            Op::SetThinking { effort } => {
+                                let level = if effort.eq_ignore_ascii_case("off") {
+                                    None
+                                } else {
+                                    Some(effort.clone())
+                                };
+                                self.state.thinking_effort = level;
+                                self.push_status(&format!("thinking: {effort}"), false);
                             }
                             _ => {}
                         }
@@ -822,6 +1148,367 @@ impl ConsoleUi {
         }
         self.send_user_input(text);
         Flow::Continue
+    }
+
+    /// Soft clear: transcript and dialogue reset, context (the actor's
+    /// conversation) is kept.
+    fn clear_screen(&mut self) {
+        if self.state.busy() {
+            self.push_status(
+                "cannot clear screen while a turn is running (press Esc to interrupt)",
+                false,
+            );
+        } else if self.shell.is_some() {
+            self.push_status(
+                "cannot clear screen while a shell command is running (press Esc to cancel)",
+                false,
+            );
+        } else {
+            self.reset_transcript();
+        }
+    }
+
+    /// Reset transcript-side state; keeps the link, usage, and session
+    /// identity (a fresh welcome card lands on top).
+    fn reset_transcript(&mut self) {
+        self.transcript.clear();
+        self.streaming.clear();
+        self.open_calls.clear();
+        self.state.dialogue.clear();
+        let info = welcome_info_of(&self.state, &self.version);
+        self.transcript.push_new_turn(Box::new(Welcome::new(info)));
+        self.screen.invalidate();
+    }
+
+    /// `/new`: rotate to a fresh session through the factory (new
+    /// context and journal); without a factory, degrade to a soft clear.
+    fn start_new_session(&mut self) {
+        if self.state.busy() {
+            self.push_status("cannot start a new session while a turn runs", false);
+            return;
+        }
+        if self.factory.is_some() {
+            self.pending_launch = Some(LaunchSpec {
+                session_id: None,
+                history: Vec::new(),
+                readonly: false,
+                model_override: None,
+            });
+        } else {
+            self.reset_transcript();
+            self.push_status("screen cleared (no session factory; context kept)", false);
+        }
+    }
+
+    /// `/sessions`: list recorded sessions in a picker.
+    fn open_session_picker(&mut self) {
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("sessions are unavailable without a home directory", true);
+            return;
+        };
+        let metas = state_persistence::sessions::list_sessions(&home);
+        let rows: Vec<SessionRow> = metas
+            .into_iter()
+            .map(|meta| SessionRow {
+                title: if meta.title.is_empty() {
+                    meta.id.clone()
+                } else {
+                    meta.title
+                },
+                id: meta.id,
+                cwd: meta.cwd,
+                age: relative_age(meta.updated_at),
+                turns: meta.turns,
+            })
+            .collect();
+        if rows.is_empty() {
+            self.push_status("no recorded sessions yet", false);
+            return;
+        }
+        let current_cwd = self.state.cwd.to_string_lossy().to_string();
+        self.dialog = Some(Dialog::Sessions(crate::dialogs::SessionPickerDialog::new(
+            rows,
+            &current_cwd,
+        )));
+    }
+
+    /// `/fork`: snapshot the dialogue into a resumable copy and stay in
+    /// this session (fork tools and context carry over as text).
+    fn fork_session(&mut self) {
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("forking is unavailable without a home directory", true);
+            return;
+        };
+        if self.state.dialogue.is_empty() {
+            self.push_status("nothing to fork yet — send a message first", false);
+            return;
+        }
+        if self.state.busy() {
+            self.push_status("cannot fork while a turn is running", false);
+            return;
+        }
+        let history: Vec<(bool, String)> = self
+            .state
+            .dialogue
+            .iter()
+            // Dialogue flags users; the journal flags the model side.
+            .map(|entry| (!entry.from_user, entry.text.clone()))
+            .collect();
+        let source_title = self
+            .state
+            .session_title
+            .clone()
+            .unwrap_or_else(|| self.state.session_id.clone());
+        let fork_id = Uuid::new_v4().to_string();
+        let cwd = self.state.cwd.to_string_lossy().to_string();
+        match state_persistence::sessions::fork_session(
+            &home,
+            &fork_id,
+            &format!("Fork: {source_title}"),
+            &cwd,
+            &history,
+        ) {
+            Ok(meta) => {
+                self.push_status(
+                    &format!(
+                        "session forked ({}). still in the original session;",
+                        short_id(&meta.id)
+                    ),
+                    false,
+                );
+                self.push_status(
+                    &format!("open the fork with: wavecode --session {}", meta.id),
+                    false,
+                );
+            }
+            Err(error) => self.push_status(&format!("fork failed: {error}"), true),
+        }
+    }
+
+    /// `/title <title>`: rename the session; no args shows the current.
+    fn set_session_title(&mut self, args: &str) {
+        let title = args.trim();
+        if title.is_empty() {
+            match &self.state.session_title {
+                Some(current) => {
+                    self.push_status(
+                        &format!("session: {current} ({})", short_id(&self.state.session_id)),
+                        false,
+                    );
+                }
+                None => self.push_status(
+                    &format!(
+                        "no title set — session {}",
+                        short_id(&self.state.session_id)
+                    ),
+                    false,
+                ),
+            }
+            return;
+        }
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("titles are unavailable without a home directory", true);
+            return;
+        };
+        match state_persistence::sessions::set_title(&home, &self.state.session_id, title) {
+            Ok(Some(_)) => {
+                self.state.session_title = Some(title.to_string());
+                self.push_status(&format!("session renamed: {title}"), false);
+            }
+            Ok(None) => {
+                self.push_status("usage: /title <title>", false);
+            }
+            Err(error) => self.push_status(&format!("rename failed: {error}"), true),
+        }
+    }
+
+    /// `/init`: send a fixed analysis prompt so the agent writes
+    /// AGENTS.md for this repository.
+    fn init_project(&mut self) {
+        const INIT_PROMPT: &str = "Analyze this repository and create (or update) an AGENTS.md \
+file at the repository root. Cover: the project's purpose in one or two sentences, the \
+directory layout a newcomer needs, build/test/lint commands that actually work here, and \
+any conventions the code follows. Keep it under 60 lines and state only what you can \
+verify from the repository.";
+        self.push_status("initializing: the agent will write AGENTS.md", false);
+        self.send_user_input(INIT_PROMPT);
+    }
+
+    /// `/btw [question]`: ask a side question in a read-only session
+    /// seeded with the main dialogue; the answer streams into a panel
+    /// and never enters the main conversation. An open panel asks
+    /// follow-ups on the same side session.
+    fn handle_btw(&mut self, args: &str) {
+        let question = args.trim();
+        if question.is_empty() {
+            self.push_status("usage: /btw <question> (esc closes the panel)", false);
+            return;
+        }
+        if let Some(job) = &self.btw {
+            job.ask(question);
+            self.btw_log.push((true, question.to_string()));
+            self.btw_running = true;
+            return;
+        }
+        if self.factory.is_none() {
+            self.push_status("side questions are unavailable in this surface", true);
+            return;
+        }
+        let history: Vec<(bool, String)> = self
+            .state
+            .dialogue
+            .iter()
+            .map(|entry| (!entry.from_user, entry.text.clone()))
+            .collect();
+        let spec = LaunchSpec {
+            session_id: None,
+            history,
+            readonly: true,
+            model_override: Some(self.state.model_name.clone()),
+        };
+        match self.factory.as_ref().map(|factory| factory(&spec)) {
+            Some(Ok(launch)) => {
+                self.btw_log = vec![(true, question.to_string())];
+                self.btw_buffer.clear();
+                self.btw_running = true;
+                self.btw = Some(BtwJob::spawn(launch.link, question));
+            }
+            Some(Err(error)) => self.push_status(&format!("side session failed: {error}"), true),
+            None => self.push_status("side questions are unavailable in this surface", true),
+        }
+    }
+
+    /// Close the btw panel: cancels a running answer and shuts the side
+    /// session down (the pump drains in the background).
+    fn close_btw(&mut self) {
+        if let Some(job) = &self.btw {
+            job.cancel();
+        }
+        self.btw = None;
+        self.btw_log.clear();
+        self.btw_buffer.clear();
+        self.btw_running = false;
+    }
+
+    /// Drain the btw pump into the panel state; returns true when the
+    /// frame changed (the run-loop tick calls this, like the shell).
+    pub fn poll_btw(&mut self) -> bool {
+        let Some(job) = self.btw.as_mut() else {
+            return false;
+        };
+        let mut changed = false;
+        let mut ended = false;
+        while let Some(event) = job.try_recv() {
+            match event {
+                crate::controllers::btw::BtwEvent::Delta(text) => {
+                    let text = tui_engine::sanitize::sanitize_terminal(&text);
+                    self.btw_buffer.push_str(&text);
+                    changed = true;
+                }
+                crate::controllers::btw::BtwEvent::Done { text, interrupted } => {
+                    if !text.is_empty() {
+                        let text = tui_engine::sanitize::sanitize_terminal(&text);
+                        self.btw_log.push((false, text.into_owned()));
+                    } else if interrupted {
+                        self.btw_log.push((false, "(cancelled)".to_string()));
+                    }
+                    self.btw_buffer.clear();
+                    self.btw_running = false;
+                    changed = true;
+                }
+                crate::controllers::btw::BtwEvent::Ended => {
+                    ended = true;
+                    changed = true;
+                }
+            }
+        }
+        if ended {
+            // The side session is gone; drop the job so the next /btw
+            // relaunches instead of asking a dead pump (which would
+            // strand the panel in streaming forever). The log stays
+            // visible until the panel is closed or reopened.
+            self.btw = None;
+            self.btw_running = false;
+            self.btw_buffer.clear();
+        }
+        changed
+    }
+
+    /// True while the btw panel occupies the frame: a live job, or the
+    /// leftover log of a side session that already ended.
+    fn btw_open(&self) -> bool {
+        self.btw.is_some() || !self.btw_log.is_empty()
+    }
+
+    /// `/mcp`: list configured MCP servers.
+    fn list_mcp_servers(&mut self) {
+        if self.state.mcp_servers.is_empty() {
+            self.push_status("(no MCP servers configured)", false);
+            return;
+        }
+        for server in self.state.mcp_servers.clone() {
+            self.push_status(&format!("- {server}"), false);
+        }
+    }
+
+    /// `/status`: the aggregate session summary.
+    fn push_session_status(&mut self) {
+        let state = self.state.clone();
+        let model_line = match (&state.thinking_effort, state.provider_id.as_str()) {
+            (Some(level), provider) if !provider.is_empty() => {
+                format!(
+                    "model: {} @ {provider} · thinking: {level}",
+                    state.model_name
+                )
+            }
+            (Some(level), _) => format!("model: {} · thinking: {level}", state.model_name),
+            (None, provider) if !provider.is_empty() => {
+                format!("model: {} @ {provider}", state.model_name)
+            }
+            (None, _) => format!("model: {}", state.model_name),
+        };
+        let session_line = match &state.session_title {
+            Some(title) => {
+                format!("session: {title} ({})", short_id(&state.session_id))
+            }
+            None => format!("session: {}", short_id(&state.session_id)),
+        };
+        let context_line = match (state.context_used, state.context_window) {
+            (Some(used), Some(window)) => format!(
+                "context: {}% ({}/{})",
+                crate::state::context_percent(used, window),
+                crate::state::format_tokens(used),
+                crate::state::format_tokens(window)
+            ),
+            _ => "context: n/a".to_string(),
+        };
+        let usage_line = format!(
+            "tokens: {} in / {} out / {} total",
+            crate::state::format_tokens(state.usage.input),
+            crate::state::format_tokens(state.usage.output),
+            crate::state::format_tokens(state.usage.total())
+        );
+        for line in [
+            session_line,
+            model_line,
+            format!("mode: {}", permission_mode_label(&state.permission_mode)),
+            format!("cwd: {}", state.cwd.display()),
+        ]
+        .into_iter()
+        .chain(
+            state
+                .git_branch
+                .iter()
+                .map(|branch| format!("branch: {branch}")),
+        )
+        .chain([context_line, usage_line])
+        .chain([format!(
+            "mcp: {} server(s) · WaveCode v{}",
+            state.mcp_servers.len(),
+            self.version
+        )]) {
+            self.push_status(&line, false);
+        }
     }
 
     /// Apply a `/theme light|dark|auto` switch locally.
@@ -866,9 +1553,7 @@ impl ConsoleUi {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
-                self.state
-                    .cwd
-                    .join(format!("wavecode-export-{stamp}.md"))
+                self.state.cwd.join(format!("wavecode-export-{stamp}.md"))
             }
             arg => PathBuf::from(arg),
         };
@@ -901,6 +1586,10 @@ impl ConsoleUi {
             (Key::Char('c'), m) if m.ctrl => self.handle_ctrl_c(),
             (Key::Esc, _) if self.shell.is_some() => {
                 self.cancel_shell();
+                Flow::Continue
+            }
+            (Key::Esc, _) if self.btw_open() => {
+                self.close_btw();
                 Flow::Continue
             }
             (Key::Char('d'), m) if m.ctrl && self.editor.is_empty() => {
@@ -1000,8 +1689,10 @@ impl ConsoleUi {
         }
         // Live assistant draft.
         if !self.streaming.assistant.is_empty() {
-            let mut draft =
-                AssistantMessage::streaming(self.streaming.assistant.clone(), Box::new(PlainHighlighter));
+            let mut draft = AssistantMessage::streaming(
+                self.streaming.assistant.clone(),
+                Box::new(PlainHighlighter),
+            );
             lines.extend(Component::render(&mut draft, inner));
         }
         lines.extend(render_todos(
@@ -1009,7 +1700,20 @@ impl ConsoleUi {
             self.state.todo_expanded,
             inner,
         ));
-        lines.extend(panes::render_queue(&self.state.queued, inner, Instant::now()));
+        lines.extend(panes::render_queue(
+            &self.state.queued,
+            inner,
+            Instant::now(),
+        ));
+        // Modal dialogs render as an inline panel above the editor: they
+        // own the keyboard, so the frame must show them.
+        if let Some(dialog) = &mut self.dialog {
+            lines.extend(dialog.render(inner));
+        }
+        // The /btw side-question panel streams answers above the editor.
+        if self.btw_open() {
+            lines.extend(self.render_btw_panel(inner));
+        }
         lines.extend(self.editor.render_box(inner, rows));
         lines.extend(self.footer(inner));
         let pad = " ".repeat(GUTTER);
@@ -1027,10 +1731,8 @@ impl ConsoleUi {
             self.editor.set_prompt("!");
             return;
         }
-        let ticking = self.state.busy()
-            && (self.started_at.elapsed().as_millis() / 400) % 2 == 1;
-        self.editor
-            .set_prompt(if ticking { "⊔⊓" } else { "⊓⊔" });
+        let ticking = self.state.busy() && (self.started_at.elapsed().as_millis() / 400) % 2 == 1;
+        self.editor.set_prompt(if ticking { "⊔⊓" } else { "⊓⊔" });
     }
 
     /// Take the queued terminal sequence, if any.
@@ -1041,14 +1743,23 @@ impl ConsoleUi {
     /// True when an animation tick must repaint (busy phases animate,
     /// shell output arrives asynchronously, the welcome ripple flows).
     pub fn needs_tick_render(&mut self) -> bool {
-        self.state.busy() || self.exit_armed() || self.shell.is_some() || self.welcome_rippling()
+        self.state.busy()
+            || self.exit_armed()
+            || self.shell.is_some()
+            || self.btw_running
+            || self.welcome_rippling()
     }
 
     /// True while the welcome wave is still flowing after a resize.
     fn welcome_rippling(&mut self) -> bool {
         self.transcript
             .get_mut(0)
-            .and_then(|entry| entry.component.as_any_mut().downcast_ref::<crate::welcome::Welcome>())
+            .and_then(|entry| {
+                entry
+                    .component
+                    .as_any_mut()
+                    .downcast_ref::<crate::welcome::Welcome>()
+            })
             .is_some_and(|welcome| welcome.is_rippling())
     }
 
@@ -1191,12 +1902,95 @@ pub fn permission_mode_label(mode: &str) -> &'static str {
     }
 }
 
+/// Short display form of a session id: first 8 characters.
+pub fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+/// Visible panel rows for an open `/btw` session.
+const BTW_PANEL_ROWS: usize = 10;
+
+impl ConsoleUi {
+    /// Render the `/btw` side-question panel: the question/answer tail
+    /// plus the streaming buffer, above the editor.
+    fn render_btw_panel(&self, columns: usize) -> Vec<String> {
+        use crate::chrome::symbols;
+        let theme = theme::current();
+        let mut body = Vec::new();
+        let status = if self.btw_running {
+            "streaming"
+        } else {
+            "idle · type /btw <question> to ask"
+        };
+        body.push(theme.bold(
+            Token::BorderFocus,
+            &format!("{} btw — {status}", symbols::SINE_WAVE),
+        ));
+        // Flatten the log into lines, then keep the tail.
+        let mut lines: Vec<(bool, String)> = Vec::new();
+        for (from_user, text) in &self.btw_log {
+            let prefix = if *from_user { "? " } else { "" };
+            for line in text.lines() {
+                let marker = if *from_user {
+                    prefix.to_string()
+                } else {
+                    "  ".to_string()
+                };
+                lines.push((*from_user, format!("{marker}{line}")));
+            }
+        }
+        if !self.btw_buffer.is_empty() {
+            for line in self.btw_buffer.lines() {
+                lines.push((false, format!("  {line}")));
+            }
+        }
+        let skip = lines.len().saturating_sub(BTW_PANEL_ROWS);
+        for (from_user, line) in lines.into_iter().skip(skip) {
+            if from_user {
+                body.push(theme.bold(Token::Accent, &line));
+            } else {
+                body.push(theme.paint(Token::Text, &line));
+            }
+        }
+        body.push(theme.paint(
+            Token::TextDim,
+            "esc closes the panel; the main session is unaffected",
+        ));
+        tui_engine::border::frame(body, columns, theme.style(Token::BorderFocus), None)
+    }
+}
+
+/// Relative age label for a session's last activity.
+fn relative_age(updated_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let seconds = now.saturating_sub(updated_at);
+    match seconds {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", seconds / 60),
+        3600..=86_399 => format!("{}h ago", seconds / 3600),
+        _ => format!("{}d ago", seconds / 86_400),
+    }
+}
+
 /// Run the console UI until exit.
 ///
 /// Handles key events, bracketed pastes, resizes, and session events;
 /// renders through the differential screen. Ctrl+C exits via the
 /// double-press cascade (interrupting the turn first when busy).
 pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
+    run_with_factory(client, ctx, None).await
+}
+
+/// Run the console UI with an on-demand session factory, enabling
+/// `/sessions` resume and `/new` re-assembly.
+pub async fn run_with_factory(
+    client: ActorClient,
+    ctx: UiContext,
+    factory: Option<std::sync::Arc<SessionFactory>>,
+) -> anyhow::Result<()> {
     let mut guard =
         TerminalGuard::enter().map_err(|e| anyhow::anyhow!("terminal init failed: {e}"))?;
     let _ = guard.keyboard_enhanced();
@@ -1204,6 +1998,9 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
 
     let (mut columns, mut rows) = terminal::size().unwrap_or((80, 24));
     let mut ui = ConsoleUi::new(Box::new(client), &ctx, env!("CARGO_PKG_VERSION"));
+    if let Some(factory) = factory {
+        ui.set_factory(factory);
+    }
     if let Err(e) = ui.render(&mut std::io::stdout().lock(), columns, rows) {
         guard.leave();
         return Err(anyhow::anyhow!("initial render failed: {e}"));
@@ -1218,16 +2015,23 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
     let mut abort_reason: Option<String> = None;
 
     while flow == Flow::Continue && abort_reason.is_none() {
+        // Dialog-requested launches (resume, /new) re-assemble the
+        // session before anything else runs.
+        if ui.take_pending_launch()
+            && let Err(e) = ui.render(&mut std::io::stdout().lock(), columns, rows)
+        {
+            abort_reason = Some(format!("terminal render error: {e}"));
+        }
         let stdout = std::io::stdout();
         if let Err(error) = ui.flush_outbox().await {
             abort_reason = Some(format!("session submission failed: {error}"));
             break;
         }
-            // Terminal sequences queued by handlers go straight out;
-            // they are invisible and never disturb the diff renderer.
-            if let Some(seq) = ui.take_pending_sequence() {
-                notify::emit_raw(&seq);
-            }
+        // Terminal sequences queued by handlers go straight out;
+        // they are invisible and never disturb the diff renderer.
+        if let Some(seq) = ui.take_pending_sequence() {
+            notify::emit_raw(&seq);
+        }
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(CEvent::Key(key))) => {
@@ -1276,10 +2080,11 @@ pub async fn run(client: ActorClient, ctx: UiContext) -> anyhow::Result<()> {
                 }
             }
             _ = tick.tick() => {
-                // Spinner animation, streaming flush cadence, and the
-                // live shell card.
+                // Spinner animation, streaming flush cadence, the live
+                // shell card, and the btw panel.
                 let shell_changed = ui.poll_shell();
-                if (shell_changed || ui.needs_tick_render())
+                let btw_changed = ui.poll_btw();
+                if ((shell_changed || btw_changed) || ui.needs_tick_render())
                     && let Err(e) = ui.render(&mut stdout.lock(), columns, rows)
                 {
                     abort_reason = Some(format!("terminal render error: {e}"));
@@ -1365,18 +2170,29 @@ mod tests {
 
     fn ui() -> ConsoleUi {
         theme::set(theme::Theme::dark());
-        ConsoleUi::new(
+        let mut ui = ConsoleUi::new(
             Box::new(TestLink::new()),
             &UiContext {
                 model_name: "test-model".to_string(),
+                provider_id: String::new(),
+                thinking_effort: None,
+                thinking_levels: Vec::new(),
                 cwd: PathBuf::from("/home/user/work/proj/sub"),
                 permission_mode: "auto".to_string(),
                 skill_names: Vec::new(),
                 mcp_servers: vec!["fs".to_string()],
                 status: Arc::new(NullStatus),
+                session_id: "session-0001".to_string(),
+                session_title: None,
+                model_entries: Vec::new(),
+                home: None,
             },
             "0.1.0",
-        )
+        );
+        // Picker and settings tests mutate settings; keep them off the
+        // real user file.
+        ui.settings = crate::settings::SharedSettings::without_persistence(Default::default());
+        ui
     }
 
     #[test]
@@ -2010,11 +2826,18 @@ mod tests {
             Box::new(FailingLink),
             &UiContext {
                 model_name: "test-model".to_string(),
+                provider_id: String::new(),
+                thinking_effort: None,
+                thinking_levels: Vec::new(),
                 cwd: PathBuf::from("/test"),
                 permission_mode: "auto".to_string(),
                 skill_names: Vec::new(),
                 mcp_servers: Vec::new(),
                 status: Arc::new(NullStatus),
+                session_id: "session-0001".to_string(),
+                session_title: None,
+                model_entries: Vec::new(),
+                home: None,
             },
             "0.1.0",
         );
@@ -2036,7 +2859,612 @@ mod tests {
         assert!(!ui.state.busy());
         assert!(!ui.transcript.is_empty());
         ui.user_submit("/clear");
-        assert!(ui.transcript.is_empty());
+        // The clear resets to a fresh welcome card, not a bare screen.
+        assert_eq!(ui.transcript.len(), 1);
+        assert!(ui.state.dialogue.is_empty());
+    }
+
+    fn picker_entries() -> Vec<crate::dialogs::ModelEntryView> {
+        vec![
+            crate::dialogs::ModelEntryView {
+                label: "deepseek-chat".to_string(),
+                provider: "deepseek".to_string(),
+                model: "deepseek-chat".to_string(),
+                effort: None,
+            },
+            crate::dialogs::ModelEntryView {
+                label: "deepseek-reasoner".to_string(),
+                provider: "deepseek".to_string(),
+                model: "deepseek-reasoner".to_string(),
+                effort: None,
+            },
+            crate::dialogs::ModelEntryView {
+                label: "MiniMax-M3".to_string(),
+                provider: "minimax".to_string(),
+                model: "MiniMax-M3".to_string(),
+                effort: Some("high".to_string()),
+            },
+        ]
+    }
+
+    fn ui_with_models() -> ConsoleUi {
+        let mut ui = ui();
+        ui.model_entries = picker_entries();
+        ui.state.model_name = "deepseek-chat".to_string();
+        ui.state.provider_id = "deepseek".to_string();
+        ui.thinking_levels = vec!["off".to_string(), "low".to_string(), "high".to_string()];
+        ui
+    }
+
+    #[test]
+    fn model_no_args_opens_picker_and_alt_s_switches_live() {
+        let mut ui = ui_with_models();
+        ui.user_submit("/model");
+        assert!(ui.dialog.is_some(), "picker opens");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Select a model"), "{joined}");
+        // Move down to the same-provider sibling, then Alt+S: live
+        // switch happens on the wire.
+        ui.handle_key(KeyEvent::plain(Key::Down));
+        ui.handle_key(KeyEvent::new(
+            Key::Char('s'),
+            tui_engine::keys::Mods {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        ));
+        ui.handle_key(KeyEvent::plain(Key::Enter));
+        let ops = ui.pending_ops().clone();
+        assert!(
+            ops.iter().any(|op| matches!(op, Op::SetModel { .. })),
+            "same-provider selection switches live: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn model_picker_enter_persists_default_and_cross_provider_skips_live_switch() {
+        let mut ui = ui_with_models();
+        ui.user_submit("/model");
+        // Move to MiniMax-M3 (different provider), Enter persists.
+        ui.handle_key(KeyEvent::plain(Key::Down));
+        ui.handle_key(KeyEvent::plain(Key::Down));
+        ui.handle_key(KeyEvent::plain(Key::Enter));
+        let ops = ui.pending_ops().clone();
+        assert!(
+            !ops.iter().any(|op| matches!(op, Op::SetModel { .. })),
+            "cross-provider selection must not switch live: {ops:?}"
+        );
+        // The picked model's effort must not leak onto the model that
+        // is still live (it keeps sampling until the restart).
+        assert!(
+            !ops.iter().any(|op| matches!(op, Op::SetThinking { .. })),
+            "cross-provider effort must not go live: {ops:?}"
+        );
+        assert_eq!(ui.state.thinking_effort, None);
+        let view = ui.settings.get();
+        assert_eq!(view.default_model.as_deref(), Some("MiniMax-M3"));
+        assert_eq!(view.default_provider.as_deref(), Some("minimax"));
+        assert_eq!(view.default_effort.as_deref(), Some("high"));
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("restart to apply"),
+            "cross-provider default explains the restart: {joined}"
+        );
+    }
+
+    #[test]
+    fn cross_provider_session_only_switch_is_rejected_with_guidance() {
+        let mut ui = ui_with_models();
+        ui.user_submit("/model");
+        // Alt+S on the cross-provider entry: nothing can go live and
+        // session-only would persist nothing, so it must be rejected
+        // with a pointer at Enter instead of a "switched" claim.
+        ui.handle_key(KeyEvent::plain(Key::Down));
+        ui.handle_key(KeyEvent::plain(Key::Down));
+        ui.handle_key(KeyEvent::new(
+            Key::Char('s'),
+            tui_engine::keys::Mods {
+                ctrl: false,
+                alt: true,
+                shift: false,
+            },
+        ));
+        assert!(
+            ui.pending_ops().is_empty(),
+            "nothing may go live cross-provider: {:?}",
+            ui.pending_ops()
+        );
+        assert_eq!(
+            ui.settings.get().default_model,
+            None,
+            "session-only must not persist"
+        );
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("use Enter to save"),
+            "guidance points at saving a default: {joined}"
+        );
+    }
+
+    #[test]
+    fn model_picker_thinking_selection_enqueues_set_thinking() {
+        let mut ui = ui_with_models();
+        ui.user_submit("/model");
+        // Right moves the draft from the seed (off) to "low".
+        ui.handle_key(KeyEvent::plain(Key::Right));
+        ui.handle_key(KeyEvent::plain(Key::Enter));
+        let ops = ui.pending_ops().clone();
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::SetThinking { effort } if effort == "low")),
+            "thinking draft reaches the wire: {ops:?}"
+        );
+        assert_eq!(ui.state.thinking_effort.as_deref(), Some("low"));
+    }
+
+    #[test]
+    fn permissions_no_args_opens_picker_and_enter_applies() {
+        let mut ui = ui();
+        ui.user_submit("/permissions");
+        assert!(ui.dialog.is_some(), "mode picker opens");
+        ui.handle_key(KeyEvent::plain(Key::Char('1')));
+        assert!(ui.dialog.is_none());
+        assert_eq!(ui.state.permission_mode, "plan");
+        assert!(
+            ui.pending_ops()
+                .iter()
+                .any(|op| matches!(op, Op::SetPermissionMode { mode } if mode == "plan")),
+        );
+    }
+
+    #[test]
+    fn help_opens_panel_dialog_instead_of_status_lines() {
+        let mut ui = ui();
+        ui.user_submit("/help");
+        assert!(matches!(ui.dialog, Some(Dialog::Help(_))));
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(ui.dialog.is_none());
+    }
+
+    #[test]
+    fn direct_mode_shortcuts_dispatch() {
+        let mut ui = ui();
+        ui.user_submit("/wave");
+        assert_eq!(ui.state.permission_mode, "wave");
+        ui.user_submit("/auto");
+        assert_eq!(ui.state.permission_mode, "auto");
+    }
+
+    #[test]
+    fn effort_command_sets_level() {
+        let mut ui = ui();
+        ui.user_submit("/effort high");
+        assert_eq!(ui.state.thinking_effort.as_deref(), Some("high"));
+        assert!(
+            ui.pending_ops()
+                .iter()
+                .any(|op| matches!(op, Op::SetThinking { effort } if effort == "high")),
+        );
+    }
+
+    #[test]
+    fn completed_turns_journal_under_the_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = ui();
+        ui.state.home = Some(dir.path().to_path_buf());
+        ui.submit("hello assistant");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        let sessions = state_persistence::sessions::list_sessions(dir.path());
+        assert_eq!(sessions.len(), 1, "one session recorded");
+        assert_eq!(sessions[0].id, ui.state.session_id);
+        let history =
+            state_persistence::sessions::load_session_history(dir.path(), &sessions[0].id).unwrap();
+        assert!(history.contains(&(false, "hello assistant".to_string())));
+    }
+
+    #[tokio::test]
+    async fn sessions_picker_resumes_through_the_factory() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_path_buf();
+        state_persistence::sessions::record_turn(
+            &home,
+            "seeded-session-id",
+            "/test",
+            "earlier question",
+            &[
+                (false, "earlier question".to_string()),
+                (true, "earlier answer".to_string()),
+            ],
+            "Completed",
+        )
+        .unwrap();
+        let mut ui = ui();
+        ui.state.home = Some(home);
+        ui.state.cwd = PathBuf::from("/test");
+        let launched = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let launched_clone = launched.clone();
+        ui.set_factory(std::sync::Arc::new(move |spec: &LaunchSpec| {
+            launched_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(spec.session_id.as_deref(), Some("seeded-session-id"));
+            let ctx = UiContext {
+                model_name: "test-model".to_string(),
+                provider_id: String::new(),
+                thinking_effort: None,
+                thinking_levels: Vec::new(),
+                cwd: PathBuf::from("/test"),
+                permission_mode: "auto".to_string(),
+                skill_names: Vec::new(),
+                mcp_servers: Vec::new(),
+                status: Arc::new(NullStatus),
+                session_id: spec.session_id.clone().unwrap_or_default(),
+                session_title: None,
+                model_entries: Vec::new(),
+                home: None,
+            };
+            Ok(SessionLaunch {
+                link: Box::new(TestLink::new()),
+                ctx,
+                history: vec![
+                    (false, "earlier question".to_string()),
+                    (true, "earlier answer".to_string()),
+                ],
+            })
+        }));
+        // Open the picker (cwd-scoped to /test, where the seed lives),
+        // then resume the highlighted entry.
+        ui.user_submit("/sessions");
+        assert!(ui.dialog.is_some(), "picker opens over the index");
+        ui.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(ui.dialog.is_none());
+        // The run loop drains the pending launch on its next iteration.
+        ui.take_pending_launch();
+        assert_eq!(
+            launched.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "factory assembled the resume"
+        );
+        assert_eq!(ui.state.session_id, "seeded-session-id");
+        assert_eq!(ui.state.dialogue.len(), 2, "seed history replayed");
+    }
+
+    #[test]
+    fn resume_without_home_or_factory_is_rejected() {
+        let mut ui = ui();
+        // No factory: rejected before the home check.
+        ui.request_resume("some-id");
+        assert!(ui.pending_launch.is_none());
+        // With a factory but no home, resume must not read a relative
+        // journal path; home: None disables resume by contract.
+        ui.set_factory(std::sync::Arc::new(|_spec: &LaunchSpec| {
+            panic!("factory must not be consulted without a home")
+        }));
+        ui.request_resume("some-id");
+        assert!(ui.pending_launch.is_none());
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("resume is unavailable without a home directory"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn fork_writes_journal_history_with_model_side_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ui = ui();
+        ui.state.home = Some(dir.path().to_path_buf());
+        ui.submit("user question");
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "an answer".to_string(),
+        });
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        ui.user_submit("/fork");
+        // The journal flags the model side, so resuming the fork must
+        // replay the user question as user and the answer as assistant.
+        let fork = state_persistence::sessions::list_sessions(dir.path())
+            .into_iter()
+            .find(|meta| meta.title.starts_with("Fork:"))
+            .expect("fork recorded in the index");
+        let history =
+            state_persistence::sessions::load_session_history(dir.path(), &fork.id).unwrap();
+        assert_eq!(
+            history,
+            vec![
+                (false, "user question".to_string()),
+                (true, "an answer".to_string()),
+            ]
+        );
+    }
+
+    /// A session link that replays scripted events (drives the btw
+    /// pump) and records submissions.
+    struct ScriptBtwLink {
+        submitted: Arc<std::sync::Mutex<Vec<Op>>>,
+        events: Arc<std::sync::Mutex<std::collections::VecDeque<Event>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionLink for ScriptBtwLink {
+        async fn submit(&self, submission: Submission) -> Result<(), SubmitError> {
+            self.submitted
+                .lock()
+                .expect("test lock")
+                .push(submission.op);
+            Ok(())
+        }
+
+        async fn next_event(&mut self) -> Option<Event> {
+            loop {
+                let next = self.events.lock().expect("test lock").pop_front();
+                if let Some(event) = next {
+                    return Some(event);
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn steer(&self, _text: &str, _target: SteerTarget) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn btw_streams_answers_through_the_side_session() {
+        let submitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let script = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(
+            vec![
+                Event {
+                    id: "t1".to_string(),
+                    msg: EventMsg::AgentMessageDelta {
+                        text: "the answer is ".to_string(),
+                    },
+                },
+                Event {
+                    id: "t1".to_string(),
+                    msg: EventMsg::AgentMessageDelta {
+                        text: "42".to_string(),
+                    },
+                },
+                Event {
+                    id: "t1".to_string(),
+                    msg: EventMsg::AgentMessageComplete {
+                        text: String::new(),
+                    },
+                },
+                Event {
+                    id: "t1".to_string(),
+                    msg: EventMsg::TurnCompleted { interrupted: false },
+                },
+            ],
+        )));
+        let mut ui = ui();
+        ui.state.cwd = PathBuf::from("/test");
+        let submitted_clone = submitted.clone();
+        let script_clone = script.clone();
+        ui.set_factory(std::sync::Arc::new(move |spec: &LaunchSpec| {
+            assert!(spec.readonly, "btw launches are read-only");
+            assert_eq!(spec.model_override.as_deref(), Some("test-model"));
+            Ok(SessionLaunch {
+                link: Box::new(ScriptBtwLink {
+                    submitted: submitted_clone.clone(),
+                    events: script_clone.clone(),
+                }),
+                ctx: UiContext {
+                    model_name: "test-model".to_string(),
+                    provider_id: String::new(),
+                    thinking_effort: None,
+                    thinking_levels: Vec::new(),
+                    cwd: PathBuf::from("/test"),
+                    permission_mode: "plan".to_string(),
+                    skill_names: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    status: Arc::new(NullStatus),
+                    session_id: String::new(),
+                    session_title: None,
+                    model_entries: Vec::new(),
+                    home: None,
+                },
+                history: Vec::new(),
+            })
+        }));
+        ui.user_submit("/btw what is the answer?");
+        assert!(ui.btw.is_some(), "panel opens");
+        // The question crossed to the side session (the pump task
+        // submits asynchronously; wait for it).
+        for _ in 0..100 {
+            let landed = submitted.lock().unwrap().iter().any(
+                |op| matches!(op, Op::UserInput { text } if text.contains("what is the answer")),
+            );
+            if landed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            submitted.lock().unwrap().iter().any(
+                |op| matches!(op, Op::UserInput { text } if text.contains("what is the answer"))
+            ),
+            "question must reach the side session"
+        );
+        // Drain the pump until the answer settles.
+        for _ in 0..100 {
+            ui.poll_btw();
+            if !ui.btw_running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!ui.btw_running, "side turn completed");
+        assert!(
+            ui.btw_log
+                .contains(&(false, "the answer is 42".to_string())),
+            "answer landed: {:?}",
+            ui.btw_log
+        );
+        // Follow-up rides the same side session (one more UserInput,
+        // no new factory launch).
+        ui.user_submit("/btw and now what?");
+        for _ in 0..100 {
+            let landed =
+                submitted.lock().unwrap().iter().any(
+                    |op| matches!(op, Op::UserInput { text } if text.contains("and now what")),
+                );
+            if landed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            submitted
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|op| matches!(op, Op::UserInput { text } if text.contains("and now what"))),
+            "follow-up must reach the same side session"
+        );
+        // Esc closes the panel and cancels the side session.
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(ui.btw.is_none(), "panel closed");
+        assert!(ui.btw_log.is_empty());
+        // The frame no longer shows the panel.
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(!joined.contains("btw —"), "panel gone: {joined}");
+    }
+
+    #[test]
+    fn btw_without_args_shows_usage() {
+        let mut ui = ui();
+        ui.user_submit("/btw");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(joined.contains("usage: /btw"), "{joined}");
+    }
+
+    /// A link whose session is already over: `next_event` ends
+    /// immediately, driving the pump to report `Ended`.
+    struct DeadLink;
+
+    #[async_trait::async_trait]
+    impl SessionLink for DeadLink {
+        async fn submit(&self, _submission: Submission) -> Result<(), SubmitError> {
+            Ok(())
+        }
+
+        async fn next_event(&mut self) -> Option<Event> {
+            None
+        }
+
+        fn steer(&self, _text: &str, _target: SteerTarget) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn btw_panel_survives_a_dead_side_session_and_relaunches() {
+        let mut ui = ui();
+        let launched = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let launched_clone = launched.clone();
+        ui.set_factory(Arc::new(move |_spec: &LaunchSpec| {
+            launched_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(SessionLaunch {
+                link: Box::new(DeadLink),
+                ctx: UiContext {
+                    model_name: "test-model".to_string(),
+                    provider_id: String::new(),
+                    thinking_effort: None,
+                    thinking_levels: Vec::new(),
+                    cwd: PathBuf::from("/test"),
+                    permission_mode: "plan".to_string(),
+                    skill_names: Vec::new(),
+                    mcp_servers: Vec::new(),
+                    status: Arc::new(NullStatus),
+                    session_id: String::new(),
+                    session_title: None,
+                    model_entries: Vec::new(),
+                    home: None,
+                },
+                history: Vec::new(),
+            })
+        }));
+        ui.user_submit("/btw first question");
+        // The pump sees the dead link and reports Ended; the tick loop
+        // drains it and must drop the job instead of stranding the
+        // panel in streaming forever.
+        for _ in 0..100 {
+            ui.poll_btw();
+            if ui.btw.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(ui.btw.is_none(), "dead side session drops the job");
+        assert!(!ui.btw_log.is_empty(), "the question stays visible");
+        assert!(!ui.btw_running, "the panel must not stick in streaming");
+        // A follow-up relaunches through the factory instead of asking
+        // a dead pump (which would silently drop the question).
+        ui.user_submit("/btw second question");
+        assert_eq!(
+            launched.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "factory relaunched the side session"
+        );
+        assert!(ui.btw.is_some(), "a fresh job backs the reopened panel");
+    }
+
+    #[test]
+    fn new_session_without_factory_soft_clears() {
+        let mut ui = ui();
+        ui.submit("hello");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        ui.user_submit("/new");
+        // No factory: the transcript resets (welcome + status note) but
+        // the session identity stays.
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(joined.contains("screen cleared"), "{joined}");
+        assert!(ui.state.dialogue.is_empty());
     }
 
     #[test]
@@ -2068,7 +3496,8 @@ mod tests {
         ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
         ui.streaming.push_assistant("stale draft");
         ui.user_submit("/clear");
-        assert!(ui.transcript.is_empty());
+        // The clear resets to a fresh welcome card, not a bare screen.
+        assert_eq!(ui.transcript.len(), 1);
         assert!(
             ui.streaming.is_empty(),
             "streaming drafts must not survive a clear"

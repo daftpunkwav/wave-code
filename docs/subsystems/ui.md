@@ -79,15 +79,60 @@ receivers remain compatible.
   persistent JSONL history under `~/.wavecode/input-history/console.jsonl`.
 - Bracketed paste with large-paste collapse (`[paste #N +L lines]`
   markers expand atomically on submit).
-- Slash commands (`/help /clear /copy /export /usage /version /compact
-  /model /permissions /plan /theme /memory /snapshots /goal /status
-  /exit`) with fuzzy completion; unknown `/tokens` fall through as user
-  input (skills). `/usage` renders a severity-colored context bar plus
-  the cumulative token split accumulated from `TokenCount` samples.
-  `/copy` puts the last assistant message on the clipboard via OSC 52;
-  `/export [path]` writes the full untrimmed user/assistant dialogue to
-  markdown. Mode and model commands update the local chrome immediately
-  (there is no mode-changed wire event).
+- Slash commands (`/help /new /clear /sessions /resume /fork /title
+  /model /effort /permissions /auto /wave /plan /init /mcp /settings
+  /theme /usage /version /status /memory /snapshots /goal /compact
+  /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
+  through as user input (skills). `/usage` renders a severity-colored
+  context bar plus the cumulative token split accumulated from
+  `TokenCount` samples. `/copy` puts the last assistant message on the
+  clipboard via OSC 52; `/export [path]` writes the full untrimmed
+  user/assistant dialogue to markdown. Mode and model commands update
+  the local chrome immediately (there is no mode-changed wire event).
+- Sessions: every interactive launch journals completed turns (text
+  snapshots) under `~/.wavecode/sessions/<uuid>.jsonl` with a shared
+  `index.json` (title, cwd, timestamps, turn count). `/sessions` (alias
+  `/resume`) opens a picker (type-to-search, Ctrl+A toggles cwd/all
+  scoping) and resumes in place: the harness re-assembles a session
+  seeded with the recorded history and the transcript replays it.
+  `wavecode --session <id>` and `wavecode --continue` (-c, latest
+  session for the current directory) do the same from the CLI. `/fork`
+  snapshots the current dialogue into a resumable copy and stays in the
+  original (prints the `--session` command); `/title <title>` renames;
+  `/new` starts a fresh session (new context and journal) through the
+  same re-assembly path; `/clear` remains a soft screen reset. Resume
+  is text-level by design: tool blocks are not replayed.
+- `/btw <question>` asks a side question in a read-only side session
+  (plan mode, seeded with the main dialogue via the same session
+  factory): answers stream into a panel above the editor and never
+  enter the main conversation or journal. Follow-ups (`/btw <question>`
+  while the panel is open) ride the same side session; Esc closes the
+  panel and shuts it down. The main session stays interactive the whole
+  time.
+- `/model` opens the model picker: provider tabs (Tab/Shift+Tab),
+  type-to-search, ↑/↓ navigation, a `← current` marker, and an `N more`
+  collapse. Entries come from the config `[models]` table
+  (`[models.<alias>]` with `provider`/`model`/optional
+  `reasoning_effort`) plus the configured default model. Enter saves the
+  choice as the default (`default_model`/`default_provider` in
+  `~/.wavecode/console-settings.json`; CLI `--model` still wins;
+  a cross-provider default applies on the next launch — live switches
+  stay same-provider only). Alt+S applies the choice to the session
+  only, same-provider too: a cross-provider pick cannot go live, so
+  Alt+S there is rejected with a pointer at Enter. The Thinking row
+  (OpenAI-compatible providers; budget-driven Anthropic thinking hides
+  it) switches off/low/medium/high with ←/→ and dispatches
+  `SetThinking` live (same-provider picks only, so a picked model's
+  effort never leaks onto the model still running). `/effort <level>`
+  sets the level directly; `/model <name>` keeps direct name switching.
+- `/permissions` opens a mode picker (plan/auto/wave with
+  descriptions); `/plan`, `/auto`, `/wave` apply directly.
+- `/help` opens a scrollable panel (keybindings plus every command with
+  a description; ↑/↓ line scroll, PgUp/PgDn page, Esc/q closes).
+- `/init` sends a fixed analysis prompt so the agent writes AGENTS.md
+  for the repository. `/mcp` lists configured MCP servers. `/status`
+  prints the aggregate summary (session id/title, model + provider +
+  thinking, mode, cwd, branch, context, usage, mcp, version).
 - `!cmd` shell mode: a leading `!` runs the command locally under the
   platform shell (`cmd /C` / `sh -c`) with live output in a transcript
   card (dim tail, `(esc to cancel)`, exit-code row on failure). The
@@ -181,8 +226,11 @@ raw colors; the engine works on `Color`/`Style` values.
 
 ## Deliberate non-goals this generation
 
-Background tasks, plan approval flow, syntax highlighting in code
-blocks (`PlainHighlighter` stands in; the seam exists), and model
-pickers need wire or backend support that does not exist yet; the
-approval dialog only offers decisions the backend implements
-(`AllowOnce` / `Deny` — `AllowAlways` is reserved but unwired).
+Background tasks, plan approval flow, and syntax highlighting in code
+blocks (`PlainHighlighter` stands in; the seam exists) need wire or
+backend support that does not exist yet; the approval dialog only
+offers decisions the backend implements (`AllowOnce` / `Deny` —
+`AllowAlways` is reserved but unwired). Cross-provider live model
+switches need session re-assembly by design (base URL and credentials
+are baked into the provider client), so the picker persists a default
+for the next launch instead.

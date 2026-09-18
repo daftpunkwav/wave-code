@@ -32,9 +32,12 @@ pub mod transcript;
 pub mod ui;
 pub mod welcome;
 
+pub use dialogs::ModelEntryView;
 pub use state::AppState;
 pub use tui_engine::sanitize::{sanitize_terminal, truncate_chars};
-pub use ui::{ConsoleUi, UiContext, run};
+pub use ui::{
+    ConsoleUi, LaunchSpec, SessionFactory, SessionLaunch, UiContext, run, run_with_factory,
+};
 
 #[cfg(test)]
 mod dependency_matrix_locked {
@@ -48,8 +51,13 @@ mod dependency_matrix_locked {
     /// test deliberately.
     #[test]
     fn console_ui_internal_dependencies_are_locked() {
-        const INTERNAL: [&str; 3] = ["tui-engine", "wavecode-wire", "operations-actor"];
-        const EXTERNAL: [&str; 9] = [
+        const INTERNAL: [&str; 4] = [
+            "tui-engine",
+            "wavecode-wire",
+            "operations-actor",
+            "state-persistence",
+        ];
+        const EXTERNAL: [&str; 10] = [
             "async-trait",
             "crossterm",
             "tokio",
@@ -59,6 +67,8 @@ mod dependency_matrix_locked {
             "uuid",
             "anyhow",
             "base64",
+            // dev-dependencies only: session-journal tests need temp dirs.
+            "tempfile",
         ];
         let manifest = include_str!("../Cargo.toml");
         let mut in_deps = false;

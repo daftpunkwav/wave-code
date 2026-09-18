@@ -42,6 +42,7 @@ use wavecode_wire::{Event, EventMsg, Op, Submission};
 
 use crate::chrome::footer as footer_chrome;
 use crate::chrome::notify;
+use crate::chrome::title;
 use crate::chrome::{TIP_ROTATE_INTERVAL, TransientHint, render_todos};
 use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
@@ -200,6 +201,12 @@ pub struct ConsoleUi {
     /// Terminal sequence queued by UI logic, flushed straight to stdout
     /// by the run loop (notifications, clipboard writes).
     pending_sequence: Option<String>,
+    /// Window title last sent to the terminal (`None` = not yet sent).
+    chrome_title: Option<String>,
+    /// True while tab progress is being reported as running.
+    chrome_progress_on: bool,
+    /// Last time the busy progress was (re-)emitted.
+    chrome_progress_at: Instant,
     /// Terminal focus state from focus-reporting events. Starts `false`
     /// so terminals without focus reporting keep the always-notify
     /// behavior; once a FocusGained arrives, turn-finished notifications
@@ -271,6 +278,9 @@ impl ConsoleUi {
             started_at: Instant::now(),
             settings: crate::settings::SharedSettings::load(),
             pending_sequence: None,
+            chrome_title: None,
+            chrome_progress_on: false,
+            chrome_progress_at: Instant::now(),
             terminal_focused: false,
             pending_launch: None,
             factory: None,
@@ -1779,6 +1789,7 @@ verify from the repository.";
     /// Assemble the full frame at (columns, rows).
     pub fn frame(&mut self, columns: usize, rows: usize) -> Vec<String> {
         let inner = columns.saturating_sub(GUTTER * 2);
+        self.update_chrome();
         self.animate_editor_prompt();
         let mut lines = Vec::new();
         lines.extend(self.transcript.render(inner));
@@ -1822,6 +1833,45 @@ verify from the repository.";
             .into_iter()
             .map(|line| format!("{pad}{line}"))
             .collect()
+    }
+
+    /// Sync the window title and tab progress with state; queues raw
+    /// sequences the run loop flushes next iteration. A frame calls
+    /// this, so changes land with the next repaint. The single
+    /// pending-sequence slot is never clobbered: when occupied (a
+    /// notification is waiting), the update defers to the next frame.
+    fn update_chrome(&mut self) {
+        let wanted = title::session_title(
+            &self.state.model_name,
+            self.state.session_title.as_deref(),
+            &self.state.session_id,
+        );
+        if self.chrome_title.as_deref() != Some(wanted.as_str()) && self.pending_sequence.is_none()
+        {
+            self.pending_sequence = Some(title::set_title(&wanted));
+            self.chrome_title = Some(wanted);
+        }
+        let busy = self.state.busy();
+        if busy
+            && self.chrome_progress_on
+            && self.chrome_progress_at.elapsed() >= title::PROGRESS_KEEPALIVE
+            && self.pending_sequence.is_none()
+        {
+            // Terminals may clear the progress state on their own; the
+            // keepalive re-arms it for as long as the turn runs.
+            self.chrome_progress_at = Instant::now();
+            self.pending_sequence = Some(title::progress_start());
+            return;
+        }
+        if busy != self.chrome_progress_on && self.pending_sequence.is_none() {
+            self.pending_sequence = Some(if busy {
+                title::progress_start()
+            } else {
+                title::progress_clear()
+            });
+            self.chrome_progress_on = busy;
+            self.chrome_progress_at = Instant::now();
+        }
     }
 
     /// Flip the editor's square-wave prompt while a turn runs: high↔low
@@ -2199,6 +2249,9 @@ pub async fn run_with_factory(
             }
         }
     }
+    // Stop the tab progress even when the final frame never flushed;
+    // the title stays so the pane keeps naming its session.
+    notify::emit_raw(&title::progress_clear());
     guard.leave();
     match abort_reason {
         Some(reason) => Err(anyhow::anyhow!(reason)),

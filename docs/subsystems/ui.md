@@ -180,6 +180,12 @@ receivers remain compatible.
   session (`WAVECODE_NOTIFY=0` disables). `WAVECODE_NOTIFY_STYLE`
   picks the delivery: `osc9` (default), `bell` (bare BEL ring), or
   `both`; under tmux the OSC 9 payload rides a DCS passthrough.
+- Terminal chrome sequences: the window title (OSC 0,
+  `WaveCode · model · session title`) tracks model, `/title`, and
+  session swaps; a running turn reports indeterminate tab progress
+  (OSC 9;4 state 2, re-emitted once a second, cleared on turn end and
+  at exit). Sequences ride the single pending-sequence slot and never
+  clobber a queued notification.
 - Fenced code blocks in assistant markdown are syntax highlighted
   (syntect with the two-face extra syntax set — TypeScript, TOML, ...
   — on the pure-Rust fancy-regex backend) behind the engine's
@@ -240,7 +246,7 @@ raw colors; the engine works on `Color`/`Style` values.
 
 ## Deliberate non-goals this generation
 
-Background tasks and plan approval flow need wire or
+Background tasks and a plan approval flow need wire or
 backend support that does not exist yet. Cross-provider live model
 switches need session re-assembly by design (base URL and credentials
 are baked into the provider client), so the picker persists a default

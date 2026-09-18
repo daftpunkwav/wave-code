@@ -3,6 +3,7 @@
 pub mod footer;
 pub mod notify;
 pub mod symbols;
+pub mod title;
 pub mod todo;
 
 pub use footer::{TIP_ROTATE_INTERVAL, TIPS, TransientHint, mode_badge, row1, row2};

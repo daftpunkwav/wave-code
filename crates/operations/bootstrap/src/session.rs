@@ -388,15 +388,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         &mut warnings,
     );
     // Effective wire name for status displays (post-fallback, so the UI
-    // never shows a mode the policy rejected). The catch-all arm exists
-    // because PermissionMode is #[non_exhaustive] across crates; today it
-    // is unreachable.
-    let permission_mode_raw = match permission_mode {
-        wavecode_protocol::PermissionMode::Plan => "plan".to_string(),
-        wavecode_protocol::PermissionMode::Auto => "auto".to_string(),
-        wavecode_protocol::PermissionMode::Wave => "wave".to_string(),
-        _ => "auto".to_string(),
-    };
+    // never shows a mode the policy rejected). `as_str` is an exhaustive
+    // match, so a future PermissionMode variant fails compilation here
+    // instead of silently displaying under the wrong mode name.
+    let permission_mode_raw = permission_mode.as_str().to_string();
     let deny_rules: Vec<String> = wave_denylist
         .iter()
         .map(|entry| {

@@ -42,7 +42,9 @@ pub struct OpenAIClient {
     http: reqwest::Client,
     /// Best-effort reasoning effort sent as `reasoning_effort`; `None`
     /// omits the param so endpoints without it keep working unchanged.
-    reasoning_effort: Option<String>,
+    /// Behind a lock so `/effort`-style switches work through the shared
+    /// `Arc<dyn ChatModel>` handle (mirrors `ModelAdapter::model_name`).
+    reasoning_effort: std::sync::RwLock<Option<String>>,
 }
 
 impl OpenAIClient {
@@ -53,7 +55,7 @@ impl OpenAIClient {
             api_key,
             model,
             http: build_http_client()?,
-            reasoning_effort: None,
+            reasoning_effort: std::sync::RwLock::new(None),
         })
     }
 
@@ -65,9 +67,20 @@ impl OpenAIClient {
 
     /// Set the best-effort reasoning effort (e.g. "low"); builder style so
     /// existing `new(...)` call sites keep compiling unchanged.
-    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
-        self.reasoning_effort = Some(effort.into());
+    pub fn with_reasoning_effort(self, effort: impl Into<String>) -> Self {
+        *self
+            .reasoning_effort
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(effort.into());
         self
+    }
+
+    /// The configured reasoning effort, if any.
+    pub fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -99,6 +112,13 @@ impl ChatModel for OpenAIClient {
         } else {
             &req.model
         };
+        // Copy the effort out under the lock: the guard must not live
+        // across the await below.
+        let reasoning_effort = self
+            .reasoning_effort
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let response = self
             .http
             .post(url)
@@ -107,7 +127,7 @@ impl ChatModel for OpenAIClient {
             .json(&build_request_body(
                 &req,
                 model,
-                self.reasoning_effort.as_deref(),
+                reasoning_effort.as_deref(),
             ))
             .send()
             .await
@@ -132,6 +152,22 @@ impl ChatModel for OpenAIClient {
             byte_stream,
             sse::STREAM_IDLE_TIMEOUT,
         ))))
+    }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        let level = effort.trim();
+        if level.is_empty() {
+            return false;
+        }
+        *self
+            .reasoning_effort
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = if level.eq_ignore_ascii_case("off") {
+            None
+        } else {
+            Some(level.to_string())
+        };
+        true
     }
 }
 
@@ -821,14 +857,14 @@ mod tests {
             "key".to_string(),
             "deepseek-chat".to_string(),
         );
-        assert_eq!(plain.reasoning_effort, None);
+        assert_eq!(plain.reasoning_effort(), None);
         let tuned = OpenAIClient::new(
             "https://example.test".to_string(),
             "key".to_string(),
             "deepseek-chat".to_string(),
         )
         .with_reasoning_effort("low");
-        assert_eq!(tuned.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(tuned.reasoning_effort().as_deref(), Some("low"));
 
         let ok_client = OpenAIClient::try_new(
             "https://example.test".to_string(),
@@ -836,6 +872,22 @@ mod tests {
             "deepseek-chat".to_string(),
         );
         assert!(ok_client.is_ok());
+    }
+
+    /// Runtime effort switches go through the shared `&self` seam: `off`
+    /// clears the param, other levels set it, empty rejects.
+    #[test]
+    fn set_thinking_switches_effort_through_shared_ref() {
+        let plain = OpenAIClient::new(
+            "https://example.test".to_string(),
+            "key".to_string(),
+            "deepseek-chat".to_string(),
+        );
+        assert!(!ChatModel::set_thinking(&plain, ""));
+        assert!(ChatModel::set_thinking(&plain, "high"));
+        assert_eq!(plain.reasoning_effort().as_deref(), Some("high"));
+        assert!(ChatModel::set_thinking(&plain, "off"));
+        assert_eq!(plain.reasoning_effort(), None);
     }
 
     /// Drives the byte-level decoder over canned chunks (no network).

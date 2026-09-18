@@ -75,6 +75,11 @@ pub struct SessionHandle {
     pub system: String,
     /// Resolved model name for status displays.
     pub model_name: String,
+    /// Provider id the primary client resolves through.
+    pub provider_id: String,
+    /// Effective reasoning-effort level for status displays (OpenAI-
+    /// compatible providers only; `None` for budget-driven thinking).
+    pub thinking_effort: Option<String>,
     /// Effective permission mode wire name for status displays.
     pub permission_mode: String,
     /// Directly invokable skill names for completion sources.
@@ -133,8 +138,17 @@ pub struct AssembleOptions {
     pub config_path: Option<PathBuf>,
     /// `--model` override winning over the configured model.
     pub model_override: Option<String>,
+    /// Provider id override winning over the configured `model_provider`
+    /// (e.g. a saved default model that lives on another provider).
+    /// Unknown names warn and fall back to the configured provider
+    /// instead of failing assembly.
+    pub provider_override: Option<String>,
     /// `--permission-mode` override winning over the configured mode.
     pub permission_override: Option<String>,
+    /// Reasoning-effort override (saved picker default) winning over the
+    /// provider's configured `reasoning_effort`; OpenAI-compatible
+    /// providers only.
+    pub thinking_override: Option<String>,
     /// Working directory for tools and relative paths.
     pub cwd: PathBuf,
     /// Home directory; `None` degrades memory without failing.
@@ -176,9 +190,7 @@ pub fn resolve_permission_mode(
     config_value
         .and_then(|raw| {
             let parsed = wavecode_protocol::PermissionMode::parse(raw);
-            if parsed.is_some()
-                && matches!(raw, "default" | "acceptEdits" | "bypassPermissions")
-            {
+            if parsed.is_some() && matches!(raw, "default" | "acceptEdits" | "bypassPermissions") {
                 warnings.push(format!(
                     "permission_mode {raw:?} is a legacy name; use plan, auto, or wave"
                 ));
@@ -202,7 +214,9 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let AssembleOptions {
         config_path,
         model_override,
+        provider_override,
         permission_override,
+        thinking_override,
         cwd,
         home,
         identity,
@@ -217,7 +231,27 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         Some(path) => wavecode_config::Config::load_from(&path)?,
         None => wavecode_config::Config::load()?,
     };
-    let (provider, api_key) = config.resolve_provider()?;
+    // A provider override (saved default model on another provider)
+    // degrades to the configured provider with a warning when unknown,
+    // matching the permission-mode fallback style: a stale saved default
+    // must never brick startup. The reported provider id always names
+    // the provider actually resolved to.
+    let (provider, api_key, provider_id) = match provider_override.as_deref() {
+        Some(name) => match config.resolve_named_provider(name) {
+            Ok((provider, api_key)) => (provider, api_key, name.to_string()),
+            Err(error) => {
+                warnings.push(format!(
+                    "provider override {name:?} unusable ({error}); using configured provider"
+                ));
+                let (provider, api_key) = config.resolve_provider()?;
+                (provider, api_key, config.model_provider.clone())
+            }
+        },
+        None => {
+            let (provider, api_key) = config.resolve_provider()?;
+            (provider, api_key, config.model_provider.clone())
+        }
+    };
     if is_insecure_http_url(&provider.base_url) {
         warnings.push(format!(
             "base_url uses plain http to a non-loopback host ({}); credentials travel in cleartext",
@@ -229,13 +263,25 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     // `assemble_session_with_model` so tests can inject a stub model.
     // Production behavior is unchanged: this resolves config and builds
     // the provider client, then delegates everything below.
+    // Effort display state: only OpenAI-compatible providers carry a
+    // switchable string level; Anthropic budgets stay config-only.
+    let thinking_effort = match provider.kind {
+        wavecode_config::ProviderKind::OpenAiCompatible => thinking_override
+            .clone()
+            .or_else(|| provider.reasoning_effort.clone()),
+        _ => None,
+    };
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
     // Primary plus ordered fallbacks share one constructor; each fallback
     // resolves its own provider entry and key, so credentials never cross
     // providers. Unresolvable fallbacks (unknown name, missing key) warn
     // and skip instead of failing the session.
-    let primary: Arc<dyn wavecode_llm::ChatModel> =
-        crate::model_adapter::build_chat_model(provider, api_key, &model_name);
+    let primary: Arc<dyn wavecode_llm::ChatModel> = crate::model_adapter::build_chat_model(
+        provider,
+        api_key,
+        &model_name,
+        thinking_override.as_deref(),
+    );
     let mut chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = vec![primary];
     for name in &provider.fallback_providers {
         match config.resolve_named_provider(name) {
@@ -244,6 +290,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
                     fallback_provider,
                     fallback_key,
                     &model_name,
+                    thinking_override.as_deref(),
                 ))
             }
             Err(error) => warnings.push(format!("skipping fallback provider {name:?}: {error}")),
@@ -297,6 +344,8 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         config,
         model,
         model_name,
+        provider_id,
+        thinking_effort,
         deny_env,
         context_window,
         max_output_tokens,
@@ -324,6 +373,10 @@ pub(crate) struct WithModel {
     pub model: Arc<dyn wavecode_llm::ChatModel>,
     /// Effective model name for status displays and sampling.
     pub model_name: String,
+    /// Provider id the primary client resolves through.
+    pub provider_id: String,
+    /// Effective reasoning-effort level for status displays.
+    pub thinking_effort: Option<String>,
     /// Env names hidden from tools, resolved from the provider.
     pub deny_env: Vec<String>,
     /// Effective context window, resolved from the provider.
@@ -358,6 +411,8 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         config,
         model,
         model_name,
+        provider_id,
+        thinking_effort,
         deny_env,
         context_window,
         max_output_tokens,
@@ -403,15 +458,13 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             }
         })
         .collect();
-    let sandbox = wavecode_sandbox::Sandbox::new(
-        permission_mode,
-        &[],
-        &deny_rules,
-    )
-    .unwrap_or_else(|error| {
-        warnings.push(format!("wave denylist rejected: {error}; continuing without it"));
-        wavecode_sandbox::Sandbox::without_rules(permission_mode)
-    });
+    let sandbox =
+        wavecode_sandbox::Sandbox::new(permission_mode, &[], &deny_rules).unwrap_or_else(|error| {
+            warnings.push(format!(
+                "wave denylist rejected: {error}; continuing without it"
+            ));
+            wavecode_sandbox::Sandbox::without_rules(permission_mode)
+        });
 
     // 4. Context sources with warn-and-continue degradation.
     let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
@@ -719,7 +772,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             .into_iter()
             .map(|spec| spec.name)
             .collect(),
-        forbidden: CHILD_FORBIDDEN_TOOLS.iter().map(|s| s.to_string()).collect(),
+        forbidden: CHILD_FORBIDDEN_TOOLS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     });
 
     // 9. Actor task and client handle, sharing the child runtime with
@@ -762,6 +818,8 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         interrupt,
         system,
         model_name,
+        provider_id,
+        thinking_effort,
         permission_mode: permission_mode_raw,
         skill_names,
         memory_index,
@@ -1001,7 +1059,9 @@ api_key = "k-inline"
         let mut handle = assemble_session(AssembleOptions {
             config_path: Some(path),
             model_override: None,
+            provider_override: None,
             permission_override: None,
+            thinking_override: None,
             wave_denylist: Vec::new(),
             cwd: dir.path().to_path_buf(),
             home: None,
@@ -1042,6 +1102,122 @@ api_key = "k-inline"
             .await
             .unwrap();
         assert!(handle.client.next_event().await.is_none());
+    }
+
+    /// The actor's driver reaches the run loop through an `Arc<T>`
+    /// blanket impl; that impl must forward the live-switch seams or
+    /// `/model` and `/effort` silently reject in every production
+    /// session (regression guard: both forwards once went missing).
+    #[tokio::test]
+    async fn live_model_and_thinking_switches_survive_the_arc_wrapper() {
+        // OpenAI-compatible provider so `set_thinking` has a mutable
+        // effort behind it (Anthropic budgets stay config-driven and
+        // legitimately reject).
+        const OPENAI_CONFIG: &str = r#"
+model = "m1"
+model_provider = "p1"
+
+[model_providers.p1]
+type = "open-ai-compatible"
+base_url = "https://api.example.com/v1"
+api_key = "k-inline"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, OPENAI_CONFIG).unwrap();
+        let mut handle = assemble_session(AssembleOptions {
+            config_path: Some(path),
+            model_override: None,
+            provider_override: None,
+            permission_override: None,
+            thinking_override: None,
+            wave_denylist: Vec::new(),
+            cwd: dir.path().to_path_buf(),
+            home: None,
+            identity: DEFAULT_IDENTITY.to_string(),
+            headless: true,
+            initial_history: Vec::new(),
+        })
+        .unwrap();
+        handle
+            .client
+            .submit(Submission {
+                id: "s-model".to_string(),
+                op: Op::SetModel {
+                    name: "m2".to_string(),
+                },
+            })
+            .await
+            .unwrap();
+        handle
+            .client
+            .submit(Submission {
+                id: "s-think".to_string(),
+                op: Op::SetThinking {
+                    effort: "low".to_string(),
+                },
+            })
+            .await
+            .unwrap();
+        handle
+            .client
+            .submit(Submission {
+                id: "s-end".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+        let mut rejections = Vec::new();
+        while let Some(event) = handle.client.next_event().await {
+            if let wavecode_wire::EventMsg::Warning { message } = event.msg {
+                rejections.push(message);
+            }
+        }
+        assert!(
+            rejections.is_empty(),
+            "live switches rejected through the Arc driver: {rejections:?}"
+        );
+    }
+
+    /// A stale provider override degrades to the configured provider with
+    /// a warning, and the reported provider id must name the provider
+    /// actually resolved to — not the dead override name.
+    #[tokio::test]
+    async fn stale_provider_override_falls_back_and_reports_configured_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, CONFIG).unwrap();
+        let handle = assemble_session(AssembleOptions {
+            config_path: Some(path),
+            model_override: None,
+            provider_override: Some("ghost".to_string()),
+            permission_override: None,
+            thinking_override: None,
+            wave_denylist: Vec::new(),
+            cwd: dir.path().to_path_buf(),
+            home: None,
+            identity: DEFAULT_IDENTITY.to_string(),
+            headless: true,
+            initial_history: Vec::new(),
+        })
+        .unwrap();
+        assert!(
+            handle
+                .warnings
+                .iter()
+                .any(|w| w.contains("provider override")),
+            "fallback must warn: {:?}",
+            handle.warnings
+        );
+        assert_eq!(handle.provider_id, "p1");
+        handle
+            .client
+            .submit(Submission {
+                id: "s-end".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -1190,9 +1366,7 @@ api_key = "k-inline"
             },
         );
         let policy = PolicyAdapter::new(
-            wavecode_sandbox::Sandbox::without_rules(
-                wavecode_protocol::PermissionMode::Auto,
-            ),
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Auto),
             registry.clone(),
         );
         let hooks = HookAdapter::new(

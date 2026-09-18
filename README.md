@@ -29,6 +29,12 @@ model_provider = "your-provider"
 type = "anthropic"
 base_url = "https://api.example.com/anthropic"
 env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api_key)
+
+# Optional: entries for the `/model` picker (alias -> provider + wire model).
+[models.fast]
+provider = "your-provider"
+model = "your-model-fast"
+# reasoning_effort = "low"   # OpenAI-compatible providers only
 ```
 
 ## Surfaces
@@ -38,10 +44,20 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
   with human rendering on stderr. Ctrl-C interrupts the turn (exit 130).
 - `repl`: multi-turn session over one conversation. Slash commands: `/compact`
   (compress context now), `/memory` (show memory index), `/mcp` (list
-  servers), `/permissions` (cycle approval mode), `/quit` (end session),
+  servers), `/permissions` (approval mode), `/quit` (end session),
   `/help`. `/skill-name args` invokes a user-invocable skill by name.
-- TUI: same session behind a fullscreen interface, including inline approval
-  prompts and `/mcp` status rows.
+- TUI: same session behind a fullscreen interface — inline approval prompts,
+  `/mcp` status rows, `/btw` side questions (read-only, answers stream into a
+  panel without touching the conversation), and dialogs for `/model` (provider
+  tabs, search, session-only Alt+S, a thinking-level row on OpenAI-compatible
+  providers),
+  `/permissions`, and `/help` (scrollable keybinding + command reference).
+  Session commands: `/sessions` (alias `/resume`) resumes a recorded session
+  in place, `/fork` snapshots a resumable copy, `/title` renames, `/new`
+  starts a fresh session, `/init` asks the agent to write AGENTS.md,
+  `/status` summarizes the session. Completed turns journal under
+  `~/.wavecode/sessions/`; `wavecode --session <id>` and `wavecode --continue`
+  resume from the CLI (text-level: tool blocks are not replayed).
 - `resume`: `wavecode resume` lists recent legacy sessions newest-first;
   `wavecode resume <thread-id>` imports its history as text and continues
   interactively. Tool calls import as `[tool:name]` / `[error:...]` markers
@@ -50,19 +66,18 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
 ## Permissions
 
 Three modes: `plan` (read-only exploration; the model is nudged to propose a
-plan and may also simply answer), `guarded` (dangerous operations only —
-command execution and destructive tools ask; file edits and other writes flow
-through), `auto` (everything approved, deny rules still apply). Sources in
-precedence order:
+plan and may also simply answer), `auto` (asks only for command execution and
+destructive tools), `wave` (fully automatic; deny rules still apply). Sources
+in precedence order:
 
 1. `--permission-mode <mode>` CLI flag (global, wins over config),
 2. `permission_mode` in config,
-3. built-in `guarded`.
+3. built-in `auto`.
 
-Legacy names still parse (`default`/`acceptEdits` → `guarded`,
-`bypassPermissions` → `auto`) with a startup warning. Unknown values warn and
-fall back to `guarded`. `/permissions` in REPL/TUI cycles the mode for the
-running session.
+Legacy names still parse (`guarded`/`default`/`acceptEdits` → `auto`,
+`bypassPermissions`/`yolo` → `wave`) with a startup warning. Unknown values
+warn and fall back to `auto`. Shift+Tab (or `/permissions` in the REPL)
+cycles the mode for the running session.
 
 ## Skills, memory, MCP
 

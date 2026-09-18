@@ -28,9 +28,7 @@ use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
     check_budget, estimate_tokens,
 };
-use wavecode_wire::{
-    ApprovalKind as WireApprovalKind, Event, EventMsg, ToolCallPreview,
-};
+use wavecode_wire::{ApprovalKind as WireApprovalKind, Event, EventMsg, ToolCallPreview};
 
 /// Default ceiling for tool rounds inside one run.
 ///
@@ -356,6 +354,13 @@ pub trait ModelGateway: Send + Sync {
         false
     }
 
+    /// Switch the reasoning-effort level for subsequent samples; false
+    /// rejects the level. Adapters over gateways with a mutable effort
+    /// override this; fixed gateways keep the default (rejecting).
+    fn set_thinking(&self, _effort: &str) -> bool {
+        false
+    }
+
     /// Sample with per-delta callbacks for live frontends.
     ///
     /// The default implementation replays the final text as a single
@@ -578,7 +583,12 @@ pub trait ApprovalSource: Send + Sync {
     /// Block until the user answers the parked question for `call_id`, or
     /// the wait expires. Default: nobody can answer (headless drivers),
     /// so implementations only override this when they can park.
-    async fn ask(&self, _call_id: &str, _question: &str, _options: &[String]) -> QuestionResolution {
+    async fn ask(
+        &self,
+        _call_id: &str,
+        _question: &str,
+        _options: &[String],
+    ) -> QuestionResolution {
         QuestionResolution::Unavailable {
             reason: "non-interactive session: nobody can answer questions".to_string(),
         }
@@ -709,7 +719,10 @@ struct TurnInterrupt {
 impl TurnInterrupt {
     fn is_triggered(&self) -> bool {
         self.session.is_triggered()
-            || self.run.as_ref().is_some_and(|handle| handle.is_triggered())
+            || self
+                .run
+                .as_ref()
+                .is_some_and(|handle| handle.is_triggered())
     }
 }
 
@@ -875,7 +888,13 @@ where
         loop {
             // Checkpoint 1: loop head interrupt returns without sampling.
             if interrupt.is_triggered() {
-                settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                settle(
+                    conv,
+                    &last_input,
+                    &state,
+                    self.cfg.context_window,
+                    &emit_msg,
+                );
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -900,7 +919,13 @@ where
                         self.cfg.max_tool_rounds
                     ),
                 });
-                settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                settle(
+                    conv,
+                    &last_input,
+                    &state,
+                    self.cfg.context_window,
+                    &emit_msg,
+                );
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });
                 return StopReason::MaxToolRounds;
             }
@@ -956,7 +981,13 @@ where
                                 // Blocking failures abort; automatic
                                 // failures downgrade to a warning.
                                 if trigger == CompactTrigger::Blocking {
-                                    settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                                    settle(
+                                        conv,
+                                        &last_input,
+                                        &state,
+                                        self.cfg.context_window,
+                                        &emit_msg,
+                                    );
                                     emit_msg(EventMsg::Error {
                                         message: cause,
                                         recoverable: false,
@@ -1023,7 +1054,13 @@ where
                 Err(SampleError::PromptTooLong) => {
                     reactive_compacts += 1;
                     if reactive_compacts >= self.cfg.max_reactive_compacts {
-                        settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                        settle(
+                            conv,
+                            &last_input,
+                            &state,
+                            self.cfg.context_window,
+                            &emit_msg,
+                        );
                         emit_msg(EventMsg::Error {
                             message: format!(
                                 "prompt exceeds context window after {} compactions",
@@ -1038,7 +1075,13 @@ where
                         .do_compact(conv, CompactTrigger::Reactive, &emit_msg)
                         .await
                     {
-                        settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                        settle(
+                            conv,
+                            &last_input,
+                            &state,
+                            self.cfg.context_window,
+                            &emit_msg,
+                        );
                         emit_msg(EventMsg::Error {
                             message: cause,
                             recoverable: false,
@@ -1049,7 +1092,13 @@ where
                     continue;
                 }
                 Err(other) => {
-                    settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                    settle(
+                        conv,
+                        &last_input,
+                        &state,
+                        self.cfg.context_window,
+                        &emit_msg,
+                    );
                     emit_msg(EventMsg::Error {
                         message: other.to_string(),
                         recoverable: false,
@@ -1161,7 +1210,13 @@ where
             if interrupt.is_triggered() {
                 let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
                 conv.push_blocks(Role::User, result_blocks(&results));
-                settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+                settle(
+                    conv,
+                    &last_input,
+                    &state,
+                    self.cfg.context_window,
+                    &emit_msg,
+                );
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -1177,7 +1232,13 @@ where
             state.bump_tool_round();
         }
 
-        settle(conv, &last_input, &state, self.cfg.context_window, &emit_msg);
+        settle(
+            conv,
+            &last_input,
+            &state,
+            self.cfg.context_window,
+            &emit_msg,
+        );
         emit_msg(EventMsg::TurnCompleted { interrupted: false });
         StopReason::Completed
     }
@@ -1464,10 +1525,7 @@ where
                 } => {
                     // The answer IS the tool result: the tool body never
                     // executes, so there is nothing to approve or run.
-                    let resolution = self
-                        .approvals
-                        .ask(&call.call_id, &question, &options)
-                        .await;
+                    let resolution = self.approvals.ask(&call.call_id, &question, &options).await;
                     match resolution {
                         QuestionResolution::Answered(text) => {
                             let content = if text.trim().is_empty() {
@@ -1617,6 +1675,14 @@ pub trait TurnDriver: Send + Sync {
         false
     }
 
+    /// Switch the reasoning-effort level by wire value; false rejects it.
+    ///
+    /// Defaults to rejecting: the gateway behind the loop decides whether
+    /// the level applies (mutable-effort gateways only).
+    fn set_thinking(&self, _effort: &str) -> bool {
+        false
+    }
+
     /// Session teardown hook: the actor calls this once with the final
     /// transcript (one `role: text` line per entry) before returning from
     /// Shutdown or client disconnect. The default is a no-op; composition
@@ -1694,6 +1760,10 @@ where
         self.model.set_model(name)
     }
 
+    fn set_thinking(&self, effort: &str) -> bool {
+        self.model.set_thinking(effort)
+    }
+
     fn inbox_handle(&self) -> Option<InboxHandle> {
         Some(self.inbox.clone())
     }
@@ -1754,6 +1824,18 @@ where
 
     fn set_permission_mode(&self, mode: &str) -> bool {
         self.as_ref().set_permission_mode(mode)
+    }
+
+    fn set_model(&self, name: &str) -> bool {
+        self.as_ref().set_model(name)
+    }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        self.as_ref().set_thinking(effort)
+    }
+
+    async fn end_session(&self, transcript: &[String]) {
+        self.as_ref().end_session(transcript).await
     }
 
     fn inbox_handle(&self) -> Option<InboxHandle> {
@@ -2068,12 +2150,18 @@ mod run_loop_tests {
                 })
         }
 
-        async fn ask(&self, call_id: &str, _question: &str, _options: &[String]) -> QuestionResolution {
-            self.answers.get(call_id).cloned().unwrap_or(
-                QuestionResolution::Unavailable {
+        async fn ask(
+            &self,
+            call_id: &str,
+            _question: &str,
+            _options: &[String],
+        ) -> QuestionResolution {
+            self.answers
+                .get(call_id)
+                .cloned()
+                .unwrap_or(QuestionResolution::Unavailable {
                     reason: "test: nobody answered".to_string(),
-                },
-            )
+                })
         }
 
         fn clear_stale(&self) {}
@@ -3184,15 +3272,20 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         );
-        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
-            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
-        })
-        .await;
+        let outcome = run
+            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
         assert_eq!(outcome, StopReason::Completed);
         let kinds = fx.event_kinds();
         assert!(kinds.contains(&"question_requested".to_string()));
         // The answer is the result: the tool body never executes.
-        assert!(!run.executor.lock_executed().contains(&"ask_user".to_string()));
+        assert!(
+            !run.executor
+                .lock_executed()
+                .contains(&"ask_user".to_string())
+        );
         let history = conv
             .snapshot()
             .iter()
@@ -3262,7 +3355,11 @@ mod run_loop_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(history.contains("nobody answered"), "{history}");
-        assert!(!run.executor.lock_executed().contains(&"ask_user".to_string()));
+        assert!(
+            !run.executor
+                .lock_executed()
+                .contains(&"ask_user".to_string())
+        );
     }
 
     /// Executor that parks inside one tool call until `release` fires, so
@@ -3342,7 +3439,8 @@ mod run_loop_tests {
         );
         // Register on the loop's own registry — the same seam the child
         // service uses before driving a child turn.
-        run.run_interrupts().register(&fx.ctx.run_id, run_handle.clone());
+        run.run_interrupts()
+            .register(&fx.ctx.run_id, run_handle.clone());
         // The scoped stop fires while the child parks inside the tool call;
         // the post-execute checkpoint must end the turn as Interrupted.
         let trigger = run_handle.clone();
@@ -3469,8 +3567,15 @@ mod run_loop_tests {
         // holds, and the tool never ran.
         assert_eq!(outcome, StopReason::Completed);
         assert!(!exec.lock_executed().contains(&"shell".to_string()));
-        let history = conv.snapshot().iter().map(|e| e.text()).collect::<Vec<_>>().join("
-");
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
         assert!(history.contains("interrupted by user"), "{history}");
     }
 
@@ -3526,8 +3631,15 @@ mod run_loop_tests {
         // The answer IS the tool result: an interrupted question never
         // reaches the executor either.
         assert!(!exec.lock_executed().contains(&"ask_user".to_string()));
-        let history = conv.snapshot().iter().map(|e| e.text()).collect::<Vec<_>>().join("
-");
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
         assert!(history.contains("interrupted by user"), "{history}");
     }
 
@@ -3591,11 +3703,17 @@ mod run_loop_tests {
     #[async_trait::async_trait]
     impl ToolExecutor for CountingExecutor {
         async fn execute(&self, call: ToolCall) -> ToolResult {
-            let now = self.in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            self.max_in_flight.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+            let now = self
+                .in_flight
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            self.max_in_flight
+                .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            self.in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            self.executed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            self.executed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             ToolResult {
                 call_id: call.call_id,
                 content: "ok".to_string(),
@@ -3737,12 +3855,12 @@ mod run_loop_tests {
         );
         // Session-owned turn: clears stale gate state like before.
         let conv = &mut Conversation::new();
-        let outcome = run
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|_| {})
-            .await;
+        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
         assert_eq!(outcome, StopReason::Completed);
         assert_eq!(
-            run.approvals.clears.load(std::sync::atomic::Ordering::SeqCst),
+            run.approvals
+                .clears
+                .load(std::sync::atomic::Ordering::SeqCst),
             1
         );
         // Child turn (registered run handle): must not wipe a parent
@@ -3754,7 +3872,9 @@ mod run_loop_tests {
             .await;
         assert_eq!(outcome, StopReason::Completed);
         assert_eq!(
-            run.approvals.clears.load(std::sync::atomic::Ordering::SeqCst),
+            run.approvals
+                .clears
+                .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a child turn start must not clear the shared gates"
         );

@@ -316,7 +316,9 @@ async fn new_session<W, F>(
     let handle = match assemble(AssembleOptions {
         config_path: base.config_path.clone(),
         model_override: base.model_override.clone(),
+        provider_override: None,
         permission_override: base.permission_override.clone(),
+        thinking_override: None,
         cwd,
         home: base.home.clone(),
         identity: DEFAULT_IDENTITY.to_string(),
@@ -970,6 +972,8 @@ api_key = "k-inline"
                 config,
                 model,
                 model_name,
+                provider_id: "test".to_string(),
+                thinking_effort: None,
                 deny_env: Vec::new(),
                 context_window: 200_000,
                 max_output_tokens: 64,

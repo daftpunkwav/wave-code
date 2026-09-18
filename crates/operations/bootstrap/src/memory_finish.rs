@@ -166,6 +166,10 @@ impl<D: TurnDriver> TurnDriver for SessionMemory<D> {
         self.inner.set_model(name)
     }
 
+    fn set_thinking(&self, effort: &str) -> bool {
+        self.inner.set_thinking(effort)
+    }
+
     fn inbox_handle(&self) -> Option<InboxHandle> {
         self.inner.inbox_handle()
     }

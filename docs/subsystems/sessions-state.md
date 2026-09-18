@@ -12,7 +12,17 @@ Durable state is deliberately dumb: append-only bytes plus versioned formats, wi
 
 Loaders count skipped corrupt lines instead of failing: `load_all` / `load_reported` (returns the skipped count for strict callers) / `load_all_checked` / `last_n` for resume previews. The journal is append-only; nothing truncates it.
 
-Honest status: `JsonlJournal` currently has no consumer outside its own crate. The live `resume` command still reads the legacy import path — `state_persistence::legacy` (`crates/state/persistence/src/legacy.rs`) lists and loads `~/.wavecode/threads` (`THREADS_DIR`), newest first.
+## Session registry (`crates/state/persistence/src/sessions.rs`)
+
+The new-stack session registry gives the turn journal a home and an identity:
+
+- `~/.wavecode/sessions/<session-id>.jsonl`: one `JsonlJournal` per session; every completed console turn appends a full text snapshot of the dialogue (`record_turn`), so the **latest record alone suffices for resume** (`load_session_history`).
+- `~/.wavecode/sessions/index.json`: one `SessionMeta` (id, title, cwd, created/updated timestamps, turn count) per session; `list_sessions` reads it newest-first, `set_title` renames, `fork_session` seeds a fresh journal with a caller-supplied snapshot. Broken index files degrade to empty and heal on the next write.
+- Session ids validate against the same whitelist as legacy thread ids (`is_valid_session_id`): path escapes from CLI arguments or picker payloads are rejected.
+
+Consumers: the console UI journals on `TurnCompleted` and drives `/sessions` (picker), `/resume`, `/fork`, and `/title`; the harness assembles resumed sessions from `load_session_history` (`--session <id>`, `--continue`). Resume is text-level by design: tool blocks are not represented in the journal shape.
+
+Honest status (updated 2026-09-18): the journal now has a production consumer (the session registry). The legacy `resume` subcommand still reads the legacy import path — `state_persistence::legacy` (`crates/state/persistence/src/legacy.rs`) lists and loads `~/.wavecode/threads` (`THREADS_DIR`), newest first.
 
 ## Checkpoints, snapshots, and the actor's durability seam
 

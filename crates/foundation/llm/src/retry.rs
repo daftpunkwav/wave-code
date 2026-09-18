@@ -207,6 +207,10 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
             }
         }
     }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        self.inner.set_thinking(effort)
+    }
 }
 
 #[cfg(test)]

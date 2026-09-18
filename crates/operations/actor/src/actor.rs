@@ -355,6 +355,18 @@ where
                         });
                     }
                 }
+                Op::SetThinking { effort } => {
+                    // Live reasoning-effort switch; gateways without a
+                    // mutable effort warn instead of silently ignoring.
+                    if !driver.set_thinking(&effort) {
+                        let _ = event_tx.send(Event {
+                            id: sub.id.clone(),
+                            msg: EventMsg::Warning {
+                                message: format!("thinking switch rejected: {effort:?}"),
+                            },
+                        });
+                    }
+                }
             }
         }
     }
@@ -458,11 +470,11 @@ fn route_extra(
     match sub.op {
         Op::UserInput { .. } | Op::Compact => queue_or_reject(pending, sub, event_tx),
         Op::Interrupt => interrupt.trigger(),
-        Op::SetPermissionMode { .. } | Op::SetModel { .. } => {
-            // Mode/model switches apply at the next turn boundary; queue
-            // one marker so ordering with inputs is preserved. Control-
-            // class immediacy is unnecessary: policy and the gateway read
-            // the value per sample.
+        Op::SetPermissionMode { .. } | Op::SetModel { .. } | Op::SetThinking { .. } => {
+            // Mode/model/thinking switches apply at the next turn
+            // boundary; queue one marker so ordering with inputs is
+            // preserved. Control-class immediacy is unnecessary: policy
+            // and the gateway read the value per sample.
             queue_or_reject(pending, sub, event_tx);
         }
         Op::ExecApproval { call_id, decision } => {

@@ -146,6 +146,10 @@ impl<G: ModelGateway + Send + Sync> ModelGateway for EvictingGateway<G> {
     fn set_model(&self, name: &str) -> bool {
         self.inner.set_model(name)
     }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        self.inner.set_thinking(effort)
+    }
 }
 
 #[cfg(test)]

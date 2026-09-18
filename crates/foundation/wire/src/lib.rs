@@ -67,6 +67,17 @@ pub enum Op {
         /// Wire model name, e.g. `claude-sonnet-4-5`.
         name: String,
     },
+    /// Switch the reasoning-effort level for subsequent samples.
+    ///
+    /// The value is provider-specific: `off` clears the parameter where
+    /// the client supports that, other non-empty strings pass through
+    /// best-effort. Gateways without a mutable effort (fixed models,
+    /// budget-driven Anthropic thinking) reject downstream with a
+    /// warning.
+    SetThinking {
+        /// Effort level, e.g. `low` or `off`.
+        effort: String,
+    },
     /// Shut the session down after draining in-flight work.
     Shutdown,
 }
@@ -308,6 +319,12 @@ mod tests {
                     name: "m".to_string(),
                 },
                 "set_model",
+            ),
+            (
+                Op::SetThinking {
+                    effort: "low".to_string(),
+                },
+                "set_thinking",
             ),
             (Op::Shutdown, "shutdown"),
         ];

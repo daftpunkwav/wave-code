@@ -217,6 +217,16 @@ pub type EventStream = std::pin::Pin<Box<dyn futures::Stream<Item = Result<Strea
 pub trait ChatModel: Send + Sync {
     /// Start a streaming request and return the event stream.
     async fn stream(&self, req: ChatRequest) -> Result<EventStream>;
+
+    /// Switch the reasoning-effort level for subsequent requests; false
+    /// rejects the level.
+    ///
+    /// The level is a provider-specific wire string (`off` disables the
+    /// parameter where the client supports that). Defaults to rejecting:
+    /// only clients with a mutable effort field override this.
+    fn set_thinking(&self, _effort: &str) -> bool {
+        false
+    }
 }
 
 /// Forwarding implementation so boxed models erase behind the trait
@@ -229,6 +239,10 @@ where
 {
     async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
         self.as_ref().stream(req).await
+    }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        self.as_ref().set_thinking(effort)
     }
 }
 

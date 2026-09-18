@@ -127,13 +127,15 @@ pub(crate) fn to_content_block(block: &Block) -> ContentBlock {
 ///
 /// The primary and every fallback go through this single point so wiring
 /// stays identical across the chain. `reasoning_effort` rides the
-/// OpenAI-compatible client best-effort; Anthropic has no such wire param
-/// and ignores it. Keys arrive already resolved per provider and are never
-/// shared between the clients built here.
+/// OpenAI-compatible client best-effort (`effort_override` from a saved
+/// picker default wins over the provider config); Anthropic has no such
+/// wire param and ignores it. Keys arrive already resolved per provider
+/// and are never shared between the clients built here.
 pub fn build_chat_model(
     provider: &wavecode_config::ProviderConfig,
     api_key: String,
     model_name: &str,
+    effort_override: Option<&str>,
 ) -> Arc<dyn ChatModel> {
     match provider.kind {
         wavecode_config::ProviderKind::OpenAiCompatible => {
@@ -142,7 +144,7 @@ pub fn build_chat_model(
                 api_key,
                 model_name.to_string(),
             );
-            match provider.reasoning_effort.as_deref() {
+            match effort_override.or(provider.reasoning_effort.as_deref()) {
                 Some(effort) => Arc::new(client.with_reasoning_effort(effort.to_string())),
                 None => Arc::new(client),
             }
@@ -214,6 +216,16 @@ impl ChatModel for FallbackModel {
             }
         }
         Err(last_error.unwrap_or_else(|| LlmError::Http("no providers configured".to_string())))
+    }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        // The level applies to the whole chain so a failover mid-turn
+        // keeps sampling at the chosen effort.
+        let mut applied = false;
+        for model in &self.models {
+            applied |= model.set_thinking(effort);
+        }
+        applied
     }
 }
 
@@ -345,6 +357,14 @@ impl ModelGateway for ModelAdapter {
         }
         *self.model_name.write().unwrap_or_else(|e| e.into_inner()) = name.to_string();
         true
+    }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        let effort = effort.trim();
+        if effort.is_empty() {
+            return false;
+        }
+        self.model.set_thinking(effort)
     }
 }
 

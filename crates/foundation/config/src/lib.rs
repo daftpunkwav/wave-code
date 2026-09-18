@@ -39,6 +39,25 @@ pub struct Config {
     /// validity check happens in core during conversion via the mcp crate.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerRaw>,
+    /// Selectable model catalog for the `/model` picker: `[models.<alias>]`
+    /// tables mapping a display alias onto a provider id and wire model
+    /// name. Pure data here; unknown provider ids degrade with a warning
+    /// at assembly time.
+    #[serde(default)]
+    pub models: HashMap<String, ModelEntry>,
+}
+
+/// One selectable model entry from the `[models]` config table.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelEntry {
+    /// Provider id under `model_providers` this model samples through.
+    pub provider: String,
+    /// Wire model name sent to the provider.
+    pub model: String,
+    /// Optional reasoning-effort default (e.g. `low`) applied to the
+    /// provider client when this entry is selected.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 /// User home directory: `USERPROFILE` (Windows) first, `HOME` as fallback; when neither
@@ -146,6 +165,31 @@ env_key = "TEST_KEY"
         assert_eq!(prov.base_url, "https://api.minimaxi.com/anthropic");
         assert_eq!(prov.context_window(), 200_000);
         assert_eq!(prov.max_output_tokens(), 8192);
+        // The models catalog is optional and empty by default.
+        assert!(cfg.models.is_empty());
+    }
+
+    /// [models] table: alias -> { provider, model, optional reasoning_effort }.
+    #[test]
+    fn models_catalog_parses_aliases() {
+        let cfg: Config = toml::from_str(&format!(
+            r#"{TOML_OK}
+[models.fast]
+provider = "minimax"
+model = "MiniMax-M2.5"
+
+[models.deep]
+provider = "minimax"
+model = "deepseek-v4"
+reasoning_effort = "high"
+"#
+        ))
+        .unwrap();
+        let fast = &cfg.models["fast"];
+        assert_eq!(fast.provider, "minimax");
+        assert_eq!(fast.model, "MiniMax-M2.5");
+        assert_eq!(fast.reasoning_effort, None);
+        assert_eq!(cfg.models["deep"].reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

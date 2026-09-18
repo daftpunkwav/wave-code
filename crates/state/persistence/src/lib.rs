@@ -19,6 +19,9 @@
 /// Legacy engine journal import for session resume.
 pub mod legacy;
 
+/// New-stack session registry: identity, index, and turn journaling.
+pub mod sessions;
+
 /// Current on-disk journal format version.
 ///
 /// New journals start with a `{"format":1}` header line. Journals written

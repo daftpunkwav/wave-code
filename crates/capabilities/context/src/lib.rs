@@ -56,31 +56,51 @@ pub const SYSTEM_OVERHEAD_TOKENS: u64 = 2_000;
 /// Token estimate for the history messages (fallback path when no provider
 /// usage is available).
 ///
-/// Error bounds (know them; never treat this as authoritative): English/code
-/// text runs ~4 chars/token (±20%); CJK text runs ~1.5-2 chars/token, so this
-/// estimate may undercount CJK history by about half. The three-level
-/// thresholds therefore trigger off usage; the estimate only serves windows
-/// that never produced usage yet (first turn, unsampled after compaction),
-/// with the thresholds' margin scale (>= 3k) absorbing the error.
+/// Split accounting: ASCII text runs ~[`DEFAULT_CHARS_PER_TOKEN`] chars/token
+/// (±20%); every non-ASCII character counts as one token, which brackets CJK
+/// (~0.6-1.5 tokens/char) without the systematic undercount a flat
+/// chars/ratio division produces on Chinese/Japanese/Korean history. Base64
+/// image payloads are pure ASCII and ride the ratio (upper bound; the
+/// estimate path already carries a multi-k token margin). The three-level
+/// thresholds trigger off usage; the estimate only serves windows that never
+/// produced usage yet (first turn, unsampled after compaction), with the
+/// thresholds' margin scale (>= 3k) absorbing the residual error.
 pub fn estimate_tokens(messages: &[Message], chars_per_token: usize) -> u64 {
     let ratio = chars_per_token.max(1) as u64;
-    let mut chars = 0u64;
+    let mut ascii = 0u64;
+    let mut non_ascii = 0u64;
     for m in messages {
         for b in &m.content {
-            chars += match b {
-                ContentBlock::Text { text } => text.chars().count() as u64,
+            match b {
+                ContentBlock::Text { text } => count_ascii_split(text, &mut ascii, &mut non_ascii),
                 ContentBlock::ToolUse { name, input, .. } => {
-                    name.chars().count() as u64 + input.to_string().chars().count() as u64
+                    count_ascii_split(name, &mut ascii, &mut non_ascii);
+                    count_ascii_split(&input.to_string(), &mut ascii, &mut non_ascii);
                 }
-                ContentBlock::ToolResult { content, .. } => content.chars().count() as u64,
+                ContentBlock::ToolResult { content, .. } => {
+                    count_ascii_split(content, &mut ascii, &mut non_ascii)
+                }
                 // Images travel as base64: count the encoded chars (upper bound;
                 // the estimate path already carries a multi-k token margin).
-                ContentBlock::Image { base64, .. } => base64.chars().count() as u64,
+                ContentBlock::Image { base64, .. } => {
+                    count_ascii_split(base64, &mut ascii, &mut non_ascii)
+                }
             };
         }
     }
     // Per-message structural overhead (role / block framing) at a flat ~4 tokens.
-    chars / ratio + 4 * messages.len() as u64
+    ascii / ratio + non_ascii + 4 * messages.len() as u64
+}
+
+/// Split `text` into ASCII and non-ASCII character counts.
+fn count_ascii_split(text: &str, ascii: &mut u64, non_ascii: &mut u64) {
+    for c in text.chars() {
+        if c.is_ascii() {
+            *ascii += 1;
+        } else {
+            *non_ascii += 1;
+        }
+    }
 }
 
 /// Estimated usage including the fixed system overhead.
@@ -894,6 +914,18 @@ mod tests {
         assert_eq!(estimate_tokens(&[], 4), 0);
         // Zero-proof ratio: treated as 1, never panics.
         assert!(estimate_tokens(&history, 0) > 0);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_non_ascii_per_character() {
+        // 300 CJK characters: a flat chars/4 division would claim 75 tokens
+        // while reality is ~1 token/char — non-ASCII counts directly instead.
+        let cjk: String = "中".repeat(300);
+        let history = vec![user_text(&cjk)];
+        assert_eq!(estimate_tokens(&history, 4), 300 + 4);
+        // Mixed text: ASCII rides the ratio, CJK does not.
+        let mixed = vec![user_text(&format!("{}{}", "x".repeat(400), cjk))];
+        assert_eq!(estimate_tokens(&mixed, 4), 100 + 300 + 4);
     }
 
     // --- three-level threshold edges ---

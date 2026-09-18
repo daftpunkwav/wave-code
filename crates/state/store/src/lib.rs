@@ -195,10 +195,22 @@ pub const CONTEXT_OVERHEAD_TOKENS: u64 = 2000;
 
 /// Rough token estimate for text, fallback only.
 ///
-/// Character-division estimates undercount dense scripts by about two times;
-/// authoritative provider usage must always win over this function.
+/// Split accounting mirrors the context crate: ASCII rides the ~4
+/// chars/token ratio while every non-ASCII character counts as one token,
+/// so dense CJK history is not systematically undercounted by a flat
+/// character division. Authoritative provider usage must always win over
+/// this function.
 pub fn estimate_tokens(text: &str) -> u64 {
-    (text.chars().count() as u64).div_ceil(4)
+    let mut ascii = 0u64;
+    let mut non_ascii = 0u64;
+    for c in text.chars() {
+        if c.is_ascii() {
+            ascii += 1;
+        } else {
+            non_ascii += 1;
+        }
+    }
+    ascii.div_ceil(4) + non_ascii
 }
 
 /// Append-only conversation with frozen snapshots.

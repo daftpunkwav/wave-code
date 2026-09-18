@@ -166,6 +166,10 @@ impl ApprovalDialog {
             choices: vec![
                 ("Yes, allow once".to_string(), WireDecision::AllowOnce),
                 (
+                    "Yes, always allow this exact call for the session".to_string(),
+                    WireDecision::AllowAlways,
+                ),
+                (
                     "No, and tell the agent what to do differently".to_string(),
                     WireDecision::Deny {
                         reason: "the user declined this action".to_string(),
@@ -258,7 +262,7 @@ impl ApprovalDialog {
         }
         content.push(theme.paint(
             Token::TextDim,
-            "↑/↓ select · 1/2 choose · ↵ confirm · esc denies",
+            "↑/↓ select · 1/2/3 choose · ↵ confirm · esc denies",
         ));
         border::frame(content, columns, theme.style(Token::BorderFocus), None)
     }
@@ -422,6 +426,19 @@ mod tests {
     fn approval_selection_moves_and_enters() {
         theme::set(theme::Theme::dark());
         let mut dialog = ApprovalDialog::new("c3".to_string(), ApprovalKind::Exec, "ls");
+        // One Down lands on the middle "always allow" choice.
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(matches!(
+            answer,
+            Some(Answer::Approval {
+                decision: WireDecision::AllowAlways,
+                ..
+            })
+        ));
+        // Two Downs land on deny.
+        let mut dialog = ApprovalDialog::new("c3b".to_string(), ApprovalKind::Exec, "ls");
+        dialog.handle_key(KeyEvent::plain(Key::Down));
         dialog.handle_key(KeyEvent::plain(Key::Down));
         let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
         assert!(matches!(
@@ -431,6 +448,20 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn approval_quick_select_always() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ApprovalDialog::new("c5".to_string(), ApprovalKind::Exec, "npm test");
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Char('2')));
+        match answer {
+            Some(Answer::Approval {
+                decision: WireDecision::AllowAlways,
+                ..
+            }) => {}
+            other => panic!("expected allow-always: {other:?}"),
+        }
     }
 
     #[test]

@@ -1331,10 +1331,12 @@ fn approval_what(kind: &wavecode_wire::ApprovalKind) -> &'static str {
 }
 
 /// Map one approval answer line to a wire decision: y/yes approves once,
-/// anything else (including an empty line) denies without a reason.
+/// a/always approves with a session rule, anything else (including an
+/// empty line) denies without a reason.
 fn decide_approval(line: &str) -> wavecode_wire::WireDecision {
     match line.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => wavecode_wire::WireDecision::AllowOnce,
+        "a" | "always" => wavecode_wire::WireDecision::AllowAlways,
         _ => wavecode_wire::WireDecision::Deny {
             reason: String::new(),
         },
@@ -1352,7 +1354,7 @@ fn prompt_approval(
     what: &str,
 ) -> anyhow::Result<wavecode_wire::WireDecision> {
     use rustyline::error::ReadlineError;
-    println!("allow {what} ({call_id})? [y/N] ");
+    println!("allow {what} ({call_id})? [y/a/N] ");
     match editor.readline("> ") {
         Ok(line) => Ok(decide_approval(&line)),
         Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
@@ -1796,6 +1798,8 @@ mod tests {
         use wavecode_wire::WireDecision;
         assert_eq!(decide_approval("y"), WireDecision::AllowOnce);
         assert_eq!(decide_approval("YES"), WireDecision::AllowOnce);
+        assert_eq!(decide_approval("a"), WireDecision::AllowAlways);
+        assert_eq!(decide_approval("Always"), WireDecision::AllowAlways);
         assert_eq!(
             decide_approval(""),
             WireDecision::Deny {

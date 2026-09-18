@@ -298,6 +298,11 @@ pub trait PolicyDecider: Send + Sync {
     /// Return allow/ask/deny for the given call.
     async fn decide(&self, call: &ToolCall) -> PolicyVerdict;
 
+    /// Record a session-level approval for `call` after the user chose
+    /// "always allow". Default: nothing (policies without a rule store
+    /// degrade the decision to a one-shot allow).
+    fn remember_always(&self, _call: &ToolCall) {}
+
     /// Switch the permission mode by wire name; false rejects the name.
     ///
     /// Defaults to rejecting: adapters over fixed policies override this
@@ -1498,7 +1503,11 @@ where
                 SerialCall::Direct(call) => (call, true),
                 SerialCall::Approval { call, kind, detail } => {
                     match self.approvals.decide(&call.call_id, kind, &detail).await {
-                        ApprovalResolution::AllowOnce | ApprovalResolution::AllowAlways => {
+                        ApprovalResolution::AllowOnce => (call, true),
+                        ApprovalResolution::AllowAlways => {
+                            // Session-level "always allow": the policy records
+                            // its rule so later identical calls skip the ask.
+                            self.policy.remember_always(call);
                             (call, true)
                         }
                         ApprovalResolution::Deny { reason } => {
@@ -2247,9 +2256,9 @@ mod run_loop_tests {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_loop<M: ModelGateway>(
+    fn build_loop<M: ModelGateway, P: PolicyDecider>(
         executor: FakeExecutor,
-        policy: FakePolicy,
+        policy: P,
         hooks: FakeHooks,
         model: M,
         approvals: FakeApprovals,
@@ -2257,8 +2266,7 @@ mod run_loop_tests {
         compactor: FakeCompactor,
         max_tool_rounds: u32,
         interrupt: InterruptHandle,
-    ) -> RunLoop<FakeExecutor, FakePolicy, FakeHooks, M, FakeApprovals, FakePlans, FakeCompactor>
-    {
+    ) -> RunLoop<FakeExecutor, P, FakeHooks, M, FakeApprovals, FakePlans, FakeCompactor> {
         RunLoop::new(
             executor,
             policy,
@@ -2490,6 +2498,102 @@ mod run_loop_tests {
             .join("\n");
         assert!(history.contains("nope"));
         assert!(history.contains("[c2] error"));
+    }
+
+    /// Policy that asks for one tool and records every "always allow"
+    /// callback (the session-rule seam under test).
+    struct RecordingPolicy {
+        verdicts: HashMap<String, PolicyVerdict>,
+        always: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl PolicyDecider for RecordingPolicy {
+        async fn decide(&self, call: &ToolCall) -> PolicyVerdict {
+            self.verdicts
+                .get(&call.name)
+                .cloned()
+                .unwrap_or(PolicyVerdict::Allow)
+        }
+
+        fn remember_always(&self, call: &ToolCall) {
+            self.always
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(call.name.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn allow_always_resolution_records_a_session_rule() {
+        let fx = Fixture::new();
+        let (exec, _, hooks, model, _, plans, compactor) = default_parts();
+        let mut verdicts = HashMap::new();
+        verdicts.insert(
+            "shell".to_string(),
+            PolicyVerdict::Ask {
+                kind: AskKind::Exec,
+                detail: "run ls".to_string(),
+            },
+        );
+        let always = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let policy = RecordingPolicy {
+            verdicts,
+            always: always.clone(),
+        };
+        let mut resolutions = HashMap::new();
+        resolutions.insert("c1".to_string(), ApprovalResolution::AllowAlways);
+        let approvals = FakeApprovals {
+            resolutions,
+            answers: HashMap::new(),
+        };
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            *always.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["shell".to_string()],
+            "an always-allow decision must reach the policy's rule store"
+        );
+        // The approved call still executes: the resolution is an allow.
+        let kinds = fx.event_kinds();
+        assert!(kinds.contains(&"tool_call_begin".to_string()));
     }
 
     #[tokio::test]

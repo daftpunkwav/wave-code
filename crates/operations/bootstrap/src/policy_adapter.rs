@@ -83,6 +83,13 @@ impl PolicyDecider for PolicyAdapter {
             wavecode_sandbox::Verdict::Deny { reason } => PolicyVerdict::Deny { reason },
         }
     }
+
+    /// Derive one literally exact session rule from the approved call so
+    /// later identical calls skip the ask (degrades to one-shot allow when
+    /// the input carries no derivable `command`/`path` text).
+    fn remember_always(&self, call: &ToolCall) {
+        self.sandbox.allow_always(&call.name, &call.input);
+    }
 }
 
 #[cfg(test)]

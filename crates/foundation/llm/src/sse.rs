@@ -17,8 +17,9 @@ use crate::{LlmError, Result, StreamEvent, Usage};
 
 /// Anthropic Messages streaming SSE parser.
 ///
-/// Stateful: accumulates the input_tokens reported by `message_start` and returns
-/// them when synthesizing [`StreamEvent::MessageComplete`] on `message_delta`.
+/// Stateful: records the input_tokens reported by `message_start` (a repeated
+/// one replaces, never accumulates) and returns them when synthesizing
+/// [`StreamEvent::MessageComplete`] on `message_delta`.
 #[derive(Default)]
 pub struct SseParser {
     input_tokens: u64,
@@ -58,9 +59,12 @@ impl SseParser {
         match ty {
             "message_start" => {
                 let ev: MessageStartEvent = serde_json::from_value(value)?;
-                self.input_tokens += ev.message.usage.input_tokens;
-                self.cache_read_tokens += ev.message.usage.cache_read_input_tokens;
-                self.cache_creation_tokens += ev.message.usage.cache_creation_input_tokens;
+                // Assignment, never accumulation: one stream declares exactly
+                // one message_start, so a duplicated one (broken proxy) must
+                // replace the counters instead of doubling them.
+                self.input_tokens = ev.message.usage.input_tokens;
+                self.cache_read_tokens = ev.message.usage.cache_read_input_tokens;
+                self.cache_creation_tokens = ev.message.usage.cache_creation_input_tokens;
                 Ok(None)
             }
             "ping" => Ok(None),
@@ -415,6 +419,38 @@ mod tests {
                     input_tokens: 42,
                     output_tokens: 7,
                     ..Usage::default()
+                },
+            })
+        );
+    }
+
+    /// A duplicated message_start (broken proxy replaying the stream head)
+    /// replaces the declared usage instead of doubling it.
+    #[test]
+    fn repeated_message_start_replaces_usage() {
+        let mut p = SseParser::new();
+        assert!(
+            p.feed(r#"{"type":"message_start","message":{"usage":{"input_tokens":42,"cache_read_input_tokens":9}}}"#)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            p.feed(r#"{"type":"message_start","message":{"usage":{"input_tokens":50}}}"#)
+                .unwrap()
+                .is_none()
+        );
+        let done = p
+            .feed(r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}"#)
+            .unwrap();
+        assert_eq!(
+            done,
+            Some(StreamEvent::MessageComplete {
+                stop_reason: "end_turn".into(),
+                usage: Usage {
+                    input_tokens: 50,
+                    output_tokens: 1,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
                 },
             })
         );

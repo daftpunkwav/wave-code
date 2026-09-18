@@ -153,6 +153,30 @@ pub struct ToolCall {
     lines: Option<(usize, ToolState, bool, usize, Vec<String>)>,
 }
 
+/// Per-tool output styling for one (possibly wrapped) line. Grep match
+/// lines light up their path and line number; anything else — and any
+/// wrap segment too broken to parse — stays dim body text.
+fn style_output_line(tool: &str, line: &str) -> String {
+    let theme = theme::current();
+    let body = theme.style(Token::TextDim);
+    if tool.eq_ignore_ascii_case("grep")
+        && let Some((path, rest)) = line.split_once(':')
+        && let Some((number, content)) = rest.split_once(':')
+        && !path.is_empty()
+        && !path.contains(char::is_whitespace)
+        && number.chars().all(|c| c.is_ascii_digit())
+    {
+        return format!(
+            "  {}{}{}{}",
+            theme.style(Token::Text).paint(path),
+            body.paint(":"),
+            theme.style(Token::Accent).paint(number),
+            body.paint(&format!(":{content}")),
+        );
+    }
+    format!("  {}", body.paint(line))
+}
+
 impl ToolCall {
     /// A running card for a call.
     pub fn running(
@@ -325,7 +349,7 @@ impl ToolCall {
         let mut out_rows: Vec<String> = Vec::new();
         for line in text.lines() {
             for wrapped in width::wrap_line(line, budget) {
-                out_rows.push(format!("  {}", theme.paint(Token::TextDim, &wrapped)));
+                out_rows.push(style_output_line(&self.name, &wrapped));
                 if !show_details && out_rows.len() > OUTCOME_MAX_LINES {
                     break;
                 }
@@ -399,6 +423,34 @@ mod tests {
     use super::*;
     use crate::theme;
     use tui_engine::width::strip_ansi;
+
+    #[test]
+    fn grep_lines_light_up_path_and_number() {
+        theme::set(theme::Theme::dark());
+        let styled = style_output_line("grep", "src/lib.rs:42:pub fn main() {}");
+        let plain = strip_ansi(&styled);
+        assert_eq!(plain, "  src/lib.rs:42:pub fn main() {}");
+        // The path rides a different SGR than the dim body.
+        assert!(styled.contains("src/lib.rs\x1b[0m"), "{styled}");
+        assert!(styled.contains("42"), "{styled}");
+        // Non-grep tools stay dim even for identical shapes.
+        let other = style_output_line("read", "src/lib.rs:42:pub fn main() {}");
+        assert_eq!(strip_ansi(&other), "  src/lib.rs:42:pub fn main() {}");
+        assert_eq!(other, format!("  {}", theme::current().style(Token::TextDim).paint("src/lib.rs:42:pub fn main() {}")));
+    }
+
+    #[test]
+    fn malformed_grep_lines_stay_dim() {
+        theme::set(theme::Theme::dark());
+        for line in ["no colons here", ":42:x", "path:notanumber:x", "path with space.rs:1:x"] {
+            let styled = style_output_line("grep", line);
+            assert_eq!(
+                styled,
+                format!("  {}", theme::current().style(Token::TextDim).paint(line)),
+                "{line}"
+            );
+        }
+    }
 
     #[test]
     fn args_summary_picks_key_fields() {

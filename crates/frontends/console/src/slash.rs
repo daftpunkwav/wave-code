@@ -198,6 +198,7 @@ pub fn help_lines() -> Vec<String> {
         "  ctrl+c                 interrupt; double-press exits".to_string(),
         "  esc                    interrupt the running turn".to_string(),
         "  up / down              input history".to_string(),
+        "  alt+b / alt+f          jump one word back / forward".to_string(),
         "  !cmd                   run a local shell command".to_string(),
         "  @path                  mention a file".to_string(),
         "Commands".to_string(),

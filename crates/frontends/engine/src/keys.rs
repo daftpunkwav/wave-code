@@ -69,6 +69,13 @@ impl Mods {
         alt: false,
         shift: false,
     };
+
+    /// Alt held.
+    pub const ALT: Mods = Mods {
+        ctrl: false,
+        alt: true,
+        shift: false,
+    };
 }
 
 /// One key event: a key plus its modifier state.

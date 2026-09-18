@@ -683,6 +683,19 @@ impl Editor {
                 self.refresh_popup();
                 EditorAction::Handled
             }
+            // Emacs-style word jumps: Alt+B back, Alt+F forward.
+            (Key::Char('b'), m) if m.alt && !m.ctrl => {
+                self.goal_col = None;
+                self.move_word_left();
+                self.refresh_popup();
+                EditorAction::Handled
+            }
+            (Key::Char('f'), m) if m.alt && !m.ctrl => {
+                self.goal_col = None;
+                self.move_word_right();
+                self.refresh_popup();
+                EditorAction::Handled
+            }
             (Key::Left, _) => {
                 self.move_left();
                 self.refresh_popup();
@@ -1269,6 +1282,22 @@ mod tests {
         type_string(&mut editor, "hello world ");
         editor.handle_key(KeyEvent::new(Key::Char('w'), Mods::CTRL));
         assert_eq!(editor.text(), "hello ");
+    }
+
+    #[test]
+    fn alt_b_and_alt_f_jump_words() {
+        let mut editor = editor();
+        type_string(&mut editor, "hello world");
+        // Alt+F twice lands after "hello world"; Alt+B once lands
+        // between the words.
+        editor.handle_key(KeyEvent::new(Key::Char('f'), Mods::ALT));
+        editor.handle_key(KeyEvent::new(Key::Char('f'), Mods::ALT));
+        assert_eq!(editor.col, 11, "after the last word");
+        editor.handle_key(KeyEvent::new(Key::Char('b'), Mods::ALT));
+        assert_eq!(editor.col, 6, "start of the last word");
+        // Insertion at the jumped position proves the cursor moved.
+        editor.handle_key(KeyEvent::plain(Key::Char('X')));
+        assert_eq!(editor.text(), "hello Xworld");
     }
 
     #[test]

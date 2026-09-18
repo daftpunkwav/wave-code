@@ -96,6 +96,9 @@ enum Command {
     /// Each `session/new` assembles a headless session from config, so
     /// this surface needs provider credentials like `exec`.
     Acp,
+    /// Validate local configuration, settings, themes, and session
+    /// records without contacting any provider.
+    Doctor,
 }
 
 /// MCP surfaces on the new stack.
@@ -360,6 +363,25 @@ async fn main() -> anyhow::Result<()> {
         run_plugin_list(home);
         std::process::exit(Outcome::Completed.exit_code())
     }
+    // Doctor reads local files only: like mcp/plugin, it runs before
+    // any session assembly and never needs provider credentials.
+    if matches!(args.command, Some(Command::Doctor)) {
+        let checks = doctor_checks(args.config.as_deref(), home.as_deref());
+        for check in &checks {
+            println!(
+                "{} {}",
+                if check.ok { "[ok]" } else { "[fail]" },
+                check.line
+            );
+        }
+        let failed = checks.iter().filter(|check| !check.ok).count();
+        if failed > 0 {
+            eprintln!("\n{failed} check(s) failed");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+        println!("\nall checks passed");
+        std::process::exit(Outcome::Completed.exit_code())
+    }
     // ACP serves headless sessions over stdio until EOF. Sessions
     // assemble lazily per `session/new`, so this returns before the
     // shared assembly below (which would build a throwaway session).
@@ -421,8 +443,11 @@ async fn main() -> anyhow::Result<()> {
             run_resume(thread_id, args.permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        // Mcp/Plugin/Acp return before assembly above.
-        Some(Command::Mcp { .. }) | Some(Command::Plugin { .. }) | Some(Command::Acp) => {
+        // Mcp/Plugin/Acp/Doctor return before assembly above.
+        Some(Command::Mcp { .. })
+        | Some(Command::Plugin { .. })
+        | Some(Command::Acp)
+        | Some(Command::Doctor) => {
             unreachable!("early-return surfaces never reach assembly")
         }
         None => unreachable!("bare invocation returns above"),
@@ -865,6 +890,177 @@ fn run_plugin_list(home: Option<PathBuf>) {
             plugin.hook_count()
         );
     }
+}
+
+/// One `doctor` check outcome.
+struct DoctorCheck {
+    ok: bool,
+    line: String,
+}
+
+fn ok(line: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        ok: true,
+        line: line.into(),
+    }
+}
+
+fn fail(line: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        ok: false,
+        line: line.into(),
+    }
+}
+
+/// `doctor`: validate every local file a session depends on — config,
+/// provider credentials, UI settings, custom themes, and session
+/// records — without contacting any provider. Secrets are never
+/// printed, only where a key was found.
+fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+    let Some(home) = home else {
+        checks.push(fail(
+            "home: no HOME/USERPROFILE — sessions, settings, and config cannot be located",
+        ));
+        return checks;
+    };
+
+    // Config + provider credentials: an explicit --config path wins,
+    // otherwise the file sits under the (already resolved) home.
+    let path = match config_path {
+        Some(path) => path.to_path_buf(),
+        None => home.join(".wavecode").join("config.toml"),
+    };
+    match wavecode_config::Config::load_from(&path) {
+        Err(wavecode_config::ConfigError::NotFound(path)) => checks.push(fail(format!(
+            "config: not found at {} — see the example block in the startup error or docs/",
+            path.display()
+        ))),
+        Err(error) => checks.push(fail(format!("config: {error}"))),
+        Ok(config) => {
+            checks.push(ok(format!(
+                "config: {} (model {} via {})",
+                path.display(),
+                config.model,
+                config.model_provider
+            )));
+            match config.resolve_provider() {
+                Err(wavecode_config::ConfigError::MissingApiKey(name)) => checks.push(fail(
+                    format!("provider {name}: no api key (set env_key or inline api_key)"),
+                )),
+                Err(error) => checks.push(fail(format!("provider: {error}"))),
+                Ok((provider, _key)) => {
+                    let source = provider
+                        .env_key
+                        .as_deref()
+                        .filter(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()))
+                        .map(|name| format!("env {name}"))
+                        .unwrap_or_else(|| "inline api_key".to_string());
+                    checks.push(ok(format!(
+                        "provider {}: key from {source}",
+                        config.model_provider
+                    )));
+                }
+            }
+            for (alias, entry) in &config.models {
+                if config.model_providers.contains_key(&entry.provider) {
+                    checks.push(ok(format!(
+                        "models.{alias}: {} via {}",
+                        entry.model, entry.provider
+                    )));
+                } else {
+                    checks.push(fail(format!(
+                        "models.{alias}: unknown provider {:?} (not in [model_providers])",
+                        entry.provider
+                    )));
+                }
+            }
+        }
+    }
+
+    // Console settings (a broken file silently degrades at runtime, so
+    // doctor is the place where the breakage becomes visible).
+    let settings_path = home.join(".wavecode").join("console-settings.json");
+    if !settings_path.exists() {
+        checks.push(ok("settings: defaults (no console-settings.json yet)"));
+    } else {
+        match std::fs::read_to_string(&settings_path)
+            .map_err(|e| e.to_string())
+            .and_then(|text| {
+                serde_json::from_str::<console_ui::settings::UiSettings>(&text)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }) {
+            Ok(()) => checks.push(ok(format!("settings: {}", settings_path.display()))),
+            Err(error) => checks.push(fail(format!(
+                "settings: {} parses as defaults; fix or delete the file ({error})",
+                settings_path.display()
+            ))),
+        }
+    }
+
+    // Custom themes: every file must resolve.
+    let themes = console_ui::theme::custom::list(home);
+    if themes.is_empty() {
+        checks.push(ok("themes: none custom"));
+    } else {
+        for name in &themes {
+            match console_ui::theme::custom::load(home, name) {
+                Ok(_) => checks.push(ok(format!("theme {name}: parses"))),
+                Err(error) => checks.push(fail(format!("theme {name}: {error}"))),
+            }
+        }
+    }
+
+    // Session records: the index must parse and every journal file
+    // named by the index should still exist.
+    let index = state_persistence::sessions::index_path(home);
+    if !index.exists() {
+        checks.push(ok("sessions: none recorded yet"));
+    } else {
+        let metas = state_persistence::sessions::list_sessions(home);
+        if metas.is_empty() {
+            // `list_sessions` reads a broken index as empty; tell a
+            // valid empty index apart from one that fails to parse.
+            let parses = std::fs::read_to_string(&index)
+                .map(|text| {
+                    serde_json::from_str::<Vec<state_persistence::sessions::SessionMeta>>(&text)
+                        .is_ok()
+                })
+                .unwrap_or(false);
+            if parses {
+                checks.push(ok("sessions: index present, none recorded"));
+            } else {
+                checks.push(fail(format!(
+                    "sessions: {} does not parse (read as empty; resumable sessions are lost until it is fixed or removed)",
+                    index.display()
+                )));
+            }
+        } else {
+            let missing: Vec<&str> = metas
+                .iter()
+                .filter(|meta| {
+                    !state_persistence::sessions::sessions_dir(home)
+                        .join(format!("{}.jsonl", meta.id))
+                        .exists()
+                })
+                .map(|meta| meta.id.as_str())
+                .collect();
+            if missing.is_empty() {
+                checks.push(ok(format!(
+                    "sessions: {} recorded, all journals present",
+                    metas.len()
+                )));
+            } else {
+                checks.push(fail(format!(
+                    "sessions: {} recorded, missing journals for {}",
+                    metas.len(),
+                    missing.join(", ")
+                )));
+            }
+        }
+    }
+    checks
 }
 
 /// Print a config error with creation guidance on missing files.
@@ -1494,6 +1690,150 @@ mod tests {
         assert_eq!(args.permission_mode.as_deref(), Some("plan"));
         let args = Args::try_parse_from(["wavecode", "repl"]).unwrap();
         assert_eq!(args.permission_mode, None);
+    }
+
+    /// A home with nothing set up degrades gracefully: exactly the
+    /// missing-config check fails, everything else reads as defaults.
+    #[test]
+    fn doctor_on_a_fresh_home_fails_only_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = doctor_checks(None, Some(dir.path()));
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|check| !check.ok)
+            .map(|check| check.line.as_str())
+            .collect();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("config"), "{failed:?}");
+        let lines: Vec<&str> = checks.iter().map(|c| c.line.as_str()).collect();
+        assert!(
+            lines.iter().any(|l| l.contains("settings: defaults")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("sessions: none")),
+            "{lines:?}"
+        );
+    }
+
+    /// A complete setup passes every check, including provider key
+    /// resolution through an inline api_key (never printed).
+    #[test]
+    fn doctor_passes_on_a_complete_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "test-model"
+model_provider = "test-provider"
+
+[model_providers.test-provider]
+type = "open-ai-compatible"
+base_url = "http://127.0.0.1:9"
+api_key = "doctor-test-secret"
+
+[models.fast]
+provider = "test-provider"
+model = "test-model-fast"
+"#,
+        )
+        .unwrap();
+        let checks = doctor_checks(None, Some(dir.path()));
+        let failed: Vec<&DoctorCheck> = checks.iter().filter(|check| !check.ok).collect();
+        assert!(
+            failed.is_empty(),
+            "{:?}",
+            failed.iter().map(|c| &c.line).collect::<Vec<_>>()
+        );
+        let lines: Vec<&str> = checks.iter().map(|c| c.line.as_str()).collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("models.fast: test-model-fast")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("key from inline api_key")),
+            "{lines:?}"
+        );
+        // The key itself must never appear in doctor output.
+        assert!(
+            !lines.iter().any(|l| l.contains("doctor-test-secret")),
+            "secret leaked: {lines:?}"
+        );
+    }
+
+    /// A broken console-settings.json surfaces here even though runtime
+    /// loading silently falls back to defaults.
+    #[test]
+    fn doctor_reports_broken_settings_and_unknown_model_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "m"
+model_provider = "p"
+
+[model_providers.p]
+type = "open-ai-compatible"
+base_url = "http://127.0.0.1:9"
+api_key = "inline-key"
+
+[models.broken]
+provider = "no-such-provider"
+model = "m2"
+"#,
+        )
+        .unwrap();
+        std::fs::write(wave.join("console-settings.json"), "{not json").unwrap();
+        let checks = doctor_checks(None, Some(dir.path()));
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|check| !check.ok)
+            .map(|check| check.line.as_str())
+            .collect();
+        assert_eq!(failed.len(), 2, "{failed:?}");
+        assert!(
+            failed.iter().any(|l| l.contains("models.broken")),
+            "{failed:?}"
+        );
+        assert!(failed.iter().any(|l| l.contains("settings:")), "{failed:?}");
+    }
+
+    /// An empty-but-valid session index is healthy; a broken one fails.
+    /// `list_sessions` reads both as empty, so doctor must parse the
+    /// file itself to tell them apart.
+    #[test]
+    fn doctor_tells_an_empty_index_apart_from_a_broken_one() {
+        // The other checks (config, settings) are out of scope here;
+        // only the sessions line is asserted.
+        let sessions_line = |dir: &tempfile::TempDir| {
+            doctor_checks(None, Some(dir.path()))
+                .into_iter()
+                .find(|check| check.line.starts_with("sessions:"))
+                .unwrap()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".wavecode").join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+
+        std::fs::write(state_persistence::sessions::index_path(dir.path()), "[]").unwrap();
+        let check = sessions_line(&dir);
+        assert!(check.ok, "{}", check.line);
+        assert_eq!(check.line, "sessions: index present, none recorded");
+
+        std::fs::write(
+            state_persistence::sessions::index_path(dir.path()),
+            "{not json",
+        )
+        .unwrap();
+        let check = sessions_line(&dir);
+        assert!(!check.ok, "{}", check.line);
+        assert!(check.line.contains("does not parse"), "{}", check.line);
     }
 
     /// Crate boundary: the binary's workspace edges stay exactly the

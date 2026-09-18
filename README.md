@@ -62,6 +62,10 @@ model = "your-model-fast"
   `wavecode resume <thread-id>` imports its history as text and continues
   interactively. Tool calls import as `[tool:name]` / `[error:...]` markers
   (text import is the documented scope; replay never re-executes).
+- `doctor`: validates local setup without contacting any provider — config
+  parse, provider api key resolution (never printed), `[models]` entries,
+  console settings, custom themes, and session records. Exit 1 when any
+  check fails.
 
 ## Permissions
 

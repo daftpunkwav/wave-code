@@ -389,7 +389,7 @@ async fn main() -> anyhow::Result<()> {
         thinking_override: settings.default_effort.clone(),
         cwd,
         home: home.clone(),
-        wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
+        wave_denylist: settings.wave_denylist,
         identity: DEFAULT_IDENTITY.to_string(),
         headless,
         initial_history: Vec::new(),

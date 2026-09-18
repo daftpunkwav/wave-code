@@ -171,7 +171,9 @@ receivers remain compatible.
   status line).
 - Turn-completion notifications: one OSC 9 desktop notification per
   finished turn unless interrupted or a queued follow-up continues the
-  session (`WAVECODE_NOTIFY=0` disables).
+  session (`WAVECODE_NOTIFY=0` disables). `WAVECODE_NOTIFY_STYLE`
+  picks the delivery: `osc9` (default), `bell` (bare BEL ring), or
+  `both`; under tmux the OSC 9 payload rides a DCS passthrough.
 - The footer shows the workspace git branch (⎇ badge), read directly
   from `.git/HEAD` (parent walk, worktree `gitdir:` file form, short
   sha when detached) at construction and on every turn start — no

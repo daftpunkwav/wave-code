@@ -490,7 +490,8 @@ mod tests {
         // child finishes immediately; the id is the result.
         assert!(!out.is_error);
         assert!(
-            out.content.contains("task task-1 spawned in the background"),
+            out.content
+                .contains("task task-1 spawned in the background"),
             "background spawn reports the id: {}",
             out.content
         );

@@ -192,11 +192,7 @@ impl TurnChildService {
 impl TaskService for TurnChildService {
     fn spawn(&self, request: TaskRequest) -> String {
         let driver = self.driver.clone();
-        let system = self
-            .system
-            .get()
-            .cloned()
-            .unwrap_or_default();
+        let system = self.system.get().cloned().unwrap_or_default();
         let allowlist = self.allowlist.clone();
         let run_interrupts = self.run_interrupts.clone();
         // The computed surface rides the future as Option: Some (even
@@ -286,7 +282,8 @@ impl TaskService for TurnChildService {
                     // A ceiling exit whose last round had no final text
                     // would render as an empty summary downstream; give
                     // it an honest placeholder instead.
-                    _ => final_text.filter(|text| !text.is_empty())
+                    _ => final_text
+                        .filter(|text| !text.is_empty())
                         .unwrap_or_else(|| "(no final answer text)".to_string()),
                 };
                 runtime_child::TaskResult {
@@ -496,11 +493,13 @@ mod tests {
         }
     }
 
-    fn service_with(
-        driver: Arc<dyn TurnDriver>,
-        allowlist: &RunAllowlist,
-    ) -> TurnChildService {
-        TurnChildService::new(driver, Arc::new(ChildRuntime::new()), allowlist.clone(), RunInterrupts::default())
+    fn service_with(driver: Arc<dyn TurnDriver>, allowlist: &RunAllowlist) -> TurnChildService {
+        TurnChildService::new(
+            driver,
+            Arc::new(ChildRuntime::new()),
+            allowlist.clone(),
+            RunInterrupts::default(),
+        )
     }
 
     /// Surface policy with a three-tool catalog for scope tests.

@@ -74,11 +74,8 @@ impl GateApprovalSource {
             if remaining.is_zero() {
                 return Err(ParkExit::Expired);
             }
-            match tokio::time::timeout(
-                remaining.min(Self::INTERRUPT_POLL_INTERVAL),
-                &mut *waiter,
-            )
-            .await
+            match tokio::time::timeout(remaining.min(Self::INTERRUPT_POLL_INTERVAL), &mut *waiter)
+                .await
             {
                 Ok(answer) => return Ok(answer),
                 Err(_elapsed) => continue,
@@ -320,7 +317,9 @@ mod tests {
             infrastructure_base::InterruptHandle::new(),
         );
         let driver = tokio::spawn(async move {
-            source.ask("c1", "pick one", &["a".to_string(), "b".to_string()]).await
+            source
+                .ask("c1", "pick one", &["a".to_string(), "b".to_string()])
+                .await
         });
         // Let the waiter park before answering.
         tokio::task::yield_now().await;

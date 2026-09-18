@@ -457,8 +457,16 @@ mod tests {
         assert!(out.content.contains("active"), "{}", out.content);
         // set + sub-goal seed = two version bumps.
         assert!(out.content.contains("version 2"), "{}", out.content);
-        assert!(out.content.contains("sub-goals (1/2 achieved)"), "{}", out.content);
-        assert!(out.content.contains("[achieved] fix the bug"), "{}", out.content);
+        assert!(
+            out.content.contains("sub-goals (1/2 achieved)"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("[achieved] fix the bug"),
+            "{}",
+            out.content
+        );
         // Tick advances the driver and hands back a fresh version.
         let out = goal
             .execute(serde_json::json!({"action": "tick"}), &ctx)
@@ -483,7 +491,11 @@ mod tests {
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("paused"), "{}", out.content);
-        assert!(out.content.contains("sub-goals (1/1 achieved)"), "{}", out.content);
+        assert!(
+            out.content.contains("sub-goals (1/1 achieved)"),
+            "{}",
+            out.content
+        );
         // Read-only status action never mutates and reports the same state.
         let out = goal
             .execute(serde_json::json!({"action": "status"}), &ctx)
@@ -570,7 +582,11 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
-        assert!(out.content.contains("needs something to change"), "{}", out.content);
+        assert!(
+            out.content.contains("needs something to change"),
+            "{}",
+            out.content
+        );
     }
 
     #[tokio::test]

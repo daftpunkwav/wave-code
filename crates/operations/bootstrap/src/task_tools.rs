@@ -251,10 +251,7 @@ impl Tool for TaskContinueTool {
                 // minus one (root first). A missing query entry just omits
                 // the note instead of failing the continuation.
                 let depth_note = match self.tasks.query(&new_id) {
-                    Some(info) => format!(
-                        " at depth {}",
-                        info.lineage.len().saturating_sub(1)
-                    ),
+                    Some(info) => format!(" at depth {}", info.lineage.len().saturating_sub(1)),
                     None => String::new(),
                 };
                 Ok(ToolOutput {
@@ -409,16 +406,14 @@ mod tests {
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(
-            out.content.contains("continued task task-2 as task-3 at depth 1"),
+            out.content
+                .contains("continued task task-2 as task-3 at depth 1"),
             "{}",
             out.content
         );
         // Unknown ids and blank follow-ups fail openly.
         let ghost = tool
-            .execute(
-                serde_json::json!({"id": "task-9", "followup": "x"}),
-                &ctx(),
-            )
+            .execute(serde_json::json!({"id": "task-9", "followup": "x"}), &ctx())
             .await
             .unwrap();
         assert!(ghost.is_error);

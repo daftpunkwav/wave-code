@@ -22,11 +22,11 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::tool_util::required_str;
 use action_tasks::TaskService;
 use action_workflow::{DEFAULT_RALPH_ROUNDS, MAX_RALPH_ROUNDS};
 use runtime_scheduler::Scheduler;
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
-use crate::tool_util::required_str;
 
 /// Lock helper matching the tools-crate poison convention: a panic while
 /// holding this short critical section leaves no half-broken invariant
@@ -320,9 +320,7 @@ impl Tool for ScheduleTool {
                 }
             }
             other => Ok(ToolOutput {
-                content: format!(
-                    "unknown action {other:?}: expected one of add, list, remove"
-                ),
+                content: format!("unknown action {other:?}: expected one of add, list, remove"),
                 is_error: true,
             }),
         }

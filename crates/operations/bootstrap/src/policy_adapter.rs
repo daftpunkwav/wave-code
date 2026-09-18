@@ -76,12 +76,10 @@ impl PolicyDecider for PolicyAdapter {
                 },
                 detail: truncate(&detail, APPROVAL_DETAIL_TRUNCATION),
             },
-            wavecode_sandbox::Verdict::Question { question, options } => {
-                PolicyVerdict::Question {
-                    question: truncate(&question, APPROVAL_DETAIL_TRUNCATION),
-                    options,
-                }
-            }
+            wavecode_sandbox::Verdict::Question { question, options } => PolicyVerdict::Question {
+                question: truncate(&question, APPROVAL_DETAIL_TRUNCATION),
+                options,
+            },
             wavecode_sandbox::Verdict::Deny { reason } => PolicyVerdict::Deny { reason },
         }
     }

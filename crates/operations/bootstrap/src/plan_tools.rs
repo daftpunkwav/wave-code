@@ -207,20 +207,15 @@ impl Tool for PlanTool {
         match action {
             "propose" => {
                 let text = text_param(&input, "text");
-                Ok(apply_transition(&self.store, "propose", move |plan| {
-                    plan.propose(&text)
-                })
-                .await)
+                Ok(apply_transition(&self.store, "propose", move |plan| plan.propose(&text)).await)
             }
-            "approve" => {
-                Ok(apply_transition(&self.store, "approve", |plan| plan.approve()).await)
-            }
+            "approve" => Ok(apply_transition(&self.store, "approve", |plan| plan.approve()).await),
             "feedback" => {
                 let text = text_param(&input, "text");
-                Ok(apply_transition(&self.store, "feedback", move |plan| {
-                    plan.feedback(&text)
-                })
-                .await)
+                Ok(
+                    apply_transition(&self.store, "feedback", move |plan| plan.feedback(&text))
+                        .await,
+                )
             }
             "status" => Ok(ToolOutput {
                 content: render_status(&self.store.lock()),
@@ -312,12 +307,9 @@ mod tests {
             .unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("proposed"), "{}", out.content);
-        plan.execute(
-            serde_json::json!({"action": "propose", "text": "v1"}),
-            &ctx,
-        )
-        .await
-        .unwrap();
+        plan.execute(serde_json::json!({"action": "propose", "text": "v1"}), &ctx)
+            .await
+            .unwrap();
         let out = plan
             .execute(
                 serde_json::json!({"action": "feedback", "text": "add rollback"}),

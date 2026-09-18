@@ -21,9 +21,9 @@
 
 use std::sync::Arc;
 
+use crate::tool_util::required_str;
 use action_jobs::{JobRequest, JobService};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
-use crate::tool_util::required_str;
 
 /// Owner charged against the per-owner cap: one session, one owner.
 const JOB_OWNER: &str = "session";

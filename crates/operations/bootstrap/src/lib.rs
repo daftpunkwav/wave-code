@@ -24,6 +24,7 @@ pub mod ask_user_tool;
 pub mod child_service;
 pub mod compactor;
 pub mod composite;
+pub mod environment;
 pub mod evicting_gateway;
 pub mod gate_adapter;
 pub mod goal_tools;

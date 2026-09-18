@@ -730,6 +730,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         memory_index: memory_index.clone(),
         skill_catalog,
         tool_note: format!("Available tools: {}", tool_names.join(", ")),
+        environment: crate::environment::describe(&cwd, std::time::SystemTime::now()),
         summary: String::new(),
     });
 

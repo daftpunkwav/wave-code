@@ -34,6 +34,9 @@ pub struct PromptSlots {
     pub skill_catalog: String,
     /// Tool availability note (names the tools the model may call).
     pub tool_note: String,
+    /// Environment facts (OS, shell, working directory, session date),
+    /// frozen at session assembly.
+    pub environment: String,
     /// Compaction summary carried from the previous window.
     pub summary: String,
 }
@@ -85,6 +88,8 @@ pub struct SourceBundle {
     pub skill_catalog: String,
     /// Tool availability note.
     pub tool_note: String,
+    /// Environment facts (OS, shell, working directory, session date).
+    pub environment: String,
     /// Compaction summary carried from the previous window.
     pub summary: String,
 }
@@ -114,6 +119,7 @@ pub fn assemble_budgeted(bundle: &SourceBundle, budget: &Budget) -> Assembled {
     let fixed: &[(&str, &str)] = &[
         ("Identity", &bundle.identity),
         ("Conversation Summary", &bundle.summary),
+        ("Environment", &bundle.environment),
         ("Tools", &bundle.tool_note),
         ("Project Instructions", &bundle.instructions),
         ("Memory Index", &bundle.memory_index),
@@ -179,6 +185,7 @@ pub fn build_system(slots: &PromptSlots) -> String {
         ("Memory Index", &slots.memory_index),
         ("Skills", &slots.skill_catalog),
         ("Tools", &slots.tool_note),
+        ("Environment", &slots.environment),
         ("Conversation Summary", &slots.summary),
     ];
     let mut out = String::new();
@@ -220,6 +227,23 @@ mod tests {
     }
 
     #[test]
+    fn environment_section_sits_between_tools_and_summary() {
+        let slots = PromptSlots {
+            tool_note: "t".to_string(),
+            environment: "OS: linux".to_string(),
+            summary: "s".to_string(),
+            ..PromptSlots::new()
+        };
+        let prompt = build_system(&slots);
+        let tools = prompt.find("# Tools").expect("tools section");
+        let env = prompt.find("# Environment").expect("environment section");
+        let summary = prompt
+            .find("# Conversation Summary")
+            .expect("summary section");
+        assert!(tools < env && env < summary, "section order: {prompt}");
+    }
+
+    #[test]
     fn bodies_are_trimmed() {
         let slots = PromptSlots {
             identity: "  spaced  ".to_string(),
@@ -244,6 +268,7 @@ mod tests {
             memory_index: "m".to_string(),
             skill_catalog: "s1 s2 s3".to_string(),
             tool_note: "tools: a".to_string(),
+            environment: String::new(),
             summary: String::new(),
         }
     }

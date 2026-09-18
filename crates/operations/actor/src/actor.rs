@@ -320,6 +320,7 @@ where
                     .await
                     {
                         finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
+                        end_session(&driver, &conv).await;
                         return;
                     }
                 }
@@ -981,6 +982,108 @@ mod tests {
                 .any(|line| line.contains("remember the sky"))
         );
         assert!(ended[0].iter().any(|line| line.starts_with("user: ")));
+    }
+
+    /// Shutdown arriving while a compact is held must still end the
+    /// session: the teardown at the compact exit runs the SessionEnd
+    /// hooks and delivers the final transcript, same as the turn exit.
+    #[tokio::test]
+    async fn shutdown_during_held_compact_still_ends_session() {
+        struct HoldingCompactDriver {
+            release: Arc<Notify>,
+            ended: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+        #[async_trait::async_trait]
+        impl TurnDriver for HoldingCompactDriver {
+            async fn drive_turn(
+                &self,
+                _ctx: &RunContext,
+                _conv: &mut Conversation,
+                _input: &str,
+                _system: &str,
+                _on_event: &(dyn Fn(Event) + Send + Sync),
+            ) -> StopReason {
+                StopReason::Completed
+            }
+
+            async fn drive_compact(
+                &self,
+                _conv: &mut Conversation,
+                _trigger: CompactTrigger,
+                on_event: &(dyn Fn(Event) + Send + Sync),
+            ) -> Result<(), String> {
+                on_event(Event {
+                    id: String::new(),
+                    msg: EventMsg::CompactStarted {
+                        trigger: "manual".to_string(),
+                    },
+                });
+                self.release.notified().await;
+                Ok(())
+            }
+
+            async fn drive_hook(
+                &self,
+                _point: HookPoint,
+                _payload: &str,
+                _on_event: &(dyn Fn(Event) + Send + Sync),
+            ) -> bool {
+                true
+            }
+
+            async fn end_session(&self, transcript: &[String]) {
+                self.ended
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(transcript.to_vec());
+            }
+        }
+        let ended: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut client = SessionActor::spawn(
+            HoldingCompactDriver {
+                release: Arc::new(Notify::new()),
+                ended: ended.clone(),
+            },
+            Conversation::new(),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+        );
+        client
+            .submit(Submission {
+                id: "s1".to_string(),
+                op: Op::Compact,
+            })
+            .await
+            .unwrap();
+        // The compact is held inside the driver once its start event lands.
+        let started =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(started.msg, EventMsg::CompactStarted { .. }));
+        client
+            .submit(Submission {
+                id: "s2".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+        // Teardown closes the event stream; end_session must have run.
+        while tokio::time::timeout(std::time::Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        let ended = ended.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            ended.len(),
+            1,
+            "shutdown during a compact must still end the session"
+        );
     }
 
     fn durable_driver() -> FakeDriver {

@@ -289,7 +289,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn captures_stdout_and_exit_code() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
         let out = Shell
             .execute(serde_json::json!({"command": "echo hello"}), &c)
@@ -301,7 +304,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn nonzero_exit_is_error_but_captured() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
         let out = Shell
             .execute(serde_json::json!({"command": "exit 3"}), &c)
@@ -312,7 +318,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn respects_timeout() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
         let cmd = if cfg!(windows) {
             // cmd builtin busy-wait: spawns no grandchildren, so no orphans remain after a timeout kill (ping would leave some).
@@ -329,7 +338,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn captures_stderr() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
         let cmd = if cfg!(windows) {
             "echo err 1>&2"
@@ -345,7 +357,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn chatty_output_is_capped_not_buffered_unbounded() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
         // Produce ~2MB of stdout, far past STREAM_CAPTURE_CAP: the tool
         // must still return promptly with the usual truncation marker
@@ -377,7 +392,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn runs_in_cwd() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
         std::fs::write(c.cwd.join("marker.txt"), "x").unwrap();
         let cmd = if cfg!(windows) {
@@ -446,14 +464,20 @@ mod tests {
         }
     }
 
-    // Environment variables are process-global state; tests touching them must run mutually exclusively (same pattern as the config crate).
+    // Environment variables are process-global state, and the OS-sandbox
+    // watcher pairs this process' new direct children with pending jobs —
+    // tests that touch env or spawn shells must therefore run mutually
+    // exclusive, or the watcher can pair another test's child with the
+    // sandbox test's job and leave the confined child suspended forever.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[tokio::test]
-    // Intentionally holding the lock across await: the mutually exclusive resource is process-global env state, so hold it for the whole test.
+    // Touches env and spawns a child: held under ENV_LOCK (see its docs).
     #[allow(clippy::await_holding_lock)]
     async fn shell_strips_sensitive_env_but_keeps_normal() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // Poison recovery: one panicking env test must not cascade into
+        // unrelated tests failing on PoisonError.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Three variable classes: a suffix-pattern hit, a deny_env-list hit, and an unaffected normal variable.
         unsafe {
             std::env::set_var("FOO_API_KEY", "secret123");
@@ -486,7 +510,8 @@ mod tests {
 
     #[test]
     fn os_sandbox_flag_defaults_off_and_parses() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // Poison recovery, same reason as the scrubbing test above.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
@@ -513,10 +538,11 @@ mod tests {
     }
 
     #[tokio::test]
-    // Same process-global env discipline as the scrubbing test above.
+    // Arms a sandbox job and spawns a child: held under ENV_LOCK (see its docs).
     #[allow(clippy::await_holding_lock)]
     async fn os_sandbox_enabled_runs_confined_or_fails_closed() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // Poison recovery, same reason as the scrubbing test above.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
         unsafe {
             std::env::set_var("WAVECODE_SANDBOX_OS", "1");

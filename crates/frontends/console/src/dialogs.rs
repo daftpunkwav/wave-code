@@ -54,6 +54,11 @@ pub enum Answer {
         /// Session id to resume.
         id: String,
     },
+    /// A rewind point picked in the undo picker (double-Esc).
+    RewindTurns {
+        /// How many whole turns to drop.
+        turns: u32,
+    },
     /// The dialog closed without producing an answer (settings).
     Dismissed,
 }
@@ -74,6 +79,8 @@ pub enum Dialog {
     Help(HelpPanel),
     /// The session picker (`/sessions`).
     Sessions(SessionPickerDialog),
+    /// The rewind picker (double-Esc; feeds the `/undo` path).
+    Undo(UndoPickerDialog),
 }
 
 impl Dialog {
@@ -87,6 +94,7 @@ impl Dialog {
             Self::Permissions(dialog) => dialog.title.clone(),
             Self::Help(dialog) => dialog.title.clone(),
             Self::Sessions(dialog) => dialog.title.clone(),
+            Self::Undo(dialog) => dialog.title.clone(),
         }
     }
 
@@ -100,6 +108,7 @@ impl Dialog {
             Self::Permissions(dialog) => dialog.handle_key(event),
             Self::Help(dialog) => dialog.handle_key(event),
             Self::Sessions(dialog) => dialog.handle_key(event),
+            Self::Undo(dialog) => dialog.handle_key(event),
         }
     }
 
@@ -113,6 +122,7 @@ impl Dialog {
             Self::Permissions(dialog) => dialog.render(width),
             Self::Help(dialog) => dialog.render(width),
             Self::Sessions(dialog) => dialog.render(width),
+            Self::Undo(dialog) => dialog.render(width),
         }
     }
 
@@ -715,6 +725,57 @@ mod tests {
             answer,
             Some(Answer::ResumeSession { id }) if id == "id-docs"
         ));
+    }
+
+    fn user_entry(text: &str) -> crate::state::DialogueEntry {
+        crate::state::DialogueEntry {
+            from_user: true,
+            text: text.to_string(),
+        }
+    }
+
+    fn assistant_entry(text: &str) -> crate::state::DialogueEntry {
+        crate::state::DialogueEntry {
+            from_user: false,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn undo_picker_lists_newest_first_with_stable_distances() {
+        let history = vec![
+            user_entry("one"),
+            assistant_entry("a1"),
+            user_entry("two"),
+            assistant_entry("a2"),
+            // A blank first line hides the label but the turn still
+            // counts: the kernel rewinds it like any other user turn.
+            user_entry("  \nbody"),
+            assistant_entry("a3"),
+            user_entry("four"),
+        ];
+        let picker = UndoPickerDialog::new(&history);
+        let labels: Vec<&str> = picker.rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, vec!["four", "two", "one"]);
+        let turns: Vec<u32> = picker.rows.iter().map(|row| row.turns).collect();
+        // "two" sits two user turns back even though the blank turn in
+        // between has no row of its own ("one" sits three back).
+        assert_eq!(turns, vec![1, 3, 4]);
+        assert!(!picker.is_empty());
+    }
+
+    #[test]
+    fn undo_picker_caps_rows_and_reports_empty() {
+        let long: Vec<crate::state::DialogueEntry> =
+            (0..12).map(|i| user_entry(&format!("turn {i}"))).collect();
+        let picker = UndoPickerDialog::new(&long);
+        assert_eq!(picker.rows.len(), MAX_UNDO_ROWS);
+        assert_eq!(picker.rows[0].turns, 1);
+        assert_eq!(picker.rows[MAX_UNDO_ROWS - 1].turns, MAX_UNDO_ROWS as u32);
+
+        let empty = vec![user_entry("   "), assistant_entry("only noise")];
+        assert!(UndoPickerDialog::new(&empty).is_empty());
+        assert!(UndoPickerDialog::new(&[]).is_empty());
     }
 }
 
@@ -1505,6 +1566,116 @@ impl SessionPickerDialog {
         }
         if self.filtered.is_empty() {
             body.push(theme.paint(Token::TextDim, "No sessions yet"));
+        }
+        border::frame(
+            body,
+            columns,
+            theme.style(Token::BorderFocus),
+            Some(self.title.clone()),
+        )
+    }
+}
+
+/// Rewind points offered in the picker.
+pub const MAX_UNDO_ROWS: usize = 8;
+
+/// One rewind point: how many turns to drop and the user message that
+/// started the turn.
+pub struct UndoRow {
+    /// Whole turns dropped when this point is picked.
+    pub turns: u32,
+    /// First line of the user message that started the turn.
+    pub label: String,
+}
+
+/// The rewind picker (double-Esc): the most recent user turns, newest
+/// first. Picking a row drops that turn and everything after it.
+pub struct UndoPickerDialog {
+    title: String,
+    rows: Vec<UndoRow>,
+    selected: usize,
+}
+
+impl UndoPickerDialog {
+    /// Build over the untrimmed dialogue; rows are newest-first and
+    /// capped at [`MAX_UNDO_ROWS`]. Turn counts span every user turn —
+    /// matching the kernel, which rewinds all of them — while only the
+    /// label decides whether a row is shown, so a turn whose first line
+    /// is blank never shifts the older rows' distances.
+    pub fn new(history: &[crate::state::DialogueEntry]) -> Self {
+        let rows: Vec<UndoRow> = history
+            .iter()
+            .filter(|entry| entry.from_user)
+            .rev()
+            .enumerate()
+            .filter_map(|(back, entry)| {
+                let label = entry.text.lines().next()?.trim();
+                (!label.is_empty()).then(|| UndoRow {
+                    turns: back as u32 + 1,
+                    label: label.to_string(),
+                })
+            })
+            .take(MAX_UNDO_ROWS)
+            .collect();
+        Self {
+            title: "Rewind".to_string(),
+            rows,
+            selected: 0,
+        }
+    }
+
+    /// True when there is nothing to offer.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        match event.key {
+            Key::Esc => Some(Answer::Dismissed),
+            Key::Up if !self.rows.is_empty() => {
+                self.selected = if self.selected == 0 {
+                    self.rows.len() - 1
+                } else {
+                    self.selected - 1
+                };
+                None
+            }
+            Key::Down if !self.rows.is_empty() => {
+                self.selected = (self.selected + 1) % self.rows.len();
+                None
+            }
+            Key::Enter => {
+                let row = self.rows.get(self.selected)?;
+                Some(Answer::RewindTurns { turns: row.turns })
+            }
+            _ => None,
+        }
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let mut body = Vec::new();
+        body.push(theme.paint(
+            Token::TextDim,
+            "rewind to before this turn · ↑/↓ navigate · ↵ rewind · Esc cancel",
+        ));
+        body.push(String::new());
+        for (row, point) in self.rows.iter().enumerate() {
+            let marker = if row == self.selected { "❯ " } else { "  " };
+            let turns = match point.turns {
+                1 => "1 turn".to_string(),
+                n => format!("{n} turns"),
+            };
+            let head = format!(
+                "{marker}{}  ({})",
+                width::truncate_to_width(&point.label, columns.saturating_sub(16)),
+                turns
+            );
+            if row == self.selected {
+                body.push(theme.bold(Token::TextStrong, &head));
+            } else {
+                body.push(theme.paint(Token::Text, &head));
+            }
         }
         border::frame(
             body,

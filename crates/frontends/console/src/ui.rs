@@ -66,6 +66,8 @@ use crate::welcome::Welcome;
 const GUTTER: usize = 1;
 /// Double-press window for the Ctrl+C exit confirmation.
 pub const EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
+/// Double-press window for Esc-Esc opening the rewind picker.
+pub const DOUBLE_ESC_WINDOW: Duration = Duration::from_millis(600);
 
 /// The session seam the UI drives. Implemented by [`ActorClient`] in
 /// production; tests substitute recorded links.
@@ -238,6 +240,8 @@ pub struct ConsoleUi {
     /// Pending Ctrl+G request: the draft handed to the external editor,
     /// drained by the run loop (raw-mode suspend happens there).
     pending_external_edit: Option<String>,
+    /// Last idle Esc press, for the double-Esc rewind picker.
+    last_esc_at: Option<Instant>,
     version: String,
 }
 
@@ -309,6 +313,7 @@ impl ConsoleUi {
             btw_buffer: String::new(),
             btw_running: false,
             pending_external_edit: None,
+            last_esc_at: None,
             version: version.into(),
         };
         ui.state.provider_id = ctx.provider_id.clone();
@@ -464,6 +469,9 @@ impl ConsoleUi {
             }
             Some(Answer::ResumeSession { id }) => {
                 self.request_resume(&id);
+            }
+            Some(Answer::RewindTurns { turns }) => {
+                self.rewind_turns_command(&turns.to_string());
             }
             None => {}
         }
@@ -1400,6 +1408,16 @@ impl ConsoleUi {
         }
     }
 
+    /// Double-Esc: list recent turns for a conversation rewind.
+    fn open_undo_picker(&mut self) {
+        let picker = crate::dialogs::UndoPickerDialog::new(&self.state.dialogue);
+        if picker.is_empty() {
+            self.push_status("nothing to rewind yet", false);
+            return;
+        }
+        self.dialog = Some(Dialog::Undo(picker));
+    }
+
     /// `/undo [n]`: drop the last n conversation turns (default 1).
     /// The agent stops seeing the dropped turns; file changes they
     /// already made stay. Idle-only, and the landed event trims the
@@ -1908,6 +1926,17 @@ verify from the repository.";
             (Key::Esc, _) if self.state.busy() => {
                 self.enqueue(Op::Interrupt);
                 self.push_status("interrupting the turn", false);
+                Flow::Continue
+            }
+            (Key::Esc, _) => {
+                // Double-Esc opens the rewind picker; a lone Esc stays
+                // a no-op.
+                if self.last_esc_at.is_some_and(|at| at.elapsed() <= DOUBLE_ESC_WINDOW) {
+                    self.last_esc_at = None;
+                    self.open_undo_picker();
+                } else {
+                    self.last_esc_at = Some(Instant::now());
+                }
                 Flow::Continue
             }
             (Key::Up, _) => {
@@ -2735,6 +2764,44 @@ mod tests {
         ui.submit("running");
         ui.handle_key(KeyEvent::new(Key::Char('g'), Mods::CTRL));
         assert_eq!(ui.take_external_edit(), None, "busy blocks the editor");
+    }
+
+    #[test]
+    fn double_esc_opens_the_rewind_picker() {
+        let mut ui = ui();
+        ui.submit("first question");
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "answer".to_string(),
+        });
+        // A lone Esc stays a no-op.
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(ui.dialog.is_none(), "single esc opens nothing");
+        // The second Esc within the window opens the picker, newest
+        // turn first.
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(matches!(ui.dialog, Some(Dialog::Undo(_))), "picker open");
+        // Enter on the first row rewinds exactly one turn.
+        let answer = ui
+            .dialog
+            .as_mut()
+            .and_then(|d| d.handle_key(KeyEvent::plain(Key::Enter)));
+        assert_eq!(answer, Some(Answer::RewindTurns { turns: 1 }));
+        ui.dialog = None;
+        ui.submit_answer(answer);
+        assert_eq!(
+            ui.pending_ops().last(),
+            Some(&Op::Rewind { turns: 1 }),
+            "picker feeds the same rewind path as /undo"
+        );
+    }
+
+    #[test]
+    fn double_esc_with_no_history_reports_and_skips() {
+        let mut ui = ui();
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(ui.dialog.is_none(), "empty dialogue opens nothing");
     }
 
     #[test]

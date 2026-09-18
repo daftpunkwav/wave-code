@@ -197,6 +197,7 @@ pub fn help_lines() -> Vec<String> {
         "  ctrl+g                 edit the draft in an external editor".to_string(),
         "  ctrl+c                 interrupt; double-press exits".to_string(),
         "  esc                    interrupt the running turn".to_string(),
+        "  esc esc                rewind the conversation (pick a turn)".to_string(),
         "  up / down              input history".to_string(),
         "  alt+b / alt+f          jump one word back / forward".to_string(),
         "  !cmd                   run a local shell command".to_string(),
@@ -220,7 +221,8 @@ pub fn help_lines() -> Vec<String> {
         "  /memory — reviewed-plan status".to_string(),
         "  /snapshots — file-content snapshot labels".to_string(),
         "  /goal — durable goal status".to_string(),
-        "  /compact [instruction] — compress the context now, optionally steering the summary".to_string(),
+        "  /compact [instruction] — compress the context now, optionally steering the summary"
+            .to_string(),
         "  /undo [n] — drop the last n turns from the conversation (default 1)".to_string(),
         "  /editor <cmd> — set the external editor for ctrl+g".to_string(),
         "  /copy — copy the last assistant message".to_string(),
@@ -260,10 +262,7 @@ mod tests {
     fn dispatch_maps_to_ops() {
         let status = Arc::new(support::NullStatus);
         let effect = dispatch(&parse("/compact").unwrap(), &state(), status.as_ref());
-        assert_eq!(
-            effect,
-            Effect::Ops(vec![Op::Compact { instruction: None }])
-        );
+        assert_eq!(effect, Effect::Ops(vec![Op::Compact { instruction: None }]));
         let effect = dispatch(
             &parse("/compact keep the api decisions").unwrap(),
             &state(),

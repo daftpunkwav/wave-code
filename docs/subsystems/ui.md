@@ -100,7 +100,10 @@ receivers remain compatible.
   the `HistoryRewound` event trims dialogue and transcript, and the
   truncated dialogue is journaled as the newest snapshot so resume
   replays the rewound conversation. Conversation-level only — file
-  changes the dropped turns already made are not undone.
+  changes the dropped turns already made are not undone. Double-Esc
+  (600 ms window, idle only) opens a rewind picker over the most
+  recent user turns (newest first, up to 8 rows); picking a row feeds
+  the same `/undo` path, so the busy/shell guards apply unchanged.
 - Sessions: every interactive launch journals completed turns (text
   snapshots) under `~/.wavecode/sessions/<uuid>.jsonl` with a shared
   `index.json` (title, cwd, timestamps, turn count). `/sessions` (alias

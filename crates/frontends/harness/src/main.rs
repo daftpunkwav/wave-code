@@ -1304,7 +1304,7 @@ async fn run_repl(
                 client
                     .submit(Submission {
                         id: format!("repl-{turn}-compact"),
-                        op: Op::Compact,
+                        op: Op::Compact { instruction: None },
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;

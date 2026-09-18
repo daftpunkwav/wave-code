@@ -54,7 +54,11 @@ pub enum Op {
         answer: String,
     },
     /// Request context compaction.
-    Compact,
+    Compact {
+        /// Optional user steering for the summary (`/compact <focus>`).
+        #[serde(default)]
+        instruction: Option<String>,
+    },
     /// Rewind the conversation by whole user turns (idle `/undo` path).
     ///
     /// Drops the last `turns` user messages and everything after each,
@@ -324,7 +328,7 @@ mod tests {
                 },
                 "question_answer",
             ),
-            (Op::Compact, "compact"),
+            (Op::Compact { instruction: None }, "compact"),
             (Op::Rewind { turns: 1 }, "rewind"),
             (
                 Op::SetPermissionMode {
@@ -503,6 +507,11 @@ mod tests {
 
     #[test]
     fn extended_fields_are_backward_compatible() {
+        // Legacy senders omit the optional compaction instruction.
+        let legacy = serde_json::json!({ "type": "compact" });
+        let op: Op = serde_json::from_value(legacy).unwrap();
+        assert_eq!(op, Op::Compact { instruction: None });
+
         // Older senders omit the new fields entirely; parsing must accept
         // that and default to None.
         let legacy = serde_json::json!({

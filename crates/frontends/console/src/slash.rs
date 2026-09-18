@@ -102,7 +102,12 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
             // Dialogs and local panels: the caller owns the behavior.
             Effect::Ops(Vec::new())
         }
-        "compact" => Effect::Ops(vec![Op::Compact]),
+        "compact" => {
+            let focus = invocation.args.trim();
+            Effect::Ops(vec![Op::Compact {
+                instruction: (!focus.is_empty()).then(|| focus.to_string()),
+            }])
+        }
         "model" => {
             if invocation.args.is_empty() {
                 Effect::Ops(Vec::new()) // opens the picker
@@ -211,7 +216,7 @@ pub fn help_lines() -> Vec<String> {
         "  /memory — reviewed-plan status".to_string(),
         "  /snapshots — file-content snapshot labels".to_string(),
         "  /goal — durable goal status".to_string(),
-        "  /compact — compress the context now".to_string(),
+        "  /compact [instruction] — compress the context now, optionally steering the summary".to_string(),
         "  /undo [n] — drop the last n turns from the conversation (default 1)".to_string(),
         "  /copy — copy the last assistant message".to_string(),
         "  /export [path] — write the dialogue to markdown".to_string(),
@@ -250,7 +255,21 @@ mod tests {
     fn dispatch_maps_to_ops() {
         let status = Arc::new(support::NullStatus);
         let effect = dispatch(&parse("/compact").unwrap(), &state(), status.as_ref());
-        assert_eq!(effect, Effect::Ops(vec![Op::Compact]));
+        assert_eq!(
+            effect,
+            Effect::Ops(vec![Op::Compact { instruction: None }])
+        );
+        let effect = dispatch(
+            &parse("/compact keep the api decisions").unwrap(),
+            &state(),
+            status.as_ref(),
+        );
+        assert_eq!(
+            effect,
+            Effect::Ops(vec![Op::Compact {
+                instruction: Some("keep the api decisions".to_string())
+            }])
+        );
 
         let effect = dispatch(&parse("/clear").unwrap(), &state(), status.as_ref());
         assert_eq!(effect, Effect::Ops(Vec::new()));

@@ -263,7 +263,7 @@ where
                         warn_late_approval(&event_tx, &sub.id, &call_id);
                     }
                 }
-                Op::Compact => {
+                Op::Compact { instruction } => {
                     let id = sub.id.clone();
                     // Compaction rewrites shared history (a state side
                     // effect), so it honors the side-effect flag.
@@ -296,7 +296,11 @@ where
                     };
                     let op = async {
                         if let Err(cause) = driver
-                            .drive_compact(&mut conv, CompactTrigger::Manual, &sink)
+                            .drive_compact(
+                                &mut conv,
+                                CompactTrigger::Manual { instruction },
+                                &sink,
+                            )
                             .await
                         {
                             sink(Event {
@@ -511,7 +515,7 @@ fn route_extra(
     questions: &Arc<QuestionGate>,
 ) -> bool {
     match sub.op {
-        Op::UserInput { .. } | Op::Compact => queue_or_reject(pending, sub, event_tx),
+        Op::UserInput { .. } | Op::Compact { .. } => queue_or_reject(pending, sub, event_tx),
         Op::Rewind { .. } => {
             // Never race the active snapshot: rewind waits for idle.
             tracing::warn!(id = %sub.id, "rewind rejected mid-turn");
@@ -1269,7 +1273,7 @@ mod tests {
         client
             .submit(Submission {
                 id: "s1".to_string(),
-                op: Op::Compact,
+                op: Op::Compact { instruction: None },
             })
             .await
             .unwrap();

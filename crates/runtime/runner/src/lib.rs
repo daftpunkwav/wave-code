@@ -980,12 +980,13 @@ where
                         } else {
                             CompactTrigger::Auto
                         };
+                        let blocking = trigger == CompactTrigger::Blocking;
                         match self.do_compact(conv, trigger, &emit_msg).await {
                             Ok(()) => continue,
                             Err(cause) => {
                                 // Blocking failures abort; automatic
                                 // failures downgrade to a warning.
-                                if trigger == CompactTrigger::Blocking {
+                                if blocking {
                                     settle(
                                         conv,
                                         &last_input,
@@ -1262,7 +1263,7 @@ where
             });
         }
         emit(EventMsg::CompactStarted {
-            trigger: trigger_name(trigger).to_string(),
+            trigger: trigger_name(&trigger).to_string(),
         });
         let done = self
             .compactor
@@ -1943,12 +1944,12 @@ fn history_messages(conv: &Conversation) -> Vec<HistoryEntry> {
 }
 
 /// Display name of one compaction trigger for event payloads.
-fn trigger_name(trigger: CompactTrigger) -> &'static str {
+fn trigger_name(trigger: &CompactTrigger) -> &'static str {
     match trigger {
         CompactTrigger::Auto => "auto",
         CompactTrigger::Blocking => "blocking",
         CompactTrigger::Reactive => "reactive",
-        CompactTrigger::Manual => "manual",
+        CompactTrigger::Manual { .. } => "manual",
     }
 }
 

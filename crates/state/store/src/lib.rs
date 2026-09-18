@@ -161,7 +161,7 @@ pub enum BudgetLevel {
 }
 
 /// Trigger that caused a compaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactTrigger {
     /// Automatic compaction from the budget check.
     Auto,
@@ -169,8 +169,11 @@ pub enum CompactTrigger {
     Blocking,
     /// Reactive compaction after a prompt-too-long sampling error.
     Reactive,
-    /// Explicit user request.
-    Manual,
+    /// Explicit user request, optionally steered (`/compact <focus>`).
+    Manual {
+        /// User-supplied focus for the summary, when given.
+        instruction: Option<String>,
+    },
 }
 
 /// Evaluate the budget level from remaining context tokens.

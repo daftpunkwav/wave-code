@@ -318,25 +318,41 @@ pub const SUMMARY_MESSAGE_PREFIX: &str =
 pub struct ModelSummary {
     model: Arc<dyn ChatModel>,
     model_name: String,
+    /// Optional user steering appended to the summary instruction
+    /// (`/compact <focus>`); `None` keeps the standard prompt.
+    focus: Option<String>,
 }
 
 impl ModelSummary {
     /// `model` reuses the main session's model channel (compaction uses the
     /// same model as the main session, SPEC section 6 first version).
     pub fn new(model: Arc<dyn ChatModel>, model_name: String) -> Self {
-        Self { model, model_name }
+        Self {
+            model,
+            model_name,
+            focus: None,
+        }
+    }
+
+    /// Steer the summary toward a user-supplied focus.
+    pub fn with_focus(mut self, focus: impl Into<String>) -> Self {
+        self.focus = Some(focus.into());
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl CompactionStrategy for ModelSummary {
     async fn summarize(&self, history: &[Message], budget: u32) -> Result<String> {
+        let mut instruction = SUMMARY_INSTRUCTION.to_owned();
+        if let Some(focus) = &self.focus {
+            instruction.push_str("\n\nAdditional user focus for this summary: ");
+            instruction.push_str(focus);
+        }
         let mut messages = history.to_vec();
         messages.push(Message {
             role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: SUMMARY_INSTRUCTION.to_owned(),
-            }],
+            content: vec![ContentBlock::Text { text: instruction }],
         });
         let req = ChatRequest {
             model: self.model_name.clone(),
@@ -1108,6 +1124,49 @@ mod tests {
                 self.scripts[idx].clone().into_iter().map(Ok),
             )))
         }
+    }
+
+    /// `/compact <focus>` steering reaches the summary request: the
+    /// instruction message carries the user focus after the standard
+    /// five-element prompt.
+    #[tokio::test]
+    async fn model_summary_focus_reaches_the_request() {
+        const SCRIPT: &str = "## Goal\nx\n## Progress\ny\n## Key decisions\nz\n## File inventory\nf\n## Todo\nt";
+        struct CapturingModel {
+            seen: std::sync::Mutex<Option<String>>,
+        }
+        #[async_trait::async_trait]
+        impl ChatModel for CapturingModel {
+            async fn stream(
+                &self,
+                req: ChatRequest,
+            ) -> wavecode_llm::Result<wavecode_llm::EventStream> {
+                let last = req.messages.last().expect("instruction message");
+                let ContentBlock::Text { text } = &last.content[0] else {
+                    panic!("instruction should be a text block")
+                };
+                *self.seen.lock().unwrap() = Some(text.clone());
+                Ok(Box::pin(stream::iter(vec![Ok(StreamEvent::TextDelta {
+                    text: SCRIPT.to_string(),
+                })])))
+            }
+        }
+        let model = Arc::new(CapturingModel {
+            seen: std::sync::Mutex::new(None),
+        });
+        let strategy = ModelSummary::new(model.clone(), "mock".into())
+            .with_focus("keep the api design decisions");
+        let summary = strategy.summarize(&[], 777).await.unwrap();
+        assert!(summary.contains("## Goal"), "{summary}");
+        let seen = model.seen.lock().unwrap().clone().unwrap();
+        assert!(
+            seen.starts_with(SUMMARY_INSTRUCTION),
+            "standard prompt preserved: {seen}"
+        );
+        assert!(
+            seen.contains("Additional user focus for this summary: keep the api design decisions"),
+            "focus appended: {seen}"
+        );
     }
 
     /// Scripted summary response carrying all five elements.

@@ -37,7 +37,7 @@ impl Compactor for ContextCompactor {
     async fn compact(
         &self,
         history: Vec<HistoryEntry>,
-        _trigger: state_store::CompactTrigger,
+        trigger: state_store::CompactTrigger,
     ) -> Result<Compacted, CompactError> {
         // The summarizer works on prose: block entries flatten to their
         // legacy text view so tool payloads stay visible to the summary.
@@ -53,7 +53,12 @@ impl Compactor for ContextCompactor {
                 content: vec![ContentBlock::Text { text: entry.text() }],
             })
             .collect();
-        let strategy = ModelSummary::new(self.model.clone(), self.model_name.clone());
+        let mut strategy = ModelSummary::new(self.model.clone(), self.model_name.clone());
+        // Manual compaction may carry user steering ("/compact keep the
+        // API design decisions"); other triggers summarize unsteered.
+        if let state_store::CompactTrigger::Manual { instruction: Some(focus) } = &trigger {
+            strategy = strategy.with_focus(focus.clone());
+        }
         let outcome = compact_history(&messages, &strategy, &ContextConfig::default())
             .await
             .map_err(|e| CompactError::Failed(e.to_string()))?;

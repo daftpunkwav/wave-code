@@ -72,6 +72,9 @@ pub struct UiSettings {
     /// Saved default reasoning-effort level (e.g. `low`); `None` and
     /// `off` both mean the parameter stays unset.
     pub default_effort: Option<String>,
+    /// External editor command for Ctrl+G (`/editor <cmd>`); falls back
+    /// to `$VISUAL` then `$EDITOR` when unset.
+    pub editor_command: Option<String>,
 }
 
 impl Default for UiSettings {
@@ -85,6 +88,7 @@ impl Default for UiSettings {
             default_model: None,
             default_provider: None,
             default_effort: None,
+            editor_command: None,
         }
     }
 }

@@ -230,6 +230,9 @@ pub struct ConsoleUi {
     btw_buffer: String,
     /// True while the btw side turn is running.
     btw_running: bool,
+    /// Pending Ctrl+G request: the draft handed to the external editor,
+    /// drained by the run loop (raw-mode suspend happens there).
+    pending_external_edit: Option<String>,
     version: String,
 }
 
@@ -290,6 +293,7 @@ impl ConsoleUi {
             btw_log: Vec::new(),
             btw_buffer: String::new(),
             btw_running: false,
+            pending_external_edit: None,
             version: version.into(),
         };
         ui.state.provider_id = ctx.provider_id.clone();
@@ -1088,6 +1092,8 @@ impl ConsoleUi {
                         self.set_session_title(&invocation.args);
                     } else if invocation.name == "undo" {
                         self.rewind_turns_command(&invocation.args);
+                    } else if invocation.name == "editor" {
+                        self.set_editor_command(&invocation.args);
                     } else if invocation.name == "init" {
                         self.init_project();
                     } else if invocation.name == "mcp" {
@@ -1433,6 +1439,98 @@ impl ConsoleUi {
         }
     }
 
+    /// `/editor <cmd>`: set the external editor for Ctrl+G; no args
+    /// shows the current resolution.
+    fn set_editor_command(&mut self, args: &str) {
+        let command = args.trim();
+        if command.is_empty() {
+            match self.resolve_editor_command() {
+                Some(current) => self.push_status(&format!("editor: {current}"), false),
+                None => self.push_status("no editor configured — usage: /editor <cmd>", false),
+            }
+            return;
+        }
+        self.settings
+            .update(|view| view.editor_command = Some(command.to_string()));
+        self.push_status(&format!("editor set: {command} (ctrl+g to use)"), false);
+    }
+
+    /// Ctrl+G: hand the current draft to the external editor (the run
+    /// loop performs the raw-mode suspend/resume round trip).
+    fn request_external_edit(&mut self) {
+        if self.state.busy() {
+            self.push_status("cannot open the editor while a turn is running", false);
+            return;
+        }
+        if self.pending_external_edit.is_none() {
+            self.pending_external_edit = Some(self.editor.text());
+        }
+    }
+
+    /// Take the pending external-edit request: the draft to edit.
+    fn take_external_edit(&mut self) -> Option<String> {
+        self.pending_external_edit.take()
+    }
+
+    /// Load the externally edited text into the draft buffer.
+    fn apply_external_edit(&mut self, text: &str) {
+        self.editor.set_text(text);
+        self.push_status("draft loaded from the external editor", false);
+    }
+
+    /// The external editor command: the `/editor` setting wins, then
+    /// `$VISUAL`, then `$EDITOR`.
+    fn resolve_editor_command(&self) -> Option<String> {
+        let visual = std::env::var("VISUAL").ok();
+        let editor = std::env::var("EDITOR").ok();
+        pick_editor_command(
+            self.settings.get().editor_command.as_deref(),
+            visual.as_deref(),
+            editor.as_deref(),
+        )
+        .map(str::to_string)
+    }
+
+    /// Hand the draft to the external editor: leave raw mode, run the
+    /// command on a temp file, restore the terminal, load the result.
+    /// Only a terminal-restore failure is fatal (`Err`); editor
+    /// failures keep the original draft and surface as status lines.
+    pub async fn run_external_editor(&mut self, guard: &mut TerminalGuard) -> anyhow::Result<()> {
+        let Some(draft) = self.take_external_edit() else {
+            return Ok(());
+        };
+        let Some(command) = self.resolve_editor_command() else {
+            self.editor.set_text(&draft);
+            self.push_status("no editor configured — set $EDITOR or /editor <cmd>", true);
+            return Ok(());
+        };
+        let temp = std::env::temp_dir().join(format!("wavecode-edit-{}.md", Uuid::new_v4()));
+        if let Err(error) = std::fs::write(&temp, &draft) {
+            self.editor.set_text(&draft);
+            self.push_status(&format!("editor temp file failed: {error}"), true);
+            return Ok(());
+        }
+        guard.leave();
+        let outcome = edit_with_command(&command, &temp).await;
+        *guard = TerminalGuard::enter()
+            .map_err(|e| anyhow::anyhow!("terminal restore failed: {e}"))?;
+        let _ = guard.keyboard_enhanced();
+        let _ = std::fs::remove_file(&temp);
+        match outcome {
+            Ok(text) if text.is_empty() => {
+                self.editor.set_text(&draft);
+                self.push_status("editor saved nothing; draft kept", false);
+            }
+            Ok(text) => self.apply_external_edit(&text),
+            Err(error) => {
+                self.editor.set_text(&draft);
+                self.push_status(&format!("editor failed: {error}"), true);
+            }
+        }
+        self.screen.invalidate();
+        Ok(())
+    }
+
     /// `/init`: send a fixed analysis prompt so the agent writes
     /// AGENTS.md for this repository.
     fn init_project(&mut self) {
@@ -1723,6 +1821,10 @@ verify from the repository.";
                 self.steer();
                 Flow::Continue
             }
+            (Key::Char('g'), m) if m.ctrl => {
+                self.request_external_edit();
+                Flow::Continue
+            }
             (Key::Esc, _) if self.state.busy() => {
                 self.enqueue(Op::Interrupt);
                 self.push_status("interrupting the turn", false);
@@ -1939,6 +2041,44 @@ verify from the repository.";
         out.write_all(&buffer)?;
         out.flush()
     }
+}
+
+/// Run `command` on `path` as a foreground external editor, returning
+/// the file contents afterwards. The command runs under the platform
+/// shell so multi-word editors (`code -w`) work as configured.
+async fn edit_with_command(command: &str, path: &std::path::Path) -> anyhow::Result<String> {
+    let script = format!("{command} \"{}\"", path.display());
+    let mut cmd = tokio::process::Command::new(crate::controllers::shell::platform_shell());
+    if cfg!(windows) {
+        cmd.arg("/C");
+    } else {
+        cmd.arg("-c");
+    }
+    cmd.arg(&script);
+    let status = cmd
+        .status()
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn failed: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("editor exited with {status}");
+    }
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    // Editors append a final newline; it is layout, not content.
+    Ok(text.strip_suffix('\n').unwrap_or(&text).to_string())
+}
+
+/// Resolve the external editor: the `/editor` setting wins, then
+/// `$VISUAL`, then `$EDITOR`; blank values never win.
+fn pick_editor_command<'a>(
+    setting: Option<&'a str>,
+    visual: Option<&'a str>,
+    editor: Option<&'a str>,
+) -> Option<&'a str> {
+    [setting, visual, editor]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|command| !command.is_empty())
 }
 
 /// The editor border color for a permission mode (plan accent, auto
@@ -2182,6 +2322,14 @@ pub async fn run_with_factory(
         // they are invisible and never disturb the diff renderer.
         if let Some(seq) = ui.take_pending_sequence() {
             notify::emit_raw(&seq);
+        }
+        // Ctrl+G: the draft goes to an external editor while the
+        // terminal is restored to cooked mode for the duration.
+        if ui.pending_external_edit.is_some()
+            && let Err(e) = ui.run_external_editor(&mut guard).await
+        {
+            abort_reason = Some(format!("terminal restore failed: {e}"));
+            break;
         }
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
@@ -2477,6 +2625,52 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("nothing to rewind"), "{joined}");
+    }
+
+    #[test]
+    fn ctrl_g_stages_the_draft_and_apply_replaces_it() {
+        let mut ui = ui();
+        ui.editor.set_text("draft to improve");
+        ui.handle_key(KeyEvent::new(Key::Char('g'), Mods::CTRL));
+        assert_eq!(
+            ui.take_external_edit().as_deref(),
+            Some("draft to improve"),
+            "ctrl+g stages the draft"
+        );
+        assert_eq!(
+            ui.take_external_edit(),
+            None,
+            "the request is consumed once"
+        );
+        // The editor result replaces the draft buffer.
+        ui.editor.set_text("draft to improve");
+        ui.apply_external_edit("improved draft");
+        assert_eq!(ui.editor.text(), "improved draft");
+    }
+
+    #[test]
+    fn ctrl_g_is_rejected_while_busy() {
+        let mut ui = ui();
+        ui.submit("running");
+        ui.handle_key(KeyEvent::new(Key::Char('g'), Mods::CTRL));
+        assert_eq!(ui.take_external_edit(), None, "busy blocks the editor");
+    }
+
+    #[test]
+    fn editor_command_resolution_prefers_the_setting() {
+        // Pure resolution order: setting > $VISUAL > $EDITOR; blanks
+        // never win.
+        assert_eq!(
+            pick_editor_command(Some("nvim"), Some("vim"), Some("vi")),
+            Some("nvim")
+        );
+        assert_eq!(
+            pick_editor_command(None, Some("vim"), Some("vi")),
+            Some("vim")
+        );
+        assert_eq!(pick_editor_command(None, None, Some("vi")), Some("vi"));
+        assert_eq!(pick_editor_command(None, None, None), None);
+        assert_eq!(pick_editor_command(Some("  "), None, Some("vi")), Some("vi"));
     }
 
     #[test]

@@ -82,7 +82,7 @@ receivers remain compatible.
 - Slash commands (`/help /new /clear /sessions /resume /fork /title
   /model /effort /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
-  /undo /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
+  /undo /editor /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
   through as user input (skills). `/usage` renders a severity-colored
   context bar plus the cumulative token split accumulated from
   `TokenCount` samples. `/copy` puts the last assistant message on the
@@ -174,7 +174,11 @@ receivers remain compatible.
   the same cascade. Ctrl+O toggles expansion, Ctrl+T toggles the todo
   panel, Ctrl+S steers the running turn (queued message or editor
   text), Esc interrupts while busy (both interrupts acknowledge with a
-  status line).
+  status line). Ctrl+G hands the draft to an external editor: the
+  terminal leaves raw mode, the editor runs on a temp file under the
+  platform shell (`/editor <cmd>` setting, else `$VISUAL`/`$EDITOR`),
+  and the saved text replaces the draft; an empty save keeps the
+  original.
 - Turn-completion notifications: one OSC 9 desktop notification per
   finished turn unless interrupted or a queued follow-up continues the
   session (`WAVECODE_NOTIFY=0` disables). `WAVECODE_NOTIFY_STYLE`

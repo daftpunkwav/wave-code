@@ -174,7 +174,7 @@ impl ShellJob {
 
 /// The platform shell program: `%COMSPEC%` (default `cmd`) on Windows,
 /// `sh` elsewhere.
-fn platform_shell() -> String {
+pub(crate) fn platform_shell() -> String {
     if cfg!(windows) {
         std::env::var_os("COMSPEC")
             .map(|shell| shell.to_string_lossy().into_owned())

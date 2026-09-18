@@ -21,7 +21,7 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 29] = [
+pub const COMMANDS: [&str; 30] = [
     "help",
     "btw",
     "new",
@@ -48,6 +48,7 @@ pub const COMMANDS: [&str; 29] = [
     "goal",
     "compact",
     "undo",
+    "editor",
     "copy",
     "export",
     "exit",
@@ -98,7 +99,8 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
         "clear" | "new" => Effect::Ops(Vec::new()), // handled by the UI caller
         "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
-        "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" | "undo" => {
+        "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" | "undo"
+        | "editor" => {
             // Dialogs and local panels: the caller owns the behavior.
             Effect::Ops(Vec::new())
         }
@@ -192,6 +194,7 @@ pub fn help_lines() -> Vec<String> {
         "  ctrl+o                 expand tool output and thinking".to_string(),
         "  ctrl+t                 expand the todo panel".to_string(),
         "  ctrl+s                 steer a running turn".to_string(),
+        "  ctrl+g                 edit the draft in an external editor".to_string(),
         "  ctrl+c                 interrupt; double-press exits".to_string(),
         "  esc                    interrupt the running turn".to_string(),
         "  up / down              input history".to_string(),
@@ -218,6 +221,7 @@ pub fn help_lines() -> Vec<String> {
         "  /goal — durable goal status".to_string(),
         "  /compact [instruction] — compress the context now, optionally steering the summary".to_string(),
         "  /undo [n] — drop the last n turns from the conversation (default 1)".to_string(),
+        "  /editor <cmd> — set the external editor for ctrl+g".to_string(),
         "  /copy — copy the last assistant message".to_string(),
         "  /export [path] — write the dialogue to markdown".to_string(),
         "  /exit, /quit — end the session".to_string(),
@@ -324,6 +328,7 @@ mod tests {
         // Caller-handled commands dispatch as no-ops on the wire.
         for name in [
             "btw", "new", "sessions", "resume", "fork", "title", "init", "mcp", "status", "undo",
+            "editor",
         ] {
             let effect = dispatch(
                 &parse(&format!("/{name}")).unwrap(),

@@ -259,10 +259,18 @@ impl ConsoleUi {
                 let mut command_names: Vec<String> =
                     slash::COMMANDS.iter().map(|s| s.to_string()).collect();
                 command_names.extend(ctx.skill_names.iter().cloned());
-                editor.set_provider(Box::new(ConsoleProvider::new(
-                    &command_names,
-                    FileInventory::scan(&ctx.cwd),
-                )));
+                editor.set_provider(Box::new(
+                    ConsoleProvider::new(
+                        &command_names,
+                        FileInventory::scan(&ctx.cwd),
+                    )
+                    .with_models(
+                        ctx.model_entries
+                            .iter()
+                            .map(|entry| (entry.label.clone(), entry.provider.clone()))
+                            .collect(),
+                    ),
+                ));
                 if let Some(path) = home_history_path() {
                     editor.load_history(history::load(&path));
                 }

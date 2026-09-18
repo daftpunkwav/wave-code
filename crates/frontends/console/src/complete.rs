@@ -75,6 +75,9 @@ impl FileInventory {
 pub struct ConsoleProvider {
     slash: FuzzyProvider,
     inventory: FileInventory,
+    /// Model picker aliases for `/model <name>` argument completion:
+    /// (alias, provider description).
+    models: Vec<(String, String)>,
 }
 
 impl ConsoleProvider {
@@ -91,14 +94,76 @@ impl ConsoleProvider {
         Self {
             slash: FuzzyProvider::new(candidates),
             inventory,
+            models: Vec::new(),
         }
+    }
+
+    /// Offer these models for `/model <name>` argument completion.
+    pub fn with_models(mut self, models: Vec<(String, String)>) -> Self {
+        self.models = models;
+        self
+    }
+
+    /// Argument candidates for one command after its name: scored
+    /// against the partial argument, each inserting the full line
+    /// (the editor replaces from the `/` trigger).
+    fn argument_completions(&self, command: &str, arg: &str) -> Vec<Completion> {
+        let statics: &[(&str, &str)] = match command {
+            "effort" => &[
+                ("off", "clear the effort parameter"),
+                ("low", ""),
+                ("medium", ""),
+                ("high", ""),
+            ],
+            "theme" => &[
+                ("light", ""),
+                ("dark", ""),
+                ("auto", "follow the terminal"),
+            ],
+            "permissions" => &[("plan", ""), ("auto", ""), ("wave", "")],
+            _ => &[],
+        };
+        let mut candidates: Vec<Completion> = statics
+            .iter()
+            .map(|(label, description)| Completion {
+                label: label.to_string(),
+                description: (!description.is_empty()).then(|| description.to_string()),
+                insert: format!("/{command} {label}"),
+            })
+            .collect();
+        if command == "model" {
+            candidates.extend(self.models.iter().map(|(alias, provider)| Completion {
+                label: alias.clone(),
+                description: Some(provider.clone()),
+                insert: format!("/{command} {alias}"),
+            }));
+        }
+        let mut scored: Vec<(i64, Completion)> = candidates
+            .into_iter()
+            .filter_map(|completion| {
+                fuzzy::score(arg, &completion.label).map(|s| (s, completion))
+            })
+            .collect();
+        scored.sort_by_key(|(score, _)| *score);
+        scored
+            .into_iter()
+            .take(MAX_SUGGESTIONS)
+            .map(|(_, completion)| completion)
+            .collect()
     }
 }
 
 impl CompletionProvider for ConsoleProvider {
     fn complete(&self, kind: TriggerKind, token: &str) -> Vec<Completion> {
         match kind {
-            TriggerKind::Slash => self.slash.complete(kind, token),
+            TriggerKind::Slash => {
+                // `model fac` past the first space is argument
+                // completion for the named command.
+                if let Some((command, arg)) = token.split_once(' ') {
+                    return self.argument_completions(command, arg);
+                }
+                self.slash.complete(kind, token)
+            }
             TriggerKind::Mention => {
                 let mut scored: Vec<(i64, &String)> = self
                     .inventory
@@ -165,5 +230,46 @@ mod tests {
         );
         let completions = provider.complete(TriggerKind::Slash, "he");
         assert_eq!(completions[0].label, "/help");
+    }
+
+    #[test]
+    fn effort_arguments_complete_with_the_full_line() {
+        let provider = ConsoleProvider::new(&[], FileInventory::empty());
+        let completions = provider.complete(TriggerKind::Slash, "effort hi");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].label, "high");
+        assert_eq!(completions[0].insert, "/effort high");
+    }
+
+    #[test]
+    fn model_arguments_come_from_the_catalog() {
+        let provider = ConsoleProvider::new(&[], FileInventory::empty()).with_models(vec![(
+            "fast-model".to_string(),
+            "openai".to_string(),
+        )]);
+        let completions = provider.complete(TriggerKind::Slash, "model fas");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].label, "fast-model");
+        assert_eq!(completions[0].description.as_deref(), Some("openai"));
+        assert_eq!(completions[0].insert, "/model fast-model");
+    }
+
+    #[test]
+    fn unknown_command_arguments_complete_to_nothing() {
+        let provider = ConsoleProvider::new(&[], FileInventory::empty());
+        assert!(provider.complete(TriggerKind::Slash, "help x").is_empty());
+    }
+
+    #[test]
+    fn theme_arguments_list_the_three_modes() {
+        let provider = ConsoleProvider::new(&[], FileInventory::empty());
+        // Fuzzy subsequence matching: "a" ranks "auto" but also "dark".
+        let completions = provider.complete(TriggerKind::Slash, "theme a");
+        let labels: Vec<&str> = completions.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"auto"), "{labels:?}");
+        assert!(labels.contains(&"dark"), "{labels:?}");
+        // The exact prefix wins the top slot.
+        assert_eq!(completions[0].label, "auto");
+        assert_eq!(completions[0].insert, "/theme auto");
     }
 }

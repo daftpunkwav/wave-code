@@ -21,6 +21,7 @@ pub mod controllers;
 pub mod dialogs;
 pub mod diff;
 pub mod gitinfo;
+pub mod highlight;
 pub mod history;
 pub mod messages;
 pub mod panes;
@@ -57,7 +58,7 @@ mod dependency_matrix_locked {
             "operations-actor",
             "state-persistence",
         ];
-        const EXTERNAL: [&str; 10] = [
+        const EXTERNAL: [&str; 12] = [
             "async-trait",
             "crossterm",
             "tokio",
@@ -67,6 +68,8 @@ mod dependency_matrix_locked {
             "uuid",
             "anyhow",
             "base64",
+            "syntect",
+            "two-face",
             // dev-dependencies only: session-journal tests need temp dirs.
             "tempfile",
         ];

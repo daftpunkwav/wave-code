@@ -180,6 +180,12 @@ receivers remain compatible.
   session (`WAVECODE_NOTIFY=0` disables). `WAVECODE_NOTIFY_STYLE`
   picks the delivery: `osc9` (default), `bell` (bare BEL ring), or
   `both`; under tmux the OSC 9 payload rides a DCS passthrough.
+- Fenced code blocks in assistant markdown are syntax highlighted
+  (syntect with the two-face extra syntax set — TypeScript, TOML, ...
+  — on the pure-Rust fancy-regex backend) behind the engine's
+  `SyntaxHighlighter` seam; the theme follows the active palette
+  (base16-ocean dark/light). Oversized blocks (>30 KB) and unknown
+  languages fall back to plain lines.
 - The footer shows the workspace git branch (⎇ badge), read directly
   from `.git/HEAD` (parent walk, worktree `gitdir:` file form, short
   sha when detached) at construction and on every turn start — no
@@ -234,8 +240,7 @@ raw colors; the engine works on `Color`/`Style` values.
 
 ## Deliberate non-goals this generation
 
-Background tasks, plan approval flow, and syntax highlighting in code
-blocks (`PlainHighlighter` stands in; the seam exists) need wire or
+Background tasks and plan approval flow need wire or
 backend support that does not exist yet. Cross-provider live model
 switches need session re-assembly by design (base URL and credentials
 are baked into the provider client), so the picker persists a default

@@ -35,7 +35,6 @@ use std::collections::HashMap;
 use tui_engine::component::Component;
 use tui_engine::editor::{Editor, EditorAction, EditorStyle};
 use tui_engine::keys::{Key, KeyEvent};
-use tui_engine::markdown::PlainHighlighter;
 use tui_engine::screen::Screen;
 use tui_engine::terminal::{self, TerminalGuard};
 use uuid::Uuid;
@@ -586,7 +585,7 @@ impl ConsoleUi {
         self.state.push_dialogue(false, text);
         self.transcript.push(Box::new(AssistantMessage::new(
             text,
-            Box::new(PlainHighlighter),
+            crate::highlight::highlighter(),
         )));
     }
 
@@ -1793,7 +1792,7 @@ verify from the repository.";
         if !self.streaming.assistant.is_empty() {
             let mut draft = AssistantMessage::streaming(
                 self.streaming.assistant.clone(),
-                Box::new(PlainHighlighter),
+                crate::highlight::highlighter(),
             );
             lines.extend(Component::render(&mut draft, inner));
         }

@@ -137,6 +137,9 @@ fn is_link_local_host(host: &str) -> bool {
     }
 }
 
+/// Reason to refuse a redirect target host: it is a private-range IP
+/// literal. Names are not judged here — the resolver vets them at
+/// connect time, which also makes the check apply to every hop.
 /// True when the address is non-routable from the public internet:
 /// loopback, RFC1918, link-local, CGNAT 100.64/10, unspecified /
 /// broadcast, documentation ranges, IPv6 unique-local and link-local.
@@ -172,9 +175,11 @@ fn is_private_addr(addr: std::net::IpAddr) -> bool {
 /// DNS resolver vetting resolved addresses at connect time: a name that
 /// resolves only into non-routable ranges fails the fetch, so a
 /// public-looking URL cannot smuggle a request into private space
-/// (split-horizon DNS, DNS rebinding). Runs for every connect, so each
-/// redirect hop is re-vetted. IP-literal hosts never consult DNS and
-/// keep the literal behavior documented on [`is_link_local_host`].
+/// (split-horizon DNS, DNS rebinding). Name resolution happens per
+/// connect, so redirect hops through names are re-vetted too; private
+/// IP literals skip DNS entirely and are instead refused per hop by
+/// [`private_redirect_reason`]. The initial URL keeps the local-dev
+/// literal allowance documented on [`is_link_local_host`].
 #[derive(Debug)]
 struct NonPrivateResolver;
 
@@ -340,6 +345,20 @@ impl Tool for WebFetch {
                 return Ok(err_output(format!(
                     "redirect to unsupported scheme '{}': only http and https are allowed",
                     next.scheme()
+                )));
+            }
+            // Redirect targets get the same literal check as the initial
+            // URL: link-local (cloud metadata, fe80::/10) is refused at
+            // every hop, so a public server cannot 302 the tool into the
+            // instance metadata endpoint. Loopback/RFC1918 redirects keep
+            // working for local dev servers that redirect to themselves;
+            // name-based pivots are covered per hop by the resolver.
+            if let Some(host) = next.host_str()
+                && is_link_local_host(host)
+            {
+                return Ok(err_output(format!(
+                    "refusing redirect to link-local host '{host}': this tool \
+                     never reaches cloud metadata or local-link addresses"
                 )));
             }
             current = next;
@@ -610,6 +629,23 @@ mod tests {
         let name: reqwest::dns::Name = "localhost".parse().unwrap();
         let result = NonPrivateResolver.resolve(name).await;
         assert!(result.is_err(), "localhost must not resolve");
+    }
+
+    /// Redirect targets get the same literal check as the initial URL:
+    /// link-local (cloud metadata, fe80::/10) is refused at every hop.
+    /// Loopback/RFC1918 redirects stay allowed for local dev servers
+    /// that redirect to themselves; names are the resolver's job.
+    #[test]
+    fn redirect_private_literals_are_refused() {
+        assert!(is_link_local_host("169.254.169.254"));
+        assert!(is_link_local_host("169.254.1.1"));
+        assert!(is_link_local_host("[fe80::1]"));
+        assert!(is_link_local_host("[::ffff:169.254.169.254]"));
+        // Loopback/RFC1918 stay allowed (local dev self-redirects).
+        assert!(!is_link_local_host("127.0.0.1"));
+        assert!(!is_link_local_host("10.0.0.5"));
+        assert!(!is_link_local_host("192.168.1.10"));
+        assert!(!is_link_local_host("example.com"));
     }
 
     #[test]

@@ -169,11 +169,9 @@ impl JsonlJournal {
     /// header, and [`JOURNAL_FORMAT_V0`] for headerless v0 journals
     /// (including ones whose first line is corrupt: they predate headers).
     pub fn format_version(&self) -> Result<u32, JournalError> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(JOURNAL_FORMAT_VERSION);
-            }
+        let text = match self.read_repaired() {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok(JOURNAL_FORMAT_VERSION),
             Err(e) => return Err(JournalError::Io(e)),
         };
         for line in text.lines() {
@@ -194,6 +192,40 @@ impl JsonlJournal {
             return Ok(JOURNAL_FORMAT_V0);
         }
         Ok(JOURNAL_FORMAT_VERSION)
+    }
+
+    /// Read the journal after repairing a torn final write, returning
+    /// `Ok(None)` for a missing file.
+    ///
+    /// Repair covers both tear shapes: a tail cut inside a multi-byte
+    /// UTF-8 character (truncates to the last valid boundary) and a
+    /// trailing partial line (truncates to the last newline). Truncation
+    /// persists so stricter consumers see a clean file. Mid-file damage
+    /// is never rewritten here; the parser's skip-counting handles it.
+    fn read_repaired(&self) -> std::result::Result<Option<String>, std::io::Error> {
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        // A tear inside a multi-byte character leaves an invalid tail:
+        // keep only the longest valid UTF-8 prefix.
+        let mut text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text.to_owned(),
+            Err(e) => {
+                let cut = e.valid_up_to();
+                let text = String::from_utf8_lossy(&bytes[..cut]).into_owned();
+                std::fs::write(&self.path, text.as_bytes())?;
+                text
+            }
+        };
+        // A tear between lines leaves a partial trailing line.
+        if !text.ends_with('\n') {
+            let cut = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            text.truncate(cut);
+            std::fs::write(&self.path, text.as_bytes())?;
+        }
+        Ok(Some(text))
     }
 
     /// Migrate one stored record value into the current shape.
@@ -221,12 +253,11 @@ impl JsonlJournal {
     /// truncated away persistently before parsing, keeping the file
     /// loadable by stricter consumers.
     pub fn load_reported(&self) -> Result<(Vec<TurnRecord>, usize), JournalError> {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
+        let text = match self.read_repaired() {
+            Ok(Some(text)) => text,
+            Ok(None) => return Ok((Vec::new(), 0)),
             Err(e) => return Err(JournalError::Io(e)),
         };
-        let text = self.repair_truncated_tail(text)?;
         let mut records = Vec::new();
         let mut skipped = 0;
         let mut first_line = true;
@@ -265,20 +296,6 @@ impl JsonlJournal {
             return Err(JournalError::CorruptSkipped(skipped));
         }
         Ok(records)
-    }
-
-    /// Cut a non-newline-terminated tail down to the last complete line
-    /// and persist the truncation. A newline-terminated file (or one
-    /// whose only content is a torn line) passes through: mid-file
-    /// corruption is skip-counted by the caller, never rewritten here.
-    fn repair_truncated_tail(&self, text: String) -> Result<String, JournalError> {
-        if text.ends_with('\n') {
-            return Ok(text);
-        }
-        let cut = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let repaired = &text[..cut];
-        std::fs::write(&self.path, repaired)?;
-        Ok(repaired.to_owned())
     }
 
     /// Reload at most the last `n` records for resume previews.
@@ -345,6 +362,36 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.ends_with('\n'));
         assert_eq!(journal.load_all_checked().unwrap().len(), 2);
+    }
+
+    /// A tear inside a multi-byte character leaves an invalid UTF-8
+    /// tail: the repair must truncate to the valid boundary instead of
+    /// failing the whole load (CJK turn text makes this realistic).
+    #[test]
+    fn torn_multibyte_tail_is_truncated_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        let journal = JsonlJournal::new(path.clone());
+        journal.append_turn(&record("r1")).unwrap();
+        // Simulate a torn final write whose half-character tail is not
+        // valid UTF-8 (a 3-byte CJK char cut after its first byte).
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all("{\"run_id\":\"r3\",\"input\":\"你".as_bytes())
+            .unwrap();
+        file.write_all(&[0xe4, 0xb8]).unwrap(); // torn multibyte tail
+        drop(file);
+        // The file is not even readable as UTF-8 before the repair.
+        assert!(std::fs::read_to_string(&path).is_err());
+
+        let (records, skipped) = journal.load_reported().unwrap();
+        assert_eq!(records, vec![record("r1")]);
+        assert_eq!(skipped, 0);
+        assert!(std::fs::read_to_string(&path).is_ok(), "repair persists");
+        assert_eq!(journal.load_all_checked().unwrap().len(), 1);
     }
 
     #[test]

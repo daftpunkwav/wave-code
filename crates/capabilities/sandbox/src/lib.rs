@@ -612,7 +612,9 @@ impl Sandbox {
         {
             return verdict;
         }
-        // 3. Mode default policy.
+        // 3. Mode default policy (the ask-free phrasing below describes
+        //    only this branch; step 1.9's sensitive-file ask happens
+        //    earlier — see docs/subsystems/safety.md for the order).
         //    plan: read-only only; everything else denies outright (no
         //    approval requests). auto: read-only tools, file edits, and
         //    other non-exec writes flow through; command execution

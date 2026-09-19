@@ -98,7 +98,7 @@ impl Component for CompactionCard {
             Outcome::Done(stats) => {
                 let before = stats
                     .context_before
-                    .map(|tokens| format_tokens(tokens))
+                    .map(format_tokens)
                     .unwrap_or_else(|| "?".to_string());
                 vec![theme.paint(
                     Token::Success,

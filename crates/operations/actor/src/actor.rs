@@ -85,6 +85,9 @@ where
     /// snapshot to `store` plus an fsynced `<root>/turn-N.json` copy, gated
     /// by `policy`. On startup the actor names the newest durable label so
     /// the frontend can offer resume-from-checkpoint.
+    // The parameters mirror the spawned Actor's own fields one-to-one;
+    // grouping them into a config struct would only rename the list.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_durability(
         driver: D,
         conv: Conversation,
@@ -107,6 +110,8 @@ where
         )
     }
 
+    // Same parameter bag as `spawn_with_durability` above.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_inner(
         driver: D,
         conv: Conversation,

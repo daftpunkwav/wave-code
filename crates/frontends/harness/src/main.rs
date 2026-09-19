@@ -21,6 +21,7 @@
 
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Parser;
 use operations_actor::ActorClient;
@@ -628,6 +629,7 @@ fn ui_ctx_of(
     title: Option<String>,
     model_entries: Vec<console_ui::dialogs::ModelEntryView>,
     thinking_levels: Vec<String>,
+    update_notice: Option<Arc<std::sync::Mutex<Option<String>>>>,
 ) -> console_ui::UiContext {
     console_ui::UiContext {
         model_name: handle.model_name.clone(),
@@ -643,6 +645,7 @@ fn ui_ctx_of(
         session_title: title,
         model_entries,
         home: home.clone(),
+        update_notice,
     }
 }
 
@@ -659,6 +662,7 @@ fn make_tui_factory(
     home: Option<PathBuf>,
     model_entries: Vec<console_ui::dialogs::ModelEntryView>,
     thinking_levels: Vec<String>,
+    update_notice: Option<Arc<std::sync::Mutex<Option<String>>>>,
 ) -> std::sync::Arc<console_ui::SessionFactory> {
     std::sync::Arc::new(move |spec: &console_ui::LaunchSpec| {
         let runtime = tokio::runtime::Handle::current();
@@ -669,6 +673,7 @@ fn make_tui_factory(
         let home = home.clone();
         let model_entries = model_entries.clone();
         let thinking_levels = thinking_levels.clone();
+        let update_notice = update_notice.clone();
         let history = spec.history.clone();
         let resume_id = spec.session_id.clone();
         let readonly = spec.readonly;
@@ -720,6 +725,7 @@ fn make_tui_factory(
                     title,
                     model_entries,
                     thinking_levels,
+                    update_notice,
                 );
                 Ok(console_ui::SessionLaunch {
                     link: Box::new(handle.client),
@@ -820,6 +826,31 @@ async fn run_tui_new(
     for warning in &handle.warnings {
         eprintln!("[warn] {warning}");
     }
+    // Release check runs beside the session: the footer picks the
+    // notice up on a later tick, never delaying the first frame.
+    let update_slot = Arc::new(std::sync::Mutex::new(None));
+    let slot = update_slot.clone();
+    tokio::spawn(async move {
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        else {
+            return;
+        };
+        let Ok(Some((tag, url))) = update::fetch_latest(&client).await else {
+            return;
+        };
+        if matches!(
+            update::classify(&tag, &url),
+            update::UpdateStatus::Available { .. }
+        ) {
+            // Kept short: the footer's right slot drops content that
+            // does not fit an 80-column terminal; `wavecode update`
+            // carries the details.
+            *slot.lock().expect("update slot lock") =
+                Some(format!("update available: {tag}"));
+        }
+    });
     let ctx = ui_ctx_of(
         &handle,
         cwd.clone(),
@@ -828,6 +859,7 @@ async fn run_tui_new(
         title,
         model_entries.clone(),
         thinking_levels.clone(),
+        Some(update_slot.clone()),
     );
     let factory = make_tui_factory(
         config,
@@ -837,6 +869,7 @@ async fn run_tui_new(
         home,
         model_entries,
         thinking_levels,
+        Some(update_slot),
     );
     console_ui::run_with_factory(handle.client, ctx, Some(factory)).await
 }

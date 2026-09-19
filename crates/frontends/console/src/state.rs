@@ -110,6 +110,9 @@ pub struct AppState {
     /// Git branch (or short detached sha) of the workspace, refreshed
     /// on turn starts; `None` outside a repository.
     pub git_branch: Option<String>,
+    /// One-line newer-release notice (footer tip slot); filled from the
+    /// update-check slot on a later tick, `None` until it arrives.
+    pub update_notice: Option<String>,
     /// Full user/assistant dialogue for `/export` and `/copy`; unlike
     /// the transcript this is never trimmed.
     pub dialogue: Vec<DialogueEntry>,
@@ -142,6 +145,7 @@ impl AppState {
             todo_expanded: false,
             usage: TokenUsage::default(),
             git_branch: None,
+            update_notice: None,
             dialogue: Vec::new(),
         }
     }

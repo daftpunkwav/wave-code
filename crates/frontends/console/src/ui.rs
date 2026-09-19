@@ -127,6 +127,11 @@ pub struct UiContext {
     /// Home directory for the session journal; `None` disables
     /// journaling, resume, fork, and title persistence.
     pub home: Option<PathBuf>,
+    /// Update-check slot: the harness polls the release API in the
+    /// background and writes a one-line notice here when a newer
+    /// release exists; the footer picks it up on a later tick. `None`
+    /// skips the check (non-TUI surfaces, tests).
+    pub update_notice: Option<Arc<std::sync::Mutex<Option<String>>>>,
 }
 
 /// What the UI asks the factory to launch: a fresh session (`history`
@@ -219,6 +224,9 @@ pub struct ConsoleUi {
     /// behavior; once a FocusGained arrives, turn-finished notifications
     /// pause while the user is looking at the terminal.
     terminal_focused: bool,
+    /// Update-check slot from the harness ([`UiContext::update_notice`]);
+    /// polled on ticks so a late release probe still reaches the footer.
+    update_slot: Option<Arc<std::sync::Mutex<Option<String>>>>,
     /// Session launch requested by a dialog (`/new`, `/sessions`),
     /// drained by the run loop through the session factory.
     pending_launch: Option<LaunchSpec>,
@@ -307,6 +315,7 @@ impl ConsoleUi {
             chrome_progress_on: false,
             chrome_progress_at: Instant::now(),
             terminal_focused: false,
+            update_slot: ctx.update_notice.clone(),
             pending_launch: None,
             factory: None,
             model_entries: ctx.model_entries.clone(),
@@ -2040,13 +2049,16 @@ verify from the repository.";
             self.tip_rotated_at = Instant::now();
         }
         let tip = footer_chrome::TIPS[self.tip_index % footer_chrome::TIPS.len()];
+        // A release notice outranks the rotating tip: same right-hand
+        // slot, so it inherits the width guard and right alignment.
+        let right = self.state.update_notice.as_deref().unwrap_or(tip);
         let hint = if self.exit_armed() {
             TransientHint::ExitConfirm
         } else {
             TransientHint::None
         };
         vec![
-            footer_chrome::row1(&self.state, Some(tip), columns),
+            footer_chrome::row1(&self.state, Some(right), columns),
             footer_chrome::row2(&self.state, &hint, columns),
         ]
     }
@@ -2178,6 +2190,26 @@ verify from the repository.";
                     .downcast_ref::<crate::welcome::Welcome>()
             })
             .is_some_and(|welcome| welcome.is_rippling())
+    }
+
+    /// Drain the update-check slot into the footer state. The harness
+    /// probe runs in the background, so the notice usually arrives long
+    /// after the first frame. Returns true when a notice landed this
+    /// tick (the caller repaints); once shown it stays until exit.
+    pub fn poll_update_notice(&mut self) -> bool {
+        if self.state.update_notice.is_some() {
+            return false;
+        }
+        let Some(slot) = &self.update_slot else {
+            return false;
+        };
+        match slot.lock().expect("update slot lock").take() {
+            Some(text) => {
+                self.state.update_notice = Some(text);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Whether a wire event batch may paint immediately: during heavy
@@ -2550,10 +2582,12 @@ pub async fn run_with_factory(
             }
             _ = tick.tick() => {
                 // Spinner animation, streaming flush cadence, the live
-                // shell card, and the btw panel.
+                // shell card, the btw panel, and the release notice.
                 let shell_changed = ui.poll_shell();
                 let btw_changed = ui.poll_btw();
-                if ((shell_changed || btw_changed) || ui.needs_tick_render())
+                let update_changed = ui.poll_update_notice();
+                if ((shell_changed || btw_changed || update_changed)
+                    || ui.needs_tick_render())
                     && let Err(e) = ui.render(&mut stdout.lock(), columns, rows)
                 {
                     abort_reason = Some(format!("terminal render error: {e}"));
@@ -2658,6 +2692,7 @@ mod tests {
                 session_title: None,
                 model_entries: Vec::new(),
                 home: None,
+                update_notice: None,
             },
             "0.1.0",
         );
@@ -3235,6 +3270,29 @@ mod tests {
         );
     }
 
+    /// A drained release notice replaces the rotating tip in the
+    /// footer's right-hand slot and then sticks.
+    #[test]
+    fn update_notice_takes_the_footer_tip_slot() {
+        let mut ui = ui();
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        ui.update_slot = Some(slot.clone());
+        assert!(!ui.poll_update_notice(), "empty slot must not repaint");
+        *slot.lock().expect("test slot lock") =
+            Some("update available: v9.9.9".to_string());
+        assert!(ui.poll_update_notice(), "notice arrival must repaint");
+        assert!(
+            !ui.poll_update_notice(),
+            "a shown notice must not re-trigger every tick"
+        );
+        let footer = ui.footer(80);
+        let top = strip_ansi(&footer[0]);
+        assert!(
+            top.contains("update available: v9.9.9"),
+            "footer line 1: {top:?}"
+        );
+    }
+
     #[test]
     fn usage_command_renders_panel_from_accumulated_samples() {
         let mut ui = ui();
@@ -3589,6 +3647,7 @@ mod tests {
                 session_title: None,
                 model_entries: Vec::new(),
                 home: None,
+                update_notice: None,
             },
             "0.1.0",
         );
@@ -3867,6 +3926,7 @@ mod tests {
                 session_title: None,
                 model_entries: Vec::new(),
                 home: None,
+                update_notice: None,
             };
             Ok(SessionLaunch {
                 link: Box::new(TestLink::new()),
@@ -4034,6 +4094,7 @@ mod tests {
                     session_title: None,
                     model_entries: Vec::new(),
                     home: None,
+                    update_notice: None,
                 },
                 history: Vec::new(),
             })
@@ -4168,6 +4229,7 @@ mod tests {
                     session_title: None,
                     model_entries: Vec::new(),
                     home: None,
+                    update_notice: None,
                 },
                 history: Vec::new(),
             })

@@ -87,7 +87,9 @@ live UI restores terminal modes before the report prints.
 - `update`: compares the running version against the newest GitHub
   release (10s probe). Prints the release page when newer, "up to date"
   otherwise, "no published release yet" before the first tag. A failed
-  probe exits 1 so scripts never mistake it for "no update".
+  probe exits 1 so scripts never mistake it for "no update". The TUI
+  probes once at startup and shows `update available: <tag>` in the
+  footer when a newer release exists.
 
 ## Permissions
 

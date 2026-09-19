@@ -2825,8 +2825,7 @@ mod tests {
             .iter()
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join("\n");
         assert!(joined.contains("compaction failed (manual)"), "{joined}");
     }
 
@@ -2847,8 +2846,7 @@ mod tests {
             .iter()
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
-            .join("
-");
+            .join("\n");
         assert!(joined.contains("compaction failed (auto)"), "{joined}");
     }
 

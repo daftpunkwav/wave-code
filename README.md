@@ -33,6 +33,9 @@ model_provider = "your-provider"
 type = "anthropic"
 base_url = "https://api.example.com/anthropic"
 env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api_key)
+# fallback_providers = ["backup-provider"]  # ordered failover: each provider
+# retries transient errors (429/5xx, honoring Retry-After) before the next
+# one takes over; auth and quota errors fail fast
 
 # Optional: entries for the `/model` picker (alias -> provider + wire model).
 [models.fast]

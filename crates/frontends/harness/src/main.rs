@@ -2851,6 +2851,7 @@ model = "m2"
             context_window: None,
             max_output_tokens: None,
             fallback_providers: Vec::new(),
+            rpm_limit: None,
             reasoning_effort: None,
             thinking_budget_tokens: None,
             prompt_caching: None,

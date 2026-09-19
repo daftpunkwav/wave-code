@@ -113,9 +113,11 @@ fn validate_url(input: &Value) -> std::result::Result<reqwest::Url, ToolOutput> 
 ///
 /// Scope: link-local only (IPv4 169.254/16 — including cloud instance
 /// metadata at 169.254.169.254 — and IPv6 fe80::/10). Loopback and
-/// RFC1918 targets stay reachable so local dev servers keep working,
-/// and public DNS names resolving into link-local ranges are not caught
-/// (blocking those would require pinning resolved IPs at connect time).
+/// RFC1918 targets stay reachable so local dev servers keep working.
+/// Public DNS names resolving into non-routable ranges are caught at
+/// connect time by [`NonPrivateResolver`] instead — this literal check
+/// only needs to cover the no-DNS cases, where the resolver never runs
+/// (IP-literal hosts skip DNS) and the resolver would be too late.
 fn is_link_local_host(host: &str) -> bool {
     // Trim IPv6 brackets and one trailing root dot (`example.com.`).
     let host = host.trim().trim_start_matches('[').trim_end_matches(']');
@@ -132,6 +134,76 @@ fn is_link_local_host(host: &str) -> bool {
             v6.segments()[0] & 0xffc0 == 0xfe80
         }
         Err(_) => false,
+    }
+}
+
+/// True when the address is non-routable from the public internet:
+/// loopback, RFC1918, link-local, CGNAT 100.64/10, unspecified /
+/// broadcast, documentation ranges, IPv6 unique-local and link-local.
+/// IPv4-mapped IPv6 is judged by the embedded v4 address.
+fn is_private_addr(addr: std::net::IpAddr) -> bool {
+    match addr {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // Carrier-grade NAT 100.64/10 is not covered by std's
+                // `is_private`.
+                || (v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_addr(std::net::IpAddr::V4(v4));
+            }
+            let seg = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // unique-local fc00::/7
+                || seg[0] & 0xfe00 == 0xfc00
+                // link-local fe80::/10 (covers the metadata range's v6 form)
+                || seg[0] & 0xffc0 == 0xfe80
+        }
+    }
+}
+
+/// DNS resolver vetting resolved addresses at connect time: a name that
+/// resolves only into non-routable ranges fails the fetch, so a
+/// public-looking URL cannot smuggle a request into private space
+/// (split-horizon DNS, DNS rebinding). Runs for every connect, so each
+/// redirect hop is re-vetted. IP-literal hosts never consult DNS and
+/// keep the literal behavior documented on [`is_link_local_host`].
+#[derive(Debug)]
+struct NonPrivateResolver;
+
+impl reqwest::dns::Resolve for NonPrivateResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let name = name.as_str().to_string();
+        Box::pin(async move {
+            let host = name.clone();
+            let addrs = tokio::task::spawn_blocking(move || {
+                std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 0u16))
+                    .map(|iter| iter.collect::<Vec<_>>())
+            })
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+            let vetted: Vec<std::net::SocketAddr> = addrs
+                .into_iter()
+                .filter(|addr| !is_private_addr(addr.ip()))
+                .collect();
+            if vetted.is_empty() {
+                return Err(Box::new(std::io::Error::other(format!(
+                    "host '{name}' resolves only into private address ranges; \
+                     this tool never reaches private networks by name"
+                )))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(vetted.into_iter())
+                as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>)
+        })
     }
 }
 
@@ -225,6 +297,7 @@ impl Tool for WebFetch {
         let client = match reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_millis(timeout_ms))
+            .dns_resolver(std::sync::Arc::new(NonPrivateResolver))
             .build()
         {
             Ok(c) => c,
@@ -484,6 +557,59 @@ mod tests {
                 .unwrap_or_else(|| panic!("'{url}' must be refused"));
             assert!(out.is_error, "'{url}'");
         }
+    }
+
+    /// The resolver-side private matrix: every non-routable family is
+    /// caught, public and documented-routable shapes pass.
+    #[test]
+    fn private_address_matrix() {
+        use std::net::{IpAddr, IpAddr::V4, IpAddr::V6};
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "255.255.255.255",
+            "192.0.2.1",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "fd12::1",
+            "::ffff:10.0.0.1",
+        ] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                is_private_addr(match addr {
+                    V4(v4) => V4(v4),
+                    V6(v6) => V6(v6),
+                }),
+                "'{ip}' must be private"
+            );
+        }
+        for ip in ["8.8.8.8", "1.1.1.1", "2606:4700::1111"] {
+            let addr: IpAddr = ip.parse().unwrap();
+            assert!(
+                !is_private_addr(match addr {
+                    V4(v4) => V4(v4),
+                    V6(v6) => V6(v6),
+                }),
+                "'{ip}' must not be private"
+            );
+        }
+    }
+
+    /// A name resolving only into private space fails the resolver;
+    /// `localhost` is the universally available specimen (hosts file,
+    /// no network needed).
+    #[tokio::test]
+    async fn resolver_blocks_names_resolving_private() {
+        use reqwest::dns::Resolve as _;
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        let result = NonPrivateResolver.resolve(name).await;
+        assert!(result.is_err(), "localhost must not resolve");
     }
 
     #[test]

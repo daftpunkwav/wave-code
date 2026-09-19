@@ -257,6 +257,12 @@ impl Conversation {
         Arc::new(self.entries.clone())
     }
 
+    /// Borrowed access to the current history, for readers that scan it
+    /// (token estimates) without paying the snapshot's deep copy.
+    pub fn with_entries<R>(&self, read: impl FnOnce(&[HistoryEntry]) -> R) -> R {
+        read(&self.entries)
+    }
+
     /// Replace the whole history, e.g. with a compaction summary.
     ///
     /// The caller owns re-establishing the usage carry via [`Conversation::settle`].

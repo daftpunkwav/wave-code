@@ -890,6 +890,7 @@ where
         let mut reactive_compacts: u8 = 0;
         let mut state = TurnState::new();
         let mut last_input: Option<u64> = None;
+        let mut estimate_cache = EstimateCache::default();
 
         loop {
             // Checkpoint 1: loop head interrupt returns without sampling.
@@ -945,7 +946,7 @@ where
                     if carry.input_tokens > 0 {
                         carry.input_tokens + carry.output_tokens
                     } else {
-                        estimate_tokens(&flatten(conv)) + CONTEXT_OVERHEAD_TOKENS
+                        estimate_cache.estimate(conv) + CONTEXT_OVERHEAD_TOKENS
                     }
                 }
             };
@@ -1963,18 +1964,64 @@ fn trigger_name(trigger: &CompactTrigger) -> &'static str {
     }
 }
 
-/// Flatten history text for fallback token estimates.
-fn flatten(conv: &Conversation) -> String {
-    conv.snapshot()
-        .iter()
-        .map(|entry| entry.text())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Incremental fallback token estimate for the run loop.
+///
+/// Re-flattening the whole history every tool round costs O(history)
+/// per round (snapshot deep copy plus per-entry text builds); the cache
+/// accounts each entry once and only scans growth. A shrink means the
+/// history was replaced (compaction) or rewound — the estimate is a
+/// fallback heuristic, so the one full re-scan after that is fine.
+#[derive(Default)]
+struct EstimateCache {
+    entries: usize,
+    tokens: u64,
+}
+
+impl EstimateCache {
+    /// Token estimate of the full history, counting only new entries.
+    fn estimate(&mut self, conv: &Conversation) -> u64 {
+        conv.with_entries(|entries| {
+            if entries.len() < self.entries {
+                self.entries = 0;
+                self.tokens = 0;
+            }
+            for entry in &entries[self.entries..] {
+                self.tokens += estimate_tokens(&entry.text());
+            }
+            self.entries = entries.len();
+            self.tokens
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Growth is accounted incrementally (each entry once); a shrink
+    /// resets so the post-compaction history is re-estimated whole.
+    #[test]
+    fn estimate_cache_scans_only_growth_and_resets_on_shrink() {
+        let mut conv = Conversation::new();
+        let mut cache = EstimateCache::default();
+        conv.push(Role::User, "hello");
+        let after_one = cache.estimate(&conv);
+        assert_eq!(after_one, estimate_tokens("hello"));
+        // Re-estimating without growth returns the cached total.
+        assert_eq!(cache.estimate(&conv), after_one);
+        // Growth adds only the new entry.
+        conv.push(Role::Assistant, "hi there");
+        assert_eq!(
+            cache.estimate(&conv),
+            estimate_tokens("hello") + estimate_tokens("hi there")
+        );
+        // Compaction shrank the history: full re-scan of what remains.
+        conv.replace(vec![HistoryEntry {
+            role: Role::User,
+            blocks: vec![state_store::Block::Text("summary only".to_string())],
+        }]);
+        assert_eq!(cache.estimate(&conv), estimate_tokens("summary only"));
+    }
 
     #[test]
     fn turn_state_round_ceiling_is_a_stop_not_an_error() {

@@ -45,6 +45,13 @@ pub struct Config {
     /// at assembly time.
     #[serde(default)]
     pub models: HashMap<String, ModelEntry>,
+    /// Alias into the `[models]` table naming the cheap model used for
+    /// routine side sessions: `/btw` answers sample through it instead of
+    /// the primary model (subagent-style cost steering, kimi's
+    /// `secondary_model`). An unknown alias degrades with a doctor
+    /// finding; unset means side sessions inherit the primary model.
+    #[serde(default)]
+    pub secondary_model: Option<String>,
 }
 
 /// One selectable model entry from the `[models]` config table.

@@ -42,6 +42,12 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
 provider = "your-provider"
 model = "your-model-fast"
 # reasoning_effort = "low"   # OpenAI-compatible providers only
+
+# Optional: cheap model for routine side sessions. `/btw` answers sample
+# through this [models] entry instead of the primary model; an explicit
+# /model choice in the session still wins, and a dangling alias degrades
+# to the primary with a warning (doctor reports it).
+# secondary_model = "fast"
 ```
 
 ## Surfaces

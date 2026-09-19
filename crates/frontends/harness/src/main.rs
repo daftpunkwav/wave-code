@@ -701,20 +701,46 @@ fn make_tui_factory(
                 // whatever provider the original assembly resolved to.
                 let (base_model, provider_override) =
                     model_provider_overrides(model.as_deref(), &settings);
+                // A read-only side session (`/btw`) is routine work: when
+                // the config names a `secondary_model` alias resolvable in
+                // `[models]`, sample through it instead of the primary —
+                // unless the caller pinned a live model hint (an explicit
+                // choice outranks the cost steering). An unresolvable
+                // alias degrades to the primary with a warning.
+                let secondary = if readonly {
+                    load_config_opt(config_path.as_deref())
+                        .ok()
+                        .and_then(|config| resolve_secondary(&config))
+                } else {
+                    None
+                };
+                let (model_override, provider_override, thinking_override) =
+                    match (&secondary, &model_hint) {
+                        (Some((model, provider, effort)), None) => (
+                            Some(model.clone()),
+                            provider.clone(),
+                            effort.clone().or(settings.default_effort.clone()),
+                        ),
+                        _ => (
+                            model_hint.clone().or(base_model),
+                            provider_override,
+                            settings.default_effort.clone(),
+                        ),
+                    };
                 let mut handle = assemble_session(AssembleOptions {
                     config_path,
                     // A launch hint (the live /model choice) wins; a
                     // read-only side session runs in plan mode so
                     // approvals and destructive work are impossible by
                     // mode, never by trust.
-                    model_override: model_hint.or(base_model),
+                    model_override,
                     provider_override,
                     permission_override: if readonly {
                         Some("plan".to_string())
                     } else {
                         permission_mode
                     },
-                    thinking_override: settings.default_effort.clone(),
+                    thinking_override,
                     wave_denylist: settings.wave_denylist,
                     cwd: cwd.clone(),
                     home: home.clone(),
@@ -919,6 +945,29 @@ fn load_config_opt(
     }
 }
 
+/// Resolve the config's `secondary_model` alias into the
+/// `(model, provider, effort)` triple side sessions sample through.
+/// `None` when unset — or when the alias dangles, which warns here and
+/// degrades to the primary model (doctor reports the same finding).
+fn resolve_secondary(
+    config: &wavecode_config::Config,
+) -> Option<(String, Option<String>, Option<String>)> {
+    let alias = config.secondary_model.as_deref()?;
+    match config.models.get(alias) {
+        Some(entry) => Some((
+            entry.model.clone(),
+            Some(entry.provider.clone()),
+            entry.reasoning_effort.clone(),
+        )),
+        None => {
+            eprintln!(
+                "[warn] secondary_model {alias:?} is not in [models]; side sessions use the primary model"
+            );
+            None
+        }
+    }
+}
+
 /// The effective model name: override or config default.
 fn effective_model(model_override: &Option<String>, config: &wavecode_config::Config) -> String {
     model_override
@@ -1107,6 +1156,19 @@ fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> 
                         "models.{alias}: unknown provider {:?} (not in [model_providers])",
                         entry.provider
                     )));
+                }
+            }
+            // The secondary alias steers side-session cost: a dangling
+            // pointer degrades silently at runtime, so doctor surfaces it.
+            if let Some(alias) = &config.secondary_model {
+                match config.models.get(alias) {
+                    Some(entry) => checks.push(ok(format!(
+                        "secondary_model.{alias}: {} via {}",
+                        entry.model, entry.provider
+                    ))),
+                    None => checks.push(fail(format!(
+                        "secondary_model: alias {alias:?} is not in [models]"
+                    ))),
                 }
             }
         }
@@ -2048,6 +2110,32 @@ model = "m2"
         assert!(failed.iter().any(|l| l.contains("settings:")), "{failed:?}");
     }
 
+    /// The secondary alias resolves through `[models]` for side
+    /// sessions; unset degrades to None, a dangling alias warns and also
+    /// degrades (doctor reports the same finding).
+    #[test]
+    fn secondary_model_resolution_has_three_outcomes() {
+        let mut config = picker_config();
+        assert_eq!(resolve_secondary(&config), None, "unset stays None");
+
+        config.secondary_model = Some("fast".to_string());
+        assert_eq!(
+            resolve_secondary(&config),
+            Some((
+                "fast-model".to_string(),
+                Some("fastp".to_string()),
+                Some("low".to_string())
+            ))
+        );
+
+        config.secondary_model = Some("ghost".to_string());
+        assert_eq!(
+            resolve_secondary(&config),
+            None,
+            "a dangling alias degrades instead of failing assembly"
+        );
+    }
+
     /// An empty-but-valid session index is healthy; a broken one fails.
     /// `list_sessions` reads both as empty, so doctor must parse the
     /// file itself to tell them apart.
@@ -2463,6 +2551,7 @@ model = "m2"
             hooks: std::collections::HashMap::new(),
             mcp_servers: std::collections::HashMap::new(),
             models,
+            secondary_model: None,
         }
     }
 

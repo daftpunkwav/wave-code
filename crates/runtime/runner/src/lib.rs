@@ -999,7 +999,7 @@ where
                                     emit_msg(EventMsg::Error {
                                         message: cause,
                                         recoverable: false,
-                                        code: Some("context.overflow".to_string()),
+                                        code: Some("compact.failed".to_string()),
                                     });
                                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                                     return StopReason::Error(

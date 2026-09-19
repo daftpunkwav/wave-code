@@ -78,9 +78,6 @@ struct SessionEntry {
     jobs: mpsc::UnboundedSender<SessionJob>,
     /// Request id of the in-flight prompt, if any.
     in_flight: Option<serde_json::Value>,
-    /// Session permission mode wire name (assembly-resolved at `session/new`,
-    /// updated by `session/set_mode`).
-    mode: String,
 }
 
 /// Work for a session task.
@@ -394,7 +391,6 @@ async fn new_session<W, F>(
         SessionEntry {
             jobs: job_tx,
             in_flight: None,
-            mode: mode.clone(),
         },
     );
     write_success(
@@ -607,7 +603,9 @@ async fn set_mode<W>(
             .await;
         }
         Some(entry) => {
-            entry.mode = mode_id.to_string();
+            // No local mode copy is kept: the actor is the source of
+            // truth (a queued switch can be rejected there), and ACP
+            // has no query surface that would need the mirror.
             let _ = entry.jobs.send(SessionJob::SetMode {
                 mode: mode_id.to_string(),
             });

@@ -21,12 +21,24 @@ use tui_engine::loader::SAW_FRAMES;
 use tui_engine::width::strip_ansi;
 
 /// One compaction run: created live on `CompactStarted`, finalized in
-/// place on `CompactCompleted`.
+/// place on `CompactCompleted` (or on the failure paths that report the
+/// compaction died without completing).
 pub struct CompactionCard {
     trigger: String,
     started: Instant,
-    /// `None` while running; the settled outcome afterwards.
-    finished: Option<CompactionStats>,
+    outcome: Outcome,
+}
+
+/// How a compaction run ended. A failed compaction emits no
+/// `CompactCompleted`, so the console settles the card itself when the
+/// error (or the containing turn) proves it dead.
+enum Outcome {
+    /// Still summarizing.
+    Running,
+    /// The summary landed.
+    Done(CompactionStats),
+    /// The compactor failed; the conversation was not replaced.
+    Failed,
 }
 
 /// What the completed compaction produced.
@@ -45,21 +57,26 @@ impl CompactionCard {
         Self {
             trigger: trigger.to_string(),
             started: Instant::now(),
-            finished: None,
+            outcome: Outcome::Running,
         }
     }
 
     /// Finalize with the summary tokens and the pre-compaction usage.
     pub fn finish(&mut self, summary_tokens: u64, context_before: Option<u64>) {
-        self.finished = Some(CompactionStats {
+        self.outcome = Outcome::Done(CompactionStats {
             summary_tokens,
             context_before,
         });
     }
 
+    /// Settle as failed: no summary landed, the pulse must stop.
+    pub fn fail(&mut self) {
+        self.outcome = Outcome::Failed;
+    }
+
     /// True while the compaction is still running.
     pub fn is_running(&self) -> bool {
-        self.finished.is_none()
+        matches!(self.outcome, Outcome::Running)
     }
 }
 
@@ -67,8 +84,8 @@ impl Component for CompactionCard {
     fn render(&mut self, _columns: usize) -> Vec<String> {
         let theme = theme::current();
         let trigger = strip_ansi(&self.trigger);
-        match self.finished {
-            None => {
+        match self.outcome {
+            Outcome::Running => {
                 let step = (self.started.elapsed().as_millis()
                     / tui_engine::loader::SAW_INTERVAL_MS as u128) as usize;
                 let frame = SAW_FRAMES[step % SAW_FRAMES.len()];
@@ -78,7 +95,7 @@ impl Component for CompactionCard {
                     &format!("{frame} compacting context ({trigger})… {seconds}s"),
                 )]
             }
-            Some(stats) => {
+            Outcome::Done(stats) => {
                 let before = stats
                     .context_before
                     .map(|tokens| format_tokens(tokens))
@@ -89,6 +106,12 @@ impl Component for CompactionCard {
                         "● compacted ({trigger}): context {before}, summary {} tokens",
                         format_tokens(stats.summary_tokens)
                     ),
+                )]
+            }
+            Outcome::Failed => {
+                vec![theme.paint(
+                    Token::Error,
+                    &format!("● compaction failed ({trigger}); context unchanged"),
                 )]
             }
         }
@@ -133,5 +156,14 @@ mod tests {
         card.finish(1_500, None);
         let plain = strip_ansi(&card.render(120).join("\n"));
         assert!(plain.contains("context ?"), "{plain}");
+    }
+
+    #[test]
+    fn failed_card_settles_without_a_pulse() {
+        let mut card = CompactionCard::running("manual");
+        card.fail();
+        assert!(!card.is_running());
+        let plain = strip_ansi(&card.render(120).join("\n"));
+        assert!(plain.contains("compaction failed (manual)"), "{plain}");
     }
 }

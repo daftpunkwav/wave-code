@@ -853,6 +853,17 @@ impl ConsoleUi {
                         self.push_status("request dismissed (turn failed)", false);
                     }
                 }
+                // An idle compaction failure surfaces as a recoverable
+                // error with no turn attached (manual `/compact`); with
+                // no turn to settle the card, the error is the signal
+                // the compaction died.
+                if self.compaction_card.is_some() && !self.state.busy() {
+                    if let Some(card) = self.compaction_card_mut() {
+                        card.fail();
+                    }
+                    self.compaction_card = None;
+                    self.compaction_before = None;
+                }
                 true
             }
             EventMsg::TurnCompleted { interrupted } => {
@@ -872,6 +883,17 @@ impl ConsoleUi {
                 }
                 if *interrupted {
                     self.push_status("interrupted", false);
+                }
+                // A compaction card still live at turn end means its
+                // compaction died without emitting CompactCompleted
+                // (in-turn auto/reactive/blocking failures): settle it,
+                // or the pulse and the animation ticks would run forever.
+                if self.compaction_card.is_some() {
+                    if let Some(card) = self.compaction_card_mut() {
+                        card.fail();
+                    }
+                    self.compaction_card = None;
+                    self.compaction_before = None;
                 }
                 // Journal the completed turn (text snapshot) so
                 // /sessions + resume can replay it later.
@@ -2768,6 +2790,52 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("nothing to rewind"), "{joined}");
+    }
+
+    #[test]
+    fn failed_idle_compaction_settles_the_card() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::CompactStarted {
+            trigger: "manual".to_string(),
+        });
+        assert!(ui.compaction_running(), "card live while compacting");
+        // The actor reports a failed manual compaction as a recoverable
+        // error with no turn attached; the card must settle anyway.
+        ui.handle_wire_event(&EventMsg::Error {
+            message: "compact failed".to_string(),
+            recoverable: true,
+        });
+        assert!(!ui.compaction_running(), "error settles the idle card");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(joined.contains("compaction failed (manual)"), "{joined}");
+    }
+
+    #[test]
+    fn turn_end_settles_a_dangling_compaction_card() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::TurnStarted);
+        ui.handle_wire_event(&EventMsg::CompactStarted {
+            trigger: "auto".to_string(),
+        });
+        assert!(ui.compaction_running());
+        // No CompactCompleted arrives: the in-turn compaction failed and
+        // the turn ended without it.
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        assert!(!ui.compaction_running(), "turn end settles the card");
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("
+");
+        assert!(joined.contains("compaction failed (auto)"), "{joined}");
     }
 
     #[test]

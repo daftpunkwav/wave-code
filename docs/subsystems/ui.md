@@ -94,7 +94,10 @@ receivers remain compatible.
   the model summarizer). The transcript shows a live compaction card
   (saw-wave pulse, elapsed seconds) that settles into
   `● compacted: context <before>, summary <N> tokens`, where `before`
-  is the most recent sample's context usage.
+  is the most recent sample's context usage. A failed compaction emits
+  no completion event, so the card settles into
+  `● compaction failed (…)` on the error (idle `/compact`) or the turn
+  end (in-turn auto compaction) that proves it dead.
 - `/undo [n]` drops the last n conversation turns (default 1,
   idle-only): the wire `Rewind` op truncates the actor's conversation,
   the `HistoryRewound` event trims dialogue and transcript, and the
@@ -190,6 +193,13 @@ receivers remain compatible.
   platform shell (`/editor <cmd>` setting, else `$VISUAL`/`$EDITOR`),
   and the saved text replaces the draft; an empty save keeps the
   original.
+- Compaction shows a live card that settles into
+  `● compacted (trigger): context <before>, summary <N> tokens` — or,
+  when the compactor fails (a manual `/compact` reports a recoverable
+  error with no turn attached), into
+  `● compaction failed (trigger); context unchanged`. The console
+  settles a still-running card on turn end or on the failure error, so
+  the pulse and its animation ticks can never run forever.
 - File-write approval payloads carry the affected lines (`-` old,
   `+` new, from the sandbox's `ask_detail`) and the approval dialog
   paints them with the diff colors — the user approves visible

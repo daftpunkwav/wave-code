@@ -126,6 +126,16 @@ enum Command {
     /// Compare the running version against the newest published GitHub
     /// release.
     Update,
+    /// Serve live sessions over local HTTP (REST + SSE). Binds the
+    /// loopback interface only; the bearer token prints on startup.
+    Serve {
+        /// Bind port (0 picks an ephemeral port).
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// Bearer token (default: a fresh random token per run).
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 /// MCP surfaces on the new stack.
@@ -446,6 +456,13 @@ async fn main() -> anyhow::Result<()> {
         run_update_check().await;
         std::process::exit(Outcome::Completed.exit_code())
     }
+    // The app server assembles sessions lazily per POST /sessions, so it
+    // returns before the shared assembly below and needs no provider
+    // credential check of its own.
+    if let Some(Command::Serve { port, token }) = args.command {
+        run_serve(args.config, port, token, cwd, home).await?;
+        std::process::exit(Outcome::Completed.exit_code())
+    }
     // ACP serves headless sessions over stdio until EOF. Sessions
     // assemble lazily per `session/new`, so this returns before the
     // shared assembly below (which would build a throwaway session).
@@ -527,12 +544,13 @@ async fn main() -> anyhow::Result<()> {
             run_resume(thread_id, permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        // Mcp/Plugin/Acp/Doctor/Update return before assembly above.
+        // Mcp/Plugin/Acp/Doctor/Update/Serve return before assembly above.
         Some(Command::Mcp { .. })
         | Some(Command::Plugin { .. })
         | Some(Command::Acp)
         | Some(Command::Doctor)
-        | Some(Command::Update) => {
+        | Some(Command::Update)
+        | Some(Command::Serve { .. }) => {
             unreachable!("early-return surfaces never reach assembly")
         }
         None => unreachable!("bare invocation returns above"),
@@ -1057,7 +1075,47 @@ fn run_plugin_list(home: Option<PathBuf>) {
     }
 }
 
+/// Serve live sessions over local HTTP until Ctrl-C or `POST /shutdown`.
+///
+/// The bearer token prints once; every route except `/healthz` requires
+/// it, and the server binds the loopback interface only.
+async fn run_serve(
+    config: Option<PathBuf>,
+    port: u16,
+    token: Option<String>,
+    cwd: PathBuf,
+    home: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let token = token.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let options = operations_bootstrap::app_server::ServeOptions {
+        config_path: config,
+        model_override: None,
+        cwd,
+        home,
+        token: token.clone(),
+        port,
+    };
+    let handle =
+        operations_bootstrap::app_server::serve(options, operations_bootstrap::assemble_session)
+            .await?;
+    // stderr: unbuffered even when the process is piped (stdout would
+    // block-buffer and a spawning parent would never see the token).
+    eprintln!(
+        "wavecode serve listening on http://127.0.0.1:{} (Ctrl-C stops)",
+        handle.port
+    );
+    eprintln!("bearer token: {token}");
+    eprintln!(
+        "try: curl -H 'Authorization: Bearer {token}' http://127.0.0.1:{}/healthz",
+        handle.port
+    );
+    tokio::signal::ctrl_c().await?;
+    handle.shutdown();
+    Ok(())
+}
+
 /// Probe the newest published release and report the comparison.
+///
 /// `--debug` aside, this surface has no session; a network failure
 /// prints and exits 1 so callers never read a failed probe as "no
 /// update available".

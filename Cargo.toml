@@ -30,6 +30,8 @@ bytes = "1"
 base64 = "0.22"
 regex = "1"
 glob = "0.3"
+# App server: HTTP+SSE over tokio (matches the workspace's async stack).
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 pulldown-cmark = "0.13"

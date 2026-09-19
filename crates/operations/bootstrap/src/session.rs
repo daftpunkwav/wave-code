@@ -70,6 +70,8 @@ pub struct SessionHandle {
     pub client: ActorClient,
     /// Shared approval gate behind parked decisions.
     pub approvals: Arc<ApprovalGate>,
+    /// Shared question gate behind parked interactive questions.
+    pub questions: Arc<QuestionGate>,
     /// Shared interrupt handle for stops and drops.
     pub interrupt: infrastructure_base::InterruptHandle,
     /// Assembled system prompt (also injected into every turn).
@@ -824,6 +826,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     SessionHandle {
         client,
         approvals,
+        questions,
         interrupt,
         system,
         model_name,

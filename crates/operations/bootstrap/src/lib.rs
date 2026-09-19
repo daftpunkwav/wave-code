@@ -20,6 +20,7 @@
 
 pub mod acp;
 pub mod agent_task_tool;
+pub mod app_server;
 pub mod ask_user_tool;
 pub mod child_service;
 pub mod compactor;

@@ -90,6 +90,13 @@ model = "your-model-fast"
   `wavecode resume <thread-id>` imports its history as text and continues
   interactively. Tool calls import as `[tool:name]` / `[error:...]` markers
   (text import is the documented scope; replay never re-executes).
+- `serve`: local HTTP app server (REST + SSE) over live sessions. Binds
+  `127.0.0.1` only, requires a per-run bearer token (printed on startup,
+  `--token` overrides). `POST /sessions` assembles a parking-enabled
+  session; `GET /sessions/{id}/events` streams wire events as SSE;
+  `POST /sessions/{id}/prompt` submits a turn; parked approvals and
+  questions are answered via `POST .../approvals/{call_id}` and
+  `.../questions/{call_id}`; `POST /shutdown` stops the server.
 - `doctor`: validates local setup without contacting any provider — config
   parse, provider api key resolution (never printed), `[models]` entries,
   console settings, custom themes, and session records. Exit 1 when any

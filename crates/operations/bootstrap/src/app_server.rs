@@ -1,0 +1,890 @@
+/*!
+ * @file AppServer
+ * @description Local HTTP server exposing live sessions over REST + SSE.
+ *
+ * Responsibilities:
+ * - Assemble one parking-enabled session per `POST /sessions`.
+ * - Stream wire events to any number of SSE subscribers per session.
+ * - Deliver approval/question decisions from HTTP handlers to the gates.
+ * - Enforce bearer-token auth and loopback-only Host headers.
+ *
+ * Architecture: each session owns a pump task that holds the actor
+ * client exclusively — it forwards wire events onto a broadcast channel
+ * (SSE subscribers) and executes submissions arriving on a command
+ * channel (HTTP handlers), so event consumption and submission never
+ * race on the client.
+ *
+ * Security posture: binds the loopback interface only; every route
+ * except `/healthz` requires `Authorization: Bearer <token>`; the Host
+ * header must name the loopback host (DNS-rebinding guard — an attacker
+ * page cannot reach the server under its own hostname even if it
+ * guesses the port). The token is generated per run and printed once on
+ * startup.
+ *
+ * This module must not depend on: frontends (the binary drives it).
+ */
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use tokio::sync::{Notify, broadcast, mpsc};
+use wavecode_wire::{Event, EventMsg, Op, Submission};
+
+use crate::session::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionHandle};
+
+/// Server inputs; sessions inherit these at assembly.
+#[derive(Debug, Clone)]
+pub struct ServeOptions {
+    /// Config file override passed through to assembly.
+    pub config_path: Option<std::path::PathBuf>,
+    /// Model override passed through to assembly.
+    pub model_override: Option<String>,
+    /// Working directory for sessions that omit one.
+    pub cwd: std::path::PathBuf,
+    /// Home directory for the session journal.
+    pub home: Option<std::path::PathBuf>,
+    /// Bearer token every authenticated route requires.
+    pub token: String,
+    /// Bind port; 0 picks an ephemeral port (the bound port is returned).
+    pub port: u16,
+}
+
+/// Commands a session's pump task executes on the owned actor client.
+enum SessionCommand {
+    Submit {
+        submission_id: String,
+        op: Op,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// One live session: a command channel into the pump task plus the
+/// gates HTTP handlers answer directly.
+struct AppSession {
+    commands: mpsc::Sender<SessionCommand>,
+    /// Submission counter for unique submission ids.
+    submissions: u64,
+    /// Assembles wire events for every SSE subscriber.
+    events: broadcast::Sender<Event>,
+    approvals: Arc<safety_gate::ApprovalGate>,
+    questions: Arc<safety_gate::QuestionGate>,
+    interrupt: infrastructure_base::InterruptHandle,
+}
+
+type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, AppSession>>>;
+
+/// The injection seam: builds one parking-enabled session handle.
+type Assemble = Arc<dyn Fn(AssembleOptions) -> Result<SessionHandle, SessionError> + Send + Sync>;
+
+/// Shared server state behind the router.
+#[derive(Clone)]
+struct AppState {
+    sessions: SharedSessions,
+    token: String,
+    base: ServeOptions,
+    next_session: Arc<tokio::sync::Mutex<u64>>,
+    shutdown: Arc<Notify>,
+    assemble: Assemble,
+}
+
+/// The server surface handed back to the caller (CLI or tests).
+pub struct ServerHandle {
+    /// The bound loopback port (useful when 0 was requested).
+    pub port: u16,
+    shutdown: Arc<Notify>,
+}
+
+impl ServerHandle {
+    /// Trigger the graceful shutdown; `join` then reaps the server.
+    pub fn shutdown(&self) {
+        self.shutdown.notify_waiters();
+    }
+}
+
+/// Bind and run the server on a background task.
+///
+/// `assemble` is the composition seam: production passes
+/// `assemble_session`; tests pass a scripted-model assembly. Sessions
+/// assemble with parking enabled so approvals and questions wait on the
+/// gates until the HTTP endpoints answer.
+pub async fn serve<F>(options: ServeOptions, assemble: F) -> std::io::Result<ServerHandle>
+where
+    F: Fn(AssembleOptions) -> Result<SessionHandle, SessionError> + Send + Sync + Clone + 'static,
+{
+    let assemble: Assemble = Arc::new(assemble);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], options.port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let port = listener.local_addr()?.port();
+
+    let shutdown = Arc::new(Notify::new());
+    let state = AppState {
+        sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        token: options.token.clone(),
+        next_session: Arc::new(tokio::sync::Mutex::new(1)),
+        shutdown: shutdown.clone(),
+        assemble,
+        base: options,
+    };
+    let server_shutdown = shutdown.clone();
+
+    let app = router(state);
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        server_shutdown.notified().await;
+    });
+    tokio::spawn(async move {
+        if let Err(e) = server.await {
+            eprintln!("[serve] http server failed: {e}");
+        }
+    });
+    Ok(ServerHandle { port, shutdown })
+}
+
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/sessions", post(create_session).get(list_sessions))
+        .route("/sessions/{session_id}/prompt", post(prompt_session))
+        .route("/sessions/{session_id}/events", get(stream_events))
+        .route(
+            "/sessions/{session_id}/approvals/{call_id}",
+            post(answer_approval),
+        )
+        .route(
+            "/sessions/{session_id}/questions/{call_id}",
+            post(answer_question),
+        )
+        .route("/sessions/{session_id}/cancel", post(cancel_session))
+        .route("/sessions/{session_id}", delete(drop_session))
+        .route("/shutdown", post(shutdown))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_and_host_guard,
+        ))
+        .with_state(state)
+}
+
+/// Auth + Host middleware: bearer token on every route except
+/// `/healthz`, and the Host header must name the loopback host.
+async fn auth_and_host_guard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if request.uri().path() != "/healthz" {
+        let expected = format!("Bearer {}", state.token);
+        let authorized = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|value| value == expected);
+        if !authorized {
+            return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
+        }
+    }
+    if !host_allowed(
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default(),
+    ) {
+        return (StatusCode::FORBIDDEN, "loopback hosts only").into_response();
+    }
+    next.run(request).await
+}
+
+/// True when the Host header names the loopback interface (with any
+/// port). Everything else is a rebinding attempt.
+fn host_allowed(host: &str) -> bool {
+    let hostname = host.rsplit_once(':').map_or(host, |(h, _)| h);
+    matches!(hostname, "127.0.0.1" | "localhost" | "[::1]")
+}
+
+/// Parse an approval decision body: `{"decision":"allow"|"always"|"deny",
+/// "reason"?: string}`.
+fn parse_decision(value: &serde_json::Value) -> Option<safety_gate::ApprovalDecision> {
+    match value.get("decision")?.as_str()? {
+        "allow" => Some(safety_gate::ApprovalDecision::AllowOnce),
+        "always" => Some(safety_gate::ApprovalDecision::AllowAlways),
+        "deny" => Some(safety_gate::ApprovalDecision::Deny {
+            reason: value
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
+        _ => None,
+    }
+}
+
+async fn create_session(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let cwd = body
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state.base.cwd.clone());
+    let handle = match (state.assemble)(AssembleOptions {
+        config_path: state.base.config_path.clone(),
+        model_override: state.base.model_override.clone(),
+        provider_override: None,
+        permission_override: None,
+        thinking_override: None,
+        cwd,
+        home: state.base.home.clone(),
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: false,
+        initial_history: Vec::new(),
+        wave_denylist: Vec::new(),
+    }) {
+        Ok(handle) => handle,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("session assembly failed: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let next = state.next_session.lock().await;
+    let session_id = format!("sess-{}", *next);
+    drop(next);
+
+    let permission_mode = handle.permission_mode.clone();
+    // The pump owns the client exclusively: it fans events out to SSE
+    // subscribers and executes submissions from the command channel.
+    let (events, _) = broadcast::channel(256);
+    let (commands, command_rx) = mpsc::channel(32);
+    pump(handle.client, events.clone(), command_rx);
+
+    state.sessions.lock().await.insert(
+        session_id.clone(),
+        AppSession {
+            commands,
+            submissions: 0,
+            events,
+            approvals: handle.approvals,
+            questions: handle.questions,
+            interrupt: handle.interrupt.clone(),
+        },
+    );
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "session_id": session_id,
+            "permission_mode": permission_mode,
+        })),
+    )
+        .into_response()
+}
+
+async fn list_sessions(State(state): State<AppState>) -> axum::response::Response {
+    let sessions = state.sessions.lock().await;
+    let ids: Vec<&String> = sessions.keys().collect();
+    Json(serde_json::json!({ "sessions": ids })).into_response()
+}
+
+async fn prompt_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(text) = body.get("text").and_then(serde_json::Value::as_str) else {
+        return (StatusCode::BAD_REQUEST, "`text` is required").into_response();
+    };
+    if text.is_empty() {
+        return (StatusCode::BAD_REQUEST, "`text` must not be empty").into_response();
+    }
+    submit(
+        state,
+        &session_id,
+        Op::UserInput {
+            text: text.to_string(),
+        },
+    )
+    .await
+}
+
+async fn answer_approval(
+    State(state): State<AppState>,
+    Path((session_id, call_id)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(decision) = parse_decision(&body) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "`decision` must be allow, always, or deny (with optional reason)".to_string(),
+        )
+            .into_response();
+    };
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&session_id) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    if session.approvals.decide(&call_id, decision) {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no parked approval for that call id").into_response()
+    }
+}
+
+async fn answer_question(
+    State(state): State<AppState>,
+    Path((session_id, call_id)): Path<(String, String)>,
+    Json(body): Json<serde_json::Value>,
+) -> axum::response::Response {
+    let Some(answer) = body.get("answer").and_then(serde_json::Value::as_str) else {
+        return (StatusCode::BAD_REQUEST, "`answer` is required").into_response();
+    };
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&session_id) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    if session.questions.answer(&call_id, answer.to_string()) {
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "no parked question for that call id").into_response()
+    }
+}
+
+async fn cancel_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> axum::response::Response {
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&session_id) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    session.interrupt.trigger();
+    StatusCode::OK.into_response()
+}
+
+async fn drop_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> axum::response::Response {
+    let removed = state.sessions.lock().await.remove(&session_id);
+    if removed.is_some() {
+        // Dropping the entry drops the pump's command sender and the
+        // broadcast sender; the pump exits when the actor goes quiet.
+        StatusCode::OK.into_response()
+    } else {
+        (StatusCode::NOT_FOUND, "unknown session").into_response()
+    }
+}
+
+async fn shutdown(State(state): State<AppState>) -> axum::response::Response {
+    state.shutdown.notify_waiters();
+    StatusCode::OK.into_response()
+}
+
+/// SSE stream of one session's wire events.
+async fn stream_events(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> axum::response::Response {
+    let sessions = state.sessions.lock().await;
+    let Some(session) = sessions.get(&session_id) else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    let mut receiver = session.events.subscribe();
+    let _ = &session;
+    drop(sessions);
+    let stream = async_stream::stream! {
+        loop {
+            match receiver.recv().await {
+                Ok(event) => {
+                    let payload = serde_json::to_string(&event).unwrap_or_default();
+                    yield Ok(SseEvent::default().data(payload));
+                    if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let payload = serde_json::json!({
+                        "type": "warning",
+                        "message": format!("SSE subscriber lagged; {skipped} events skipped"),
+                    }).to_string();
+                    yield Ok(SseEvent::default().data(payload));
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    // Box + pin: the generator borrows nothing but must outlive the
+    // response, and `Sse` needs one concrete stream type.
+    let stream: std::pin::Pin<
+        Box<dyn futures::Stream<Item = Result<SseEvent, std::convert::Infallible>> + Send>,
+    > = Box::pin(stream);
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+// ---- internals ----
+
+/// Spawn a session's pump task: exclusive client owner, forwarding
+/// events to subscribers and executing submission commands.
+fn pump(
+    mut client: operations_actor::ActorClient,
+    events: broadcast::Sender<Event>,
+    mut commands: mpsc::Receiver<SessionCommand>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                event = client.next_event() => match event {
+                    Some(event) => {
+                        let _ = events.send(event);
+                    }
+                    None => break,
+                },
+                command = commands.recv() => match command {
+                    Some(SessionCommand::Submit { submission_id, op, reply }) => {
+                        let result = client
+                            .submit(Submission { id: submission_id, op })
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(result);
+                    }
+                    None => {
+                        // All handles dropped (session deleted): shut the
+                        // actor down cleanly and end the pump.
+                        let _ = client
+                            .submit(Submission {
+                                id: "server-shutdown".to_string(),
+                                op: Op::Shutdown,
+                            })
+                            .await;
+                        break;
+                    }
+                },
+            }
+        }
+    });
+}
+
+/// Queue one op through the session's pump and wait for acceptance.
+async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Response {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let submission_id = {
+        let mut sessions = state.sessions.lock().await;
+        let Some(session) = sessions.get_mut(session_id) else {
+            return (StatusCode::NOT_FOUND, "unknown session").into_response();
+        };
+        session.submissions += 1;
+        format!("srv-{session_id}-{}", session.submissions)
+    };
+    // Send without holding the lock across await; the pump replies.
+    let sessions = state.sessions.lock().await;
+    let send_result = sessions.get(session_id).map(|session| {
+        session.commands.try_send(SessionCommand::Submit {
+            submission_id,
+            op,
+            reply: reply_tx,
+        })
+    });
+    drop(sessions);
+    let Some(send_result) = send_result else {
+        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+    };
+    if send_result.is_err() {
+        // The pump is gone: the session is closing.
+        return (StatusCode::CONFLICT, "session is closing").into_response();
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"queued": true})),
+        )
+            .into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": e})),
+        )
+            .into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "session closed").into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    const CONFIG: &str = r#"
+model = "m1"
+model_provider = "p1"
+
+[model_providers.p1]
+type = "anthropic"
+base_url = "https://api.example.com/anthropic"
+api_key = "k-inline"
+"#;
+
+    /// Scripted model: serves one queued script, then a plain completion
+    /// so follow-up samples terminate the loop.
+    struct OneShotModel {
+        script: std::sync::Mutex<Option<Vec<wavecode_llm::StreamEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl wavecode_llm::ChatModel for OneShotModel {
+        async fn stream(
+            &self,
+            _req: wavecode_llm::ChatRequest,
+        ) -> wavecode_llm::Result<wavecode_llm::EventStream> {
+            let fallback = || {
+                vec![
+                    wavecode_llm::StreamEvent::TextDelta {
+                        text: "done".to_string(),
+                    },
+                    wavecode_llm::StreamEvent::MessageComplete {
+                        stop_reason: "end_turn".to_string(),
+                        usage: wavecode_llm::Usage::default(),
+                    },
+                ]
+            };
+            let script = self
+                .script
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .unwrap_or_else(fallback);
+            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
+        }
+    }
+
+    /// Assembly seam for tests: config from a tempdir, scripted model.
+    #[derive(Clone)]
+    struct TestAssemble {
+        scripts: Arc<std::sync::Mutex<VecDeque<Vec<wavecode_llm::StreamEvent>>>>,
+        fallback_config: std::path::PathBuf,
+    }
+
+    impl TestAssemble {
+        fn assemble(&self, options: AssembleOptions) -> Result<SessionHandle, SessionError> {
+            let path = options
+                .config_path
+                .clone()
+                .unwrap_or_else(|| self.fallback_config.clone());
+            let config = wavecode_config::Config::load_from(&path).map_err(SessionError::Config)?;
+            let model_name = options
+                .model_override
+                .clone()
+                .unwrap_or_else(|| config.model.clone());
+            let script = self
+                .scripts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front()
+                .unwrap_or_default();
+            let model: Arc<dyn wavecode_llm::ChatModel> = Arc::new(OneShotModel {
+                script: std::sync::Mutex::new(Some(script)),
+            });
+            Ok(crate::session::assemble_session_with_model(
+                crate::session::WithModel {
+                    config,
+                    model,
+                    model_name,
+                    provider_id: "test".to_string(),
+                    thinking_effort: None,
+                    deny_env: Vec::new(),
+                    context_window: 200_000,
+                    max_output_tokens: 64,
+                    headless: options.headless,
+                    permission_override: options.permission_override,
+                    cwd: options.cwd,
+                    home: options.home,
+                    identity: options.identity.clone(),
+                    initial_history: options.initial_history,
+                    wave_denylist: options.wave_denylist,
+                    warnings: Vec::new(),
+                },
+            ))
+        }
+    }
+
+    /// Start a server on an ephemeral port with the given scripts.
+    async fn start(
+        scripts: Vec<Vec<wavecode_llm::StreamEvent>>,
+    ) -> (String, u16, tokio::sync::oneshot::Sender<()>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = tmp.path().join("config.toml");
+        std::fs::write(&config, CONFIG).unwrap();
+        let assemble = TestAssemble {
+            scripts: Arc::new(std::sync::Mutex::new(scripts.into_iter().collect())),
+            fallback_config: config,
+        };
+        let token = "test-token".to_string();
+        let handle = serve(
+            ServeOptions {
+                config_path: None,
+                model_override: None,
+                cwd: tmp.path().to_path_buf(),
+                home: None,
+                token: token.clone(),
+                port: 0,
+            },
+            move |options| assemble.assemble(options),
+        )
+        .await
+        .unwrap();
+        let port = handle.port;
+        // Keep the tempdir alive until the caller drops its sender: the
+        // task holds the dir and waits for the receiver to go away.
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _tmp = tmp;
+            let _ = rx.await;
+        });
+        (token, port, tx)
+    }
+
+    fn client(token: &str) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
+    }
+
+    /// Open the events endpoint and await its headers; call before
+    /// prompting so the subscription cannot miss early events.
+    async fn open_events(
+        client: &reqwest::Client,
+        port: u16,
+        session_id: &str,
+    ) -> reqwest::Response {
+        let response = client
+            .get(format!(
+                "http://127.0.0.1:{port}/sessions/{session_id}/events"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response
+    }
+
+    /// Collect `n` SSE data payloads from an open events response.
+    async fn collect_events(response: reqwest::Response, n: usize) -> Vec<serde_json::Value> {
+        use futures::StreamExt as _;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut out = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        while out.len() < n {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                panic!("timed out collecting SSE events");
+            }
+            let chunk = match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(Ok(bytes))) => bytes,
+                // The stream ends at turn completion (or session close):
+                // return whatever arrived.
+                _ => break,
+            };
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(pos) = buffer.find("\n\n") {
+                let frame = buffer.drain(..pos + 2).collect::<String>();
+                for line in frame.lines() {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        out.push(serde_json::from_str(data).unwrap());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn healthz_is_open_and_other_routes_require_the_token() {
+        let (token, port, done) = start(vec![]).await;
+        let anonymous = reqwest::Client::new();
+        assert_eq!(
+            anonymous
+                .get(format!("http://127.0.0.1:{port}/healthz"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            anonymous
+                .get(format!("http://127.0.0.1:{port}/sessions"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let authorized = client(&token);
+        assert_eq!(
+            authorized
+                .get(format!("http://127.0.0.1:{port}/sessions"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        let _ = done;
+    }
+
+    #[tokio::test]
+    async fn non_loopback_host_headers_are_refused() {
+        let (token, port, done) = start(vec![]).await;
+        let http = client(&token);
+        let rebound = http
+            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .header("Host", "evil.example.com")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rebound.status(), StatusCode::FORBIDDEN);
+        let _ = done;
+    }
+
+    #[tokio::test]
+    async fn session_lifecycle_streams_prompt_events_over_sse() {
+        let script = vec![
+            wavecode_llm::StreamEvent::TextDelta {
+                text: "hello".to_string(),
+            },
+            wavecode_llm::StreamEvent::MessageComplete {
+                stop_reason: "end_turn".to_string(),
+                usage: wavecode_llm::Usage::default(),
+            },
+        ];
+        let (token, port, done) = start(vec![script]).await;
+        let http = client(&token);
+
+        let created: serde_json::Value = http
+            .post(format!("http://127.0.0.1:{port}/sessions"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        println!("created: {created}");
+        let session_id = created["session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no session_id in {created}"))
+            .to_string();
+        assert_eq!(created["permission_mode"], "auto");
+
+        // Subscribe BEFORE prompting so no event is missed: headers
+        // must be back before the prompt can race the subscription.
+        let response = open_events(&http, port, &session_id).await;
+        let events_task = tokio::spawn(collect_events(response, 8));
+        let prompt_status = http
+            .post(format!(
+                "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
+            ))
+            .json(&serde_json::json!({"text": "say hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(prompt_status.status(), StatusCode::ACCEPTED);
+
+        let events = events_task.await.unwrap();
+        let types: Vec<&str> = events.iter().filter_map(|e| e["type"].as_str()).collect();
+        assert_eq!(types.first(), Some(&"turn_started"), "events: {types:?}");
+        assert!(
+            types.contains(&"agent_message_delta") && types.contains(&"turn_completed"),
+            "events: {types:?}"
+        );
+        assert_eq!(events[1]["text"], "hello");
+        let _ = done;
+    }
+
+    #[tokio::test]
+    async fn approval_requests_answer_over_http() {
+        use wavecode_llm::StreamEvent;
+        let script = vec![
+            StreamEvent::TextDelta {
+                text: "working".to_string(),
+            },
+            StreamEvent::ToolUseBegin {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: r#"{"command":"echo hi"}"#.to_string(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_use".to_string(),
+                usage: wavecode_llm::Usage::default(),
+            },
+        ];
+        let (token, port, done) = start(vec![script]).await;
+        let http = client(&token);
+
+        let created: serde_json::Value = http
+            .post(format!("http://127.0.0.1:{port}/sessions"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let session_id = created["session_id"].as_str().unwrap().to_string();
+
+        let response = open_events(&http, port, &session_id).await;
+        let events_task = tokio::spawn(collect_events(response, 8));
+        let status = http
+            .post(format!(
+                "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
+            ))
+            .json(&serde_json::json!({"text": "run it"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::ACCEPTED);
+
+        let events = events_task.await.unwrap();
+        // tool_call_begin, then the approval parks the turn.
+        let approval = events
+            .iter()
+            .find(|e| e["type"] == "approval_requested")
+            .expect("shell call must ask in auto mode");
+        let call_id = approval["call_id"].as_str().unwrap().to_string();
+
+        // Answer over HTTP; the parked tool resumes.
+        let answered = http
+            .post(format!(
+                "http://127.0.0.1:{port}/sessions/{session_id}/approvals/{call_id}"
+            ))
+            .json(&serde_json::json!({"decision": "allow"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::OK);
+
+        let follow = open_events(&http, port, &session_id).await;
+        let rest = collect_events(follow, 1).await;
+        let types: Vec<&str> = rest.iter().filter_map(|e| e["type"].as_str()).collect();
+        assert!(
+            types.contains(&"tool_call_end") || types.contains(&"turn_completed"),
+            "expected the run to continue after the approval, got {types:?}"
+        );
+        let _ = done;
+    }
+}

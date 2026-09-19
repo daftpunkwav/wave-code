@@ -311,6 +311,47 @@ impl std::fmt::Display for Rule {
     }
 }
 
+/// Sensitive credential detection for [`Sandbox::decide`]: returns a
+/// short reason when the path names a file that usually holds secrets.
+/// Matched on separators-normalized lowercase: the `.env` family
+/// (documentation variants exempt), SSH private-key names with suffix
+/// variants, and cloud provider credential stores.
+fn sensitive_path_reason(path: &str) -> Option<&'static str> {
+    const ENV_REASON: &str = "environment files usually hold secrets";
+    const SSH_REASON: &str = "SSH private keys";
+    const CLOUD_REASON: &str = "cloud provider credential stores";
+    let normalized = path.replace('\\', "/");
+    let lower = normalized.to_lowercase();
+    let segments: Vec<&str> = lower.split('/').filter(|s| !s.is_empty()).collect();
+    let file = *segments.last()?;
+    if file == ".env" {
+        return Some(ENV_REASON);
+    }
+    if let Some(rest) = file.strip_prefix(".env.")
+        && !matches!(rest, "example" | "sample" | "template")
+    {
+        return Some(ENV_REASON);
+    }
+    for key in ["id_rsa", "id_ed25519", "id_ecdsa"] {
+        if file == key
+            || file
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.starts_with(['.', '-', '_']))
+        {
+            return Some(SSH_REASON);
+        }
+    }
+    if segments.windows(2).any(|w| {
+        matches!(
+            w,
+            [".aws", "credentials"] | [".gcp", "credentials"] | [".config", "gcloud"]
+        )
+    }) {
+        return Some(CLOUD_REASON);
+    }
+    None
+}
+
 /// Wildcard matching: `*` matches any character run (including `/` and the
 /// empty string), `?` matches one character, everything else is literal.
 /// Iterative with star backtracking — O(n·m) worst case, fine for short rules
@@ -496,6 +537,30 @@ impl Sandbox {
             return Verdict::Deny {
                 reason: format!("denied by permission rule: {rule}"),
             };
+        }
+        // 1.9 Sensitive credential files always ask (deny rules above
+        // still win; exact session allows below still exempt): `.env`
+        // files, SSH private keys, and cloud credential stores hold
+        // secrets no permission mode should hand out silently — in
+        // `wave` mode this ask is the only line of defense against an
+        // injected prompt quietly reading them. Shell commands carry the
+        // file only inside the command text, which the Bash rules and
+        // mode policy govern; this check covers path-carrying tools.
+        if tool != "shell"
+            && let Some(path) = input.get("path").and_then(serde_json::Value::as_str)
+            && let Some(reason) = sensitive_path_reason(path)
+        {
+            let exact_allows = lock(&self.allow)
+                .iter()
+                .any(|r| r.scope == RuleScope::File && r.exact && r.matches_text(path));
+            if !exact_allows {
+                return Verdict::Ask {
+                    kind: ApprovalKind::Write,
+                    detail: format!(
+                        "{path} looks like a sensitive credential file ({reason}); approve to let the agent access it"
+                    ),
+                };
+            }
         }
         // 2. Allow hits: exempt, allow directly. Allow rules bind to tool
         //    semantics ([`Rule::scope_allows_tool`]) — the input keys are
@@ -1388,6 +1453,68 @@ mod tests {
             ),
             Verdict::Deny { .. }
         ));
+    }
+
+    /// Credential-shaped paths force an ask even where the mode (wave)
+    /// or a wildcard allow would let the call through; documentation
+    /// variants and exact session allows stay exempt, and deny rules
+    /// still outrank the ask.
+    #[test]
+    fn sensitive_files_ask_despite_mode_and_wildcards() {
+        // wave mode allows everything, but credential files still ask.
+        let sb = Sandbox::without_rules(PermissionMode::Wave);
+        for path in [
+            ".env",
+            "config/.env.production",
+            "keys/id_rsa",
+            "keys/id_ed25519.bak",
+            ".aws/credentials",
+            ".gcp/credentials",
+            "C:\\Users\\me\\.env",
+        ] {
+            assert!(
+                matches!(
+                    sb.decide("read", &file_input(path), true, false),
+                    Verdict::Ask { .. }
+                ),
+                "'{path}' must ask in wave mode"
+            );
+        }
+        // Documentation variants stay freely readable.
+        assert!(matches!(
+            sb.decide("read", &file_input(".env.example"), true, false),
+            Verdict::Allow
+        ));
+        // A wildcard allow cannot waive the ask...
+        let wild = Sandbox::new(PermissionMode::Wave, &["File(**)".into()], &[]).unwrap();
+        assert!(matches!(
+            wild.decide("read", &file_input(".env"), true, false),
+            Verdict::Ask { .. }
+        ));
+        // ...but an exact allow naming the very path can.
+        let exact = Sandbox::new(PermissionMode::Wave, &[], &[]).unwrap();
+        exact.allow_always("read", &file_input(".env"));
+        assert!(matches!(
+            exact.decide("read", &file_input(".env"), true, false),
+            Verdict::Allow
+        ));
+        // Deny still outranks the sensitive ask.
+        let denied = Sandbox::new(PermissionMode::Wave, &[], &["File(.env)".into()]).unwrap();
+        assert!(matches!(
+            denied.decide("read", &file_input(".env"), true, false),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn sensitive_path_reason_matrix() {
+        assert!(sensitive_path_reason(".env").is_some());
+        assert!(sensitive_path_reason("a/b/.env.local").is_some());
+        assert!(sensitive_path_reason(".env.example").is_none());
+        assert!(sensitive_path_reason(".env.sample").is_none());
+        assert!(sensitive_path_reason("ssh/id_ed25519-old").is_some());
+        assert!(sensitive_path_reason("identity.pub").is_none());
+        assert!(sensitive_path_reason("src/main.rs").is_none());
     }
 
     /// Allow wildcard rules must not exempt compound commands: `Bash(git *)`'s

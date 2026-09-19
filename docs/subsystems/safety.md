@@ -19,9 +19,10 @@ Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and 
 `Sandbox::decide(tool, input, read_only, destructive)` evaluates in a fixed order:
 
 1. **Deny rules first** — no mode exempts them, not even `auto`. Both the whole compound Bash command and its segments match, so `echo hi\ncurl …` cannot prefix-disguise past `Bash(curl *)`. Segments are quoting-aware when the command parses: tree-sitter-bash extraction ignores commands only *mentioned* inside quotes and adds an assignment-stripped view, so `X=1 curl evil` no longer slips past `Bash(curl *)`; unparseable input falls back to string segmentation (coverage never drops below the pre-parser level).
-2. **Allow rules** — bound to tool semantics via rule scope (loose input-key sniffing is not enough); for compound Bash commands only *literally exact* rules exempt, because a wildcard `*` spans command separators.
-3. In-session state-tool exemptions (`todowrite` and the merged `goal` / `plan` tools need no approval in any mode — they write harness-owned coordination state, never the repo) and interactive-question routing (`ask_user`) — except `plan` with `action: "approve"`, which asks in every mode: only the user may approve a proposal.
-4. The mode's default policy.
+2. **Sensitive credential files ask** (`.env` family with documentation variants exempt, SSH private keys, `.aws`/`.gcp` credential stores) — in every mode including `wave`, since this ask is the only line of defense against an injected prompt quietly reading secrets. Exact allow rules naming the very path (session "always allow") exempt; wildcard allows cannot.
+3. **Allow rules** — bound to tool semantics via rule scope (loose input-key sniffing is not enough); for compound Bash commands only *literally exact* rules exempt, because a wildcard `*` spans command separators.
+4. In-session state-tool exemptions (`todowrite` and the merged `goal` / `plan` tools need no approval in any mode — they write harness-owned coordination state, never the repo) and interactive-question routing (`ask_user`) — except `plan` with `action: "approve"`, which asks in every mode: only the user may approve a proposal.
+5. The mode's default policy.
 
 `allow_always` derives one exact, session-level allow rule from the approved call (shared through `Arc` so clones — including subagents — see it; deny-first is unaffected). Session allow rules are in-memory only; persisting them to config is not wired yet. Invalid rule entries fail construction at startup — explicit failure, never silent skips. `PolicyAdapter` (`crates/operations/bootstrap/src/policy_adapter.rs`) maps these verdicts onto the runner seam, sourcing attributes from the registry.
 

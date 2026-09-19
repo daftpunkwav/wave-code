@@ -135,13 +135,16 @@ impl ChatModel for OpenAIClient {
 
         let status = response.status();
         if !status.is_success() {
+            // Read before the body: Retry-After rides the 429 headers.
+            let retry_after = crate::parse_retry_after(response.headers());
             let body = response
                 .text()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
-            return Err(api_error(
+            return Err(api_error_with_retry_after(
                 format!("http_{}", status.as_u16()),
                 truncate_error_body(&body),
+                retry_after,
             ));
         }
 
@@ -190,6 +193,17 @@ fn truncate_error_body(body: &str) -> String {
 /// match known shapes (e.g. the reactive-compact trigger in `core::session`).
 fn api_error(kind: String, message: String) -> LlmError {
     LlmError::Api { kind, message }
+}
+
+/// Non-2xx classification with the `Retry-After` hint (429 →
+/// [`LlmError::RateLimited`]); in-stream payloads have no headers and
+/// keep using [`api_error`].
+fn api_error_with_retry_after(
+    kind: String,
+    message: String,
+    retry_after: Option<std::time::Duration>,
+) -> LlmError {
+    crate::classify_api_error_with_retry_after(kind, message, retry_after)
 }
 
 // ---- Request translation (pure functions) ----

@@ -255,6 +255,15 @@ pub enum LlmError {
     /// Business error returned by the API (e.g. overloaded_error).
     #[error("API error ({kind}): {message}")]
     Api { kind: String, message: String },
+    /// Rate-limit (429) response carrying the server's `Retry-After` hint
+    /// when present. Split from [`LlmError::Api`] so the retry layer can
+    /// honor the server's backoff instead of its own exponential guess;
+    /// retryability itself follows the same transient rules as `Api`.
+    #[error("rate limited: {message}")]
+    RateLimited {
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
     /// Overlong-context error (the trigger for core reactive compact, SPEC section 5.2):
     /// the provider explicitly reports an oversized prompt / request (e.g. Anthropic 400
     /// "prompt is too long", 413 request_too_large). Split out from the generic Api error
@@ -295,6 +304,35 @@ pub(crate) fn classify_api_error(kind: String, message: String) -> LlmError {
     } else {
         LlmError::Api { kind, message }
     }
+}
+
+/// Non-2xx classification with the response's `Retry-After` hint: 429
+/// responses become [`LlmError::RateLimited`] (keeping the hint), all
+/// other shapes classify exactly like [`classify_api_error`].
+pub(crate) fn classify_api_error_with_retry_after(
+    kind: String,
+    message: String,
+    retry_after: Option<std::time::Duration>,
+) -> LlmError {
+    if kind.contains("http_429") {
+        LlmError::RateLimited {
+            message,
+            retry_after,
+        }
+    } else {
+        classify_api_error(kind, message)
+    }
+}
+
+/// Parse the `Retry-After` header's delta-seconds form (`"2"`); the
+/// HTTP-date form is ignored (returns `None`) — sub-second precision is
+/// irrelevant at backoff scales.
+pub(crate) fn parse_retry_after(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<std::time::Duration> {
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
+    let seconds: u64 = value.trim().parse().ok()?;
+    (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
 }
 
 /// Crate-wide unified Result alias.

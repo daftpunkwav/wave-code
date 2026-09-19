@@ -115,13 +115,16 @@ impl ChatModel for AnthropicClient {
 
         let status = response.status();
         if !status.is_success() {
+            // Read before the body: Retry-After rides the 429 headers.
+            let retry_after = crate::parse_retry_after(response.headers());
             let body = response
                 .text()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
-            return Err(crate::classify_api_error(
+            return Err(crate::classify_api_error_with_retry_after(
                 format!("http_{}", status.as_u16()),
                 truncate_error_body(&body),
+                retry_after,
             ));
         }
 

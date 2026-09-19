@@ -15,15 +15,21 @@
 //! [`RetryingModel`] clones the request per attempt (cheap: history rides
 //! an `Arc`) and retries only transient failures: stall timeouts,
 //! connection errors, 5xx/server-overload shapes, and rate limiting
-//! (429). Authentication, other 4xx, and
+//! (429, honoring the server's `Retry-After` hint over local backoff).
+//! Authentication, quota exhaustion, other 4xx, and
 //! [`crate::LlmError::PromptTooLong`] fail fast so bad credentials never
-//! burn retries and compaction triggers stay intact.
+//! burn retries, an empty account never burns backoff, and compaction
+//! triggers stay intact.
 //!
-//! Retry covers request establishment only ([`ChatModel::stream`]); a
-//! stream that fails mid-flight surfaces its item error unchanged (no
-//! cross-attempt resume, which could duplicate side effects).
+//! Mid-stream tears retry only while nothing has been forwarded: the
+//! half response is dropped wholesale and the request re-issued. After
+//! the first event reaches the consumer an error surfaces unchanged —
+//! re-issuing then would duplicate delivered text and re-run tool side
+//! effects.
 
 use std::time::{Duration, Instant};
+
+use futures::StreamExt as _;
 
 use crate::{ChatModel, ChatRequest, EventStream, LlmError, Result};
 
@@ -73,16 +79,21 @@ impl RetryPolicy {
 
     /// True when `error` may be retried under this policy.
     ///
-    /// Auth failures always return false, even when their carrier looks
-    /// retryable: retrying bad credentials across attempts (or providers)
-    /// only burns budget and risks lockout.
+    /// Auth failures and quota exhaustion always return false, even when
+    /// their carrier looks retryable: retrying bad credentials burns
+    /// budget and risks lockout, and retrying an exhausted quota only
+    /// burns the backoff budget on an error that needs human action.
     pub fn is_retryable(&self, error: &LlmError) -> bool {
         if is_auth_error(error) {
+            return false;
+        }
+        if is_quota_error(error) {
             return false;
         }
         match error {
             LlmError::Timeout(_) => self.retry_timeout,
             LlmError::Http(_) => self.retry_connection,
+            LlmError::RateLimited { .. } => self.retry_transient,
             LlmError::Api { kind, message } => {
                 self.retry_transient && is_transient_error(kind, message)
             }
@@ -93,6 +104,21 @@ impl RetryPolicy {
             | LlmError::Json(_)
             | LlmError::ClientInit(_) => false,
         }
+    }
+
+    /// Backoff after `failed_attempt` failures, honoring the server's
+    /// `Retry-After` hint when the error carries one: the hint wins over
+    /// both the exponential guess and `max_delay_ms` (only the global
+    /// deadline bounds it).
+    pub fn delay_for_error(&self, error: &LlmError, failed_attempt: usize) -> Duration {
+        if let LlmError::RateLimited {
+            retry_after: Some(hint),
+            ..
+        } = error
+        {
+            return *hint;
+        }
+        self.delay_for_attempt(failed_attempt)
     }
 }
 
@@ -124,6 +150,7 @@ pub fn is_auth_error(error: &LlmError) -> bool {
                 || message.contains("authentication")
         }
         LlmError::Timeout(_)
+        | LlmError::RateLimited { .. }
         | LlmError::PromptTooLong { .. }
         | LlmError::Sse(_)
         | LlmError::Json(_)
@@ -159,9 +186,38 @@ fn is_transient_error(kind: &str, message: &str) -> bool {
         .any(|m| kind.contains(m) || message.contains(m))
 }
 
-/// [`ChatModel`] wrapper applying [`RetryPolicy`] to request establishment.
+/// True for quota / credit exhaustion: the account is out of budget, so
+/// retrying cannot succeed and only burns the backoff budget. Marker
+/// list is deliberately narrow (billing-specific shapes) to avoid
+/// fail-fast on an ordinary rate limit, which IS worth retrying.
+pub fn is_quota_error(error: &LlmError) -> bool {
+    const MARKERS: &[&str] = &[
+        "insufficient_quota",
+        "quota_exceeded",
+        "quota exceeded",
+        "exceeded your current quota",
+        "billing",
+        "credit balance",
+        "arrears",
+    ];
+    let matches = |kind: &str, message: &str| {
+        let kind = kind.to_lowercase();
+        let message = message.to_lowercase();
+        MARKERS
+            .iter()
+            .any(|m| kind.contains(m) || message.contains(m))
+    };
+    match error {
+        LlmError::Api { kind, message } => matches(kind, message),
+        LlmError::RateLimited { message, .. } => matches("", message),
+        _ => false,
+    }
+}
+
+/// [`ChatModel`] wrapper applying [`RetryPolicy`] to request establishment
+/// and to stream tears before the first event reaches the consumer.
 pub struct RetryingModel<M> {
-    inner: M,
+    inner: std::sync::Arc<M>,
     policy: RetryPolicy,
 }
 
@@ -172,7 +228,10 @@ impl<M> RetryingModel<M> {
         if policy.max_attempts < 1 {
             policy.max_attempts = 1;
         }
-        Self { inner, policy }
+        Self {
+            inner: std::sync::Arc::new(inner),
+            policy,
+        }
     }
 
     /// The active policy (attempt counts, backoff bound, deadline).
@@ -182,20 +241,33 @@ impl<M> RetryingModel<M> {
 }
 
 #[async_trait::async_trait]
-impl<M: ChatModel> ChatModel for RetryingModel<M> {
+impl<M: ChatModel + 'static> ChatModel for RetryingModel<M> {
     async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
+        // First attempt stays eager with the plain `Err` return: callers
+        // key establishment failures off it (PromptTooLong drives the
+        // reactive compactor, auth errors surface immediately).
         let start = Instant::now();
         let mut attempt: usize = 0;
         loop {
             attempt += 1;
             match self.inner.stream(req.clone()).await {
-                Ok(stream) => return Ok(stream),
+                Ok(stream) => {
+                    let wrapped = retrying_items(
+                        self.inner.clone(),
+                        self.policy.clone(),
+                        req,
+                        stream,
+                        attempt,
+                        start,
+                    );
+                    return Ok(Box::pin(wrapped));
+                }
                 Err(error) => {
                     let exhausted = attempt >= self.policy.max_attempts;
                     if exhausted || !self.policy.is_retryable(&error) {
                         return Err(error);
                     }
-                    let delay = self.policy.delay_for_attempt(attempt);
+                    let delay = self.policy.delay_for_error(&error, attempt);
                     let overrun = self.policy.deadline_ms.is_some_and(|budget| {
                         start.elapsed() + delay > Duration::from_millis(budget)
                     });
@@ -210,6 +282,80 @@ impl<M: ChatModel> ChatModel for RetryingModel<M> {
 
     fn set_thinking(&self, effort: &str) -> bool {
         self.inner.set_thinking(effort)
+    }
+}
+
+/// Wrap a successfully established stream so a tear before any event was
+/// forwarded re-issues the request; tears after forwarding surface
+/// unchanged (re-issuing would duplicate already-delivered content and
+/// re-run side effects). Retry attempts share the original deadline.
+fn retrying_items<M: ChatModel + 'static>(
+    model: std::sync::Arc<M>,
+    policy: RetryPolicy,
+    req: ChatRequest,
+    first: EventStream,
+    initial_attempt: usize,
+    start: Instant,
+) -> impl futures::Stream<Item = Result<crate::StreamEvent>> + Send + 'static {
+    let deadline_ms = policy.deadline_ms;
+    let overruns = move |delay: Duration| {
+        deadline_ms.is_some_and(|budget| start.elapsed() + delay > Duration::from_millis(budget))
+    };
+    async_stream::stream! {
+        let mut attempt = initial_attempt;
+        let mut pending = Some(first);
+        loop {
+            let mut stream = match pending.take() {
+                Some(stream) => stream,
+                None => loop {
+                    attempt += 1;
+                    match model.stream(req.clone()).await {
+                        Ok(stream) => break stream,
+                        Err(error) => {
+                            let delay = policy.delay_for_error(&error, attempt);
+                            if attempt >= policy.max_attempts
+                                || !policy.is_retryable(&error)
+                                || overruns(delay)
+                            {
+                                yield Err(error);
+                                return;
+                            }
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                },
+            };
+            let mut forwarded = false;
+            let mut torn: Option<LlmError> = None;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(event) => {
+                        forwarded = true;
+                        yield Ok(event);
+                    }
+                    Err(error) => {
+                        if !forwarded
+                            && attempt < policy.max_attempts
+                            && policy.is_retryable(&error)
+                        {
+                            let delay = policy.delay_for_error(&error, attempt);
+                            if !overruns(delay) {
+                                torn = Some(error);
+                                break;
+                            }
+                        }
+                        yield Err(error);
+                        return;
+                    }
+                }
+            }
+            match torn {
+                // The tear is retried wholesale: nothing reached the
+                // consumer, so the half response is simply dropped.
+                Some(error) => tokio::time::sleep(policy.delay_for_error(&error, attempt)).await,
+                None => return,
+            }
+        }
     }
 }
 
@@ -389,5 +535,127 @@ mod tests {
         assert!(on.is_retryable(&http));
         // Auth never retries even with every class enabled.
         assert!(!on.is_retryable(&auth()));
+    }
+
+    /// Streams queued item lists per attempt, then empty streams.
+    struct StreamScript {
+        attempts_streams: Mutex<VecDeque<Vec<Result<crate::StreamEvent>>>>,
+        attempts: AtomicUsize,
+    }
+
+    impl StreamScript {
+        fn scripted(streams: Vec<Vec<Result<crate::StreamEvent>>>) -> Self {
+            Self {
+                attempts_streams: Mutex::new(streams.into()),
+                attempts: AtomicUsize::new(0),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChatModel for StreamScript {
+        async fn stream(&self, _req: ChatRequest) -> Result<EventStream> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let items = self
+                .attempts_streams
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front()
+                .unwrap_or_default();
+            Ok(Box::pin(futures::stream::iter(items)))
+        }
+    }
+
+    async fn collect(model: &RetryingModel<StreamScript>) -> Vec<Result<crate::StreamEvent>> {
+        use futures::StreamExt as _;
+        let mut stream = model.stream(request()).await.unwrap();
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        items
+    }
+
+    #[tokio::test]
+    async fn tear_before_first_event_is_retried_wholesale() {
+        let script = StreamScript::scripted(vec![
+            vec![Err(timeout())],
+            vec![Ok(crate::StreamEvent::TextDelta {
+                text: "hi".to_string(),
+            })],
+        ]);
+        let model = RetryingModel::new(script, fast_policy(3));
+        let items = collect(&model).await;
+        // The torn attempt's error never surfaces; the clean retry does.
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_ok());
+        assert_eq!(model.inner.attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn tear_after_forwarding_surfaces_unchanged() {
+        let script = StreamScript::scripted(vec![vec![
+            Ok(crate::StreamEvent::TextDelta {
+                text: "partial".to_string(),
+            }),
+            Err(timeout()),
+        ]]);
+        let model = RetryingModel::new(script, fast_policy(3));
+        let items = collect(&model).await;
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_ok());
+        assert!(items[1].is_err(), "delivered content forbids a re-issue");
+        assert_eq!(model.inner.attempts(), 1);
+    }
+
+    #[test]
+    fn quota_errors_fail_fast() {
+        let quota = LlmError::Api {
+            kind: "insufficient_quota".to_string(),
+            message: "You exceeded your current quota".to_string(),
+        };
+        assert!(is_quota_error(&quota));
+        assert!(!fast_policy(3).is_retryable(&quota));
+        // An ordinary rate limit stays retryable — only billing shapes
+        // fail fast.
+        let rate = LlmError::Api {
+            kind: "http_429".to_string(),
+            message: "too many requests".to_string(),
+        };
+        assert!(!is_quota_error(&rate));
+        assert!(fast_policy(3).is_retryable(&rate));
+    }
+
+    #[test]
+    fn retry_after_hint_wins_over_local_backoff() {
+        let policy = RetryPolicy {
+            base_delay_ms: 100,
+            max_delay_ms: 200,
+            ..RetryPolicy::default()
+        };
+        let hinted = LlmError::RateLimited {
+            message: "slow down".to_string(),
+            retry_after: Some(Duration::from_secs(5)),
+        };
+        assert_eq!(
+            policy.delay_for_error(&hinted, 1),
+            Duration::from_secs(5),
+            "the server hint wins over base backoff and max_delay"
+        );
+        let unhinted = LlmError::RateLimited {
+            message: "slow down".to_string(),
+            retry_after: None,
+        };
+        assert_eq!(
+            policy.delay_for_error(&unhinted, 2),
+            Duration::from_millis(200),
+            "no hint falls back to the exponential schedule"
+        );
+        // Rate limits retry under the transient class.
+        assert!(fast_policy(3).is_retryable(&hinted));
     }
 }

@@ -1424,9 +1424,10 @@ api_key = "k-inline"
                 run_id: "proof".to_string(),
                 submission_id: "proof".to_string(),
                 input: "write and report".to_string(),
+                images: Vec::new(),
             },
             &mut Conversation::new(),
-            "write and report",
+            runtime_runner::TurnInput::text("write and report"),
             "sys",
             &|event| {
                 seen_events

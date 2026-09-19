@@ -58,6 +58,9 @@ model = "your-model-fast"
   carries the session id and its `wavecode --session` resume command, and
   the finished turn is journaled so the session can be resumed. Ctrl-C
   interrupts the turn (exit 130).
+- `exec --image <path>`: attaches an image (PNG/JPEG/WebP/GIF, ≤5 MB) to
+  the prompt for vision-capable models; repeatable. Providers without
+  vision reject it with a visible error.
 - `exec --approvals`: opts in to answering parked approvals from stdin.
   Off by default, so unattended runs keep the fail-closed deny. The JSON
   dialect answers a specific request with one stdin line:

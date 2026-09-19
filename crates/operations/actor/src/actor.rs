@@ -26,7 +26,7 @@ use infrastructure_base::{
     CONTROL_CHANNEL_CAP, InterruptHandle, PENDING_QUEUE_CAP, SHUTDOWN_DRAIN,
 };
 use runtime_child::ChildRuntime;
-use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
+use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver, TurnInput};
 use safety_gate::{ApprovalDecision, ApprovalGate, QuestionGate};
 use state_store::{CompactTrigger, Conversation, Role, Usage};
 use tokio::sync::mpsc;
@@ -199,7 +199,7 @@ where
                 return;
             };
             match sub.op {
-                Op::UserInput { text } => {
+                Op::UserInput { text, images } => {
                     // Child completions re-enter as user messages before
                     // the turn snapshot is taken.
                     for note in children.drain_notifications() {
@@ -231,11 +231,21 @@ where
                         run_id: sub.id.clone(),
                         submission_id: sub.id.clone(),
                         input: text.clone(),
+                        images,
                     };
                     let sink = unbounded_sink(&event_tx);
                     let op = async {
                         let _ = driver
-                            .drive_turn(&ctx, &mut conv, &text, &system, &sink)
+                            .drive_turn(
+                                &ctx,
+                                &mut conv,
+                                TurnInput {
+                                    text: &ctx.input,
+                                    images: &ctx.images,
+                                },
+                                &system,
+                                &sink,
+                            )
                             .await;
                     };
                     if supervised(
@@ -640,14 +650,14 @@ mod tests {
             &self,
             ctx: &RunContext,
             _conv: &mut Conversation,
-            input: &str,
+            input: TurnInput<'_>,
             _system: &str,
             on_event: &(dyn Fn(Event) + Send + Sync),
         ) -> StopReason {
             self.inputs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(input.to_string());
+                .push(input.text.to_string());
             on_event(Event {
                 id: ctx.submission_id.clone(),
                 msg: EventMsg::TurnStarted,
@@ -878,6 +888,7 @@ mod tests {
             id: id.to_string(),
             op: Op::UserInput {
                 text: text.to_string(),
+                images: Vec::new(),
             },
         }
     }
@@ -1121,11 +1132,11 @@ mod tests {
                 &self,
                 _ctx: &RunContext,
                 conv: &mut Conversation,
-                input: &str,
+                input: TurnInput<'_>,
                 _system: &str,
                 on_event: &(dyn Fn(Event) + Send + Sync),
             ) -> StopReason {
-                conv.push(Role::User, input.to_string());
+                conv.push(Role::User, input.text.to_string());
                 conv.push(Role::Assistant, "noted".to_string());
                 on_event(Event {
                     id: "s1".to_string(),
@@ -1221,7 +1232,7 @@ mod tests {
                 &self,
                 _ctx: &RunContext,
                 _conv: &mut Conversation,
-                _input: &str,
+                _input: TurnInput<'_>,
                 _system: &str,
                 _on_event: &(dyn Fn(Event) + Send + Sync),
             ) -> StopReason {

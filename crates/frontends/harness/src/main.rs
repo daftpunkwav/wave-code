@@ -94,6 +94,10 @@ enum Command {
         /// still parked.
         #[arg(long)]
         approvals: bool,
+        /// Attach an image (PNG/JPEG/WebP/GIF, up to 5 MB) to the prompt.
+        /// Repeatable; requires a vision-capable model.
+        #[arg(long = "image")]
+        image_paths: Vec<std::path::PathBuf>,
     },
     /// Interactive multi-turn session sharing one conversation.
     Repl,
@@ -517,6 +521,7 @@ async fn main() -> anyhow::Result<()> {
             prompt,
             json,
             approvals,
+            image_paths,
         }) => {
             // A headless turn still leaves a resumable session behind
             // (journal + meta line) when a home directory exists.
@@ -525,7 +530,16 @@ async fn main() -> anyhow::Result<()> {
                 home: home.clone(),
                 cwd: cwd.to_string_lossy().to_string(),
             });
-            let outcome = run_exec(&mut handle.client, &prompt, json, approvals, session).await?;
+            let images = load_images(&image_paths)?;
+            let outcome = run_exec(
+                &mut handle.client,
+                &prompt,
+                json,
+                approvals,
+                images,
+                session,
+            )
+            .await?;
             std::process::exit(outcome.exit_code())
         }
         Some(Command::Repl) => {
@@ -974,6 +988,50 @@ fn model_provider_overrides(
 
 /// Load the config for catalog derivation, from `path` or the default
 /// location.
+/// Read one image file into a wire `UserImage`: mime sniffed from the
+/// extension, size capped like the provider validators (5 MB decoded is
+/// what they enforce; here we cap the raw file at the same bound).
+fn load_image(path: &std::path::Path) -> anyhow::Result<wavecode_wire::UserImage> {
+    const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
+    let mime = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        other => {
+            return Err(anyhow::anyhow!(
+                "unsupported image extension {:?} (png/jpg/jpeg/webp/gif)",
+                other
+            ));
+        }
+    };
+    let bytes = std::fs::read(path)?;
+    if bytes.len() > IMAGE_MAX_BYTES {
+        return Err(anyhow::anyhow!(
+            "image {} is {} bytes; the limit is {} bytes",
+            path.display(),
+            bytes.len(),
+            IMAGE_MAX_BYTES
+        ));
+    }
+    use base64::Engine as _;
+    Ok(wavecode_wire::UserImage {
+        id: None,
+        mime: mime.to_string(),
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
+/// Load every `--image` path, failing the run on the first problem.
+fn load_images(paths: &[std::path::PathBuf]) -> anyhow::Result<Vec<wavecode_wire::UserImage>> {
+    paths.iter().map(|p| load_image(p)).collect()
+}
+
 fn load_config_opt(
     path: Option<&std::path::Path>,
 ) -> Result<wavecode_config::Config, wavecode_config::ConfigError> {
@@ -1660,6 +1718,7 @@ async fn run_exec(
     prompt: &str,
     json: bool,
     approvals: bool,
+    images: Vec<wavecode_wire::UserImage>,
     session: Option<ExecSession>,
 ) -> anyhow::Result<Outcome> {
     client
@@ -1667,6 +1726,7 @@ async fn run_exec(
             id: "exec-1".to_string(),
             op: Op::UserInput {
                 text: prompt.to_string(),
+                images,
             },
         })
         .await
@@ -1903,6 +1963,7 @@ async fn run_repl(
                             id: format!("repl-{turn}-skill"),
                             op: Op::UserInput {
                                 text: skill_request(&name, &args),
+                                images: Vec::new(),
                             },
                         })
                         .await
@@ -2005,7 +2066,10 @@ async fn run_repl(
                 client
                     .submit(Submission {
                         id: format!("repl-{turn}"),
-                        op: Op::UserInput { text },
+                        op: Op::UserInput {
+                            text,
+                            images: Vec::new(),
+                        },
                     })
                     .await
                     .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
@@ -2176,6 +2240,25 @@ async fn drain_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--image` loading: known extensions map to mimes, unknown ones
+    /// fail, and the bytes come back base64-encoded.
+    #[test]
+    fn load_image_sniffs_mime_and_encodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("pic.png");
+        std::fs::write(&png, b"\x89PNG-fake-bytes").unwrap();
+        let image = load_image(&png).unwrap();
+        assert_eq!(image.mime, "image/png");
+        use base64::Engine as _;
+        assert_eq!(
+            image.base64,
+            base64::engine::general_purpose::STANDARD.encode(b"\x89PNG-fake-bytes")
+        );
+        let bad = dir.path().join("pic.bmp");
+        std::fs::write(&bad, b"x").unwrap();
+        assert!(load_image(&bad).is_err());
+    }
 
     #[test]
     fn global_permission_mode_flag_parses() {

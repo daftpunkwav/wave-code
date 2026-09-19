@@ -49,6 +49,9 @@ pub struct RunContext {
     pub submission_id: String,
     /// Raw user input text for this run.
     pub input: String,
+    /// Inline images attached to the input (empty on text-only runs and
+    /// on older senders; serde-compatible default).
+    pub images: Vec<wavecode_wire::UserImage>,
 }
 
 impl RunContext {
@@ -835,7 +838,7 @@ where
         &self,
         ctx: &RunContext,
         conv: &mut Conversation,
-        input: &str,
+        input: TurnInput<'_>,
         system: &str,
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> StopReason {
@@ -863,7 +866,7 @@ where
 
         // Admission runs before TurnStarted: blocked input never enters
         // history and is never sampled.
-        let admission = self.hooks.run(HookPoint::PromptSubmit, input).await;
+        let admission = self.hooks.run(HookPoint::PromptSubmit, input.text).await;
         if !admission.allow {
             emit_msg(EventMsg::Error {
                 message: admission.message,
@@ -879,7 +882,19 @@ where
             });
         }
 
-        conv.push(Role::User, input);
+        if input.images.is_empty() {
+            conv.push(Role::User, input.text);
+        } else {
+            let mut blocks = vec![state_store::Block::Text(input.text.to_string())];
+            for image in input.images {
+                blocks.push(state_store::Block::Image {
+                    id: image.id.clone(),
+                    mime: image.mime.clone(),
+                    base64: image.base64.clone(),
+                });
+            }
+            conv.push_blocks(Role::User, blocks);
+        }
         emit_msg(EventMsg::TurnStarted);
 
         let mut warned = false;
@@ -1655,6 +1670,22 @@ where
 /// The blanket implementation below wires every [`RunLoop`] automatically;
 /// actors stay generic over this trait instead of the seven concrete seam
 /// types, so transport never names capabilities.
+/// The user input driving one turn: text plus optional inline images.
+/// Images ride into conversation history as `Block::Image` and reach
+/// vision-capable providers as image content parts; providers without
+/// vision reject them at request translation.
+pub struct TurnInput<'a> {
+    pub text: &'a str,
+    pub images: &'a [wavecode_wire::UserImage],
+}
+
+impl<'a> TurnInput<'a> {
+    /// Text-only input (the common case).
+    pub fn text(text: &'a str) -> Self {
+        Self { text, images: &[] }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait TurnDriver: Send + Sync {
     /// Drive one turn, emitting wire events through `on_event`.
@@ -1662,7 +1693,7 @@ pub trait TurnDriver: Send + Sync {
         &self,
         ctx: &RunContext,
         conv: &mut Conversation,
-        input: &str,
+        input: TurnInput<'_>,
         system: &str,
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> StopReason;
@@ -1734,7 +1765,7 @@ where
         &self,
         ctx: &RunContext,
         conv: &mut Conversation,
-        input: &str,
+        input: TurnInput<'_>,
         system: &str,
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> StopReason {
@@ -1816,7 +1847,7 @@ where
         &self,
         ctx: &RunContext,
         conv: &mut Conversation,
-        input: &str,
+        input: TurnInput<'_>,
         system: &str,
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> StopReason {
@@ -2038,6 +2069,7 @@ mod tests {
             run_id: "run-1".to_string(),
             submission_id: "sub-1".to_string(),
             input: "hi".to_string(),
+            images: Vec::new(),
         };
         assert_eq!(ctx.idempotency_key("tools"), "run-1:tools");
         assert_ne!(
@@ -2289,6 +2321,7 @@ mod run_loop_tests {
                     run_id: "run-1".to_string(),
                     submission_id: "sub-1".to_string(),
                     input: "hi".to_string(),
+                    images: Vec::new(),
                 },
             }
         }
@@ -2413,7 +2446,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2447,7 +2480,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2538,7 +2571,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2639,7 +2672,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2703,7 +2736,9 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         );
-        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         assert_eq!(outcome, StopReason::Completed);
         // Read-only allows execute before mutations; results still come
         // back in declaration order.
@@ -2763,7 +2798,7 @@ mod run_loop_tests {
         let events = fx.events.clone();
         assert!(task_loop.executor.lock_executed().is_empty());
         let outcome = task_loop
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             })
             .await;
@@ -2824,7 +2859,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2864,7 +2899,7 @@ mod run_loop_tests {
             0,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2909,7 +2944,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -2963,7 +2998,7 @@ mod run_loop_tests {
                 },
                 fx.interrupt.clone(),
             )
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             })
             .await;
@@ -3003,7 +3038,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -3044,7 +3079,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -3082,7 +3117,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -3121,7 +3156,7 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -3173,7 +3208,7 @@ mod run_loop_tests {
             },
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -3259,7 +3294,7 @@ mod run_loop_tests {
         let conv = &mut Conversation::new();
         let events = fx.events.clone();
         let outcome = cycle
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             })
             .await;
@@ -3292,7 +3327,7 @@ mod run_loop_tests {
         let conv = &mut Conversation::new();
         let events = fx.events.clone();
         cycle
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             })
             .await;
@@ -3320,7 +3355,7 @@ mod run_loop_tests {
         let conv = &mut Conversation::new();
         let events = fx.events.clone();
         cycle
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             })
             .await;
@@ -3364,7 +3399,7 @@ mod run_loop_tests {
         let events = fx.events.clone();
         let outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            cycle.run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            cycle.run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             }),
         )
@@ -3435,7 +3470,7 @@ mod run_loop_tests {
             fx.interrupt.clone(),
         );
         let outcome = run
-            .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
                 events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
             })
             .await;
@@ -3508,7 +3543,9 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         );
-        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         assert_eq!(outcome, StopReason::Completed);
         let history = conv
             .snapshot()
@@ -3610,7 +3647,9 @@ mod run_loop_tests {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             trigger.trigger();
         });
-        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         assert_eq!(outcome, StopReason::Interrupted);
         // The whole point of the run-scoped handle: a child stop must not
         // look like (or become) a user interrupt of the session.
@@ -3642,7 +3681,9 @@ mod run_loop_tests {
         );
         run.run_interrupts()
             .register(&fx.ctx.run_id, InterruptHandle::new());
-        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         assert_eq!(outcome, StopReason::Interrupted);
         // The child turn's fresh handle starts untriggered and is never
         // reset at entry: the user's session-wide interrupt survives the
@@ -3671,7 +3712,7 @@ mod run_loop_tests {
             0,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|_| {})
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
         .await;
         assert_eq!(outcome, StopReason::MaxToolRounds);
     }
@@ -3724,7 +3765,9 @@ mod run_loop_tests {
             8,
             fx.interrupt.clone(),
         );
-        let outcome = loop_.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = loop_
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         // The turn continues with the interrupted slot filled: pairing
         // holds, and the tool never ran.
         assert_eq!(outcome, StopReason::Completed);
@@ -3788,7 +3831,9 @@ mod run_loop_tests {
             fx.interrupt.clone(),
         );
         let conv = &mut Conversation::new();
-        let outcome = loop_.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = loop_
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         assert_eq!(outcome, StopReason::Completed);
         // The answer IS the tool result: an interrupted question never
         // reaches the executor either.
@@ -3841,7 +3886,7 @@ mod run_loop_tests {
             1,
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|e| {
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
@@ -3942,7 +3987,7 @@ mod run_loop_tests {
             },
             fx.interrupt.clone(),
         )
-        .run_turn(&fx.ctx, conv, "hi", "sys", &|_| {})
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
         .await;
         assert_eq!(outcome, StopReason::Completed);
         // All 24 executed despite the cap, and the in-flight peak stayed
@@ -4017,7 +4062,9 @@ mod run_loop_tests {
         );
         // Session-owned turn: clears stale gate state like before.
         let conv = &mut Conversation::new();
-        let outcome = run.run_turn(&fx.ctx, conv, "hi", "sys", &|_| {}).await;
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
         assert_eq!(outcome, StopReason::Completed);
         assert_eq!(
             run.approvals
@@ -4030,7 +4077,7 @@ mod run_loop_tests {
         run.run_interrupts()
             .register(&fx.ctx.run_id, InterruptHandle::new());
         let outcome = run
-            .run_turn(&fx.ctx, conv, "hi again", "sys", &|_| {})
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi again"), "sys", &|_| {})
             .await;
         assert_eq!(outcome, StopReason::Completed);
         assert_eq!(

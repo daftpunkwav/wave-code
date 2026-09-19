@@ -27,6 +27,20 @@ pub struct Submission {
     pub op: Op,
 }
 
+/// One inline image attached to user input. Shapes mirror the llm
+/// crate's `ContentBlock::Image`; validation (mime allowlist, size cap)
+/// happens at request translation so every transport can carry it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UserImage {
+    /// Optional client-side label (preserved, never sent to providers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// MIME type (must be in the provider-allowed image mimes).
+    pub mime: String,
+    /// Base64-encoded image bytes.
+    pub base64: String,
+}
+
 /// Operations a frontend may submit.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -35,6 +49,11 @@ pub enum Op {
     UserInput {
         /// Raw user input text.
         text: String,
+        /// Optional inline images attached to the input. Absent on older
+        /// senders; providers without vision support reject them at
+        /// request translation with a visible constraint error.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<UserImage>,
     },
     /// Interrupt the running turn at the next safe point.
     Interrupt,
@@ -316,6 +335,7 @@ mod tests {
             (
                 Op::UserInput {
                     text: "hi".to_string(),
+                    images: Vec::new(),
                 },
                 "user_input",
             ),
@@ -542,6 +562,7 @@ mod tests {
             id: "sub-1".to_string(),
             op: Op::UserInput {
                 text: "hello".to_string(),
+                images: Vec::new(),
             },
         };
         let json = serde_json::to_string(&sub).unwrap();

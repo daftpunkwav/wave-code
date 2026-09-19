@@ -712,7 +712,10 @@ async fn session_task<W>(
                         if client
                             .submit(Submission {
                                 id: submission,
-                                op: Op::UserInput { text },
+                                op: Op::UserInput {
+                                text,
+                                images: Vec::new(),
+                            },
                             })
                             .await
                             .is_err()

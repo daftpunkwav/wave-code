@@ -281,9 +281,10 @@ async fn continuation_micro_bench() {
                 run_id: "bench-cont".to_string(),
                 submission_id: "bench-cont".to_string(),
                 input: "bench input".to_string(),
+                images: Vec::new(),
             },
             &mut conv,
-            "bench input",
+            runtime_runner::TurnInput::text("bench input"),
             "bench system",
             &|event| {
                 seen.lock().unwrap_or_else(|e| e.into_inner()).push(event);
@@ -352,9 +353,10 @@ async fn session_open_bench() {
                     run_id: format!("bench-open-{index}"),
                     submission_id: format!("bench-open-{index}"),
                     input: input.clone(),
+                    images: Vec::new(),
                 },
                 &mut conv,
-                &input,
+                runtime_runner::TurnInput::text(&input),
                 "bench system",
                 &|event| {
                     seen.lock().unwrap_or_else(|e| e.into_inner()).push(event);
@@ -445,9 +447,10 @@ async fn live_gate_smoke() {
                 run_id: "bench-live".to_string(),
                 submission_id: "bench-live".to_string(),
                 input: "live smoke".to_string(),
+                images: Vec::new(),
             },
             &mut conv,
-            "live smoke",
+            runtime_runner::TurnInput::text("live smoke"),
             "bench system",
             &|_| {},
         )

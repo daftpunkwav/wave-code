@@ -178,7 +178,7 @@ mod tests {
     use super::*;
     use operations_actor::SessionActor;
     use runtime_child::ChildRuntime;
-    use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver};
+    use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver, TurnInput };
     use safety_gate::ApprovalGate;
     use state_store::{CompactTrigger, Conversation};
     use std::sync::Arc;
@@ -194,7 +194,7 @@ mod tests {
             &self,
             _ctx: &RunContext,
             _conv: &mut Conversation,
-            _input: &str,
+            _input: TurnInput<'_>,
             _system: &str,
             on_event: &(dyn Fn(Event) + Send + Sync),
         ) -> StopReason {

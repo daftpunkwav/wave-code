@@ -23,7 +23,7 @@ pub use replay::{
     validate_contract,
 };
 
-use runtime_runner::{RunContext, StopReason, TurnDriver};
+use runtime_runner::{RunContext, StopReason, TurnDriver, TurnInput};
 use state_store::Conversation;
 
 /// One benchmark case.
@@ -83,10 +83,20 @@ pub async fn evaluate<D: TurnDriver>(driver: &D, cases: &[EvalCase], system: &st
             run_id: format!("eval-{index}"),
             submission_id: format!("eval-{index}"),
             input: case.input.clone(),
+            images: Vec::new(),
         };
         let mut conv = Conversation::new();
         let outcome = driver
-            .drive_turn(&ctx, &mut conv, &case.input, system, &|_| {})
+            .drive_turn(
+                &ctx,
+                &mut conv,
+                TurnInput {
+                    text: &case.input,
+                    images: &ctx.images,
+                },
+                system,
+                &|_| {},
+            )
             .await;
         let history = conv
             .snapshot()
@@ -138,12 +148,12 @@ mod tests {
             &self,
             _ctx: &RunContext,
             conv: &mut Conversation,
-            input: &str,
+            input: TurnInput<'_>,
             _system: &str,
             _on_event: &(dyn Fn(Event) + Send + Sync),
         ) -> StopReason {
-            conv.push(Role::User, input);
-            conv.push(Role::Assistant, format!("echo:{input}"));
+            conv.push(Role::User, input.text);
+            conv.push(Role::Assistant, format!("echo:{}", input.text));
             StopReason::Completed
         }
 

@@ -37,7 +37,7 @@ use std::sync::{
 use action_tasks::{TaskInfo, TaskKind, TaskOutcome, TaskRequest, TaskService, TaskState};
 use infrastructure_base::InterruptHandle;
 use runtime_child::{ChildKind, ChildRuntime, ChildSpec};
-use runtime_runner::{RunAllowlist, RunContext, RunInterrupts, StopReason, TurnDriver};
+use runtime_runner::{RunAllowlist, RunContext, RunInterrupts, StopReason, TurnDriver, TurnInput};
 use state_store::{Conversation, Role};
 
 /// How often the stop watcher polls the ticket flag.
@@ -248,6 +248,7 @@ impl TaskService for TurnChildService {
                     run_id: run_id.clone(),
                     submission_id: ticket.task_id.clone(),
                     input: ticket.input.clone(),
+                    images: Vec::new(),
                 };
                 // Restrict before the first sample so denied tools are
                 // hidden from the catalog and refused at execution; the
@@ -264,7 +265,16 @@ impl TaskService for TurnChildService {
                 };
                 let mut conv = Conversation::new();
                 let outcome = driver
-                    .drive_turn(&ctx, &mut conv, &ticket.input, &system, &|_| {})
+                    .drive_turn(
+                        &ctx,
+                        &mut conv,
+                        TurnInput {
+                            text: &ticket.input,
+                            images: &ctx.images,
+                        },
+                        &system,
+                        &|_| {},
+                    )
                     .await;
                 drop(teardown);
                 // The summary is the child's final answer, not whatever
@@ -380,12 +390,12 @@ mod tests {
             &self,
             _ctx: &RunContext,
             conv: &mut Conversation,
-            input: &str,
+            input: TurnInput<'_>,
             _system: &str,
             _on_event: &(dyn Fn(Event) + Send + Sync),
         ) -> StopReason {
-            conv.push(Role::User, input);
-            conv.push(Role::Assistant, format!("child saw {input}"));
+            conv.push(Role::User, input.text);
+            conv.push(Role::Assistant, format!("child saw {}", input.text));
             StopReason::Completed
         }
 
@@ -418,7 +428,7 @@ mod tests {
             &self,
             _ctx: &RunContext,
             _conv: &mut Conversation,
-            _input: &str,
+            _input: TurnInput<'_>,
             _system: &str,
             _on_event: &(dyn Fn(Event) + Send + Sync),
         ) -> StopReason {
@@ -457,7 +467,7 @@ mod tests {
             &self,
             _ctx: &RunContext,
             conv: &mut Conversation,
-            _input: &str,
+            _input: TurnInput<'_>,
             _system: &str,
             _on_event: &(dyn Fn(Event) + Send + Sync),
         ) -> StopReason {
@@ -685,7 +695,7 @@ mod tests {
                 &self,
                 _ctx: &RunContext,
                 _conv: &mut Conversation,
-                _input: &str,
+                _input: TurnInput<'_>,
                 _system: &str,
                 _on_event: &(dyn Fn(Event) + Send + Sync),
             ) -> StopReason {
@@ -729,7 +739,7 @@ mod tests {
                 &self,
                 _ctx: &RunContext,
                 conv: &mut Conversation,
-                _input: &str,
+                _input: TurnInput<'_>,
                 _system: &str,
                 _on_event: &(dyn Fn(Event) + Send + Sync),
             ) -> StopReason {
@@ -778,7 +788,7 @@ mod tests {
                 &self,
                 _ctx: &RunContext,
                 _conv: &mut Conversation,
-                _input: &str,
+                _input: TurnInput<'_>,
                 _system: &str,
                 _on_event: &(dyn Fn(Event) + Send + Sync),
             ) -> StopReason {

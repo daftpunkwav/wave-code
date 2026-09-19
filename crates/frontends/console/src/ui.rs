@@ -352,7 +352,10 @@ impl ConsoleUi {
             return;
         }
         self.push_user_message(&text);
-        self.enqueue(Op::UserInput { text });
+        self.enqueue(Op::UserInput {
+            text,
+            images: Vec::new(),
+        });
         self.state.phase = StreamingPhase::Waiting;
     }
 
@@ -4106,7 +4109,7 @@ mod tests {
         // submits asynchronously; wait for it).
         for _ in 0..100 {
             let landed = submitted.lock().unwrap().iter().any(
-                |op| matches!(op, Op::UserInput { text } if text.contains("what is the answer")),
+                |op| matches!(op, Op::UserInput { text, .. } if text.contains("what is the answer")),
             );
             if landed {
                 break;
@@ -4115,7 +4118,7 @@ mod tests {
         }
         assert!(
             submitted.lock().unwrap().iter().any(
-                |op| matches!(op, Op::UserInput { text } if text.contains("what is the answer"))
+                |op| matches!(op, Op::UserInput { text, .. } if text.contains("what is the answer"))
             ),
             "question must reach the side session"
         );
@@ -4138,21 +4141,18 @@ mod tests {
         // no new factory launch).
         ui.user_submit("/btw and now what?");
         for _ in 0..100 {
-            let landed =
-                submitted.lock().unwrap().iter().any(
-                    |op| matches!(op, Op::UserInput { text } if text.contains("and now what")),
-                );
+            let landed = submitted.lock().unwrap().iter().any(
+                |op| matches!(op, Op::UserInput { text, .. } if text.contains("and now what")),
+            );
             if landed {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert!(
-            submitted
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|op| matches!(op, Op::UserInput { text } if text.contains("and now what"))),
+            submitted.lock().unwrap().iter().any(
+                |op| matches!(op, Op::UserInput { text, .. } if text.contains("and now what"))
+            ),
             "follow-up must reach the same side session"
         );
         // Esc closes the panel and cancels the side session.

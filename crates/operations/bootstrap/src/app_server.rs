@@ -302,11 +302,22 @@ async fn prompt_session(
     if text.is_empty() {
         return (StatusCode::BAD_REQUEST, "`text` must not be empty").into_response();
     }
+    let images: Vec<wavecode_wire::UserImage> = body
+        .get("images")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     submit(
         state,
         &session_id,
         Op::UserInput {
             text: text.to_string(),
+            images,
         },
     )
     .await

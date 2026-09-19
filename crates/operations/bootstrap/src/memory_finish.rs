@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use runtime_runner::{HookPoint, InboxHandle, RunContext, StopReason, TurnDriver};
+use runtime_runner::{HookPoint, InboxHandle, RunContext, StopReason, TurnDriver, TurnInput};
 use state_store::{CompactTrigger, Conversation};
 use wavecode_llm::{ChatModel, ChatRequest, ContentBlock, Message, Role};
 use wavecode_memory::{MemoryStore, parse_extracted_entries};
@@ -131,7 +131,7 @@ impl<D: TurnDriver> TurnDriver for SessionMemory<D> {
         &self,
         ctx: &RunContext,
         conv: &mut Conversation,
-        input: &str,
+        input: TurnInput<'_>,
         system: &str,
         on_event: &(dyn Fn(Event) + Send + Sync),
     ) -> StopReason {

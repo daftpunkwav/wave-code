@@ -71,7 +71,10 @@ impl BtwJob {
             let _ = link
                 .submit(Submission {
                     id: Uuid::new_v4().to_string(),
-                    op: Op::UserInput { text: question },
+                    op: Op::UserInput {
+                        text: question,
+                        images: Vec::new(),
+                    },
                 })
                 .await;
             let mut running = true;
@@ -87,7 +90,10 @@ impl BtwJob {
                             let _ = link
                                 .submit(Submission {
                                     id: Uuid::new_v4().to_string(),
-                                    op: Op::UserInput { text },
+                                    op: Op::UserInput {
+                                        text,
+                                        images: Vec::new(),
+                                    }
                                 })
                                 .await;
                         }

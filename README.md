@@ -79,7 +79,9 @@ model = "your-model-fast"
 Diagnostics: every surface logs to a daily rolling file under
 `~/.wavecode/logs/` (14 days retained), never to stdout/stderr, so the
 `exec --json` stream stays clean. Levels: `--debug` wins over the
-`WAVECODE_LOG` env var, which wins over the `warn` default. A panic in a
+`WAVECODE_LOG` env var, which wins over the `warn` default (`WAVECODE_LOG`
+takes full env-filter syntax — `wavecode=debug` for this crate's debug
+logs; a bare word filters by target and would silence everything). A panic in a
 live UI restores terminal modes before the report prints.
 
 - `update`: compares the running version against the newest GitHub

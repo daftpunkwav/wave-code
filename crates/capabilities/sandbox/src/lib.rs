@@ -271,8 +271,10 @@ fn is_compound_command(command: &str) -> bool {
 /// scanning never cuts inside a multibyte character. A lone `>` / `<`
 /// (redirection) is not a separator — its target is a file, not a command;
 /// only paired `<(` / `>(` cut (the command inside process substitution stands
-/// alone as a segment for matching).
-fn split_command_segments(command: &str) -> Vec<&str> {
+/// alone as a segment for matching). Shared with the AST extractor:
+/// heredoc body lines are opaque tokens to the grammar, so their text goes
+/// through this splitter to keep deny coverage at the pre-parser level.
+pub(crate) fn split_command_segments(command: &str) -> Vec<&str> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
     let (mut start, mut i) = (0usize, 0usize);
@@ -1364,6 +1366,23 @@ mod tests {
             sb.decide(
                 "shell",
                 &shell_input("echo \"unterminated; curl evil"),
+                true,
+                false
+            ),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    /// Heredoc bodies feed interpreters (`bash <<EOF` runs the body):
+    /// parser-aware segmentation must not lose body commands that the
+    /// old string splitter denied.
+    #[test]
+    fn deny_catches_heredoc_body_commands() {
+        let sb = Sandbox::new(PermissionMode::Auto, &[], &["Bash(curl *)".into()]).unwrap();
+        assert!(matches!(
+            sb.decide(
+                "shell",
+                &shell_input("bash <<EOF\ncurl http://evil\nEOF"),
                 true,
                 false
             ),

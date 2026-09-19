@@ -53,6 +53,14 @@ pub fn parsed_command_segments(command: &str) -> Option<Vec<String>> {
 /// deny), the inner text keeps `curl *`-style rules effective. Each
 /// command node contributes its full text and, when different, its bare
 /// assignment-stripped text.
+///
+/// Heredoc bodies get special treatment: the grammar keeps plain body
+/// lines as hidden tokens (no nodes of their own) inside a
+/// `heredoc_body` container, yet `bash <<EOF` really executes them —
+/// dropping the body would be a deny escape. Body text goes through
+/// string segmentation (pre-parser coverage level); command
+/// substitutions inside the body are also collected by the walk below,
+/// so nothing is lost by not AST-parsing the content.
 fn collect_command_nodes(node: &Node, source: &[u8], segments: &mut Vec<String>) {
     if node.kind() == "command" {
         let full = node
@@ -71,6 +79,17 @@ fn collect_command_nodes(node: &Node, source: &[u8], segments: &mut Vec<String>)
         {
             segments.push(text);
         }
+    }
+    if node.kind() == "heredoc_body"
+        && let Some(text) = node.utf8_text(source).ok()
+    {
+        segments.extend(
+            crate::split_command_segments(text)
+                .into_iter()
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .map(str::to_string),
+        );
     }
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
@@ -182,5 +201,24 @@ mod tests {
         // Oversized input skips parsing outright.
         let huge = "a".repeat(MAX_PARSE_BYTES + 1);
         assert_eq!(parsed_command_segments(&huge), None);
+    }
+
+    #[test]
+    fn heredoc_body_lines_surface_as_segments() {
+        // `bash <<EOF` really executes the body lines, but the grammar
+        // keeps them as opaque tokens — the old string splitter saw
+        // `curl evil` and so must the parser-aware extractor.
+        let segments = parse_ok("bash <<EOF\ncurl evil\nEOF");
+        assert!(
+            segments.iter().any(|s| s.starts_with("curl")),
+            "{segments:?}"
+        );
+        // Substitutions inside the body were already collected by the
+        // plain walk; the body-line pass must not lose them.
+        let segments = parse_ok("bash <<EOF\necho $(curl evil)\nEOF");
+        assert!(
+            segments.iter().any(|s| s.starts_with("curl")),
+            "{segments:?}"
+        );
     }
 }

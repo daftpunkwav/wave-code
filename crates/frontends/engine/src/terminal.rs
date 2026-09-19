@@ -19,12 +19,19 @@ pub struct TerminalGuard {
     focus_reporting: bool,
 }
 
+/// Whether a [`TerminalGuard`] currently owns terminal modes. The panic
+/// hook restores modes only while this is set, so caught panics on
+/// non-TUI surfaces (the sandbox and child-runtime catch-unwind paths)
+/// never touch the terminal.
+static GUARD_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl TerminalGuard {
     /// Enter raw mode and enable bracketed paste, focus reporting, and
     /// (when supported) the Kitty keyboard protocol. Restores everything
     /// on `leave`/drop.
     pub fn enter() -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
+        GUARD_ACTIVE.store(true, std::sync::atomic::Ordering::SeqCst);
         let bracketed_paste = crossterm::execute!(std::io::stdout(), EnableBracketedPaste).is_ok();
         let focus_reporting = crossterm::execute!(std::io::stdout(), EnableFocusChange).is_ok();
         let mut keyboard_enhanced = false;
@@ -67,6 +74,7 @@ impl TerminalGuard {
 
     /// Restore every mode taken by [`Self::enter`].
     pub fn leave(&mut self) {
+        GUARD_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
         if self.keyboard_enhanced {
             let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
             self.keyboard_enhanced = false;
@@ -99,10 +107,13 @@ impl Drop for TerminalGuard {
 /// The guard's `drop` restores modes during unwinding, but the panic
 /// hook fires first — without this, the panic message prints in raw
 /// mode (unreadable), and an aborting panic skips `drop` entirely.
-/// Also covers surfaces that never enter raw mode: both restores are
-/// no-ops then, and a non-terminal stdout (exec `--json` pipe) is left
-/// byte-clean. Chains to the previously installed hook; installing
-/// more than once is safe but pointless — call it once at startup.
+/// Restoration runs only while a guard owns the modes
+/// ([`GUARD_ACTIVE`]): non-TUI surfaces are untouched, a non-terminal
+/// stdout (`exec --json` pipe) stays byte-clean, and a panic that some
+/// component catches while the TUI is live degrades the UI (an
+/// accepted, bug-scenario cost) instead of silently corrupting later
+/// rendering. Chains to the previously installed hook; installing more
+/// than once is safe but pointless — call it once at startup.
 pub fn install_panic_restore() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -111,10 +122,11 @@ pub fn install_panic_restore() {
     }));
 }
 
-/// Drop back to cooked mode and show the cursor, unconditionally.
+/// Drop back to cooked mode and show the cursor, while a guard is
+/// active; a no-op otherwise.
 fn restore_terminal_now() {
     use std::io::IsTerminal as _;
-    if !std::io::stdout().is_terminal() {
+    if !GUARD_ACTIVE.load(std::sync::atomic::Ordering::SeqCst) || !std::io::stdout().is_terminal() {
         return;
     }
     let _ = crossterm::terminal::disable_raw_mode();

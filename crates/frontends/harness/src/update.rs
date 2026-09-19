@@ -70,10 +70,7 @@ pub async fn fetch_latest(client: &reqwest::Client) -> Result<Option<(String, St
         .as_str()
         .context("release payload missing tag_name")?
         .to_string();
-    let page = payload["html_url"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let page = payload["html_url"].as_str().unwrap_or_default().to_string();
     Ok(Some((tag, page)))
 }
 

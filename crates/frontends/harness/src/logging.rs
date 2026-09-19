@@ -80,10 +80,11 @@ mod tests {
     }
 
     #[test]
-    fn unparsable_env_directive_falls_back_to_warn() {
+    fn malformed_level_directive_is_rejected_by_envfilter() {
         // A bare word is a legal target directive; only malformed
-        // `target=level` pairs make EnvFilter reject the string, and
-        // `init` then falls back to `warn`.
+        // `target=level` pairs make EnvFilter reject the string. `init`
+        // falls back to `warn` on that rejection (the subscriber itself
+        // is global and cannot be asserted in-process).
         assert!(EnvFilter::try_new("nonsense=verbose").is_err());
     }
 }

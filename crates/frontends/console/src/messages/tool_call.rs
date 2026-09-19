@@ -278,10 +278,7 @@ impl ToolCall {
         for line in pretty.lines() {
             if shown >= INPUT_MAX_LINES {
                 let rest = pretty.lines().count() - shown;
-                rows.push(theme.paint(
-                    Token::TextMuted,
-                    &format!("  … ({rest} more lines)"),
-                ));
+                rows.push(theme.paint(Token::TextMuted, &format!("  … ({rest} more lines)")));
                 break;
             }
             for (index, wrapped) in width::wrap_line(line, budget).into_iter().enumerate() {
@@ -436,13 +433,26 @@ mod tests {
         // Non-grep tools stay dim even for identical shapes.
         let other = style_output_line("read", "src/lib.rs:42:pub fn main() {}");
         assert_eq!(strip_ansi(&other), "  src/lib.rs:42:pub fn main() {}");
-        assert_eq!(other, format!("  {}", theme::current().style(Token::TextDim).paint("src/lib.rs:42:pub fn main() {}")));
+        assert_eq!(
+            other,
+            format!(
+                "  {}",
+                theme::current()
+                    .style(Token::TextDim)
+                    .paint("src/lib.rs:42:pub fn main() {}")
+            )
+        );
     }
 
     #[test]
     fn malformed_grep_lines_stay_dim() {
         theme::set(theme::Theme::dark());
-        for line in ["no colons here", ":42:x", "path:notanumber:x", "path with space.rs:1:x"] {
+        for line in [
+            "no colons here",
+            ":42:x",
+            "path:notanumber:x",
+            "path with space.rs:1:x",
+        ] {
             let styled = style_output_line("grep", line);
             assert_eq!(
                 styled,
@@ -486,13 +496,12 @@ mod tests {
     fn card_states_and_output_body() {
         theme::set(theme::Theme::dark());
         let flag = ExpandedFlag::new();
-        let mut card =
-            ToolCall::running(
-                "shell",
-                &serde_json::json!({"command": "ls"}),
-                flag.clone(),
-                crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
-            );
+        let mut card = ToolCall::running(
+            "shell",
+            &serde_json::json!({"command": "ls"}),
+            flag.clone(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
+        );
         let lines = card.render(80);
         assert!(
             strip_ansi(&lines[0]).starts_with("▁ Running shell (ls)"),

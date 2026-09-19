@@ -301,11 +301,7 @@ where
                     };
                     let op = async {
                         if let Err(cause) = driver
-                            .drive_compact(
-                                &mut conv,
-                                CompactTrigger::Manual { instruction },
-                                &sink,
-                            )
+                            .drive_compact(&mut conv, CompactTrigger::Manual { instruction }, &sink)
                             .await
                         {
                             sink(Event {

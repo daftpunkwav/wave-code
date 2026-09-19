@@ -94,9 +94,15 @@ impl Component for ShellCard {
             let frame = SAW_FRAMES[step % SAW_FRAMES.len()];
             theme.paint(Token::TextDim, &format!("{frame} "))
         } else if failed {
-            theme.paint(Token::Error, &format!("{} ", crate::chrome::symbols::FAILED))
+            theme.paint(
+                Token::Error,
+                &format!("{} ", crate::chrome::symbols::FAILED),
+            )
         } else {
-            theme.paint(Token::Success, &format!("{} ", crate::chrome::symbols::DONE))
+            theme.paint(
+                Token::Success,
+                &format!("{} ", crate::chrome::symbols::DONE),
+            )
         };
         out.push(format!(
             "{bullet}{}",

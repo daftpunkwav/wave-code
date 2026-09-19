@@ -630,7 +630,11 @@ mod tests {
         // The failing step's whole chunk was asked to stop: an in-flight
         // sibling must not keep burning tokens after the step failed.
         assert_eq!(
-            service.stopped.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            service
+                .stopped
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             vec![
                 "task-1".to_string(),
                 "task-2".to_string(),

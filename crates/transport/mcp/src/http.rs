@@ -186,7 +186,11 @@ impl HttpMcp {
         let raw = serde_json::to_vec(body).map_err(|e| {
             TransportError::Protocol(format!("failed to encode JSON-RPC request: {e}"))
         })?;
-        let session = self.session_id.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let session = self
+            .session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         // A static `Authorization` header wins: skip the OAuth grant entirely
         // so no token request is issued when explicit auth is configured.
         let bearer = if has_static_authorization(&self.headers) {
@@ -234,7 +238,12 @@ impl HttpMcp {
         // session id and tell the caller to re-initialize. A 404 without a
         // session is a plain routing error, not an expiry.
         if status == reqwest::StatusCode::NOT_FOUND
-            && self.session_id.lock().unwrap_or_else(|e| e.into_inner()).take().is_some()
+            && self
+                .session_id
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .is_some()
         {
             return Err(TransportError::SessionExpired);
         }
@@ -580,7 +589,10 @@ mod tests {
             headers,
             body,
         };
-        observed.lock().unwrap_or_else(|e| e.into_inner()).push(request.clone());
+        observed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(request.clone());
         let (status, extra, resp_body) = handler(&request);
         let reason = match status {
             200 => "OK",

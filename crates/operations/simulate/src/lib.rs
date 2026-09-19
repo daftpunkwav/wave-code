@@ -80,7 +80,9 @@ pub fn tool_names(blocks: &[SampleBlock]) -> Vec<&str> {
         .iter()
         .filter_map(|block| match block {
             SampleBlock::ToolUse { name, .. } => Some(name.as_str()),
-            SampleBlock::Text(_) | SampleBlock::ToolResult { .. } | SampleBlock::Image { .. } => None,
+            SampleBlock::Text(_) | SampleBlock::ToolResult { .. } | SampleBlock::Image { .. } => {
+                None
+            }
         })
         .collect()
 }

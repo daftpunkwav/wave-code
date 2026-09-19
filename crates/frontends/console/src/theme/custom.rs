@@ -114,9 +114,17 @@ impl CustomTheme {
         apply(&mut palette.primary, "primary", &self.colors.primary)?;
         apply(&mut palette.accent, "accent", &self.colors.accent)?;
         apply(&mut palette.text, "text", &self.colors.text)?;
-        apply(&mut palette.text_strong, "text_strong", &self.colors.text_strong)?;
+        apply(
+            &mut palette.text_strong,
+            "text_strong",
+            &self.colors.text_strong,
+        )?;
         apply(&mut palette.text_dim, "text_dim", &self.colors.text_dim)?;
-        apply(&mut palette.text_muted, "text_muted", &self.colors.text_muted)?;
+        apply(
+            &mut palette.text_muted,
+            "text_muted",
+            &self.colors.text_muted,
+        )?;
         apply(&mut palette.border, "border", &self.colors.border)?;
         apply(
             &mut palette.border_focus,
@@ -126,7 +134,11 @@ impl CustomTheme {
         apply(&mut palette.success, "success", &self.colors.success)?;
         apply(&mut palette.warning, "warning", &self.colors.warning)?;
         apply(&mut palette.error, "error", &self.colors.error)?;
-        apply(&mut palette.diff_added, "diff_added", &self.colors.diff_added)?;
+        apply(
+            &mut palette.diff_added,
+            "diff_added",
+            &self.colors.diff_added,
+        )?;
         apply(
             &mut palette.diff_removed,
             "diff_removed",
@@ -142,10 +154,18 @@ impl CustomTheme {
             "diff_removed_strong",
             &self.colors.diff_removed_strong,
         )?;
-        apply(&mut palette.diff_gutter, "diff_gutter", &self.colors.diff_gutter)?;
+        apply(
+            &mut palette.diff_gutter,
+            "diff_gutter",
+            &self.colors.diff_gutter,
+        )?;
         apply(&mut palette.diff_meta, "diff_meta", &self.colors.diff_meta)?;
         apply(&mut palette.role_user, "role_user", &self.colors.role_user)?;
-        apply(&mut palette.shell_mode, "shell_mode", &self.colors.shell_mode)?;
+        apply(
+            &mut palette.shell_mode,
+            "shell_mode",
+            &self.colors.shell_mode,
+        )?;
         Ok(palette)
     }
 }

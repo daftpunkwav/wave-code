@@ -56,7 +56,10 @@ impl Compactor for ContextCompactor {
         let mut strategy = ModelSummary::new(self.model.clone(), self.model_name.clone());
         // Manual compaction may carry user steering ("/compact keep the
         // API design decisions"); other triggers summarize unsteered.
-        if let state_store::CompactTrigger::Manual { instruction: Some(focus) } = &trigger {
+        if let state_store::CompactTrigger::Manual {
+            instruction: Some(focus),
+        } = &trigger
+        {
             strategy = strategy.with_focus(focus.clone());
         }
         let outcome = compact_history(&messages, &strategy, &ContextConfig::default())

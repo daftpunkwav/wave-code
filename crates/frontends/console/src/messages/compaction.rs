@@ -87,7 +87,8 @@ impl Component for CompactionCard {
         match self.outcome {
             Outcome::Running => {
                 let step = (self.started.elapsed().as_millis()
-                    / tui_engine::loader::SAW_INTERVAL_MS as u128) as usize;
+                    / tui_engine::loader::SAW_INTERVAL_MS as u128)
+                    as usize;
                 let frame = SAW_FRAMES[step % SAW_FRAMES.len()];
                 let seconds = self.started.elapsed().as_secs();
                 vec![theme.paint(
@@ -134,7 +135,13 @@ mod tests {
         let lines = card.render(60);
         let plain = strip_ansi(&lines[0]);
         assert!(plain.contains("compacting context (manual)"), "{plain}");
-        assert!(plain.contains('▁') || plain.contains('▃') || plain.contains('▅') || plain.contains('▇'), "saw frame: {plain}");
+        assert!(
+            plain.contains('▁')
+                || plain.contains('▃')
+                || plain.contains('▅')
+                || plain.contains('▇'),
+            "saw frame: {plain}"
+        );
         assert!(plain.contains('s'), "elapsed seconds: {plain}");
     }
 

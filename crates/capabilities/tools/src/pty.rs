@@ -433,9 +433,7 @@ fn run_one_shot(
     // Publish the killer for the outer timeout arm: the internal deadline
     // check only runs after a read returns, so a child idling without
     // output must be killable from outside the blocked reader thread.
-    *killer_slot
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(child.clone_killer());
+    *killer_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(child.clone_killer());
     drop(pair.slave);
     let mut reader = pair
         .master
@@ -649,10 +647,8 @@ impl Tool for PtyShell {
                     // unblock the reader thread) instead of leaving both
                     // behind until the shell exits on its own.
                     Err(_) => {
-                        if let Some(mut killer) = killer_slot
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .take()
+                        if let Some(mut killer) =
+                            killer_slot.lock().unwrap_or_else(|e| e.into_inner()).take()
                         {
                             let _ = killer.kill();
                         }
@@ -780,10 +776,7 @@ mod tests {
         };
         let started = std::time::Instant::now();
         let out = PtyShell
-            .execute(
-                serde_json::json!({"command": cmd, "timeout_ms": 1500}),
-                &c,
-            )
+            .execute(serde_json::json!({"command": cmd, "timeout_ms": 1500}), &c)
             .await
             .unwrap();
         let elapsed = started.elapsed();

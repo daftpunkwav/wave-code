@@ -56,7 +56,11 @@ pub struct WelcomeInfo {
 /// Index of the first oscilloscope row within the card at `inner`.
 fn wave_offset(inner: usize) -> usize {
     // leading blank + logo rows (figlet or the one-line wordmark).
-    1 + if inner >= LOGO_MIN_WIDTH { LOGO.len() } else { 1 }
+    1 + if inner >= LOGO_MIN_WIDTH {
+        LOGO.len()
+    } else {
+        1
+    }
 }
 
 /// Build the welcome card lines at `width`.
@@ -72,8 +76,10 @@ pub fn render(info: &WelcomeInfo, width: usize) -> Vec<String> {
         for (row, line) in LOGO.iter().enumerate() {
             let k = row as f32 / (LOGO.len() - 1) as f32;
             let c = lerp(palette.primary, palette.accent, k);
-            content
-                .push(center_line(&format!("\x1b[{}m{line}\x1b[0m", c.fg_params()), inner));
+            content.push(center_line(
+                &format!("\x1b[{}m{line}\x1b[0m", c.fg_params()),
+                inner,
+            ));
         }
     } else {
         content.push(center_line(
@@ -134,12 +140,7 @@ fn wave_banner(
     to: tui_engine::color::Color,
 ) -> (String, String) {
     // Braille cell bit layout: rows 0-3 top to bottom, left/right.
-    const DOT: [[u32; 2]; 4] = [
-        [0x01, 0x08],
-        [0x02, 0x10],
-        [0x04, 0x20],
-        [0x40, 0x80],
-    ];
+    const DOT: [[u32; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
     let pixel_count = columns * 2;
     // Per-pixel trace height: modulated sine through the vertical mid.
     let height = |x: usize| {
@@ -178,7 +179,11 @@ fn wave_banner(
                 // mid-span.
                 let k = 0.5 * (1.0 - (t * std::f32::consts::TAU).cos());
                 let c = lerp(from, to, k);
-                format!("\x1b[{}m{}\x1b[0m", c.fg_params(), char::from_u32(0x2800 + bits).unwrap())
+                format!(
+                    "\x1b[{}m{}\x1b[0m",
+                    c.fg_params(),
+                    char::from_u32(0x2800 + bits).unwrap()
+                )
             })
             .collect::<String>()
     };
@@ -341,10 +346,13 @@ mod tests {
             let banner = &lines[row];
             assert_eq!(width::width(banner), 58, "banner width: {banner:?}");
             // The gradient paints more than one distinct color.
-            let starts: Vec<&str> = banner.match_indices("\x1b[").map(|(i, _)| {
-                let rest = &banner[i..];
-                &rest[..rest.find('m').map(|m| m + 1).unwrap_or(0)]
-            }).collect();
+            let starts: Vec<&str> = banner
+                .match_indices("\x1b[")
+                .map(|(i, _)| {
+                    let rest = &banner[i..];
+                    &rest[..rest.find('m').map(|m| m + 1).unwrap_or(0)]
+                })
+                .collect();
             let distinct: std::collections::HashSet<&str> = starts.into_iter().collect();
             assert!(distinct.len() > 2, "gradient colors: {distinct:?}");
             // Braille cells or silence only.
@@ -357,8 +365,16 @@ mod tests {
             );
         }
         // The trace crosses the midline: both rows carry dots.
-        assert!(strip_ansi(&lines[6]).chars().any(|c| c != '\u{2800}' && c != ' '));
-        assert!(strip_ansi(&lines[7]).chars().any(|c| c != '\u{2800}' && c != ' '));
+        assert!(
+            strip_ansi(&lines[6])
+                .chars()
+                .any(|c| c != '\u{2800}' && c != ' ')
+        );
+        assert!(
+            strip_ansi(&lines[7])
+                .chars()
+                .any(|c| c != '\u{2800}' && c != ' ')
+        );
     }
 
     #[test]
@@ -379,9 +395,16 @@ mod tests {
         theme::set(theme::Theme::dark());
         let mut card = Welcome::new(info());
         let lines = card.render(40);
-        let joined = lines.iter().map(|l| strip_ansi(l)).collect::<Vec<_>>().join("\n");
+        let joined = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(joined.contains("W A V E C O D E"), "{joined}");
-        assert!(!joined.contains(LOGO[0]), "no figlet below {LOGO_MIN_WIDTH}: {joined}");
+        assert!(
+            !joined.contains(LOGO[0]),
+            "no figlet below {LOGO_MIN_WIDTH}: {joined}"
+        );
     }
 
     /// Manual visual check: `cargo test -p console-ui welcome_snapshot

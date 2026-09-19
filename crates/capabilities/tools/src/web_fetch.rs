@@ -490,10 +490,10 @@ mod tests {
     fn loopback_private_and_public_hosts_still_pass_validation() {
         for url in [
             "https://example.com/x",
-            "http://localhost/admin",  // loopback stays reachable (dev servers)
-            "http://127.0.0.1:3000/",  // same
+            "http://localhost/admin", // loopback stays reachable (dev servers)
+            "http://127.0.0.1:3000/", // same
             "http://192.168.1.10/dev", // RFC1918 stays reachable
-            "http://example.com.",     // root dot is trimmed, not link-local
+            "http://example.com.",    // root dot is trimmed, not link-local
         ] {
             assert!(
                 validate_url(&serde_json::json!({"url": url})).is_ok(),

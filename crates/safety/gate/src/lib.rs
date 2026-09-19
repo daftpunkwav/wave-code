@@ -149,9 +149,7 @@ impl QuestionGate {
     }
 
     /// Recover the mutex guard after a poison; see crate docs for why.
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<String>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, oneshot::Sender<String>>> {
         self.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
 

@@ -221,8 +221,14 @@ impl Tool for Shell {
         // chatty child cannot grow memory without bound.
         let run = async {
             let mut child = cmd.spawn()?;
-            let stdout = child.stdout.take().map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
-            let stderr = child.stderr.take().map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
+            let stdout = child
+                .stdout
+                .take()
+                .map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
+            let stderr = child
+                .stderr
+                .take()
+                .map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
             let stdout = async {
                 match stdout {
                     Some(read) => read.await,

@@ -12,9 +12,7 @@ use crate::color::Style;
 use crate::component::Component;
 
 /// Sine ripple frames: amplitude swells and recedes (80 ms).
-pub const SINE_FRAMES: [&str; 12] = [
-    "▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂",
-];
+pub const SINE_FRAMES: [&str; 12] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂"];
 /// Sine spinner frame interval in milliseconds.
 pub const SINE_INTERVAL_MS: u64 = 80;
 
@@ -141,7 +139,12 @@ mod tests {
 
     #[test]
     fn triangle_style_starts_at_trough() {
-        let loader = Loader::new(SpinnerStyle::Triangle, "thinking", Style::new(), Style::new());
+        let loader = Loader::new(
+            SpinnerStyle::Triangle,
+            "thinking",
+            Style::new(),
+            Style::new(),
+        );
         assert_eq!(loader.current_frame(), "▁");
     }
 }

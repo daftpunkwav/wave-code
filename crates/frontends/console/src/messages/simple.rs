@@ -190,7 +190,11 @@ impl Component for AssistantMessage {
             .enumerate()
         {
             if index == 0 {
-                out.push(format!("{}{}{line}", theme.paint(Token::Primary, &bullet), " "));
+                out.push(format!(
+                    "{}{}{line}",
+                    theme.paint(Token::Primary, &bullet),
+                    " "
+                ));
             } else {
                 out.push(format!("{MESSAGE_INDENT}{line}"));
             }

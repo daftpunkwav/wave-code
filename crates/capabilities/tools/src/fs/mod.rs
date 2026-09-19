@@ -251,13 +251,7 @@ mod tests {
         // builtins (pty, websearch, spill, image, present, ...); the stable
         // contract is sorted specs, object schemas, and per-tool presence.
         assert!(specs.len() >= 14);
-        for name in [
-            "read",
-            "view",
-            "present",
-            "web_search",
-            "spill",
-        ] {
+        for name in ["read", "view", "present", "web_search", "spill"] {
             assert!(
                 specs.iter().any(|s| s.name == name),
                 "{name} must be registered"

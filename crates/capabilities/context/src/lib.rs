@@ -1131,7 +1131,8 @@ mod tests {
     /// five-element prompt.
     #[tokio::test]
     async fn model_summary_focus_reaches_the_request() {
-        const SCRIPT: &str = "## Goal\nx\n## Progress\ny\n## Key decisions\nz\n## File inventory\nf\n## Todo\nt";
+        const SCRIPT: &str =
+            "## Goal\nx\n## Progress\ny\n## Key decisions\nz\n## File inventory\nf\n## Todo\nt";
         struct CapturingModel {
             seen: std::sync::Mutex<Option<String>>,
         }

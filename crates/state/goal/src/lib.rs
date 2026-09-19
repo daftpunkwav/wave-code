@@ -657,15 +657,16 @@ mod tests {
         let mut goal = GoalState::default();
         goal.set("ship it").unwrap();
         // CAS mismatch is rejected and mutates nothing.
-        assert!(goal
-            .replace_sub_goals(
+        assert!(
+            goal.replace_sub_goals(
                 999,
                 vec![SubGoal {
                     text: "x".into(),
                     status: SubGoalStatus::InProgress
                 }]
             )
-            .is_err());
+            .is_err()
+        );
         assert!(goal.sub_goals.is_empty());
         // The fresh version applies the whole list.
         goal.replace_sub_goals(
@@ -673,11 +674,11 @@ mod tests {
             vec![
                 SubGoal {
                     text: "fix the bug".into(),
-                    status: SubGoalStatus::Achieved
+                    status: SubGoalStatus::Achieved,
                 },
                 SubGoal {
                     text: "add tests".into(),
-                    status: SubGoalStatus::InProgress
+                    status: SubGoalStatus::InProgress,
                 },
             ],
         )
@@ -686,15 +687,16 @@ mod tests {
         assert_eq!(goal.sub_goals[0].status, SubGoalStatus::Achieved);
         assert_eq!(goal.version, 2);
         // Blank texts are rejected outright.
-        assert!(goal
-            .replace_sub_goals(
+        assert!(
+            goal.replace_sub_goals(
                 goal.version,
                 vec![SubGoal {
                     text: "   ".into(),
                     status: SubGoalStatus::InProgress
                 }]
             )
-            .is_err());
+            .is_err()
+        );
         // The cap rejects oversized lists.
         let overflow = vec![
             SubGoal {
@@ -712,7 +714,8 @@ mod tests {
     #[test]
     fn sub_goals_default_keeps_older_files_loadable() {
         // A file written before sub-goals existed lacks the field entirely.
-        let legacy = r#"{"objective":"old","status":"active","version":3,"round":1,"updated_at":0}"#;
+        let legacy =
+            r#"{"objective":"old","status":"active","version":3,"round":1,"updated_at":0}"#;
         let state: GoalState = serde_json::from_str(legacy).unwrap();
         assert_eq!(state.objective, "old");
         assert!(state.sub_goals.is_empty());

@@ -50,8 +50,8 @@ use crate::controllers::btw::BtwJob;
 use crate::controllers::shell::{ShellEvent, ShellJob};
 use crate::dialogs::{Answer, ApprovalDialog, Dialog, ModelEntryView, QuestionDialog, SessionRow};
 use crate::history;
-use crate::messages::shell::ShellCard;
 use crate::messages::compaction::CompactionCard;
+use crate::messages::shell::ShellCard;
 use crate::messages::tool_call::ToolCall;
 use crate::messages::usage::UsagePanel;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
@@ -264,22 +264,19 @@ impl ConsoleUi {
                     slash::COMMANDS.iter().map(|s| s.to_string()).collect();
                 command_names.extend(ctx.skill_names.iter().cloned());
                 editor.set_provider(Box::new(
-                    ConsoleProvider::new(
-                        &command_names,
-                        FileInventory::scan(&ctx.cwd),
-                    )
-                    .with_models(
-                        ctx.model_entries
-                            .iter()
-                            .map(|entry| (entry.label.clone(), entry.provider.clone()))
-                            .collect(),
-                    )
-                    .with_themes(
-                        ctx.home
-                            .as_deref()
-                            .map(crate::theme::custom::list)
-                            .unwrap_or_default(),
-                    ),
+                    ConsoleProvider::new(&command_names, FileInventory::scan(&ctx.cwd))
+                        .with_models(
+                            ctx.model_entries
+                                .iter()
+                                .map(|entry| (entry.label.clone(), entry.provider.clone()))
+                                .collect(),
+                        )
+                        .with_themes(
+                            ctx.home
+                                .as_deref()
+                                .map(crate::theme::custom::list)
+                                .unwrap_or_default(),
+                        ),
                 ));
                 if let Some(path) = home_history_path() {
                     editor.load_history(history::load(&path));
@@ -845,10 +842,7 @@ impl ConsoleUi {
                     self.state.phase = StreamingPhase::Idle;
                     // Same reasoning as TurnCompleted: the gates are
                     // gone, so a parked modal must not linger.
-                    if matches!(
-                        self.dialog,
-                        Some(Dialog::Approval(_) | Dialog::Question(_))
-                    ) {
+                    if matches!(self.dialog, Some(Dialog::Approval(_) | Dialog::Question(_))) {
                         self.dialog = None;
                         self.push_status("request dismissed (turn failed)", false);
                     }
@@ -874,10 +868,7 @@ impl ConsoleUi {
                 // Parked gates died with the turn: a stale approval or
                 // question modal could only answer into "late approval"
                 // warnings, so it goes with the turn.
-                if matches!(
-                    self.dialog,
-                    Some(Dialog::Approval(_) | Dialog::Question(_))
-                ) {
+                if matches!(self.dialog, Some(Dialog::Approval(_) | Dialog::Question(_))) {
                     self.dialog = None;
                     self.push_status("request dismissed (turn ended)", false);
                 }
@@ -1628,8 +1619,8 @@ impl ConsoleUi {
         }
         guard.leave();
         let outcome = edit_with_command(&command, &temp).await;
-        *guard = TerminalGuard::enter()
-            .map_err(|e| anyhow::anyhow!("terminal restore failed: {e}"))?;
+        *guard =
+            TerminalGuard::enter().map_err(|e| anyhow::anyhow!("terminal restore failed: {e}"))?;
         let _ = guard.keyboard_enhanced();
         let _ = std::fs::remove_file(&temp);
         match outcome {
@@ -1853,7 +1844,10 @@ verify from the repository.";
                     .map(theme::custom::list)
                     .unwrap_or_default();
                 if custom.is_empty() {
-                    self.push_status("usage: /theme light|dark|auto (or a custom theme name)", false);
+                    self.push_status(
+                        "usage: /theme light|dark|auto (or a custom theme name)",
+                        false,
+                    );
                 } else {
                     self.push_status(
                         &format!("usage: /theme light|dark|auto|<{}>", custom.join("|")),
@@ -1988,7 +1982,10 @@ verify from the repository.";
             (Key::Esc, _) => {
                 // Double-Esc opens the rewind picker; a lone Esc stays
                 // a no-op.
-                if self.last_esc_at.is_some_and(|at| at.elapsed() <= DOUBLE_ESC_WINDOW) {
+                if self
+                    .last_esc_at
+                    .is_some_and(|at| at.elapsed() <= DOUBLE_ESC_WINDOW)
+                {
                     self.last_esc_at = None;
                     self.open_undo_picker();
                 } else {
@@ -2975,7 +2972,10 @@ mod tests {
         );
         assert_eq!(pick_editor_command(None, None, Some("vi")), Some("vi"));
         assert_eq!(pick_editor_command(None, None, None), None);
-        assert_eq!(pick_editor_command(Some("  "), None, Some("vi")), Some("vi"));
+        assert_eq!(
+            pick_editor_command(Some("  "), None, Some("vi")),
+            Some("vi")
+        );
     }
 
     #[test]

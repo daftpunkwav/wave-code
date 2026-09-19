@@ -78,6 +78,9 @@ struct SessionEntry {
     jobs: mpsc::UnboundedSender<SessionJob>,
     /// Request id of the in-flight prompt, if any.
     in_flight: Option<serde_json::Value>,
+    /// Session permission mode wire name (assembly-resolved at `session/new`,
+    /// updated by `session/set_mode`).
+    mode: String,
 }
 
 /// Work for a session task.
@@ -91,6 +94,36 @@ enum SessionJob {
     },
     /// Interrupt the in-flight turn, if any.
     Cancel,
+    /// Switch the session permission mode (pre-validated wire name).
+    SetMode {
+        /// Mode wire name (`plan` / `auto` / `wave`).
+        mode: String,
+    },
+}
+
+/// The mode table every ACP client sees: the three wire names with
+/// controller-facing descriptions, plus the session's current pick.
+fn acp_modes(current: &str) -> serde_json::Value {
+    serde_json::json!({
+        "currentModeId": current,
+        "availableModes": [
+            {
+                "id": "plan",
+                "name": "Plan",
+                "description": "Read-only exploration; the agent proposes instead of acting",
+            },
+            {
+                "id": "auto",
+                "name": "Auto",
+                "description": "Asks only for command execution and destructive tools",
+            },
+            {
+                "id": "wave",
+                "name": "Wave",
+                "description": "Fully automatic; deny rules still apply",
+            },
+        ],
+    })
 }
 
 /// Turn outcome reported back to the serve loop.
@@ -276,6 +309,9 @@ async fn dispatch_line<W, F>(
         "session/cancel" => {
             cancel_prompt(&id, &params, sessions, writer).await;
         }
+        "session/set_mode" => {
+            set_mode(&id, &params, sessions, writer).await;
+        }
         _ => {
             write_error(
                 writer,
@@ -344,6 +380,7 @@ async fn new_session<W, F>(
     };
     let session_id = format!("sess-{next_session}");
     *next_session += 1;
+    let mode = handle.permission_mode.clone();
     let (job_tx, job_rx) = mpsc::unbounded_channel();
     tokio::spawn(session_task(
         session_id.clone(),
@@ -357,11 +394,19 @@ async fn new_session<W, F>(
         SessionEntry {
             jobs: job_tx,
             in_flight: None,
+            mode: mode.clone(),
         },
     );
-    write_success(writer, id, serde_json::json!({ "sessionId": session_id })).await;
+    write_success(
+        writer,
+        id,
+        serde_json::json!({
+            "sessionId": session_id,
+            "modes": acp_modes(&mode),
+        }),
+    )
+    .await;
 }
-
 /// Queue one turn; the JSON-RPC reply is deferred until the turn ends.
 ///
 /// Text blocks join with newlines; non-text blocks are skipped. A
@@ -500,6 +545,77 @@ async fn cancel_prompt<W>(
     }
 }
 
+/// Switch a session's permission mode (`session/set_mode`).
+///
+/// Only the three table ids are accepted: legacy wire names never cross
+/// the protocol. The reply is immediate (the switch takes effect at the
+/// next approval decision, not retroactively on a running turn); an
+/// unknown session or mode id fails the request so controllers can
+/// surface a typo instead of silently keeping the old mode.
+async fn set_mode<W>(
+    id: &serde_json::Value,
+    params: &serde_json::Value,
+    sessions: &mut HashMap<String, SessionEntry>,
+    writer: &Arc<Mutex<W>>,
+) where
+    W: AsyncWrite + Unpin,
+{
+    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+        Some(session_id) => session_id,
+        None => {
+            write_error(
+                writer,
+                id,
+                INVALID_PARAMS,
+                "invalid params: session/set_mode requires a string sessionId",
+            )
+            .await;
+            return;
+        }
+    };
+    let mode_id = match params.get("modeId").and_then(|v| v.as_str()) {
+        Some(mode_id) => mode_id,
+        None => {
+            write_error(
+                writer,
+                id,
+                INVALID_PARAMS,
+                "invalid params: session/set_mode requires a string modeId",
+            )
+            .await;
+            return;
+        }
+    };
+    if !matches!(mode_id, "plan" | "auto" | "wave") {
+        write_error(
+            writer,
+            id,
+            INVALID_PARAMS,
+            format!("invalid params: unknown modeId {mode_id:?}"),
+        )
+        .await;
+        return;
+    }
+    match sessions.get_mut(session_id) {
+        None => {
+            write_error(
+                writer,
+                id,
+                INVALID_PARAMS,
+                format!("invalid params: unknown sessionId {session_id:?}"),
+            )
+            .await;
+        }
+        Some(entry) => {
+            entry.mode = mode_id.to_string();
+            let _ = entry.jobs.send(SessionJob::SetMode {
+                mode: mode_id.to_string(),
+            });
+            write_success(writer, id, serde_json::Value::Null).await;
+        }
+    }
+}
+
 /// Answer a deferred prompt once its turn ends.
 async fn handle_task_msg<W>(
     msg: TaskMsg,
@@ -568,6 +684,17 @@ async fn session_task<W>(
                                 })
                                 .await;
                         }
+                    }
+                    Some(SessionJob::SetMode { mode }) => {
+                        // Pre-validated by set_mode; a rejection here can
+                        // only mean a fixed gateway, which surfaces as a
+                        // warning event instead of failing the protocol.
+                        let _ = client
+                            .submit(Submission {
+                                id: format!("acp-{session_id}-mode"),
+                                op: Op::SetPermissionMode { mode },
+                            })
+                            .await;
                     }
                     Some(SessionJob::Prompt { req_id, text }) => {
                         if in_flight.is_some() {
@@ -1151,6 +1278,67 @@ api_key = "k-inline"
     }
 
     #[tokio::test]
+    async fn session_new_response_carries_the_mode_table() {
+        let (mut h, _server) = spawn_server(vec![done_script()]).await;
+        let reply = h.request("session/new", serde_json::json!({})).await;
+        let session = reply
+            .pointer("/result/sessionId")
+            .and_then(|v| v.as_str())
+            .expect("session/new must return a sessionId")
+            .to_string();
+        // The table names the three wire modes and the assembly-resolved
+        // current pick; controllers render it and key set_mode off it.
+        let current = reply
+            .pointer("/result/modes/currentModeId")
+            .and_then(|v| v.as_str())
+            .expect("modes.currentModeId")
+            .to_string();
+        assert_eq!(
+            reply
+                .pointer("/result/modes/availableModes")
+                .and_then(|v| v.as_array())
+                .map(|modes| {
+                    modes
+                        .iter()
+                        .filter_map(|m| m.get("id").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                }),
+            Some(vec!["plan", "auto", "wave"])
+        );
+        assert!(
+            ["plan", "auto", "wave"].contains(&current.as_str()),
+            "currentModeId {current:?} must be one of the table ids"
+        );
+
+        // A valid switch answers empty; the table id set is enforced.
+        let switched = h
+            .request(
+                "session/set_mode",
+                serde_json::json!({"sessionId": session, "modeId": "plan"}),
+            )
+            .await;
+        assert!(switched.get("error").is_none(), "{switched}");
+    }
+
+    #[tokio::test]
+    async fn set_mode_rejects_unknown_ids_and_sessions() {
+        let (mut h, _server) = spawn_server(vec![done_script()]).await;
+        let session = h.new_session(serde_json::json!({})).await;
+        for params in [
+            serde_json::json!({"sessionId": session, "modeId": "yolo"}),
+            serde_json::json!({"sessionId": session, "modeId": ""}),
+            serde_json::json!({"sessionId": "sess-999", "modeId": "auto"}),
+        ] {
+            let reply = h.request("session/set_mode", params).await;
+            assert_eq!(
+                reply.pointer("/error/code"),
+                Some(&serde_json::json!(-32602)),
+                "{reply}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn prompt_streams_text_then_reports_end_turn() {
         let (mut h, _server) = spawn_server(vec![done_script()]).await;
         let session = h.new_session(serde_json::json!({})).await;
@@ -1224,7 +1412,7 @@ api_key = "k-inline"
     #[tokio::test]
     async fn unknown_methods_fail_with_method_not_found() {
         let (mut h, _server) = spawn_server(vec![]).await;
-        let reply = h.request("session/set_mode", serde_json::json!({})).await;
+        let reply = h.request("session/frobnicate", serde_json::json!({})).await;
         assert_eq!(
             reply.pointer("/error/code"),
             Some(&serde_json::json!(METHOD_NOT_FOUND))

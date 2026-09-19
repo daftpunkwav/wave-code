@@ -255,6 +255,7 @@ mod tests {
         metrics.record(&event(EventMsg::Error {
             message: "e".to_string(),
             recoverable: true,
+            code: None,
         }));
         assert_eq!(metrics.errors, 1);
         assert_eq!(metrics.tool_errors, 0);

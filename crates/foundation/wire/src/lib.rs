@@ -290,6 +290,12 @@ pub enum EventMsg {
         message: String,
         /// True when the session survives and accepts new submissions.
         recoverable: bool,
+        /// Machine-readable class in `domain.reason` form (`hook.blocked`,
+        /// `context.overflow`, `provider.error`, `queue.full`, …) so
+        /// programmatic consumers can switch on it instead of sniffing
+        /// the message. Absent on older events; optional on the wire.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     /// The run terminated; always the last event of a submission.
     TurnCompleted {
@@ -453,6 +459,7 @@ mod tests {
                 EventMsg::Error {
                     message: "e".to_string(),
                     recoverable: true,
+                    code: None,
                 },
                 "error",
             ),
@@ -490,6 +497,43 @@ mod tests {
             serde_json::to_value(ApprovalKind::Write).unwrap(),
             serde_json::json!("write")
         );
+    }
+
+    /// The error `code` field is optional on the wire: events recorded
+    /// before it existed deserialize unchanged, and `None` codes are
+    /// omitted from the JSON so consumers never see explicit nulls.
+    #[test]
+    fn error_code_is_backward_compatible() {
+        // Old payload without `code` still parses.
+        let legacy: EventMsg = serde_json::from_value(serde_json::json!({
+            "type": "error",
+            "message": "boom",
+            "recoverable": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy,
+            EventMsg::Error {
+                message: "boom".to_string(),
+                recoverable: true,
+                code: None,
+            }
+        );
+        // `None` codes stay off the wire; `Some` rides along.
+        let none = serde_json::to_value(&EventMsg::Error {
+            message: "boom".to_string(),
+            recoverable: true,
+            code: None,
+        })
+        .unwrap();
+        assert!(none.get("code").is_none(), "{none}");
+        let classified = serde_json::to_value(&EventMsg::Error {
+            message: "slow".to_string(),
+            recoverable: false,
+            code: Some("provider.timeout".to_string()),
+        })
+        .unwrap();
+        assert_eq!(classified.get("code").unwrap(), "provider.timeout");
     }
 
     #[test]

@@ -845,6 +845,7 @@ impl ConsoleUi {
             EventMsg::Error {
                 message,
                 recoverable,
+                ..
             } => {
                 self.push_status(&format!("error: {message}"), true);
                 if !*recoverable {
@@ -2850,6 +2851,7 @@ mod tests {
         ui.handle_wire_event(&EventMsg::Error {
             message: "compact failed".to_string(),
             recoverable: true,
+            code: Some("compact.failed".to_string()),
         });
         assert!(!ui.compaction_running(), "error settles the idle card");
         let frame = ui.frame(80, 24);

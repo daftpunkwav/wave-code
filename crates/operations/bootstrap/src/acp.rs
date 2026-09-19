@@ -758,6 +758,7 @@ where
         EventMsg::Error {
             message,
             recoverable,
+            ..
         } => {
             if *recoverable {
                 None

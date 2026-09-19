@@ -309,6 +309,7 @@ where
                                 msg: EventMsg::Error {
                                     message: cause,
                                     recoverable: true,
+                                    code: Some("compact.failed".to_string()),
                                 },
                             });
                         }
@@ -571,6 +572,7 @@ fn queue_or_reject(
                     "submission queue is full ({PENDING_QUEUE_CAP} pending); retry later"
                 ),
                 recoverable: true,
+                code: Some("queue.full".to_string()),
             },
         });
     } else {

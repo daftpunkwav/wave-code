@@ -301,8 +301,15 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
         EventMsg::Error {
             message,
             recoverable,
+            code,
         } => {
-            stderr.push_str(&format!("[error] {}\n", clean(message)));
+            // The machine class rides the line so scripts can filter
+            // without parsing prose (`[error] (provider.timeout) ...`).
+            let class = code
+                .as_deref()
+                .map(|c| format!(" ({c})"))
+                .unwrap_or_default();
+            stderr.push_str(&format!("[error]{class} {}\n", clean(message)));
             if *recoverable {
                 None
             } else {
@@ -2283,7 +2290,8 @@ model = "m2"
             render_event(
                 &EventMsg::Error {
                     message: "x".to_string(),
-                    recoverable: true
+                    recoverable: true,
+                    code: None
                 },
                 &mut out,
                 &mut err
@@ -2294,7 +2302,8 @@ model = "m2"
             render_event(
                 &EventMsg::Error {
                     message: "x".to_string(),
-                    recoverable: false
+                    recoverable: false,
+                    code: None
                 },
                 &mut out,
                 &mut err

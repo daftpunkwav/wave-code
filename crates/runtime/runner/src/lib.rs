@@ -868,6 +868,7 @@ where
             emit_msg(EventMsg::Error {
                 message: admission.message,
                 recoverable: true,
+                code: Some("hook.blocked".to_string()),
             });
             emit_msg(EventMsg::TurnCompleted { interrupted: false });
             return StopReason::Completed;
@@ -997,6 +998,7 @@ where
                                     emit_msg(EventMsg::Error {
                                         message: cause,
                                         recoverable: false,
+                                        code: Some("context.overflow".to_string()),
                                     });
                                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                                     return StopReason::Error(
@@ -1073,6 +1075,7 @@ where
                                 self.cfg.max_reactive_compacts
                             ),
                             recoverable: false,
+                            code: Some("context.overflow".to_string()),
                         });
                         emit_msg(EventMsg::TurnCompleted { interrupted: false });
                         return StopReason::Error("prompt too long".to_string());
@@ -1091,6 +1094,7 @@ where
                         emit_msg(EventMsg::Error {
                             message: cause,
                             recoverable: false,
+                            code: Some("compact.failed".to_string()),
                         });
                         emit_msg(EventMsg::TurnCompleted { interrupted: false });
                         return StopReason::Error("reactive compaction failed".to_string());
@@ -1105,9 +1109,15 @@ where
                         self.cfg.context_window,
                         &emit_msg,
                     );
+                    let code = match &other {
+                        SampleError::Timeout => "provider.timeout",
+                        SampleError::PromptTooLong => "context.overflow",
+                        SampleError::Transport(_) => "provider.error",
+                    };
                     emit_msg(EventMsg::Error {
                         message: other.to_string(),
                         recoverable: false,
+                        code: Some(code.to_string()),
                     });
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::Error(other.to_string());

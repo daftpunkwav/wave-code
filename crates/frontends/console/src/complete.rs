@@ -78,6 +78,8 @@ pub struct ConsoleProvider {
     /// Model picker aliases for `/model <name>` argument completion:
     /// (alias, provider description).
     models: Vec<(String, String)>,
+    /// Custom theme names for `/theme <name>` argument completion.
+    themes: Vec<String>,
 }
 
 impl ConsoleProvider {
@@ -95,12 +97,20 @@ impl ConsoleProvider {
             slash: FuzzyProvider::new(candidates),
             inventory,
             models: Vec::new(),
+            themes: Vec::new(),
         }
     }
 
     /// Offer these models for `/model <name>` argument completion.
     pub fn with_models(mut self, models: Vec<(String, String)>) -> Self {
         self.models = models;
+        self
+    }
+
+    /// Offer these custom theme names for `/theme <name>` argument
+    /// completion.
+    pub fn with_themes(mut self, themes: Vec<String>) -> Self {
+        self.themes = themes;
         self
     }
 
@@ -115,11 +125,7 @@ impl ConsoleProvider {
                 ("medium", ""),
                 ("high", ""),
             ],
-            "theme" => &[
-                ("light", ""),
-                ("dark", ""),
-                ("auto", "follow the terminal"),
-            ],
+            "theme" => &[("light", ""), ("dark", ""), ("auto", "follow the terminal")],
             "permissions" => &[("plan", ""), ("auto", ""), ("wave", "")],
             _ => &[],
         };
@@ -138,11 +144,16 @@ impl ConsoleProvider {
                 insert: format!("/{command} {alias}"),
             }));
         }
+        if command == "theme" {
+            candidates.extend(self.themes.iter().map(|name| Completion {
+                label: name.clone(),
+                description: Some("custom".to_string()),
+                insert: format!("/{command} {name}"),
+            }));
+        }
         let mut scored: Vec<(i64, Completion)> = candidates
             .into_iter()
-            .filter_map(|completion| {
-                fuzzy::score(arg, &completion.label).map(|s| (s, completion))
-            })
+            .filter_map(|completion| fuzzy::score(arg, &completion.label).map(|s| (s, completion)))
             .collect();
         scored.sort_by_key(|(score, _)| *score);
         scored
@@ -243,10 +254,8 @@ mod tests {
 
     #[test]
     fn model_arguments_come_from_the_catalog() {
-        let provider = ConsoleProvider::new(&[], FileInventory::empty()).with_models(vec![(
-            "fast-model".to_string(),
-            "openai".to_string(),
-        )]);
+        let provider = ConsoleProvider::new(&[], FileInventory::empty())
+            .with_models(vec![("fast-model".to_string(), "openai".to_string())]);
         let completions = provider.complete(TriggerKind::Slash, "model fas");
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0].label, "fast-model");
@@ -271,5 +280,16 @@ mod tests {
         // The exact prefix wins the top slot.
         assert_eq!(completions[0].label, "auto");
         assert_eq!(completions[0].insert, "/theme auto");
+    }
+
+    #[test]
+    fn theme_arguments_include_custom_theme_names() {
+        let provider = ConsoleProvider::new(&[], FileInventory::empty())
+            .with_themes(vec!["sunset".to_string()]);
+        let completions = provider.complete(TriggerKind::Slash, "theme sun");
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].label, "sunset");
+        assert_eq!(completions[0].description.as_deref(), Some("custom"));
+        assert_eq!(completions[0].insert, "/theme sunset");
     }
 }

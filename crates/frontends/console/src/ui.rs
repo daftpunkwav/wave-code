@@ -273,6 +273,12 @@ impl ConsoleUi {
                             .iter()
                             .map(|entry| (entry.label.clone(), entry.provider.clone()))
                             .collect(),
+                    )
+                    .with_themes(
+                        ctx.home
+                            .as_deref()
+                            .map(crate::theme::custom::list)
+                            .unwrap_or_default(),
                     ),
                 ));
                 if let Some(path) = home_history_path() {

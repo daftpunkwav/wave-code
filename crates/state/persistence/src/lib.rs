@@ -154,6 +154,11 @@ impl JsonlJournal {
             )?;
         }
         writeln!(file, "{}", serde_json::to_string(&line).unwrap_or_default())?;
+        // Durability per turn: a crash may lose at most the record being
+        // written, never a "completed" one. The reader repairs the only
+        // possible tear — a trailing partial line.
+        file.flush()?;
+        file.sync_data()?;
         Ok(())
     }
 
@@ -210,13 +215,18 @@ impl JsonlJournal {
     /// Reload every parseable record, reporting skipped corrupt lines.
     ///
     /// The journal is a recovery path, so partial history still returns;
-    /// the count lets callers decide whether partial is acceptable.
+    /// the count lets callers decide whether partial is acceptable. A
+    /// crash mid-append leaves a trailing partial line (writes are
+    /// fsynced per record, so a tear can only be the last one): it is
+    /// truncated away persistently before parsing, keeping the file
+    /// loadable by stricter consumers.
     pub fn load_reported(&self) -> Result<(Vec<TurnRecord>, usize), JournalError> {
         let text = match std::fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
             Err(e) => return Err(JournalError::Io(e)),
         };
+        let text = self.repair_truncated_tail(text)?;
         let mut records = Vec::new();
         let mut skipped = 0;
         let mut first_line = true;
@@ -257,6 +267,20 @@ impl JsonlJournal {
         Ok(records)
     }
 
+    /// Cut a non-newline-terminated tail down to the last complete line
+    /// and persist the truncation. A newline-terminated file (or one
+    /// whose only content is a torn line) passes through: mid-file
+    /// corruption is skip-counted by the caller, never rewritten here.
+    fn repair_truncated_tail(&self, text: String) -> Result<String, JournalError> {
+        if text.ends_with('\n') {
+            return Ok(text);
+        }
+        let cut = text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let repaired = &text[..cut];
+        std::fs::write(&self.path, repaired)?;
+        Ok(repaired.to_owned())
+    }
+
     /// Reload at most the last `n` records for resume previews.
     pub fn last_n(&self, n: usize) -> Result<Vec<TurnRecord>, JournalError> {
         let all = self.load_all()?;
@@ -292,6 +316,35 @@ mod tests {
         let tail = journal.last_n(1).unwrap();
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].run_id, "r2");
+    }
+
+    /// A crash mid-append leaves a trailing partial line; loading must
+    /// repair it persistently (the tear is always the last record) and
+    /// return the intact prefix.
+    #[test]
+    fn torn_tail_is_truncated_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turns.jsonl");
+        let journal = JsonlJournal::new(path.clone());
+        journal.append_turn(&record("r1")).unwrap();
+        journal.append_turn(&record("r2")).unwrap();
+        // Simulate the torn final write: partial JSON, no newline.
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(file, "{{\"run_id\":\"r3\",\"inpu").unwrap();
+        drop(file);
+
+        let (records, skipped) = journal.load_reported().unwrap();
+        assert_eq!(records, vec![record("r1"), record("r2")]);
+        assert_eq!(skipped, 0, "the tear is repaired, not skipped");
+        // The repair persists: the file is newline-terminated again and
+        // a strict reload (which refuses corrupt lines) passes clean.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.ends_with('\n'));
+        assert_eq!(journal.load_all_checked().unwrap().len(), 2);
     }
 
     #[test]

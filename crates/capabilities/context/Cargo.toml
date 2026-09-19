@@ -9,6 +9,7 @@ wavecode-llm = { path = "../../foundation/llm" }
 async-trait.workspace = true
 futures.workspace = true
 thiserror.workspace = true
+wavecode-config = { path = "../../foundation/config" }
 
 [dev-dependencies]
 tokio.workspace = true

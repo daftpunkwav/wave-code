@@ -223,8 +223,8 @@ fn mode_row(info: &WelcomeInfo) -> String {
 
 /// Replace the home directory prefix with `~` when present.
 fn shorten_home(path: &str) -> String {
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-        && !home.is_empty()
+    if let Some(home) = wavecode_config::home_dir()
+        && !home.as_os_str().is_empty()
         && let Some(rest) = path.strip_prefix(&home.to_string_lossy().to_string())
     {
         let rest = rest.trim_start_matches(['/', '\\']);

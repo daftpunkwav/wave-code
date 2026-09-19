@@ -125,11 +125,10 @@ pub fn parse_spill_uri(uri: &str) -> std::result::Result<String, SpillError> {
     Ok(id.to_owned())
 }
 
-/// User home directory: `USERPROFILE` (Windows) first, `HOME` fallback.
+/// User home directory, delegating to the shared [`wavecode_config::
+/// home_dir`] definition (`USERPROFILE` first, `HOME` fallback).
 pub fn spill_home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
+    wavecode_config::home_dir()
 }
 
 /// Effective store root: `<home>/.wavecode/spills`, falling back to the

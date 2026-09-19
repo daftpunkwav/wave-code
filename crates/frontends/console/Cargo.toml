@@ -7,11 +7,13 @@ license.workspace = true
 # Boundary: the console UI consumes the session exclusively through the
 # wire protocol and the actor client, with rendering delegated to
 # tui-engine. Session identity/journaling for the pickers rides
-# state-persistence. Internal dependencies are exactly those four; tests::
-# dependency_matrix_locked locks the set.
+# state-persistence; user paths resolve through the shared
+# wavecode-config home definition. Internal dependencies are exactly
+# those five; tests::dependency_matrix_locked locks the set.
 [dependencies]
 tui-engine = { path = "../engine" }
 wavecode-wire = { path = "../../foundation/wire" }
+wavecode-config = { path = "../../foundation/config" }
 operations-actor = { path = "../../operations/actor" }
 state-persistence = { path = "../../state/persistence" }
 async-trait.workspace = true

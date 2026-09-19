@@ -23,7 +23,7 @@
 //! on an outbox the run loop flushes; steering crosses the actor
 //! inbox directly.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2275,13 +2275,13 @@ fn editor_style() -> EditorStyle {
     }
 }
 
-/// The history file for the console surface, when HOME is known.
+/// The history file for the console surface, when the home directory is known.
 fn home_history_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    if home.is_empty() {
+    let home = wavecode_config::home_dir()?;
+    if home.as_os_str().is_empty() {
         return None;
     }
-    Some(history::history_path(Path::new(&home), "console"))
+    Some(history::history_path(&home, "console"))
 }
 
 /// Downcast a transcript component to its tool card, updating state.
@@ -2329,10 +2329,10 @@ fn welcome_info_of(state: &AppState, version: &str) -> crate::welcome::WelcomeIn
 /// segments with a `~/` prefix when trimmed.
 pub fn shorten_cwd(path: &std::path::Path, keep: usize) -> String {
     let text = path.to_string_lossy().to_string();
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    let home = wavecode_config::home_dir();
     let mut display = text.clone();
     if let Some(home) = home
-        && !home.is_empty()
+        && !home.as_os_str().is_empty()
         && let Some(rest) = text.strip_prefix(&home.to_string_lossy().to_string())
     {
         display = format!("~{}", rest.replace('\\', "/"));

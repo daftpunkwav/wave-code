@@ -327,9 +327,9 @@ async fn main() -> anyhow::Result<()> {
     // Resolved before any `args` field moves below.
     let permission_mode = effective_permission_mode(&args);
     let cwd = std::env::current_dir()?;
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
+    // The shared definition point: config loading, sessions, and logging
+    // must agree on the home root even when both env vars are set.
+    let home = wavecode_config::home_dir();
     // `--session` / `--continue` seed only the fullscreen TUI; every
     // other surface says so instead of silently dropping the request.
     if (args.session.is_some() || args.continue_last)

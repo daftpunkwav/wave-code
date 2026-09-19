@@ -96,15 +96,11 @@ impl Default for UiSettings {
 impl UiSettings {
     /// The settings file path under the home directory, when known.
     pub fn path() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-        if home.is_empty() {
+        let home = wavecode_config::home_dir()?;
+        if home.as_os_str().is_empty() {
             return None;
         }
-        Some(
-            PathBuf::from(home)
-                .join(".wavecode")
-                .join("console-settings.json"),
-        )
+        Some(home.join(".wavecode").join("console-settings.json"))
     }
 
     /// Load from the default path; missing or broken files yield the

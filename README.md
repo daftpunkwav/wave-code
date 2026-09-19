@@ -16,6 +16,8 @@ wavecode exec --json "summarize"       # JSONL events on stdout
 wavecode repl                          # interactive multi-turn session
 wavecode resume                        # list previous sessions / resume one
 wavecode                               # fullscreen TUI on a TTY, REPL otherwise
+wavecode --plan                        # start in plan mode (-y for auto mode)
+wavecode doctor                        # validate local setup, no provider contact
 ```
 
 On first run without configuration, WaveCode prints a creation guide with a
@@ -46,18 +48,23 @@ model = "your-model-fast"
   (compress context now), `/memory` (show memory index), `/mcp` (list
   servers), `/permissions` (approval mode), `/quit` (end session),
   `/help`. `/skill-name args` invokes a user-invocable skill by name.
-- TUI: same session behind a fullscreen interface — inline approval prompts,
-  `/mcp` status rows, `/btw` side questions (read-only, answers stream into a
-  panel without touching the conversation), and dialogs for `/model` (provider
-  tabs, search, session-only Alt+S, a thinking-level row on OpenAI-compatible
-  providers),
-  `/permissions`, and `/help` (scrollable keybinding + command reference).
+- TUI: same session behind a fullscreen interface — inline approval prompts
+  (file-write approvals show the affected lines as a colored diff), `/mcp`
+  status rows, `/btw` side questions (read-only, answers stream into a panel
+  without touching the conversation), and dialogs for `/model` (provider tabs,
+  search, session-only Alt+S, a thinking-level row on OpenAI-compatible
+  providers), `/permissions`, `/theme` (built-ins plus custom themes), and
+  `/help` (scrollable keybinding + command reference).
   Session commands: `/sessions` (alias `/resume`) resumes a recorded session
   in place, `/fork` snapshots a resumable copy, `/title` renames, `/new`
   starts a fresh session, `/init` asks the agent to write AGENTS.md,
-  `/status` summarizes the session. Completed turns journal under
-  `~/.wavecode/sessions/`; `wavecode --session <id>` and `wavecode --continue`
-  resume from the CLI (text-level: tool blocks are not replayed).
+  `/status` summarizes the session, `/undo [n]` (or double-Esc) rewinds the
+  conversation by whole turns, `/compact [instruction]` compresses context
+  with optional steering, `/export [path]` and `/copy` take the dialogue out,
+  `/usage` shows token split, `/editor <cmd>` sets the Ctrl+G external
+  editor. Completed turns journal under `~/.wavecode/sessions/`;
+  `wavecode --session <id>` and `wavecode --continue` resume from the CLI
+  (text-level: tool blocks are not replayed).
 - `resume`: `wavecode resume` lists recent legacy sessions newest-first;
   `wavecode resume <thread-id>` imports its history as text and continues
   interactively. Tool calls import as `[tool:name]` / `[error:...]` markers

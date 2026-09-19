@@ -42,8 +42,16 @@ struct Args {
 
     /// Permission mode override winning over the configured mode
     /// (`plan`, `auto`, `wave`; legacy names still parse).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, conflicts_with_all = ["plan", "yolo"])]
     permission_mode: Option<String>,
+
+    /// Start in plan mode (shortcut for `--permission-mode plan`).
+    #[arg(long, global = true, conflicts_with = "yolo")]
+    plan: bool,
+
+    /// Start in auto mode (shortcut for `--permission-mode auto`).
+    #[arg(long, short = 'y', global = true, conflicts_with = "plan")]
+    yolo: bool,
 
     /// Resume a recorded session by id (fullscreen TUI only).
     #[arg(long, global = true)]
@@ -113,6 +121,22 @@ enum McpCommand {
 enum PluginCommand {
     /// List installed plugins with skill/MCP/hook counts.
     List,
+}
+
+/// The permission mode the session should start in: an explicit
+/// `--permission-mode` wins (clap already rejects combining it with
+/// the shortcuts); `--plan`/`--yolo` map onto the wire names.
+fn effective_permission_mode(args: &Args) -> Option<String> {
+    if args.permission_mode.is_some() {
+        return args.permission_mode.clone();
+    }
+    if args.plan {
+        return Some("plan".to_string());
+    }
+    if args.yolo {
+        return Some("auto".to_string());
+    }
+    None
 }
 
 /// Terminal outcome driving the process exit code.
@@ -284,6 +308,8 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Resolved before any `args` field moves below.
+    let permission_mode = effective_permission_mode(&args);
     let cwd = std::env::current_dir()?;
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -301,7 +327,7 @@ async fn main() -> anyhow::Result<()> {
             run_tui_new(
                 args.config,
                 args.model,
-                args.permission_mode,
+                permission_mode.clone(),
                 args.session,
                 args.continue_last,
                 cwd,
@@ -317,7 +343,7 @@ async fn main() -> anyhow::Result<()> {
             config_path: args.config,
             model_override,
             provider_override,
-            permission_override: args.permission_mode.clone(),
+            permission_override: permission_mode.clone(),
             thinking_override: settings.default_effort.clone(),
             cwd,
             home: home.clone(),
@@ -390,7 +416,7 @@ async fn main() -> anyhow::Result<()> {
         run_acp(
             args.config.clone(),
             args.model.clone(),
-            args.permission_mode.clone(),
+            permission_mode.clone(),
             cwd.clone(),
             home.clone(),
         )
@@ -407,7 +433,7 @@ async fn main() -> anyhow::Result<()> {
         config_path: args.config,
         model_override,
         provider_override,
-        permission_override: args.permission_mode.clone(),
+        permission_override: permission_mode.clone(),
         thinking_override: settings.default_effort.clone(),
         cwd,
         home: home.clone(),
@@ -440,7 +466,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(Outcome::Completed.exit_code())
         }
         Some(Command::Resume { thread_id }) => {
-            run_resume(thread_id, args.permission_mode, home).await?;
+            run_resume(thread_id, permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
         // Mcp/Plugin/Acp/Doctor return before assembly above.
@@ -1690,6 +1716,29 @@ mod tests {
         assert_eq!(args.permission_mode.as_deref(), Some("plan"));
         let args = Args::try_parse_from(["wavecode", "repl"]).unwrap();
         assert_eq!(args.permission_mode, None);
+    }
+
+    #[test]
+    fn plan_and_yolo_shortcuts_map_onto_wire_modes() {
+        let args = Args::try_parse_from(["wavecode", "--plan", "exec", "hi"]).unwrap();
+        assert_eq!(effective_permission_mode(&args).as_deref(), Some("plan"));
+        let args = Args::try_parse_from(["wavecode", "-y", "repl"]).unwrap();
+        assert_eq!(effective_permission_mode(&args).as_deref(), Some("auto"));
+        // An explicit mode wins the (clap-rejected) combination check,
+        // so the helper simply passes it through.
+        let args = Args::try_parse_from(["wavecode", "--permission-mode", "wave"]).unwrap();
+        assert_eq!(effective_permission_mode(&args).as_deref(), Some("wave"));
+        let args = Args::try_parse_from(["wavecode"]).unwrap();
+        assert_eq!(effective_permission_mode(&args), None);
+    }
+
+    #[test]
+    fn mode_shortcuts_conflict_with_permission_mode() {
+        let result = Args::try_parse_from(["wavecode", "-y", "--plan"]);
+        assert!(result.is_err(), "combining shortcuts must be rejected");
+        let result =
+            Args::try_parse_from(["wavecode", "--permission-mode", "auto", "-y", "exec", "hi"]);
+        assert!(result.is_err(), "flag + explicit mode must be rejected");
     }
 
     /// A home with nothing set up degrades gracefully: exactly the

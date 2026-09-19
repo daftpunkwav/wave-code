@@ -3278,8 +3278,7 @@ mod tests {
         let slot = Arc::new(std::sync::Mutex::new(None));
         ui.update_slot = Some(slot.clone());
         assert!(!ui.poll_update_notice(), "empty slot must not repaint");
-        *slot.lock().expect("test slot lock") =
-            Some("update available: v9.9.9".to_string());
+        *slot.lock().expect("test slot lock") = Some("update available: v9.9.9".to_string());
         assert!(ui.poll_update_notice(), "notice arrival must repaint");
         assert!(
             !ui.poll_update_notice(),

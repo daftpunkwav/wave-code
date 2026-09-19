@@ -27,7 +27,7 @@ use clap::Parser;
 use operations_actor::ActorClient;
 use operations_bootstrap::{AssembleOptions, DEFAULT_IDENTITY, assemble_session};
 use uuid::Uuid;
-use wavecode_wire::{EventMsg, Op, Submission};
+use wavecode_wire::{EventMsg, Op, Submission, WireDecision};
 
 mod logging;
 mod update;
@@ -87,6 +87,13 @@ enum Command {
         /// Emit JSONL events on stdout, human rendering on stderr.
         #[arg(long)]
         json: bool,
+        /// Answer parked approvals from stdin (opt-in; off by default so
+        /// unattended runs keep the fail-closed deny). JSON dialect:
+        /// `<call_id> <allow|always|deny[:reason]>`. Text dialect: a
+        /// `y`/`a`/`n` line per prompt. stdin EOF denies everything
+        /// still parked.
+        #[arg(long)]
+        approvals: bool,
     },
     /// Interactive multi-turn session sharing one conversation.
     Repl,
@@ -456,7 +463,16 @@ async fn main() -> anyhow::Result<()> {
     }
     // Only headless exec denies approvals openly: the REPL parks them on
     // the gate and answers inline, which needs parking enabled here.
-    let headless = matches!(args.command, Some(Command::Exec { .. }));
+    // With `--approvals`, exec keeps the parking gate alive and answers
+    // from stdin; without it the headless gate denies openly (fail-closed
+    // for unattended runs).
+    let headless = !matches!(
+        args.command,
+        Some(Command::Exec {
+            approvals: true,
+            ..
+        })
+    );
     let settings = console_ui::settings::UiSettings::load();
     let (model_override, provider_override) =
         model_provider_overrides(args.model.as_deref(), &settings);
@@ -480,7 +496,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match args.command {
-        Some(Command::Exec { prompt, json }) => {
+        Some(Command::Exec {
+            prompt,
+            json,
+            approvals,
+        }) => {
             // A headless turn still leaves a resumable session behind
             // (journal + meta line) when a home directory exists.
             let session = home.as_ref().map(|home| ExecSession {
@@ -488,7 +508,7 @@ async fn main() -> anyhow::Result<()> {
                 home: home.clone(),
                 cwd: cwd.to_string_lossy().to_string(),
             });
-            let outcome = run_exec(&mut handle.client, &prompt, json, session).await?;
+            let outcome = run_exec(&mut handle.client, &prompt, json, approvals, session).await?;
             std::process::exit(outcome.exit_code())
         }
         Some(Command::Repl) => {
@@ -1542,10 +1562,46 @@ impl ExecSession {
     }
 }
 
+/// Parse the machine approval line: `<call_id> <allow|always|deny[:reason]>`.
+/// Returns `None` for unrecognized decision tokens so a malformed line can
+/// be re-sent instead of misread as a denial.
+fn parse_approval_line(line: &str) -> Option<(String, WireDecision)> {
+    let trimmed = line.trim();
+    let (call_id, token) = trimmed.split_once(char::is_whitespace)?;
+    let call_id = call_id.trim();
+    if call_id.is_empty() {
+        return None;
+    }
+    let token = token.trim();
+    let decision = match token.to_ascii_lowercase().as_str() {
+        "allow" => WireDecision::AllowOnce,
+        "always" => WireDecision::AllowAlways,
+        "deny" => WireDecision::Deny {
+            reason: String::new(),
+        },
+        other => {
+            let reason = other
+                .strip_prefix("deny")
+                .and_then(|rest| rest.strip_prefix([':', ' ']))
+                .map(str::to_string)?;
+            WireDecision::Deny { reason }
+        }
+    };
+    Some((call_id.to_string(), decision))
+}
+
+/// A stdin line reader for the approval dialect (lazy: only built when
+/// `--approvals` is on, so plain exec never touches stdin).
+fn exec_stdin_lines() -> tokio::io::Lines<tokio::io::BufReader<tokio::io::Stdin>> {
+    use tokio::io::AsyncBufReadExt as _;
+    tokio::io::BufReader::new(tokio::io::stdin()).lines()
+}
+
 async fn run_exec(
     client: &mut ActorClient,
     prompt: &str,
     json: bool,
+    approvals: bool,
     session: Option<ExecSession>,
 ) -> anyhow::Result<Outcome> {
     client
@@ -1575,6 +1631,12 @@ async fn run_exec(
     if json && let Some(sess) = &session {
         stream_json_line(&mut out, &sess.meta_line(), &mut broken)?;
     }
+    // Approval answering: call ids parked for a decision, in request
+    // order; stdin exists only with `--approvals`, and EOF (closed pipe)
+    // flips to fail-closed auto-deny for everything still parked.
+    let mut pending_approvals: std::collections::VecDeque<String> = Default::default();
+    let mut stdin_lines = approvals.then(exec_stdin_lines);
+    let mut input_closed = !approvals;
     let outcome = loop {
         tokio::select! {
             event = client.next_event() => {
@@ -1584,6 +1646,35 @@ async fn run_exec(
                 };
                 if json {
                     stream_json_line(&mut out, &event, &mut broken)?;
+                }
+                if let EventMsg::ApprovalRequested { call_id, kind, .. } = &event.msg {
+                    if approvals && input_closed {
+                        // --approvals ran but stdin closed: deny now,
+                        // instead of parking until the gate timeout.
+                        client
+                            .submit(Submission {
+                                id: format!("approval-{call_id}"),
+                                op: Op::ExecApproval {
+                                    call_id: call_id.clone(),
+                                    decision: WireDecision::Deny {
+                                        reason: "stdin closed".to_string(),
+                                    },
+                                },
+                            })
+                            .await
+                            .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                    } else if approvals {
+                        pending_approvals.push_back(call_id.clone());
+                        if !json {
+                            eprintln!(
+                                "[approval] {} wants to {} — reply 'y', 'a' or 'n':",
+                                call_id,
+                                approval_what(kind)
+                            );
+                        }
+                    }
+                    // Without --approvals the headless gate denied at the
+                    // gate itself; render_event's neutral line suffices.
                 }
                 if let Some(end) = render_event(&event.msg, &mut stdout_text, &mut stderr_text) {
                     if end == Outcome::Failed {
@@ -1598,6 +1689,68 @@ async fn run_exec(
                     stream_out(&mut out, &stdout_text, &mut printed_out, &mut broken)?;
                 }
                 stream_out(&mut err, &stderr_text, &mut printed_err, &mut broken)?;
+            }
+            line = async {
+                match stdin_lines.as_mut() {
+                    Some(reader) => reader.next_line().await,
+                    // No reader (no --approvals): never wakes.
+                    None => std::future::pending().await,
+                }
+            } => {
+                match line {
+                    Ok(Some(line)) => {
+                        // JSON dialect lines carry an explicit call id and
+                        // are ignored when malformed or already answered;
+                        // text dialect lines answer the oldest parked
+                        // request, and unrecognized input denies (same
+                        // as the REPL).
+                        let answer = if json {
+                            parse_approval_line(&line)
+                        } else {
+                            pending_approvals
+                                .front()
+                                .cloned()
+                                .map(|id| (id, decide_approval(&line)))
+                        };
+                        let Some((target, decision)) = answer else {
+                            continue;
+                        };
+                        if !pending_approvals.iter().any(|id| *id == target) {
+                            continue; // not parked (already answered): ignore
+                        }
+                        pending_approvals.retain(|id| *id != target);
+                        client
+                            .submit(Submission {
+                                id: format!("approval-{target}"),
+                                op: Op::ExecApproval {
+                                    call_id: target,
+                                    decision,
+                                },
+                            })
+                            .await
+                            .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                    }
+                    // stdin closed or unreadable: everything still parked
+                    // denies now rather than at the gate timeout.
+                    _ => {
+                        input_closed = true;
+                        stdin_lines = None;
+                        for call_id in pending_approvals.drain(..) {
+                            client
+                                .submit(Submission {
+                                    id: format!("approval-{call_id}"),
+                                    op: Op::ExecApproval {
+                                        call_id,
+                                        decision: WireDecision::Deny {
+                                            reason: "stdin closed".to_string(),
+                                        },
+                                    },
+                                })
+                                .await
+                                .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                        }
+                    }
+                }
             }
             _ = tokio::signal::ctrl_c() => {
                 let _ = client
@@ -2201,6 +2354,42 @@ model = "m2"
             ],
             "harness internal deps changed; update the matrix deliberately",
         );
+    }
+
+    /// The machine approval dialect: `<call_id> <allow|always|deny[:reason]>`.
+    /// Unrecognized tokens are `None` (re-sendable), never silently deny.
+    #[test]
+    fn approval_line_parsing() {
+        assert_eq!(
+            parse_approval_line("c1 allow"),
+            Some(("c1".to_string(), WireDecision::AllowOnce))
+        );
+        assert_eq!(
+            parse_approval_line("  c-2   ALWAYS "),
+            Some(("c-2".to_string(), WireDecision::AllowAlways))
+        );
+        assert_eq!(
+            parse_approval_line("c3 deny"),
+            Some((
+                "c3".to_string(),
+                WireDecision::Deny {
+                    reason: String::new()
+                }
+            ))
+        );
+        assert_eq!(
+            parse_approval_line("c3 deny:tests are flaky"),
+            Some((
+                "c3".to_string(),
+                WireDecision::Deny {
+                    reason: "tests are flaky".to_string()
+                }
+            ))
+        );
+        // Unrecognized shapes are None, never a misread denial.
+        assert_eq!(parse_approval_line("c3 yes"), None);
+        assert_eq!(parse_approval_line("allow"), None);
+        assert_eq!(parse_approval_line(""), None);
     }
 
     #[test]

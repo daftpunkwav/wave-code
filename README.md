@@ -58,6 +58,13 @@ model = "your-model-fast"
   carries the session id and its `wavecode --session` resume command, and
   the finished turn is journaled so the session can be resumed. Ctrl-C
   interrupts the turn (exit 130).
+- `exec --approvals`: opts in to answering parked approvals from stdin.
+  Off by default, so unattended runs keep the fail-closed deny. The JSON
+  dialect answers a specific request with one stdin line:
+  `<call_id> allow|always|deny[:reason]` (the call id comes from the
+  `approval_requested` event). The text dialect prompts on stderr and
+  takes `y` / `a` / `n`. stdin closing (EOF) denies everything still
+  parked immediately — no run can hang waiting for an answer.
 - `repl`: multi-turn session over one conversation. Slash commands: `/compact`
   (compress context now), `/memory` (show memory index), `/mcp` (list
   servers), `/permissions` (approval mode), `/quit` (end session),

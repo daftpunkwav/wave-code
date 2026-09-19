@@ -28,6 +28,8 @@ use operations_bootstrap::{AssembleOptions, DEFAULT_IDENTITY, assemble_session};
 use uuid::Uuid;
 use wavecode_wire::{EventMsg, Op, Submission};
 
+mod logging;
+
 /// Single-turn headless execution and interactive REPL over the new stack.
 #[derive(Debug, Parser)]
 #[command(name = "wavecode", version)]
@@ -61,6 +63,11 @@ struct Args {
     /// (fullscreen TUI only; an explicit `--session` wins).
     #[arg(long, short = 'c', global = true)]
     continue_last: bool,
+
+    /// Log at debug level to `~/.wavecode/logs/wavecode.log.<date>`;
+    /// overrides `WAVECODE_LOG` (default warn).
+    #[arg(long, global = true)]
+    debug: bool,
 
     /// Subcommand selecting the frontend surface; empty runs the TUI on a
     /// TTY and the REPL otherwise.
@@ -308,6 +315,11 @@ fn render_event(msg: &EventMsg, stdout: &mut String, stderr: &mut String) -> Opt
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    // Diagnostics before anything else can fail: the log file first,
+    // then the panic hook that restores the terminal when a later
+    // panic hits a live UI.
+    logging::init(args.debug);
+    console_ui::install_panic_restore();
     // Resolved before any `args` field moves below.
     let permission_mode = effective_permission_mode(&args);
     let cwd = std::env::current_dir()?;

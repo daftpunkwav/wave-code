@@ -17,6 +17,7 @@ wavecode repl                          # interactive multi-turn session
 wavecode resume                        # list previous sessions / resume one
 wavecode                               # fullscreen TUI on a TTY, REPL otherwise
 wavecode --plan                        # start in plan mode (-y for auto mode)
+wavecode --debug                       # debug-level file logging (~/.wavecode/logs)
 wavecode doctor                        # validate local setup, no provider contact
 ```
 
@@ -73,6 +74,12 @@ model = "your-model-fast"
   parse, provider api key resolution (never printed), `[models]` entries,
   console settings, custom themes, and session records. Exit 1 when any
   check fails.
+
+Diagnostics: every surface logs to a daily rolling file under
+`~/.wavecode/logs/` (14 days retained), never to stdout/stderr, so the
+`exec --json` stream stays clean. Levels: `--debug` wins over the
+`WAVECODE_LOG` env var, which wins over the `warn` default. A panic in a
+live UI restores terminal modes before the report prints.
 
 ## Permissions
 

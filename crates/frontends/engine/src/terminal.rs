@@ -94,6 +94,33 @@ impl Drop for TerminalGuard {
     }
 }
 
+/// Restore terminal modes on panic, before the previous panic hook runs.
+///
+/// The guard's `drop` restores modes during unwinding, but the panic
+/// hook fires first — without this, the panic message prints in raw
+/// mode (unreadable), and an aborting panic skips `drop` entirely.
+/// Also covers surfaces that never enter raw mode: both restores are
+/// no-ops then, and a non-terminal stdout (exec `--json` pipe) is left
+/// byte-clean. Chains to the previously installed hook; installing
+/// more than once is safe but pointless — call it once at startup.
+pub fn install_panic_restore() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal_now();
+        previous(info);
+    }));
+}
+
+/// Drop back to cooked mode and show the cursor, unconditionally.
+fn restore_terminal_now() {
+    use std::io::IsTerminal as _;
+    if !std::io::stdout().is_terminal() {
+        return;
+    }
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+}
+
 /// Current terminal size as (width, height) in cells.
 pub fn size() -> std::io::Result<(usize, usize)> {
     let (columns, rows) = crossterm::terminal::size()?;
@@ -260,5 +287,22 @@ mod tests {
         assert_eq!(background_from_colorfgbg("15;0"), Some(Background::Dark));
         assert_eq!(background_from_colorfgbg("0;15"), Some(Background::Light));
         assert_eq!(background_from_colorfgbg("junk"), None);
+    }
+
+    /// Installing the restore hook twice must not corrupt the hook
+    /// chain, and panics must still unwind as failures.
+    #[test]
+    fn panic_restore_install_is_repeatable_and_panics_still_fail() {
+        let previous = std::panic::take_hook();
+        // Silence the chained output during the test, then restore it
+        // afterwards so sibling tests keep their usual reporting.
+        std::panic::set_hook(Box::new(|_| {}));
+        install_panic_restore();
+        install_panic_restore();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            panic!("hook smoke test");
+        }));
+        std::panic::set_hook(previous);
+        assert!(result.is_err());
     }
 }

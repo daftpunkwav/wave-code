@@ -31,3 +31,14 @@ jobs:
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
             | "$bin" mcp serve | grep -q '"serverInfo"'
           "$bin" plugin list | grep -q "no plugins installed"
+      - name: SDK build and smoke (real binary)
+        uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: SDK build and test
+        working-directory: sdk/typescript
+        run: |
+          pnpm install --no-frozen-lockfile
+          pnpm build
+          pnpm test

@@ -142,6 +142,15 @@ cycles the mode for the running session.
   failed startups. HTTP servers report `unavailable (http transport not
   implemented)`; prompts-to-skills conversion is future work.
 
+## SDK
+
+[`@wavecode/sdk`](sdk/typescript) drives the agent from JavaScript:
+`execSession({ prompt })` spawns `wavecode exec --json`, exposes the typed
+JSONL event stream as an async iterator, and — with `approvals: true` — lets
+your code answer approval requests (`session.answerApproval(callId, "allow")`).
+Zero runtime dependencies; the wire types in `src/types.ts` mirror the Rust
+`EventMsg` one-to-one. Tests run against a real binary (see the SDK README).
+
 ## Develop
 
 ```bash

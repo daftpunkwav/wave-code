@@ -39,6 +39,7 @@ pub mod native;
 pub mod plan_adapter;
 pub mod plan_tools;
 pub mod policy_adapter;
+pub mod prune_adapter;
 pub mod session;
 pub mod skill_tool;
 pub mod status_queries;

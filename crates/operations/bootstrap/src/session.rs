@@ -43,6 +43,7 @@ use crate::model_adapter::ModelAdapter;
 use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
+use crate::prune_adapter::PruningExecutor;
 use crate::skill_tool::SkillTool;
 use crate::task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 use crate::tool_adapter::ToolAdapter;
@@ -511,7 +512,14 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
 
     // 6. Run loop behind the shared driver pointer.
     let native = Arc::new(Mutex::new(NativeExecutor::new()));
-    let executor = CompositeExecutor::new(tools, native.clone(), registry.clone());
+    // Oversized tool outputs spill to the side-store instead of flowing
+    // into history unbounded; the `spill` tool reads them back.
+    let executor = PruningExecutor::new(
+        CompositeExecutor::new(tools, native.clone(), registry.clone()),
+        wavecode_context::spill::SpillStore::new(
+            wavecode_context::spill::default_spill_store_root(),
+        ),
+    );
     let worker = Arc::new(RunLoop::new(
         executor,
         policy,

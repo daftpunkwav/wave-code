@@ -20,3 +20,14 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - name: E2E smoke (binary boots, MCP protocol answers)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin wavecode
+          bin="target/debug/wavecode"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then bin="target/debug/wavecode.exe"; fi
+          "$bin" --version | grep -q wavecode
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            | "$bin" mcp serve | grep -q '"serverInfo"'
+          "$bin" plugin list | grep -q "no plugins installed"

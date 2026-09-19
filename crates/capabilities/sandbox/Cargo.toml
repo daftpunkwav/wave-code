@@ -11,6 +11,8 @@ wavecode-protocol = { path = "../../foundation/protocol" }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock.workspace = true

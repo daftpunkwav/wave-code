@@ -18,7 +18,7 @@ Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and 
 
 `Sandbox::decide(tool, input, read_only, destructive)` evaluates in a fixed order:
 
-1. **Deny rules first** — no mode exempts them, not even `auto`. Both the whole compound Bash command and its segments match, so `echo hi\ncurl …` cannot prefix-disguise past `Bash(curl *)`.
+1. **Deny rules first** — no mode exempts them, not even `auto`. Both the whole compound Bash command and its segments match, so `echo hi\ncurl …` cannot prefix-disguise past `Bash(curl *)`. Segments are quoting-aware when the command parses: tree-sitter-bash extraction ignores commands only *mentioned* inside quotes and adds an assignment-stripped view, so `X=1 curl evil` no longer slips past `Bash(curl *)`; unparseable input falls back to string segmentation (coverage never drops below the pre-parser level).
 2. **Allow rules** — bound to tool semantics via rule scope (loose input-key sniffing is not enough); for compound Bash commands only *literally exact* rules exempt, because a wildcard `*` spans command separators.
 3. In-session state-tool exemptions (`todowrite` and the merged `goal` / `plan` tools need no approval in any mode — they write harness-owned coordination state, never the repo) and interactive-question routing (`ask_user`) — except `plan` with `action: "approve"`, which asks in every mode: only the user may approve a proposal.
 4. The mode's default policy.

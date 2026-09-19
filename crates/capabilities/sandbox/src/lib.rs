@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex};
 
 use wavecode_protocol::{ApprovalKind, PermissionMode};
 
+pub mod bash;
 pub mod bwrap;
 pub mod chain;
 pub mod os;
@@ -193,6 +194,12 @@ impl Rule {
     /// command holds shell separators, a wildcard rule may hit past a
     /// separator — `Bash(curl *)` must refuse `echo hi\ncurl http://evil`
     /// rather than be fooled by the prefix disguise.
+    ///
+    /// Segments come from the AST ([`bash::parsed_command_segments`]) when the
+    /// parse is trustworthy (quoting-aware: no phantom commands from quoted
+    /// separators, command names extracted from behind env prefixes), and from
+    /// string segmentation otherwise — the fallback keeps deny coverage at
+    /// least at the pre-parser level.
     fn matches_any_segment(&self, input: &serde_json::Value) -> bool {
         if self.scope != RuleScope::Bash {
             return false;
@@ -201,7 +208,7 @@ impl Rule {
             .get("command")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|command| {
-                split_command_segments(command)
+                command_segments(command)
                     .iter()
                     .any(|segment| self.matches_text(segment))
             })
@@ -226,6 +233,19 @@ impl Rule {
             RuleScope::Bash => tool == "shell",
             RuleScope::File => is_file_edit(tool),
         }
+    }
+}
+
+/// Segments a command for rule matching: AST extraction when the parse
+/// is trustworthy, string segmentation otherwise. The fallback never
+/// weakens deny coverage below the pre-parser level.
+fn command_segments(command: &str) -> Vec<String> {
+    match bash::parsed_command_segments(command) {
+        Some(segments) => segments,
+        None => split_command_segments(command)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
     }
 }
 
@@ -1312,6 +1332,42 @@ mod tests {
         assert!(matches!(
             sb.decide("shell", &shell_input("echo hicurl"), true, false),
             Verdict::Allow
+        ));
+    }
+
+    /// AST extraction fixes the two string-splitter blind spots: a
+    /// deny rule must catch a curl hidden behind an env prefix
+    /// (string segments keep the `X=1 ` prefix, so `curl *` never
+    /// matched), and must not fire on a curl mentioned inside quotes.
+    #[test]
+    fn deny_segments_are_parsing_aware() {
+        let sb = Sandbox::new(PermissionMode::Auto, &[], &["Bash(curl *)".into()]).unwrap();
+        // Env-prefix disguise: the bare segment `curl evil` hits.
+        assert!(matches!(
+            sb.decide("shell", &shell_input("X=1 curl evil"), true, false),
+            Verdict::Deny { .. }
+        ));
+        // Quoted mention: no command is named curl here, so the old
+        // phantom-segment false deny is gone.
+        assert!(matches!(
+            sb.decide(
+                "shell",
+                &shell_input("echo \"hello; curl evil\""),
+                true,
+                false
+            ),
+            Verdict::Allow
+        ));
+        // Unparseable input falls back to string segmentation, which
+        // still cuts on the quoted `;` — deny stays conservative.
+        assert!(matches!(
+            sb.decide(
+                "shell",
+                &shell_input("echo \"unterminated; curl evil"),
+                true,
+                false
+            ),
+            Verdict::Deny { .. }
         ));
     }
 

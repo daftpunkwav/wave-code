@@ -87,9 +87,11 @@ fn server_caps(payload: &serde_json::Value) -> ServerCaps {
 
 /// The request/response half both client transports share (each keeps its
 /// own connection handling behind [`McpClient`]; this trait exists so the
-/// list/call drivers below are written once).
+/// list/call drivers below are written once). The `Send + Sync` bound
+/// lets [`ResilientMcpClient`] hold the live connection as
+/// `Arc<dyn RpcClient>`.
 #[async_trait::async_trait]
-trait RpcClient {
+trait RpcClient: Send + Sync {
     /// One request/response exchange.
     async fn rpc(
         &self,
@@ -749,6 +751,200 @@ impl McpClient for HttpMcpClient {
     }
 }
 
+// ---- Demand-driven reconnection ----
+
+/// How to rebuild a dropped connection to one server.
+#[derive(Clone)]
+enum ServerSpec {
+    Stdio {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    },
+    Http {
+        name: String,
+        url: String,
+        headers: HashMap<String, String>,
+        oauth: Option<transport_mcp::http::OAuthClientCredentials>,
+    },
+    #[cfg(test)]
+    Test(
+        std::sync::Arc<dyn Fn() -> std::result::Result<Arc<dyn RpcClient>, McpError> + Send + Sync>,
+    ),
+}
+
+impl ServerSpec {
+    /// Open a fresh connection (spawn + handshake). The client surfaces
+    /// as its request/response half: healing only needs to re-drive RPCs.
+    async fn connect(&self) -> std::result::Result<(Arc<dyn RpcClient>, ServerCaps), McpError> {
+        match self {
+            Self::Stdio {
+                name,
+                command,
+                args,
+                env,
+            } => {
+                let client = StdioMcpClient::connect(name, command, args.clone(), env).await?;
+                let caps = client.caps();
+                Ok((Arc::new(client) as Arc<dyn RpcClient>, caps))
+            }
+            Self::Http {
+                name: _,
+                url,
+                headers,
+                oauth,
+            } => {
+                let client = HttpMcpClient::connect(url, headers.clone(), oauth.clone()).await?;
+                let caps = client.caps();
+                Ok((Arc::new(client) as Arc<dyn RpcClient>, caps))
+            }
+            #[cfg(test)]
+            Self::Test(connect) => Ok((connect()?, ServerCaps::default())),
+        }
+    }
+
+    /// Server name for error messages.
+    fn name(&self) -> &str {
+        match self {
+            Self::Stdio { name, .. } | Self::Http { name, .. } => name,
+            #[cfg(test)]
+            Self::Test(_) => "test",
+        }
+    }
+}
+
+/// [`McpClient`] decorator healing dropped connections on demand.
+///
+/// A transport failure during any request triggers one reconnect
+/// (spawn/handshake) under the client lock, then the failed call retries
+/// on the fresh connection. Concurrent callers serialize on the lock, so
+/// one healer serves them all — no background polling, and a call that
+/// arrives while healing is under way simply waits for the fresh
+/// connection. Protocol errors (bad frames, JSON-RPC errors) never
+/// heal: the server is reachable and the problem is not the connection.
+/// Capability gates use the first handshake's snapshot (`connect`).
+struct ResilientMcpClient {
+    live: tokio::sync::Mutex<Arc<dyn RpcClient>>,
+    spec: ServerSpec,
+    initial_caps: ServerCaps,
+}
+
+impl ResilientMcpClient {
+    /// Open the first connection; returns the wrapper plus that
+    /// handshake's capability snapshot for bridge construction.
+    async fn connect(spec: ServerSpec) -> std::result::Result<(Self, ServerCaps), McpError> {
+        let (client, caps) = spec.connect().await?;
+        Ok((
+            Self {
+                live: tokio::sync::Mutex::new(client),
+                spec,
+                initial_caps: caps,
+            },
+            caps,
+        ))
+    }
+
+    /// Run `op` on the live client; on a transport failure heal once and
+    /// retry on the fresh connection.
+    async fn once<F, Fut, T>(&self, op: F) -> std::result::Result<T, McpError>
+    where
+        F: Fn(Arc<dyn RpcClient>) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, McpError>>,
+    {
+        let client = self.live.lock().await.clone();
+        match op(client).await {
+            Ok(value) => Ok(value),
+            Err(McpError::Transport(reason)) => {
+                let mut guard = self.live.lock().await;
+                let fresh = self.spec.connect().await.map_err(|e| {
+                    McpError::Transport(format!(
+                        "reconnect to MCP server {} failed: {e} (initial failure: {reason})",
+                        self.spec.name()
+                    ))
+                })?;
+                *guard = fresh.0;
+                op(guard.clone()).await
+            }
+            Err(other) => Err(other),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RpcClient for ResilientMcpClient {
+    async fn rpc(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, McpError> {
+        self.once(|client| {
+            let params = params.clone();
+            async move { client.rpc(method, params).await }
+        })
+        .await
+    }
+}
+
+#[async_trait::async_trait]
+impl McpClient for ResilientMcpClient {
+    async fn list_tools(&self) -> std::result::Result<Vec<McpToolDef>, McpError> {
+        list_paged(self, "tools/list", parse_tools_list).await
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> std::result::Result<McpToolOutput, McpError> {
+        call_tool_via(self, name, input).await
+    }
+
+    async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
+        if !self.initial_caps.prompts {
+            return Ok(vec![]);
+        }
+        list_paged(self, "prompts/list", parse_prompts_list).await
+    }
+
+    async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: HashMap<String, String>,
+    ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
+        if !self.initial_caps.prompts {
+            return Ok(vec![]);
+        }
+        let payload = self
+            .rpc(
+                "prompts/get",
+                serde_json::json!({"name": name, "arguments": arguments}),
+            )
+            .await?;
+        parse_prompt_messages(&payload)
+    }
+
+    async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
+        if !self.initial_caps.resources {
+            return Ok(vec![]);
+        }
+        list_paged(self, "resources/list", parse_resources_list).await
+    }
+
+    async fn read_resource(
+        &self,
+        uri: &str,
+    ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
+        if !self.initial_caps.resources {
+            return Ok(vec![]);
+        }
+        let payload = self
+            .rpc("resources/read", serde_json::json!({"uri": uri}))
+            .await?;
+        parse_resource_contents(&payload)
+    }
+}
+
 /// One MCP server tool as a registry tool.
 pub struct McpToolBridge {
     name: String,
@@ -1263,6 +1459,8 @@ async fn bridge_server(
 }
 
 /// Handshake, list, and bridge one stdio server; returns bridged count.
+/// The connection is demand-healed: a dropped child respawns on the
+/// next tool call.
 async fn connect_stdio(
     name: &str,
     command: &str,
@@ -1270,12 +1468,19 @@ async fn connect_stdio(
     env: &HashMap<String, String>,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> std::result::Result<usize, McpError> {
-    let client = StdioMcpClient::connect(name, command, args, env).await?;
-    let caps = client.caps();
+    let spec = ServerSpec::Stdio {
+        name: name.to_string(),
+        command: command.to_string(),
+        args,
+        env: env.clone(),
+    };
+    let (client, caps) = ResilientMcpClient::connect(spec).await?;
     bridge_server(name, Arc::new(client), caps, registry).await
 }
 
 /// Handshake, list, and bridge one HTTP server; returns bridged count.
+/// The connection is demand-healed: a session the server dropped
+/// re-establishes on the next tool call.
 async fn connect_http(
     name: &str,
     url: &str,
@@ -1283,16 +1488,111 @@ async fn connect_http(
     oauth: Option<transport_mcp::http::OAuthClientCredentials>,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> std::result::Result<usize, McpError> {
-    let client = HttpMcpClient::connect(url, headers, oauth).await?;
-    let caps = client.caps();
+    let spec = ServerSpec::Http {
+        name: name.to_string(),
+        url: url.to_string(),
+        headers,
+        oauth,
+    };
+    let (client, caps) = ResilientMcpClient::connect(spec).await?;
     bridge_server(name, Arc::new(client), caps, registry).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+    /// Scripted transport: pops queued rpc outcomes; each construction
+    /// bumps `connects` so tests can observe the healing count.
+    struct ScriptedRpc {
+        outcomes: std::sync::Mutex<VecDeque<std::result::Result<serde_json::Value, McpError>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RpcClient for ScriptedRpc {
+        async fn rpc(
+            &self,
+            _method: &str,
+            _params: serde_json::Value,
+        ) -> std::result::Result<serde_json::Value, McpError> {
+            self.outcomes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front()
+                .unwrap_or_else(|| Ok(serde_json::json!({})))
+        }
+    }
+
+    /// One scripted connection: the nth connect (0 = initial) gets the
+    /// outcomes its factory slot returns, then empty results.
+    fn scripted_connect(
+        make_outcomes: std::sync::Arc<
+            dyn Fn(usize) -> Vec<std::result::Result<serde_json::Value, McpError>> + Send + Sync,
+        >,
+        connects: Arc<AtomicUsize>,
+    ) -> ServerSpec {
+        ServerSpec::Test(std::sync::Arc::new(move || {
+            let outcomes = make_outcomes(connects.fetch_add(1, Ordering::SeqCst));
+            Ok(Arc::new(ScriptedRpc {
+                outcomes: std::sync::Mutex::new(VecDeque::from(outcomes)),
+            }) as Arc<dyn RpcClient>)
+        }))
+    }
+
+    #[tokio::test]
+    async fn transport_failure_heals_once_and_retries() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        // First connection fails the call with a transport error; the
+        // heal reconnects (connects: 2) and the retry answers.
+        let make = |n: usize| {
+            if n == 0 {
+                vec![Err(McpError::Transport("child died".to_string()))]
+            } else {
+                vec![Ok(serde_json::json!({"fresh": true}))]
+            }
+        };
+        let (client, _) = ResilientMcpClient::connect(scripted_connect(
+            std::sync::Arc::new(make),
+            connects.clone(),
+        ))
+        .await
+        .unwrap();
+        let answer = client
+            .rpc("tools/call", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(answer["fresh"], true);
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            2,
+            "one heal reconnects once"
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_failure_surfaces_without_healing() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let make = |_n: usize| vec![Err(McpError::Protocol("bad frame".to_string()))];
+        let (client, _) = ResilientMcpClient::connect(scripted_connect(
+            std::sync::Arc::new(make),
+            connects.clone(),
+        ))
+        .await
+        .unwrap();
+        let error = client
+            .rpc("tools/call", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, McpError::Protocol(_)));
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            1,
+            "protocol errors never heal"
+        );
+    }
 
     struct FakeClient {
         tools: Vec<McpToolDef>,

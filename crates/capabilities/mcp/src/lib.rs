@@ -206,9 +206,9 @@ pub enum McpError {
 /// **Implementation status**: real stdio and streamable-http implementations
 /// live at the composition side (`bootstrap::mcp_bridge`, `StdioMcpClient` /
 /// `HttpMcpClient`); streamable-http re-initializes once when the server
-/// expires a session (404). Exponential-backoff reconnects on connection
-/// failure (SPEC section 10) are a transport implementation detail and stay
-/// out of the trait surface.
+/// expires a session (404). Demand-driven reconnection on dropped
+/// connections lives in `bootstrap::mcp_bridge::ResilientMcpClient`, which
+/// wraps either client without changing this trait surface.
 #[async_trait::async_trait]
 pub trait McpClient: Send + Sync {
     /// List every tool the server exposes (`tools/list`).

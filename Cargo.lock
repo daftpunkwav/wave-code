@@ -675,6 +675,7 @@ dependencies = [
  "console-ui",
  "operations-actor",
  "operations-bootstrap",
+ "reqwest",
  "rustyline",
  "serde_json",
  "state-persistence",

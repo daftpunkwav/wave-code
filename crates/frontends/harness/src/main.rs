@@ -29,6 +29,7 @@ use uuid::Uuid;
 use wavecode_wire::{EventMsg, Op, Submission};
 
 mod logging;
+mod update;
 
 /// Single-turn headless execution and interactive REPL over the new stack.
 #[derive(Debug, Parser)]
@@ -114,6 +115,9 @@ enum Command {
     /// Validate local configuration, settings, themes, and session
     /// records without contacting any provider.
     Doctor,
+    /// Compare the running version against the newest published GitHub
+    /// release.
+    Update,
 }
 
 /// MCP surfaces on the new stack.
@@ -420,6 +424,13 @@ async fn main() -> anyhow::Result<()> {
         println!("\nall checks passed");
         std::process::exit(Outcome::Completed.exit_code())
     }
+    // Update check talks only to the GitHub releases API: no session
+    // assembly, no provider credentials. A failed probe exits 1 so
+    // scripts can tell "no update" from "could not tell".
+    if matches!(args.command, Some(Command::Update)) {
+        run_update_check().await;
+        std::process::exit(Outcome::Completed.exit_code())
+    }
     // ACP serves headless sessions over stdio until EOF. Sessions
     // assemble lazily per `session/new`, so this returns before the
     // shared assembly below (which would build a throwaway session).
@@ -481,11 +492,12 @@ async fn main() -> anyhow::Result<()> {
             run_resume(thread_id, permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        // Mcp/Plugin/Acp/Doctor return before assembly above.
+        // Mcp/Plugin/Acp/Doctor/Update return before assembly above.
         Some(Command::Mcp { .. })
         | Some(Command::Plugin { .. })
         | Some(Command::Acp)
-        | Some(Command::Doctor) => {
+        | Some(Command::Doctor)
+        | Some(Command::Update) => {
             unreachable!("early-return surfaces never reach assembly")
         }
         None => unreachable!("bare invocation returns above"),
@@ -930,12 +942,50 @@ fn run_plugin_list(home: Option<PathBuf>) {
     }
 }
 
+/// Probe the newest published release and report the comparison.
+/// `--debug` aside, this surface has no session; a network failure
+/// prints and exits 1 so callers never read a failed probe as "no
+/// update available".
+async fn run_update_check() {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let client = match client {
+        Ok(client) => client,
+        Err(cause) => {
+            eprintln!("[fail] update check failed: {cause}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    match update::fetch_latest(&client).await {
+        Ok(None) => println!("no published release yet"),
+        Ok(Some((tag, url))) => match update::classify(&tag, &url) {
+            update::UpdateStatus::UpToDate { latest } => {
+                println!(
+                    "wavecode {} is up to date (latest {latest})",
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+            update::UpdateStatus::Available { latest, url } => {
+                println!(
+                    "update available: {} -> {latest}",
+                    env!("CARGO_PKG_VERSION")
+                );
+                println!("{url}");
+            }
+        },
+        Err(cause) => {
+            eprintln!("[fail] update check failed: {cause:#}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    }
+}
+
 /// One `doctor` check outcome.
 struct DoctorCheck {
     ok: bool,
     line: String,
 }
-
 fn ok(line: impl Into<String>) -> DoctorCheck {
     DoctorCheck {
         ok: true,

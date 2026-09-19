@@ -19,6 +19,7 @@ wavecode                               # fullscreen TUI on a TTY, REPL otherwise
 wavecode --plan                        # start in plan mode (-y for auto mode)
 wavecode --debug                       # debug-level file logging (~/.wavecode/logs)
 wavecode doctor                        # validate local setup, no provider contact
+wavecode update                        # check for a newer published release
 ```
 
 On first run without configuration, WaveCode prints a creation guide with a
@@ -80,6 +81,11 @@ Diagnostics: every surface logs to a daily rolling file under
 `exec --json` stream stays clean. Levels: `--debug` wins over the
 `WAVECODE_LOG` env var, which wins over the `warn` default. A panic in a
 live UI restores terminal modes before the report prints.
+
+- `update`: compares the running version against the newest GitHub
+  release (10s probe). Prints the release page when newer, "up to date"
+  otherwise, "no published release yet" before the first tag. A failed
+  probe exits 1 so scripts never mistake it for "no update".
 
 ## Permissions
 

@@ -459,7 +459,7 @@ async fn main() -> anyhow::Result<()> {
         provider_override,
         permission_override: permission_mode.clone(),
         thinking_override: settings.default_effort.clone(),
-        cwd,
+        cwd: cwd.clone(),
         home: home.clone(),
         wave_denylist: settings.wave_denylist,
         identity: DEFAULT_IDENTITY.to_string(),
@@ -474,7 +474,14 @@ async fn main() -> anyhow::Result<()> {
 
     match args.command {
         Some(Command::Exec { prompt, json }) => {
-            let outcome = run_exec(&mut handle.client, &prompt, json).await?;
+            // A headless turn still leaves a resumable session behind
+            // (journal + meta line) when a home directory exists.
+            let session = home.as_ref().map(|home| ExecSession {
+                id: Uuid::new_v4().to_string(),
+                home: home.clone(),
+                cwd: cwd.to_string_lossy().to_string(),
+            });
+            let outcome = run_exec(&mut handle.client, &prompt, json, session).await?;
             std::process::exit(outcome.exit_code())
         }
         Some(Command::Repl) => {
@@ -1398,17 +1405,17 @@ fn stream_out(
     Ok(())
 }
 
-/// Write one JSONL event line immediately. Returns false on a broken
-/// pipe (latched by the caller).
-fn stream_json_line(
+/// Write one JSONL line for a serializable value immediately. Returns
+/// false on a broken pipe (latched by the caller).
+fn stream_json_line<T: serde::Serialize>(
     out: &mut impl std::io::Write,
-    event: &wavecode_wire::Event,
+    value: &T,
     broken: &mut bool,
 ) -> anyhow::Result<bool> {
     if *broken {
         return Ok(true);
     }
-    let line = serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string());
+    let line = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
     match out
         .write_all(line.as_bytes())
         .and_then(|()| out.write_all(b"\n"))
@@ -1423,7 +1430,55 @@ fn stream_json_line(
     }
 }
 
-async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow::Result<Outcome> {
+/// Session identity for a headless turn: when present, `exec` emits a
+/// leading session meta line (JSON mode), journals the finished turn,
+/// and leaves the session resumable via `wavecode --session <id>`.
+struct ExecSession {
+    id: String,
+    home: PathBuf,
+    cwd: String,
+}
+
+impl ExecSession {
+    /// The leading JSON-mode control line, kimi-style: it identifies the
+    /// session before any event so consumers can persist the handle.
+    fn meta_line(&self) -> serde_json::Value {
+        serde_json::json!({
+            "meta": "session",
+            "session_id": self.id,
+            "version": env!("CARGO_PKG_VERSION"),
+            "resume": format!("wavecode --session {}", self.id),
+        })
+    }
+
+    /// Journal the finished turn (text-level snapshot: prompt plus the
+    /// final answer; tool blocks are not replayed, matching the
+    /// documented resume scope). Failures warn, never fail the turn.
+    fn journal(&self, prompt: &str, answer: &str, outcome: &Outcome) {
+        let name = match outcome {
+            Outcome::Completed => "Completed",
+            Outcome::Interrupted => "Interrupted",
+            Outcome::Failed => "Failed",
+        };
+        if let Err(e) = state_persistence::sessions::record_turn(
+            &self.home,
+            &self.id,
+            &self.cwd,
+            prompt,
+            &[(false, prompt.to_string()), (true, answer.to_string())],
+            name,
+        ) {
+            eprintln!("[warn] session journal update failed: {e}");
+        }
+    }
+}
+
+async fn run_exec(
+    client: &mut ActorClient,
+    prompt: &str,
+    json: bool,
+    session: Option<ExecSession>,
+) -> anyhow::Result<Outcome> {
     client
         .submit(Submission {
             id: "exec-1".to_string(),
@@ -1446,6 +1501,11 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
     let mut interrupted = false;
     let mut out = std::io::stdout().lock();
     let mut err = std::io::stderr().lock();
+    // The session handle ships before any event so a consumer that only
+    // keeps the first line still knows where the session lives.
+    if json && let Some(sess) = &session {
+        stream_json_line(&mut out, &sess.meta_line(), &mut broken)?;
+    }
     let outcome = loop {
         tokio::select! {
             event = client.next_event() => {
@@ -1506,6 +1566,9 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
     }
     stream_out(&mut err, &stderr_text, &mut printed_err, &mut broken)?;
     let end = if failed { Outcome::Failed } else { outcome };
+    if let Some(sess) = &session {
+        sess.journal(prompt, &stdout_text, &end);
+    }
     Ok(if broken {
         // Closed stdout pipe (e.g. `| head`): the user took what they
         // needed; a clean end, not an error.

@@ -48,7 +48,10 @@ model = "your-model-fast"
 
 - `exec`: one prompt, one turn. Streams the answer to stdout; tool activity,
   approvals, and usage go to stderr. `--json` swaps to JSONL events on stdout
-  with human rendering on stderr. Ctrl-C interrupts the turn (exit 130).
+  with human rendering on stderr — a leading `{"meta":"session",…}` line
+  carries the session id and its `wavecode --session` resume command, and
+  the finished turn is journaled so the session can be resumed. Ctrl-C
+  interrupts the turn (exit 130).
 - `repl`: multi-turn session over one conversation. Slash commands: `/compact`
   (compress context now), `/memory` (show memory index), `/mcp` (list
   servers), `/permissions` (approval mode), `/quit` (end session),

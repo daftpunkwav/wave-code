@@ -678,6 +678,7 @@ dependencies = [
  "operations-bootstrap",
  "reqwest",
  "rustyline",
+ "serde",
  "serde_json",
  "state-persistence",
  "tempfile",

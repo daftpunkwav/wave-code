@@ -30,6 +30,11 @@ pub struct ProviderConfig {
     /// provider they were issued for).
     #[serde(default)]
     pub fallback_providers: Vec<String>,
+    /// Local client-side rate limit in requests per minute. Unset (the
+    /// default) sends requests unthrottled; set, a token bucket gates
+    /// each model request so retries never hammer the endpoint.
+    #[serde(default)]
+    pub rpm_limit: Option<u32>,
     /// Best-effort per-step reasoning effort forwarded to OpenAI-compatible
     /// endpoints (e.g. low / medium / high); `None` sends nothing so
     /// providers without the param keep working unchanged.

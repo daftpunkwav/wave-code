@@ -137,7 +137,7 @@ pub fn build_chat_model(
     model_name: &str,
     effort_override: Option<&str>,
 ) -> Arc<dyn ChatModel> {
-    match provider.kind {
+    let model: Arc<dyn ChatModel> = match provider.kind {
         wavecode_config::ProviderKind::OpenAiCompatible => {
             let client = wavecode_llm::OpenAIClient::new(
                 provider.base_url.clone(),
@@ -162,6 +162,12 @@ pub fn build_chat_model(
                 None => Arc::new(client),
             }
         }
+    };
+    // Optional local throttling keeps a retry loop from hammering the
+    // endpoint; provider-side 429 handling stays the second line.
+    match provider.rpm_limit {
+        Some(rpm) => Arc::new(crate::rate_limit::RateLimitedModel::new(model, rpm)),
+        None => model,
     }
 }
 

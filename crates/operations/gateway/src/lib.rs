@@ -178,7 +178,7 @@ mod tests {
     use super::*;
     use operations_actor::SessionActor;
     use runtime_child::ChildRuntime;
-    use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver, TurnInput };
+    use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver, TurnInput};
     use safety_gate::ApprovalGate;
     use state_store::{CompactTrigger, Conversation};
     use std::sync::Arc;

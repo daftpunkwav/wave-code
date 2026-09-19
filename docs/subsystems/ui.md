@@ -183,7 +183,9 @@ receivers remain compatible.
   the same cascade. Ctrl+O toggles expansion, Ctrl+T toggles the todo
   panel, Ctrl+S steers the running turn (queued message or editor
   text), Esc interrupts while busy (both interrupts acknowledge with a
-  status line). Ctrl+G hands the draft to an external editor: the
+  status line), and Alt+B/Alt+F jump one word back/forward. Esc on an
+  empty shell-mode prompt leaves shell mode. Ctrl+G hands the draft to
+  an external editor: the
   terminal leaves raw mode, the editor runs on a temp file under the
   platform shell (`/editor <cmd>` setting, else `$VISUAL`/`$EDITOR`),
   and the saved text replaces the draft; an empty save keeps the

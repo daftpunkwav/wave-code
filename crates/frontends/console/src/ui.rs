@@ -1947,6 +1947,14 @@ verify from the repository.";
                 self.push_status("interrupting the turn", false);
                 Flow::Continue
             }
+            (Key::Esc, _) if self.shell_chrome && self.editor.text() == "!" => {
+                // Esc on an empty shell-mode prompt exits the mode: the
+                // `!` is the buffer itself, so clearing it restores the
+                // normal prompt.
+                self.editor.clear();
+                self.refresh_editor_chrome();
+                Flow::Continue
+            }
             (Key::Esc, _) => {
                 // Double-Esc opens the rewind picker; a lone Esc stays
                 // a no-op.
@@ -2821,6 +2829,23 @@ mod tests {
         ui.handle_key(KeyEvent::plain(Key::Esc));
         ui.handle_key(KeyEvent::plain(Key::Esc));
         assert!(ui.dialog.is_none(), "empty dialogue opens nothing");
+    }
+
+    #[test]
+    fn esc_exits_shell_mode_on_an_empty_prompt() {
+        let mut ui = ui();
+        ui.editor.set_text("!");
+        ui.refresh_editor_chrome();
+        assert!(ui.shell_chrome, "shell mode active");
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(!ui.shell_chrome, "esc leaves shell mode");
+        assert_eq!(ui.editor.text(), "", "buffer cleared");
+        // A populated shell buffer is not touched.
+        ui.editor.set_text("!ls");
+        ui.refresh_editor_chrome();
+        ui.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(ui.shell_chrome, "non-empty shell buffer stays");
+        assert_eq!(ui.editor.text(), "!ls");
     }
 
     #[test]

@@ -847,8 +847,7 @@ async fn run_tui_new(
             // Kept short: the footer's right slot drops content that
             // does not fit an 80-column terminal; `wavecode update`
             // carries the details.
-            *slot.lock().expect("update slot lock") =
-                Some(format!("update available: {tag}"));
+            *slot.lock().expect("update slot lock") = Some(format!("update available: {tag}"));
         }
     });
     let ctx = ui_ctx_of(
@@ -1375,6 +1374,55 @@ fn next_mode(current: &str) -> &'static str {
 /// With `json`, stdout carries one JSON event per line while the human
 /// rendering falls back to stderr (legacy exec contract); otherwise
 /// stdout carries the answer text.
+/// Write everything appended to `buffered` since the last call, then
+/// flush. A broken pipe (e.g. `| head`) latches `broken` instead of
+/// erroring: the consumer took what it needed and further writes are
+/// skipped while the turn still drains for a clean shutdown.
+fn stream_out(
+    stream: &mut impl std::io::Write,
+    buffered: &str,
+    printed: &mut usize,
+    broken: &mut bool,
+) -> anyhow::Result<()> {
+    if *broken || buffered.len() == *printed {
+        return Ok(());
+    }
+    match stream
+        .write_all(&buffered.as_bytes()[*printed..])
+        .and_then(|()| stream.flush())
+    {
+        Ok(()) => *printed = buffered.len(),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => *broken = true,
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+
+/// Write one JSONL event line immediately. Returns false on a broken
+/// pipe (latched by the caller).
+fn stream_json_line(
+    out: &mut impl std::io::Write,
+    event: &wavecode_wire::Event,
+    broken: &mut bool,
+) -> anyhow::Result<bool> {
+    if *broken {
+        return Ok(true);
+    }
+    let line = serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string());
+    match out
+        .write_all(line.as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
+        .and_then(|()| out.flush())
+    {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+            *broken = true;
+            Ok(false)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow::Result<Outcome> {
     client
         .submit(Submission {
@@ -1386,11 +1434,18 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
         .await
         .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
 
+    // Text mode renders into the two buffers and streams every append
+    // as it lands; JSON mode writes each event line straight through.
+    // Either way consumers see events in real time instead of after exit.
     let mut stdout_text = String::new();
     let mut stderr_text = String::new();
-    let mut json_lines = String::new();
+    let mut printed_out = 0usize;
+    let mut printed_err = 0usize;
+    let mut broken = false;
     let mut failed = false;
     let mut interrupted = false;
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr().lock();
     let outcome = loop {
         tokio::select! {
             event = client.next_event() => {
@@ -1399,10 +1454,7 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
                     break Outcome::Failed;
                 };
                 if json {
-                    json_lines.push_str(
-                        &serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()),
-                    );
-                    json_lines.push('\n');
+                    stream_json_line(&mut out, &event, &mut broken)?;
                 }
                 if let Some(end) = render_event(&event.msg, &mut stdout_text, &mut stderr_text) {
                     if end == Outcome::Failed {
@@ -1411,6 +1463,12 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
                         break if interrupted { Outcome::Interrupted } else { end };
                     }
                 }
+                // JSON stdout carries the protocol lines only; the text
+                // rendering stays buffered as the human side channel.
+                if !json {
+                    stream_out(&mut out, &stdout_text, &mut printed_out, &mut broken)?;
+                }
+                stream_out(&mut err, &stderr_text, &mut printed_err, &mut broken)?;
             }
             _ = tokio::signal::ctrl_c() => {
                 let _ = client
@@ -1436,19 +1494,18 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
         .flatten()
     {
         if json {
-            json_lines
-                .push_str(&serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string()));
-            json_lines.push('\n');
+            stream_json_line(&mut out, &event, &mut broken)?;
         } else {
             render_event(&event.msg, &mut stdout_text, &mut stderr_text);
+            stream_out(&mut out, &stdout_text, &mut printed_out, &mut broken)?;
+            stream_out(&mut err, &stderr_text, &mut printed_err, &mut broken)?;
         }
     }
+    if !json {
+        stream_out(&mut out, &stdout_text, &mut printed_out, &mut broken)?;
+    }
+    stream_out(&mut err, &stderr_text, &mut printed_err, &mut broken)?;
     let end = if failed { Outcome::Failed } else { outcome };
-    let broken = if json {
-        flush_buffers(&json_lines, &stderr_text)?
-    } else {
-        flush_buffers(&stdout_text, &stderr_text)?
-    };
     Ok(if broken {
         // Closed stdout pipe (e.g. `| head`): the user took what they
         // needed; a clean end, not an error.
@@ -1456,33 +1513,6 @@ async fn run_exec(client: &mut ActorClient, prompt: &str, json: bool) -> anyhow:
     } else {
         end
     })
-}
-
-/// Flush buffered streams with locked handles.
-///
-/// Returns true on a closed pipe (stdout or stderr); panicking `print!`
-/// would turn `| head` into a crash, while `writeln!` lets a broken pipe
-/// read as a clean end.
-fn flush_buffers(stdout_text: &str, stderr_text: &str) -> std::io::Result<bool> {
-    let mut out = std::io::stdout().lock();
-    match out
-        .write_all(stdout_text.as_bytes())
-        .and_then(|()| out.flush())
-    {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(true),
-        Err(e) => return Err(e),
-    }
-    let mut err = std::io::stderr().lock();
-    match err
-        .write_all(stderr_text.as_bytes())
-        .and_then(|()| err.flush())
-    {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Ok(true),
-        Err(e) => return Err(e),
-    }
-    Ok(false)
 }
 
 /// Interactive multi-turn session over one shared conversation.

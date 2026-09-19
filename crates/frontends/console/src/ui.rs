@@ -904,7 +904,9 @@ impl ConsoleUi {
                 // visibly active.
                 let queued_next = !self.state.queued.is_empty();
                 if !*interrupted && !queued_next && notify::enabled() && !self.terminal_focused {
-                    self.pending_sequence = Some(notify::sequence("turn finished"));
+                    // Composed (style + tmux passthrough), not the bare
+                    // OSC 9: delivery must follow WAVECODE_NOTIFY_STYLE.
+                    self.pending_sequence = Some(notify::notification("turn finished"));
                 }
                 // Trim old turns now that the frame is stable; no calls
                 // span turns, so the open-call index resets with it.
@@ -2790,6 +2792,18 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("nothing to rewind"), "{joined}");
+    }
+
+    #[test]
+    fn turn_finished_notification_uses_the_composed_sequence() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+        // The composed notification (not the bare OSC 9) is what carries
+        // WAVECODE_NOTIFY_STYLE and the tmux passthrough.
+        assert_eq!(
+            ui.take_pending_sequence().as_deref(),
+            Some(notify::notification("turn finished").as_str())
+        );
     }
 
     #[test]

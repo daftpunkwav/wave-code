@@ -188,6 +188,11 @@ receivers remain compatible.
   platform shell (`/editor <cmd>` setting, else `$VISUAL`/`$EDITOR`),
   and the saved text replaces the draft; an empty save keeps the
   original.
+- File-write approval payloads carry the affected lines (`-` old,
+  `+` new, from the sandbox's `ask_detail`) and the approval dialog
+  paints them with the diff colors — the user approves visible
+  content, not a bare path. Character and line budgets bound the
+  payload at the sandbox, the wire truncation, and the dialog.
 - A wire-driven modal (approval or question) never outlives its turn:
   on `TurnCompleted` — and on non-recoverable errors — the dialog is
   dismissed with a status line, because the parked gate died with the

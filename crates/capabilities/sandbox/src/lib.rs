@@ -75,7 +75,9 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Character cap for Ask details (ApprovalRequested.detail): a command in full
 /// can be very long, and event payloads must stay bounded; the frontend
 /// truncates separately when rendering.
-const DETAIL_MAX_CHARS: usize = 500;
+/// Hard cap for one approval detail payload; large enough for the
+/// multi-line diff of a file-write approval after line budgeting.
+const DETAIL_MAX_CHARS: usize = 2000;
 
 /// Rule scope (the entry prefix): `Bash(...)` matches the full command,
 /// `File(...)` matches the path.
@@ -615,14 +617,22 @@ fn approval_kind(tool: &str) -> ApprovalKind {
 
 /// Ask detail: a human-readable call summary (full command for shell, path for
 /// file tools, compact JSON fallback), truncated by character count.
+/// File-write tools render the affected lines (`-` old, `+` new) so the
+/// user approves visible content, not a bare path.
 fn ask_detail(tool: &str, input: &serde_json::Value) -> String {
-    let target = input
-        .get("command")
-        .or_else(|| input.get("path"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| input.to_string());
-    let detail = format!("{tool}: {target}");
+    let detail = match tool {
+        "write" => write_detail(input),
+        "edit" => edit_detail(input),
+        _ => {
+            let target = input
+                .get("command")
+                .or_else(|| input.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| input.to_string());
+            format!("{tool}: {target}")
+        }
+    };
     if detail.chars().count() <= DETAIL_MAX_CHARS {
         detail
     } else {
@@ -630,6 +640,62 @@ fn ask_detail(tool: &str, input: &serde_json::Value) -> String {
         t.push('…');
         t
     }
+}
+
+/// Display budget for file-write approvals (head line + diff rows),
+/// before the hard character cap.
+const DETAIL_DIFF_LINES: usize = 24;
+
+/// Push `lines` under a `sign` prefix up to `budget` rows; hidden
+/// remainder is summarized instead of dropped silently.
+fn diff_lines_into(out: &mut Vec<String>, lines: &[&str], sign: char, budget: usize) {
+    let shown = lines.len().min(budget);
+    for line in &lines[..shown] {
+        out.push(format!("{sign}{line}"));
+    }
+    if lines.len() > shown {
+        out.push(format!("… ({sign}{} more lines)", lines.len() - shown));
+    }
+}
+
+fn write_detail(input: &serde_json::Value) -> String {
+    let path = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let content = input
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let mut out = vec![format!("write: {path}")];
+    let content_lines: Vec<&str> = content.lines().collect();
+    diff_lines_into(&mut out, &content_lines, '+', DETAIL_DIFF_LINES - 1);
+    out.join("\n")
+}
+
+fn edit_detail(input: &serde_json::Value) -> String {
+    let path = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("?");
+    let old = input
+        .get("old_string")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let new = input
+        .get("new_string")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let mut out = vec![format!("edit: {path}")];
+    // Split the budget so both sides stay visible on large edits.
+    let budget = DETAIL_DIFF_LINES - 1;
+    let half = (budget / 2).max(1);
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    diff_lines_into(&mut out, &old_lines, '-', half);
+    let used = out.len() - 1;
+    diff_lines_into(&mut out, &new_lines, '+', budget - used);
+    out.join("\n")
 }
 
 #[cfg(test)]
@@ -817,12 +883,7 @@ mod tests {
     /// pipeline as well.
     #[test]
     fn deny_rules_apply_even_in_wave_mode() {
-        let sb = Sandbox::new(
-            PermissionMode::Wave,
-            &[],
-            &["File(secrets/**)".into()],
-        )
-        .unwrap();
+        let sb = Sandbox::new(PermissionMode::Wave, &[], &["File(secrets/**)".into()]).unwrap();
         assert_eq!(
             sb.decide("read", &file_input("secrets/key.pem"), true, false),
             Verdict::Deny {
@@ -1029,6 +1090,72 @@ mod tests {
         assert!(detail.ends_with('…'));
     }
 
+    #[test]
+    fn write_approval_carries_the_new_content() {
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
+        let input = json!({
+            "path": "src/lib.rs",
+            "content": "fn a() {}\nfn b() {}",
+        });
+        let v = sb.decide("write", &input, false, true);
+        let Verdict::Ask { detail, .. } = v else {
+            panic!("should Ask: {v:?}")
+        };
+        let lines: Vec<&str> = detail.lines().collect();
+        assert_eq!(lines[0], "write: src/lib.rs");
+        assert_eq!(lines[1], "+fn a() {}");
+        assert_eq!(lines[2], "+fn b() {}");
+        // Oversized content is summarized, not dropped silently.
+        let big = json!({
+            "path": "big.rs",
+            "content": "x\n".repeat(64),
+        });
+        let v = sb.decide("write", &big, false, true);
+        let Verdict::Ask { detail, .. } = v else {
+            panic!("should Ask: {v:?}")
+        };
+        assert!(detail.contains("more lines"), "{detail}");
+    }
+
+    #[test]
+    fn edit_approval_shows_both_sides() {
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
+        let input = json!({
+            "path": "src/a.rs",
+            "old_string": "let x = 1;",
+            "new_string": "let x = 2;\nlet y = 3;",
+        });
+        let v = sb.decide("edit", &input, false, true);
+        let Verdict::Ask { detail, .. } = v else {
+            panic!("should Ask: {v:?}")
+        };
+        let lines: Vec<&str> = detail.lines().collect();
+        assert_eq!(lines[0], "edit: src/a.rs");
+        assert!(lines.contains(&"-let x = 1;"), "{detail}");
+        assert!(lines.contains(&"+let x = 2;"), "{detail}");
+        assert!(lines.contains(&"+let y = 3;"), "{detail}");
+    }
+
+    #[test]
+    fn oversized_edit_splits_the_budget() {
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
+        let input = json!({
+            "path": "src/big.rs",
+            "old_string": "old\n".repeat(40).trim_end().to_string(),
+            "new_string": "new\n".repeat(40).trim_end().to_string(),
+        });
+        let v = sb.decide("edit", &input, false, true);
+        let Verdict::Ask { detail, .. } = v else {
+            panic!("should Ask: {v:?}")
+        };
+        // Both sides stay visible with elision markers.
+        assert!(detail.contains("-old"), "{detail}");
+        assert!(detail.contains("+new"), "{detail}");
+        assert!(detail.contains("(-"), "{detail}");
+        assert!(detail.contains("(+"), "{detail}");
+        assert!(detail.matches("more lines").count() >= 2, "{detail}");
+    }
+
     // —— allow_always: session-level exact allow rules ——
 
     #[test]
@@ -1166,12 +1293,7 @@ mod tests {
     /// stop a curl joined after a newline.
     #[test]
     fn deny_matches_command_segments() {
-        let sb = Sandbox::new(
-            PermissionMode::Auto,
-            &[],
-            &["Bash(curl *)".into()],
-        )
-        .unwrap();
+        let sb = Sandbox::new(PermissionMode::Auto, &[], &["Bash(curl *)".into()]).unwrap();
         // The whole command misses the prefix, but a segment hits — under
         // bypass, deny is the only line of defense.
         assert!(matches!(
@@ -1265,12 +1387,7 @@ mod tests {
             segments.iter().any(|s| s.starts_with("curl")),
             "the process-substitution command should stand alone as a segment: {segments:?}"
         );
-        let sb = Sandbox::new(
-            PermissionMode::Auto,
-            &[],
-            &["Bash(curl *)".into()],
-        )
-        .unwrap();
+        let sb = Sandbox::new(PermissionMode::Auto, &[], &["Bash(curl *)".into()]).unwrap();
         assert!(
             matches!(
                 sb.decide(
@@ -1334,12 +1451,7 @@ mod tests {
         ));
         // The deny direction does not bind: deny rules hit any tool carrying a
         // command key (over-broad is harmless).
-        let deny = Sandbox::new(
-            PermissionMode::Auto,
-            &[],
-            &["Bash(curl *)".into()],
-        )
-        .unwrap();
+        let deny = Sandbox::new(PermissionMode::Auto, &[], &["Bash(curl *)".into()]).unwrap();
         assert!(matches!(
             deny.decide("mcp__srv__run", &shell_input("curl evil"), false, false),
             Verdict::Deny { .. }

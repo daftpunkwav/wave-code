@@ -153,7 +153,8 @@ pub struct ApprovalDialog {
 
 impl ApprovalDialog {
     /// Build the approval for one parked call. The detail string is the
-    /// wire-supplied display payload (already sanitized by the caller).
+    /// wire-supplied display payload (already sanitized by the caller);
+    /// file-write payloads carry `-`/`+` diff lines for the renderer.
     pub fn new(call_id: String, kind: ApprovalKind, detail: &str) -> Self {
         let title = match kind {
             ApprovalKind::Exec => "Run this command?".to_string(),
@@ -161,7 +162,7 @@ impl ApprovalDialog {
         };
         let mut body: Vec<String> = Vec::new();
         for line in detail.lines().take(MAX_BODY_LINES) {
-            body.push(format!("$ {line}"));
+            body.push(line.to_string());
         }
         if detail.lines().count() > MAX_BODY_LINES {
             body.push(format!(
@@ -245,13 +246,29 @@ impl ApprovalDialog {
             theme.paint(Token::BorderFocus, "▶"),
             theme.bold(Token::BorderFocus, &self.title)
         ));
+        let dollar = theme.paint(Token::Accent, "$");
         for line in &self.body {
-            let dollar = theme.paint(Token::Accent, "$");
-            content.push(format!(
-                "  {} {}",
-                dollar,
-                theme.paint(Token::Text, line.trim_start_matches("$ "))
-            ));
+            // Diff rows (file-write payloads) keep their sign prefix and
+            // take the diff colors; other lines render as `$` commands.
+            if let Some(added) = line.strip_prefix('+') {
+                content.push(format!(
+                    "  {}",
+                    theme.style(Token::DiffAdded).paint(&format!("+{added}"))
+                ));
+            } else if let Some(removed) = line.strip_prefix('-') {
+                content.push(format!(
+                    "  {}",
+                    theme
+                        .style(Token::DiffRemoved)
+                        .paint(&format!("-{removed}"))
+                ));
+            } else {
+                content.push(format!(
+                    "  {} {}",
+                    dollar,
+                    theme.paint(Token::Text, line.trim_start_matches("$ "))
+                ));
+            }
         }
         content.push(String::new());
         for (index, (label, _)) in self.choices.iter().enumerate() {
@@ -513,6 +530,56 @@ mod tests {
         assert!(joined.contains("$ echo hi"), "{joined}");
         assert!(joined.contains("Yes, allow once"), "{joined}");
         assert!(strip_ansi(&lines[0]).starts_with('╭'));
+    }
+
+    #[test]
+    fn write_approval_colors_diff_lines() {
+        theme::set(theme::Theme::dark());
+        let detail = "write: src/lib.rs\n+fn added() {}\n-fn gone() {}";
+        let mut dialog = ApprovalDialog::new("c5".to_string(), ApprovalKind::Write, detail);
+        let lines = dialog.render(70);
+        let added = lines
+            .iter()
+            .find(|l| strip_ansi(l).contains("+fn added() {}"))
+            .expect("added row present");
+        let removed = lines
+            .iter()
+            .find(|l| strip_ansi(l).contains("-fn gone() {}"))
+            .expect("removed row present");
+        // Diff rows carry their token color instead of the plain text
+        // style the `$` command rows use; each row must carry the SGR
+        // foreground of its own diff token (added vs removed).
+        let theme = theme::current();
+        let fg = |token: Token| {
+            let color = theme.color(token);
+            format!("38;2;{};{};{}", color.r, color.g, color.b)
+        };
+        let fgs = |line: &str| {
+            line.split("\x1b[")
+                .skip(1)
+                .map(|seq| seq.split('m').next().unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        assert!(
+            fgs(added).contains(&fg(Token::DiffAdded)),
+            "added row must paint DiffAdded: {:?} vs {}",
+            fgs(added),
+            fg(Token::DiffAdded)
+        );
+        assert!(
+            fgs(removed).contains(&fg(Token::DiffRemoved)),
+            "removed row must paint DiffRemoved: {:?} vs {}",
+            fgs(removed),
+            fg(Token::DiffRemoved)
+        );
+        // The head line keeps the `$` command shape.
+        let joined: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("$ write: src/lib.rs"), "{joined}");
     }
 
     fn picker_entries() -> Vec<ModelEntryView> {

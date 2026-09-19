@@ -1,0 +1,82 @@
+name: release
+
+# Tag-triggered binary release: one archive + sha256 per platform target,
+# uploaded to the GitHub Release the tag names. No signing, no canary —
+# the tag is the release gate.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --bin wavecode --target ${{ matrix.target }}
+      - name: Package archive and checksum
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="wavecode-${version}-${{ matrix.target }}"
+          exe=""
+          if [[ "${{ matrix.archive }}" == zip ]]; then exe=".exe"; fi
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/wavecode$exe" "$name/"
+          cp README.md "$name/"
+          if [[ "${{ matrix.archive }}" == zip ]]; then
+            artifact="$name.zip"
+            7z a "$artifact" "$name" >/dev/null
+          else
+            artifact="$name.tar.gz"
+            tar czf "$artifact" "$name"
+          fi
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$artifact" > "$artifact.sha256"
+          else
+            shasum -a 256 "$artifact" > "$artifact.sha256"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            wavecode-*.tar.gz*
+            wavecode-*.zip*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -150,9 +150,34 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | `tui-engine` | Inline terminal rendering engine: components, editor, markdown, diff screen |
 | `console-ui` | Themed console frontend over the wire + actor (transcript, dialogs, slash commands) |
 
+### Wiring status
+
+A crate compiles and is unit-tested only when something depends on it. As of
+2026-09-21, **24 of the 58 library crates have no dependents** — they are not
+reachable from the `wavecode` binary. Everything above describes what each
+crate *does*, not what the product *offers*; this table is the correction.
+Check a crate's dependents (`cargo tree -q -i <crate>`) before citing it as a
+feature, and move it out of this table in the same change that wires it up.
+
+| Unwired crate | Why it is not reachable |
+| --- | --- |
+| `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
+| `operations-observe`, `operations-replay`, `operations-eval`, `operations-simulate`, `operations-notify` | Library-only: no binary or adapter consumes them, so metrics folding, structural replay, and behavioural benchmarks are not product features yet |
+| `action-kit`, `action-browser`, `action-retrieval` | The tool registry and the browser/retrieval seams have no implementer or consumer; `wavecode-tools` owns the live registry |
+| `infrastructure-cache`, `infrastructure-config`, `infrastructure-coord`, `infrastructure-routing` | Unused primitives: config layering, leases, and the route/fallback chain are each still hand-rolled where they are needed |
+| `runtime-capability`, `runtime-identity`, `runtime-skills` | The live skill path is `wavecode-skills` + `bootstrap`; these are parallel, unconsumed models of the same idea |
+| `safety-policy`, `safety-guardrail`, `safety-audit`, `safety-secrets` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice |
+| `state-artifact`, `state-profile`, `state-workspace` | `state-persistence` / `state-store` carry the durable data the product uses |
+| `wavecode-auth` | Provider credentials resolve through `wavecode-config`'s `env_key` path |
+
+The `runtime-skills` / `action-kit` / `safety-policy` group is the one to watch
+for *design* debt, not just dead code: each duplicates a responsibility that
+another crate already owns, which the layering rules above are meant to
+prevent.
+
 ## Life of a turn
 
-1. A frontend (`harness-cli`, TUI, or an RPC client through `operations-gateway`) submits a prompt as a wire submission.
+1. A frontend (`harness-cli`, TUI, or an HTTP/SSE client through `wavecode serve`) submits a prompt as a wire submission.
 2. `operations-actor` serializes submissions per session and drives `runtime-runner`.
 3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
 4. Tool executions pass the `safety-gate` approval flow; verdicts come from `safety-policy` rules plus permission modes, with OS-level isolation from `safety-sandbox`.

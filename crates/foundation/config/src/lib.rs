@@ -176,6 +176,57 @@ env_key = "TEST_KEY"
         assert!(cfg.models.is_empty());
     }
 
+    /// All three wire dialects parse from `type`, including the aliases for
+    /// the Responses API, and only the OpenAI-protocol kinds carry a
+    /// switchable reasoning effort.
+    #[test]
+    fn provider_kinds_parse_every_wire_dialect() {
+        let kind_of = |ty: &str| -> ProviderKind {
+            let text = format!(
+                r#"
+model = "m"
+model_provider = "p"
+
+[model_providers.p]
+type = "{ty}"
+base_url = "https://example.test/v1"
+"#
+            );
+            toml::from_str::<Config>(&text).unwrap().model_providers["p"].kind
+        };
+        assert_eq!(kind_of("anthropic"), ProviderKind::Anthropic);
+        // Both the serde-canonical and the natural spelling parse, so a
+        // hand-written config never trips on the kebab-case split.
+        assert_eq!(
+            kind_of("open-ai-compatible"),
+            ProviderKind::OpenAiCompatible
+        );
+        assert_eq!(kind_of("openai-compatible"), ProviderKind::OpenAiCompatible);
+        assert_eq!(kind_of("open-ai-responses"), ProviderKind::OpenAiResponses);
+        assert_eq!(kind_of("openai-responses"), ProviderKind::OpenAiResponses);
+        // Aliases resolve to the same kind.
+        assert_eq!(kind_of("openai_responses"), ProviderKind::OpenAiResponses);
+        assert_eq!(kind_of("responses"), ProviderKind::OpenAiResponses);
+
+        assert!(ProviderKind::OpenAiCompatible.carries_reasoning_effort());
+        assert!(ProviderKind::OpenAiResponses.carries_reasoning_effort());
+        assert!(!ProviderKind::Anthropic.carries_reasoning_effort());
+
+        // An unknown dialect stays a config error instead of silently
+        // falling back to another wire format.
+        let unknown = toml::from_str::<Config>(
+            r#"
+model = "m"
+model_provider = "p"
+
+[model_providers.p]
+type = "gemini"
+base_url = "https://example.test/v1"
+"#,
+        );
+        assert!(unknown.is_err());
+    }
+
     /// [models] table: alias -> { provider, model, optional reasoning_effort }.
     #[test]
     fn models_catalog_parses_aliases() {

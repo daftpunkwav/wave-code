@@ -143,7 +143,7 @@ impl ChatModel for OpenAIClient {
                 .map_err(|e| LlmError::Http(e.to_string()))?;
             return Err(api_error_with_retry_after(
                 format!("http_{}", status.as_u16()),
-                truncate_error_body(&body),
+                crate::truncate_error_body(&body, crate::MAX_ERROR_BODY_CHARS),
                 retry_after,
             ));
         }
@@ -177,15 +177,6 @@ impl ChatModel for OpenAIClient {
 /// Builds the Chat Completions URL: strips trailing `/` from base_url to avoid double slashes.
 fn chat_completions_url(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
-}
-
-/// Max retained chars of an error response body (by char, so multibyte chars are never split).
-const MAX_ERROR_BODY_CHARS: usize = 2000;
-
-/// Truncates an error response body; the API key only travels in request headers
-/// and is never written into error text.
-fn truncate_error_body(body: &str) -> String {
-    body.chars().take(MAX_ERROR_BODY_CHARS).collect()
 }
 
 /// Single construction point for API errors (non-2xx responses and in-stream

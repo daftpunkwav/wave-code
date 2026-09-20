@@ -1,11 +1,39 @@
 //! provider config (split from lib.rs in phase 5): ProviderKind / ProviderConfig.
 
-/// Provider type (the `type` field in config, kebab-case form).
+/// Provider type (the `type` field in config).
+///
+/// The canonical spellings are the kebab-case names serde derives
+/// (`open-ai-compatible`), but the natural hand-written forms
+/// (`openai-compatible`, `openai-responses`, `responses`) are accepted as
+/// aliases so a plausible-looking config never fails to parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderKind {
+    /// Anthropic Messages (`POST {base_url}/v1/messages`).
     Anthropic,
+    /// OpenAI Chat Completions (`POST {base_url}/chat/completions`) — the
+    /// dialect most third-party gateways speak.
+    #[serde(alias = "openai-compatible", alias = "openai_compatible")]
     OpenAiCompatible,
+    /// OpenAI Responses (`POST {base_url}/responses`): the only endpoint
+    /// serving some models (o1-pro, gpt-5-codex) and the recommended one for
+    /// newer reasoning families.
+    #[serde(
+        alias = "openai-responses",
+        alias = "openai_responses",
+        alias = "responses"
+    )]
+    OpenAiResponses,
+}
+
+impl ProviderKind {
+    /// True for the OpenAI-protocol kinds: both take a switchable string
+    /// reasoning effort (Anthropic thinking is a config-only token budget)
+    /// and both consult the model capability table when no explicit window
+    /// or output cap is configured.
+    pub fn carries_reasoning_effort(self) -> bool {
+        matches!(self, Self::OpenAiCompatible | Self::OpenAiResponses)
+    }
 }
 
 /// Config of a single model provider.

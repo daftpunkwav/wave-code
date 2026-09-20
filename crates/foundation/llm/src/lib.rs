@@ -12,14 +12,17 @@
 
 //! wavecode-llm - multi-provider abstraction layer.
 //!
-//! Defines the unified Messages request / streaming event interface (SSE). M1 covers:
-//! - Shared types ([`Message`] / [`ContentBlock`] / [`ToolSpec`] / [`StreamEvent`], etc.)
-//!   and the [`ChatModel`] trait;
-//! - The Anthropic Messages streaming SSE parser ([`SseParser`]);
-//! - Built-in implementation: the Anthropic Messages API streaming client ([`AnthropicClient`]).
+//! Defines the unified Messages request / streaming event interface (SSE) across
+//! three wire dialects:
+//! - Anthropic Messages ([`AnthropicClient`], `POST {base_url}/v1/messages`);
+//! - OpenAI Chat Completions ([`OpenAIClient`], `POST {base_url}/chat/completions`),
+//!   the dialect most third-party gateways speak;
+//! - OpenAI Responses ([`ResponsesClient`], `POST {base_url}/responses`), the
+//!   endpoint that serves reasoning families with no Chat Completions route.
 //!
-//! The OpenAI-compatible HTTP client ([`OpenAIClient`]) plus the approximate model
-//! capability table ([`ModelCapabilities`]) live in [`openai`].
+//! Shared types ([`Message`] / [`ContentBlock`] / [`ToolSpec`] / [`StreamEvent`]),
+//! the [`ChatModel`] trait, the Anthropic SSE parser ([`SseParser`]), and the
+//! approximate model capability table ([`ModelCapabilities`]) complete the layer.
 
 use std::sync::Arc;
 
@@ -27,12 +30,25 @@ use serde::{Deserialize, Serialize};
 
 pub mod anthropic;
 pub mod openai;
+pub mod responses;
 pub mod retry;
 mod sse;
 
 pub use anthropic::AnthropicClient;
 pub use openai::{ModelCapabilities, OpenAIClient};
+pub use responses::ResponsesClient;
 pub use sse::SseParser;
+
+/// Max retained chars of a provider error response body, shared by every
+/// client so the taxonomy stays uniform across wires.
+pub(crate) const MAX_ERROR_BODY_CHARS: usize = 2000;
+
+/// Truncates an error response body to `max_chars` characters (by char, so
+/// multibyte text is never split). The API key only travels in request
+/// headers and never enters error text.
+pub(crate) fn truncate_error_body(body: &str, max_chars: usize) -> String {
+    body.chars().take(max_chars).collect()
+}
 
 /// Conversation role.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -123,7 +123,7 @@ impl ChatModel for AnthropicClient {
                 .map_err(|e| LlmError::Http(e.to_string()))?;
             return Err(crate::classify_api_error_with_retry_after(
                 format!("http_{}", status.as_u16()),
-                truncate_error_body(&body),
+                crate::truncate_error_body(&body, MAX_ERROR_BODY_CHARS),
                 retry_after,
             ));
         }
@@ -143,14 +143,8 @@ fn messages_url(base_url: &str) -> String {
     format!("{}/v1/messages", base_url.trim_end_matches('/'))
 }
 
-/// Max retained chars of an error response body.
-const MAX_ERROR_BODY_CHARS: usize = 2000;
-
-/// Truncates an error response body: keeps at most the first [`MAX_ERROR_BODY_CHARS`] chars (truncated
-/// by char, so multibyte chars are never split); the API key only travels in request headers and is never written into error text.
-fn truncate_error_body(body: &str) -> String {
-    body.chars().take(MAX_ERROR_BODY_CHARS).collect()
-}
+/// Max retained chars of an error response body (the shared cap).
+const MAX_ERROR_BODY_CHARS: usize = crate::MAX_ERROR_BODY_CHARS;
 
 /// Builds the Anthropic Messages API request body (stream is always true).
 ///
@@ -498,13 +492,21 @@ mod tests {
     #[test]
     fn error_body_truncated_at_2000_chars() {
         let short = "x".repeat(100);
-        assert_eq!(truncate_error_body(&short), short);
+        assert_eq!(
+            crate::truncate_error_body(&short, MAX_ERROR_BODY_CHARS),
+            short
+        );
         // Overlong bodies truncate to 2000 by char
         let long = "y".repeat(3000);
-        assert_eq!(truncate_error_body(&long).chars().count(), 2000);
+        assert_eq!(
+            crate::truncate_error_body(&long, MAX_ERROR_BODY_CHARS)
+                .chars()
+                .count(),
+            2000
+        );
         // Multibyte chars count by char and are never split (splitting would garble at the from_utf8 level)
         let wide = "é".repeat(2500);
-        let truncated = truncate_error_body(&wide);
+        let truncated = crate::truncate_error_body(&wide, MAX_ERROR_BODY_CHARS);
         assert_eq!(truncated.chars().count(), 2000);
         assert!(truncated.chars().all(|c| c == 'é'));
     }

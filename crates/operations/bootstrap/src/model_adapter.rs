@@ -153,6 +153,19 @@ pub fn build_chat_model(
                 None => Arc::new(client),
             }
         }
+        wavecode_config::ProviderKind::OpenAiResponses => {
+            let client = wavecode_llm::ResponsesClient::new(
+                provider.base_url.clone(),
+                api_key,
+                model_name.to_string(),
+            );
+            // Same best-effort effort contract as the chat client; the
+            // Responses wire nests it under `reasoning.effort`.
+            match effort_override.or(provider.reasoning_effort.as_deref()) {
+                Some(effort) => Arc::new(client.with_reasoning_effort(effort.to_string())),
+                None => Arc::new(client),
+            }
+        }
         wavecode_config::ProviderKind::Anthropic => {
             let client = wavecode_llm::AnthropicClient::new(provider.base_url.clone(), api_key);
             // Prompt caching defaults ON (unset = enabled); thinking only

@@ -668,12 +668,12 @@ fn build_model_entries(
     entries
 }
 
-/// Thinking levels the picker offers: OpenAI-compatible providers take a
-/// string reasoning effort; budget-driven Anthropic thinking is
-/// config-only, so the row hides there.
+/// Thinking levels the picker offers: the OpenAI-protocol providers (Chat
+/// Completions and Responses) take a string reasoning effort; budget-driven
+/// Anthropic thinking is config-only, so the row hides there.
 fn thinking_levels_for(config: &wavecode_config::Config, provider_id: &str) -> Vec<String> {
     match config.model_providers.get(provider_id) {
-        Some(provider) if provider.kind == wavecode_config::ProviderKind::OpenAiCompatible => {
+        Some(provider) if provider.kind.carries_reasoning_effort() => {
             vec![
                 "off".to_string(),
                 "low".to_string(),
@@ -1414,6 +1414,11 @@ base_url = "https://api.anthropic.com"
 env_key = "ANTHROPIC_API_KEY"
 # Option 2: inline api_key (keep secret, do not commit)
 # api_key = "sk-ant-..."
+
+# Other wire dialects: type = "openai-compatible" (Chat Completions, what
+# most third-party gateways speak) or type = "openai-responses" (OpenAI
+# Responses; needed for o1-pro / gpt-5-codex). base_url points at the API
+# root, e.g. "https://api.openai.com/v1".
 "#,
             path.display()
         );

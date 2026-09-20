@@ -268,11 +268,12 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     // the provider client, then delegates everything below.
     // Effort display state: only OpenAI-compatible providers carry a
     // switchable string level; Anthropic budgets stay config-only.
-    let thinking_effort = match provider.kind {
-        wavecode_config::ProviderKind::OpenAiCompatible => thinking_override
+    let thinking_effort = if provider.kind.carries_reasoning_effort() {
+        thinking_override
             .clone()
-            .or_else(|| provider.reasoning_effort.clone()),
-        _ => None,
+            .or_else(|| provider.reasoning_effort.clone())
+    } else {
+        None
     };
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
     // Primary plus ordered fallbacks share one constructor; each fallback
@@ -330,18 +331,18 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     // providers without explicit limits consult the capability table so
     // DeepSeek-class models sample with their real window instead of the
     // Anthropic-shaped default.
-    let (context_window, max_output_tokens) = match provider.kind {
-        wavecode_config::ProviderKind::OpenAiCompatible
-            if provider.context_window.is_none() && provider.max_output_tokens.is_none() =>
-        {
-            let caps = wavecode_llm::ModelCapabilities::resolve_or(
-                &model_name,
-                provider.context_window(),
-                provider.max_output_tokens(),
-            );
-            (caps.context_window, caps.max_output_tokens)
-        }
-        _ => (provider.context_window(), provider.max_output_tokens()),
+    let (context_window, max_output_tokens) = if provider.kind.carries_reasoning_effort()
+        && provider.context_window.is_none()
+        && provider.max_output_tokens.is_none()
+    {
+        let caps = wavecode_llm::ModelCapabilities::resolve_or(
+            &model_name,
+            provider.context_window(),
+            provider.max_output_tokens(),
+        );
+        (caps.context_window, caps.max_output_tokens)
+    } else {
+        (provider.context_window(), provider.max_output_tokens())
     };
     Ok(assemble_session_with_model(WithModel {
         config,

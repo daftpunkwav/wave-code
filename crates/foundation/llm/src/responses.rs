@@ -1,0 +1,882 @@
+//! OpenAI Responses API (`POST {base_url}/responses`) streaming client.
+//!
+//! Third wire dialect alongside [`crate::anthropic`] (Anthropic Messages) and
+//! [`crate::openai`] (Chat Completions). The Responses API is the one that
+//! serves models with no Chat Completions endpoint (o1-pro, gpt-5-codex) and
+//! the recommended path for the newer reasoning families, so it is a
+//! first-class provider kind rather than a mode of the chat client.
+//!
+//! Shape differences from Chat Completions that this module bridges:
+//! - the system prompt travels as a top-level `instructions` string, not a
+//!   `system` message;
+//! - history is a flat `input` item list: `input_text` / `input_image` parts
+//!   for user turns, `output_text` for assistant prose, and **standalone**
+//!   `function_call` / `function_call_output` items for tool exchange (tool
+//!   pairing rides `call_id`, which is what wave stores as the call id);
+//! - tool definitions are flat (`{type, name, description, parameters}`);
+//! - the output cap is `max_output_tokens` and reasoning effort nests under
+//!   `reasoning: {effort}` (with `summary: auto` so reasoning summaries
+//!   stream for display);
+//! - streaming uses named event types (`response.output_text.delta`, …)
+//!   whose `output_index` identifies the item a delta belongs to.
+//!
+//! `store: false` is always sent: wave keeps conversations on the local
+//! machine, and the Responses API otherwise persists them server-side.
+
+use std::sync::RwLock;
+
+use futures::StreamExt;
+use serde_json::Value;
+
+use crate::{
+    ChatModel, ChatRequest, ContentBlock, EventStream, LlmError, Message, Result, Role,
+    StreamEvent, ToolSpec, Usage,
+};
+
+/// Streaming client for the OpenAI Responses API.
+pub struct ResponsesClient {
+    base_url: String,
+    api_key: String,
+    http: reqwest::Client,
+    /// Model name used when a request leaves `model` empty.
+    model: String,
+    /// Best-effort reasoning effort sent as `reasoning.effort`. A `RwLock`
+    /// because the shared `&self` seam (`set_thinking`) switches it mid-session.
+    reasoning_effort: RwLock<Option<String>>,
+}
+
+impl ResponsesClient {
+    /// Creates a new client (streaming, no reasoning effort configured).
+    ///
+    /// # Panics
+    /// Panics if the TLS backend fails to initialize; use [`Self::try_new`]
+    /// where that must be a recoverable error.
+    pub fn new(base_url: String, api_key: String, model: String) -> Self {
+        Self::try_new(base_url, api_key, model)
+            .expect("TLS backend initialization failed; verify system certificates are installed")
+    }
+
+    /// Fallible constructor (the TLS init failure is returned instead of
+    /// panicking).
+    pub fn try_new(base_url: String, api_key: String, model: String) -> Result<Self> {
+        let http = reqwest::Client::builder()
+            // A redirect would carry the Authorization header to another
+            // host; fail the request instead.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+        Ok(Self {
+            base_url,
+            api_key,
+            http,
+            model,
+            reasoning_effort: RwLock::new(None),
+        })
+    }
+
+    /// Set the best-effort reasoning effort (e.g. "low"); builder style.
+    pub fn with_reasoning_effort(self, effort: impl Into<String>) -> Self {
+        *self
+            .reasoning_effort
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(effort.into());
+        self
+    }
+
+    /// The configured reasoning effort, if any.
+    pub fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatModel for ResponsesClient {
+    async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
+        let url = responses_url(&self.base_url);
+        let model = if req.model.is_empty() {
+            &self.model
+        } else {
+            &req.model
+        };
+        let reasoning_effort = self
+            .reasoning_effort
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.api_key)
+            .header("content-type", "application/json")
+            .json(&build_request_body(
+                &req,
+                model,
+                reasoning_effort.as_deref(),
+            ))
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            // Read before the body: Retry-After rides the 429 headers.
+            let retry_after = crate::parse_retry_after(response.headers());
+            let body = response
+                .text()
+                .await
+                .map_err(|e| LlmError::Http(e.to_string()))?;
+            return Err(crate::classify_api_error_with_retry_after(
+                format!("http_{}", status.as_u16()),
+                crate::truncate_error_body(&body, crate::MAX_ERROR_BODY_CHARS),
+                retry_after,
+            ));
+        }
+
+        let byte_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(|e| LlmError::Http(e.to_string())));
+        Ok(Box::pin(decode_responses_stream(crate::sse::stall_guard(
+            byte_stream,
+            crate::sse::STREAM_IDLE_TIMEOUT,
+        ))))
+    }
+
+    fn set_thinking(&self, effort: &str) -> bool {
+        let level = effort.trim();
+        if level.is_empty() {
+            return false;
+        }
+        *self
+            .reasoning_effort
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = if level.eq_ignore_ascii_case("off") {
+            None
+        } else {
+            Some(level.to_string())
+        };
+        true
+    }
+}
+
+/// Builds the Responses URL: strips trailing `/` from base_url to avoid
+/// double slashes.
+fn responses_url(base_url: &str) -> String {
+    format!("{}/responses", base_url.trim_end_matches('/'))
+}
+
+// ---- Request translation (pure functions) ----
+
+/// Builds the Responses request body (`stream` is always true).
+///
+/// `store: false` keeps the conversation local (the API otherwise persists
+/// responses server-side). `instructions` carries the system prompt; an empty
+/// one is omitted rather than sent as "". `reasoning.effort` is best-effort:
+/// `Some` nests the effort and asks for a summary (`summary: auto`) so the
+/// reasoning surfaces for display; `None` omits the whole `reasoning` object
+/// for models that reject it.
+pub(crate) fn build_request_body(
+    req: &ChatRequest,
+    model: &str,
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "input": translate_input(&req.messages),
+        "stream": true,
+        "store": false,
+        "max_output_tokens": req.max_tokens,
+    });
+    if !req.system.is_empty() {
+        body["instructions"] = Value::String(req.system.clone());
+    }
+    if !req.tools.is_empty() {
+        body["tools"] = Value::Array(req.tools.iter().map(translate_tool).collect());
+    }
+    if let Some(effort) = reasoning_effort {
+        body["reasoning"] = serde_json::json!({"effort": effort, "summary": "auto"});
+    }
+    body
+}
+
+/// Translates one tool definition into the Responses flat tool shape.
+pub(crate) fn translate_tool(spec: &ToolSpec) -> Value {
+    serde_json::json!({
+        "type": "function",
+        "name": spec.name,
+        "description": spec.description,
+        "parameters": spec.input_schema,
+    })
+}
+
+/// Translates the unified history into Responses `input` items.
+///
+/// Tool exchange becomes standalone items (not message content): a
+/// `function_call` for the model's call and a `function_call_output` for its
+/// result, paired by `call_id` — the same identifier wave stores, so pairing
+/// survives the round trip. Consecutive user blocks that are not tool results
+/// merge into one user message, keeping the alternation the API expects.
+pub(crate) fn translate_input(messages: &[Message]) -> Vec<Value> {
+    let mut items: Vec<Value> = Vec::new();
+    for message in messages {
+        match message.role {
+            Role::User => translate_user_items(&message.content, &mut items),
+            Role::Assistant => translate_assistant_items(&message.content, &mut items),
+        }
+    }
+    items
+}
+
+/// One user message: text and images as input parts, tool results as
+/// standalone `function_call_output` items.
+fn translate_user_items(blocks: &[ContentBlock], items: &mut Vec<Value>) {
+    let mut parts: Vec<Value> = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => {
+                if !text.is_empty() {
+                    parts.push(serde_json::json!({"type": "input_text", "text": text}));
+                }
+            }
+            ContentBlock::Image { mime, base64, .. } => {
+                parts.push(image_part(mime, base64));
+            }
+            // A tool call inside a user message has no wire meaning; render
+            // it as text so the intent is preserved instead of dropped.
+            ContentBlock::ToolUse { id, name, input } => parts.push(serde_json::json!({
+                "type": "input_text",
+                "text": format!("[tool call {name} ({id}): {input}]"),
+            })),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                // Results are items, not parts: flush the pending user
+                // message first so ordering stays intact.
+                flush_user_parts(&mut parts, items);
+                items.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": tool_use_id,
+                    "output": tool_result_text(content, *is_error),
+                }));
+            }
+            // Reasoning is Anthropic-wire state; the Responses input has no
+            // slot for it here (reasoning items would need the item id and
+            // encrypted payload, which wave does not retain), so the block is
+            // dropped by design.
+            ContentBlock::Thinking { .. } => {}
+        }
+    }
+    flush_user_parts(&mut parts, items);
+}
+
+/// Emits the accumulated user parts as one message item (no-op when empty).
+fn flush_user_parts(parts: &mut Vec<Value>, items: &mut Vec<Value>) {
+    if !parts.is_empty() {
+        items.push(serde_json::json!({
+            "role": "user",
+            "content": std::mem::take(parts),
+        }));
+    }
+}
+
+/// One assistant message: prose becomes `output_text` parts (merged with the
+/// message that follows, matching the API's own item shape), tool calls
+/// become standalone `function_call` items.
+fn translate_assistant_items(blocks: &[ContentBlock], items: &mut Vec<Value>) {
+    let mut parts: Vec<Value> = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => {
+                if !text.is_empty() {
+                    parts.push(serde_json::json!({
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": [],
+                    }));
+                }
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                flush_assistant_parts(&mut parts, items);
+                items.push(serde_json::json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    // Compact JSON string; normalized so a legacy non-object
+                    // payload never reaches the API as an invalid arguments
+                    // shape.
+                    "arguments": crate::normalize_tool_input(input.clone()).to_string(),
+                }));
+            }
+            ContentBlock::Image { mime, .. } => {
+                // Defensive: assistants cannot emit images on the wire; keep
+                // a visible placeholder so the intent is not dropped.
+                parts.push(serde_json::json!({
+                    "type": "output_text",
+                    "text": format!("[image {mime}]"),
+                    "annotations": [],
+                }));
+            }
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                // Defensive: a result inside an assistant message has no
+                // wire slot; keep the failure visible as prose.
+                parts.push(serde_json::json!({
+                    "type": "output_text",
+                    "text": tool_result_text(content, *is_error),
+                    "annotations": [],
+                }));
+            }
+            ContentBlock::Thinking { .. } => {}
+        }
+    }
+    flush_assistant_parts(&mut parts, items);
+}
+
+/// Emits the accumulated assistant parts as one message item (no-op when
+/// empty).
+fn flush_assistant_parts(parts: &mut Vec<Value>, items: &mut Vec<Value>) {
+    if !parts.is_empty() {
+        items.push(serde_json::json!({
+            "role": "assistant",
+            "content": std::mem::take(parts),
+        }));
+    }
+}
+
+/// Renders a tool result as plain text; error results keep an `[error]`
+/// prefix so failures stay visible instead of being dropped.
+fn tool_result_text(content: &str, is_error: bool) -> String {
+    if is_error {
+        format!("[error] {content}")
+    } else {
+        content.to_string()
+    }
+}
+
+/// Render one validated image as a Responses `input_image` part. The sandbox
+/// applies the same mime/size rules as the other wires; an invalid image
+/// becomes a visible text part naming the constraint, never a silent drop.
+fn image_part(mime: &str, base64_data: &str) -> Value {
+    match crate::validate_image(mime, base64_data) {
+        Ok(_) => serde_json::json!({
+            "type": "input_image",
+            "image_url": format!("data:{mime};base64,{base64_data}"),
+        }),
+        Err(reason) => serde_json::json!({
+            "type": "input_text",
+            "text": format!("[invalid image: {reason}]"),
+        }),
+    }
+}
+
+// ---- Streaming decode ----
+
+/// Byte-chunk stream to event stream: buffers bytes, splits SSE frames on
+/// blank lines, and feeds each `data` payload to the Responses decoder.
+fn decode_responses_stream<S>(
+    byte_stream: S,
+) -> impl futures::Stream<Item = Result<StreamEvent>> + Send
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, LlmError>> + Send + 'static,
+{
+    let mut state = ResponsesStreamState::default();
+    crate::sse::decode_sse_frames(byte_stream, crate::sse::MAX_SSE_BUF, move |data| {
+        feed_responses_data(&mut state, data)
+    })
+}
+
+/// One function call under assembly, identified by the item's `output_index`.
+#[derive(Default)]
+struct CallSlot {
+    /// `call_id` from the API: the pairing key wave stores and sends back.
+    call_id: String,
+    name: String,
+    begun: bool,
+}
+
+/// Mutable decode state across SSE data payloads of one stream.
+#[derive(Default)]
+struct ResponsesStreamState {
+    /// Function-call items, indexed by `output_index`.
+    slots: Vec<CallSlot>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cached_tokens: u64,
+    /// True once the response reported an output-token limit.
+    truncated: bool,
+    /// Provider status when it was not a clean completion (e.g.
+    /// `content_filter`); surfaces as the stop reason.
+    status: Option<String>,
+}
+
+/// Feeds one SSE `data` payload, returning zero or more stream events.
+///
+/// Named events (`response.output_text.delta`, `response.function_call_arguments.
+/// delta`, `response.output_item.added|done`, `response.completed|incomplete`,
+/// `response.failed`, `error`) drive the same [`StreamEvent`] vocabulary the
+/// other providers emit; unknown event types are ignored for forward
+/// compatibility.
+fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<Vec<StreamEvent>> {
+    // Chat-style terminator: the Responses API itself ends with
+    // `response.completed`, but gateways bridging both dialects append
+    // `[DONE]`. Tolerating it keeps such a bridge usable; the message is
+    // already complete by then.
+    if data.trim() == "[DONE]" {
+        return Ok(Vec::new());
+    }
+    let value: Value = serde_json::from_str(data)?;
+    let Some(ty) = value.get("type").and_then(Value::as_str) else {
+        // Missing type field: treat as an unknown event.
+        return Ok(Vec::new());
+    };
+    let mut events = Vec::new();
+    match ty {
+        "response.output_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str)
+                && !delta.is_empty()
+            {
+                events.push(StreamEvent::TextDelta {
+                    text: delta.to_string(),
+                });
+            }
+        }
+        // Reasoning summaries stream for display only: wave keeps no
+        // reasoning item ids, so the text is not round-tripped.
+        "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str)
+                && !delta.is_empty()
+            {
+                events.push(StreamEvent::ThinkingDelta {
+                    text: delta.to_string(),
+                });
+            }
+        }
+        "response.output_item.added" => {
+            if let Some(item) = value.get("item")
+                && item.get("type").and_then(Value::as_str) == Some("function_call")
+            {
+                let index = output_index(&value, state);
+                let slot = &mut state.slots[index];
+                if let Some(call_id) = item.get("call_id").and_then(Value::as_str)
+                    && !call_id.is_empty()
+                {
+                    slot.call_id = call_id.to_string();
+                }
+                if let Some(name) = item.get("name").and_then(Value::as_str)
+                    && !name.is_empty()
+                {
+                    slot.name = name.to_string();
+                }
+                if !slot.begun && !slot.call_id.is_empty() && !slot.name.is_empty() {
+                    slot.begun = true;
+                    events.push(StreamEvent::ToolUseBegin {
+                        id: slot.call_id.clone(),
+                        name: slot.name.clone(),
+                    });
+                }
+                // Some implementations send the opening item with a first
+                // arguments fragment; forward it instead of dropping it.
+                if let Some(arguments) = item.get("arguments").and_then(Value::as_str)
+                    && !arguments.is_empty()
+                {
+                    events.push(StreamEvent::ToolUseInputDelta {
+                        partial_json: arguments.to_string(),
+                    });
+                }
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            if let Some(delta) = value.get("delta").and_then(Value::as_str)
+                && !delta.is_empty()
+            {
+                events.push(StreamEvent::ToolUseInputDelta {
+                    partial_json: delta.to_string(),
+                });
+            }
+        }
+        "response.output_item.done" => {
+            if let Some(item) = value.get("item") {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("function_call") => {
+                        let index = output_index(&value, state);
+                        let slot = &mut state.slots[index];
+                        // Defensive completion: a stream that skipped
+                        // `output_item.added` still yields a usable call.
+                        if !slot.begun {
+                            if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
+                                slot.call_id = call_id.to_string();
+                            }
+                            if let Some(name) = item.get("name").and_then(Value::as_str) {
+                                slot.name = name.to_string();
+                            }
+                            if !slot.call_id.is_empty() && !slot.name.is_empty() {
+                                slot.begun = true;
+                                events.push(StreamEvent::ToolUseBegin {
+                                    id: slot.call_id.clone(),
+                                    name: slot.name.clone(),
+                                });
+                            }
+                        }
+                        events.push(StreamEvent::BlockEnd);
+                    }
+                    // A finished message item closes the prose block so the
+                    // adapter flushes its text buffer at the same boundary
+                    // the other providers use.
+                    Some("message") => events.push(StreamEvent::BlockEnd),
+                    _ => {}
+                }
+            }
+        }
+        "response.completed" | "response.incomplete" => {
+            if let Some(response) = value.get("response") {
+                read_usage(state, response.get("usage"));
+                if let Some(reason) = response
+                    .get("incomplete_details")
+                    .and_then(|details| details.get("reason"))
+                    .and_then(Value::as_str)
+                {
+                    if reason == "max_output_tokens" {
+                        state.truncated = true;
+                    } else {
+                        state.status = Some(reason.to_string());
+                    }
+                }
+            }
+            events.push(StreamEvent::MessageComplete {
+                stop_reason: stop_reason(state),
+                usage: Usage {
+                    input_tokens: state.input_tokens,
+                    output_tokens: state.output_tokens,
+                    cache_read_tokens: state.cached_tokens,
+                    cache_creation_tokens: 0,
+                },
+            });
+        }
+        "response.failed" => {
+            let detail = value
+                .get("response")
+                .and_then(|response| response.get("error"))
+                .and_then(|error| {
+                    let message = error.get("message").and_then(Value::as_str)?;
+                    let code = error
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .unwrap_or("failed");
+                    Some(format!("{code}: {message}"))
+                })
+                .unwrap_or_else(|| "response.failed".to_string());
+            return Err(crate::classify_api_error("response_failed".into(), detail));
+        }
+        "error" => {
+            let kind = value
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("openai_error")
+                .to_string();
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or(data)
+                .to_string();
+            return Err(crate::classify_api_error(kind, message));
+        }
+        _ => {}
+    }
+    Ok(events)
+}
+
+/// Slot index for an event: the item's `output_index` when present, else the
+/// most recent slot (a gateway omitting it still streams one call at a time in
+/// practice). Grows the slot table as needed.
+fn output_index(value: &Value, state: &mut ResponsesStreamState) -> usize {
+    let index = value
+        .get("output_index")
+        .and_then(Value::as_u64)
+        .map(|index| index as usize)
+        .unwrap_or_else(|| state.slots.len().saturating_sub(1));
+    while state.slots.len() <= index {
+        state.slots.push(CallSlot::default());
+    }
+    index
+}
+
+/// Copies the usage block: `input_tokens` is the full prompt (cache reads are
+/// a subset detail, mirroring the Chat Completions mapping), `output_tokens`
+/// the completion.
+fn read_usage(state: &mut ResponsesStreamState, usage: Option<&Value>) {
+    let Some(usage) = usage else {
+        return;
+    };
+    if let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) {
+        state.input_tokens = input;
+    }
+    if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) {
+        state.output_tokens = output;
+    }
+    if let Some(cached) = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+    {
+        state.cached_tokens = cached;
+    }
+}
+
+/// The stop reason wave's loop matches on: an output-token limit maps to
+/// `max_tokens` (the continuation trigger), a provider status like
+/// `content_filter` passes through, and everything else reads as a clean stop.
+fn stop_reason(state: &ResponsesStreamState) -> String {
+    if state.truncated {
+        return "max_tokens".to_string();
+    }
+    state.status.clone().unwrap_or_else(|| "stop".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Message;
+    use std::sync::Arc;
+
+    fn tool_spec() -> ToolSpec {
+        ToolSpec {
+            name: "read_file".to_string(),
+            description: "read a file".to_string(),
+            input_schema: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    fn user_text(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        }
+    }
+
+    async fn run_decode(chunks: Vec<&'static [u8]>) -> Vec<Result<StreamEvent>> {
+        let stream = futures::stream::iter(
+            chunks
+                .into_iter()
+                .map(|c| Ok(bytes::Bytes::from_static(c)))
+                .collect::<Vec<_>>(),
+        );
+        decode_responses_stream(stream).collect().await
+    }
+
+    #[test]
+    fn request_body_carries_instructions_items_and_flat_tools() {
+        let req = ChatRequest {
+            model: "gpt-5".to_string(),
+            system: "be terse".to_string(),
+            messages: Arc::new(vec![user_text("hi")]),
+            tools: vec![tool_spec()],
+            max_tokens: 2048,
+        };
+        let body = build_request_body(&req, "gpt-5", None);
+        assert_eq!(body["model"], "gpt-5");
+        assert_eq!(body["instructions"], "be terse");
+        assert_eq!(body["stream"], true);
+        // Conversations stay local: never persisted server-side.
+        assert_eq!(body["store"], false);
+        assert_eq!(body["max_output_tokens"], 2048);
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
+        // Flat tool shape (no nested `function` object).
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        assert!(body["tools"][0].get("function").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_nests_under_reasoning_with_a_summary() {
+        let req = ChatRequest {
+            model: "gpt-5".to_string(),
+            system: String::new(),
+            messages: Arc::new(Vec::new()),
+            tools: Vec::new(),
+            max_tokens: 100,
+        };
+        let body = build_request_body(&req, "gpt-5", Some("low"));
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        // Empty system/tools stay out of the body entirely.
+        assert!(body.get("instructions").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn tool_exchange_becomes_paired_standalone_items() {
+        let messages = vec![
+            user_text("list files"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "a.txt".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let items = translate_input(&messages);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["content"][0]["type"], "input_text");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["call_id"], "call_1");
+        assert_eq!(items[1]["name"], "shell");
+        assert_eq!(items[1]["arguments"], "{\"command\":\"ls\"}");
+        // The result is its own item, paired by the same call id.
+        assert_eq!(items[2]["type"], "function_call_output");
+        assert_eq!(items[2]["call_id"], "call_1");
+        assert_eq!(items[2]["output"], "a.txt");
+    }
+
+    #[test]
+    fn assistant_prose_uses_output_text_parts() {
+        let items = translate_input(&[Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "done".to_string(),
+            }],
+        }]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["role"], "assistant");
+        assert_eq!(items[0]["content"][0]["type"], "output_text");
+        assert_eq!(items[0]["content"][0]["text"], "done");
+    }
+
+    #[tokio::test]
+    async fn streams_text_tool_call_and_completion() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n",
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_9\",\"name\":\"shell\",\"arguments\":\"\"}}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"fc_9\",\"delta\":\"{\\\"command\\\":\"}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"item_id\":\"fc_9\",\"delta\":\"\\\"ls\\\"}\"}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"call_9\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":120,\"output_tokens\":9,\"input_tokens_details\":{\"cached_tokens\":100}}}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::TextDelta {
+                    text: "Hello".to_string()
+                },
+                StreamEvent::BlockEnd,
+                StreamEvent::ToolUseBegin {
+                    id: "call_9".to_string(),
+                    name: "shell".to_string()
+                },
+                StreamEvent::ToolUseInputDelta {
+                    partial_json: "{\"command\":".to_string()
+                },
+                StreamEvent::ToolUseInputDelta {
+                    partial_json: "\"ls\"}".to_string()
+                },
+                StreamEvent::BlockEnd,
+                StreamEvent::MessageComplete {
+                    stop_reason: "stop".to_string(),
+                    usage: Usage {
+                        input_tokens: 120,
+                        output_tokens: 9,
+                        // Cache reads are a subset detail of input_tokens.
+                        cache_read_tokens: 100,
+                        cache_creation_tokens: 0,
+                    },
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_response_maps_to_a_truncation_stop() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":4096}}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        match events.last() {
+            Some(StreamEvent::MessageComplete { stop_reason, .. }) => {
+                assert_eq!(stop_reason, "max_tokens")
+            }
+            other => panic!("expected MessageComplete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_summary_streams_for_display() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"weighing\"}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::ThinkingDelta { text }) if text == "weighing"
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_style_done_frame_is_tolerated() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n\n",
+            b"data: [DONE]\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert!(matches!(
+            events.first(),
+            Some(StreamEvent::TextDelta { text }) if text == "hi"
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::MessageComplete { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_response_and_error_events_abort_the_stream() {
+        let failed = run_decode(vec![
+            b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n",
+        ])
+        .await;
+        let error = failed.into_iter().next().expect("one event");
+        assert!(error.is_err(), "response.failed must abort: {error:?}");
+
+        let streamed = run_decode(vec![
+            b"data: {\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"bad tools\"}\n\n",
+        ])
+        .await;
+        let error = streamed.into_iter().next().expect("one event");
+        assert!(error.is_err(), "error event must abort: {error:?}");
+
+        // A context-overflow shape classifies as PromptTooLong so the loop
+        // can react with compaction instead of failing the turn.
+        let too_long = run_decode(vec![
+            b"data: {\"type\":\"error\",\"code\":\"invalid_request\",\"message\":\"prompt is too long\"}\n\n",
+        ])
+        .await;
+        let error = too_long.into_iter().next().expect("one event");
+        assert!(matches!(error, Err(LlmError::PromptTooLong { .. })));
+    }
+}

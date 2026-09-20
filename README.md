@@ -38,6 +38,15 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
 # retries transient errors (429/5xx, honoring Retry-After) before the next
 # one takes over; auth and quota errors fail fast
 
+# Wire dialect per provider, set with `type`:
+#   "anthropic"         -> Anthropic Messages   (POST {base_url}/v1/messages)
+#   "openai-compatible" -> OpenAI Chat Completions (POST {base_url}/chat/completions)
+#   "openai-responses"  -> OpenAI Responses     (POST {base_url}/responses)
+# Chat Completions is what most third-party gateways speak; Responses is the
+# endpoint that serves models with no chat route (o1-pro, gpt-5-codex) and the
+# recommended one for the newer reasoning families. All three stream, carry
+# tools and images, and pair tool calls with their results across rounds.
+
 # Optional: entries for the `/model` picker (alias -> provider + wire model).
 [models.fast]
 provider = "your-provider"

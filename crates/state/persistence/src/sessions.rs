@@ -24,6 +24,8 @@ const SESSIONS_DIR: &str = "sessions";
 
 /// Index file name inside the sessions directory.
 const INDEX_FILE: &str = "index.json";
+/// Subdirectory of the sessions root holding per-child-task journals.
+const CHILDREN_DIR: &str = "children";
 
 /// One resumable session as listed by the picker.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -83,6 +85,46 @@ fn journal_path(home: &Path, id: &str) -> Result<PathBuf, SessionError> {
 /// at one place.
 pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
     journal_path(home, id).ok()
+}
+
+/// Journal file for one child task of a session:
+/// `.../sessions/children/<parent>/<child>.jsonl`, keeping a session's own
+/// log and its subagents' logs together without mixing them.
+pub fn child_journal_file(home: &Path, parent: &str, child: &str) -> Option<PathBuf> {
+    if !is_valid_session_id(parent) || !is_valid_session_id(child) {
+        return None;
+    }
+    Some(child_journal_dir(home, parent).join(format!("{child}.jsonl")))
+}
+
+/// Directory holding one session's child-task journals.
+pub fn child_journal_dir(home: &Path, parent: &str) -> PathBuf {
+    sessions_dir(home).join(CHILDREN_DIR).join(parent)
+}
+
+/// Append one completed child task's turn to its own journal. Best-effort by
+/// contract (callers ignore failures): a subagent's log must never fail the
+/// run that spawned it.
+pub fn record_child_turn(
+    home: &Path,
+    parent: &str,
+    child: &str,
+    input: &str,
+    history: &[(bool, String)],
+    outcome: &str,
+) -> Result<PathBuf, SessionError> {
+    let path = child_journal_file(home, parent, child)
+        .ok_or_else(|| SessionError::InvalidId(child.to_string()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    JsonlJournal::new(path.clone()).append_turn(&crate::TurnRecord {
+        run_id: child.to_string(),
+        input: input.to_string(),
+        history: history.to_vec(),
+        outcome: outcome.to_string(),
+    })?;
+    Ok(path)
 }
 
 /// Session id whitelist: non-empty, bounded, ASCII alphanumerics plus

@@ -86,8 +86,12 @@ impl ContextCompactor {
 /// Pointer appended after a summary: where the compacted conversation still
 /// lives and how to read it. This is what a long-horizon session needs most
 /// after compaction — the ability to look up exact output it no longer holds.
+///
+/// When the session has spawned subagent tasks, their own journals exist
+/// beside this one; the parent's records hold only the spawn call and the
+/// child's returned summary, so the note names the children directory too.
 pub fn recovery_footer(journal: &std::path::Path) -> String {
-    format!(
+    let mut text = format!(
         "## Context Recovery\n\
          Earlier turns of this session are on disk in its turn journal:\n  {}\n\
          One JSON record per line in turn order (newest last); each record holds \
@@ -97,7 +101,32 @@ pub fn recovery_footer(journal: &std::path::Path) -> String {
          that file for a keyword, then read the matching line instead of guessing \
          or re-running.",
         journal.display()
-    )
+    );
+    if let Some(children) = children_dir_with_logs(journal) {
+        text.push_str(&format!(
+            "\nSubagent (`task`) steps are NOT in this file: each child task logs \
+             its own turns under\n  {}\n\
+             (one `<child-id>.jsonl` per task), while a parent record keeps only the \
+             spawn call and the child's returned summary. Check there for a task's \
+             exact steps.",
+            children.display()
+        ));
+    }
+    text
+}
+
+/// The session's children-journal directory when it actually holds logs;
+/// `None` otherwise so the footer stays silent about subagents that never ran.
+fn children_dir_with_logs(journal: &std::path::Path) -> Option<std::path::PathBuf> {
+    let stem = journal.file_stem()?;
+    let dir = journal
+        .parent()?
+        .join("children")
+        .join(stem.to_string_lossy().as_ref());
+    let has_logs = std::fs::read_dir(&dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    has_logs.then_some(dir)
 }
 
 /// Live task list attached after a summary; `None` when the list is empty
@@ -167,6 +196,31 @@ mod tests {
             "{footer}"
         );
         assert!(footer.contains("grep"), "{footer}");
+        // No children logs on disk: the footer says nothing about subagents.
+        assert!(!footer.contains("Subagent"), "{footer}");
+    }
+
+    /// Child-task logs beside the session journal switch on the subagent note,
+    /// pointing at the directory a post-compaction turn should search.
+    #[test]
+    fn recovery_footer_points_at_child_journals_when_they_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join(".wavecode").join("sessions");
+        let journal = sessions.join("s-1.jsonl");
+        std::fs::create_dir_all(&journal).unwrap();
+        let children = sessions.join("children").join("s-1");
+        std::fs::create_dir_all(&children).unwrap();
+        std::fs::write(children.join("child-1.jsonl"), b"{\"format\":1}\n").unwrap();
+
+        let footer = recovery_footer(&journal);
+        assert!(footer.contains("Subagent"), "{footer}");
+        assert!(footer.contains("jsonl"), "{footer}");
+        assert!(footer.contains(&children.display().to_string()), "{footer}");
+
+        // An empty children directory stays silent (no subagent ever ran).
+        std::fs::remove_file(children.join("child-1.jsonl")).unwrap();
+        let bare = recovery_footer(&journal);
+        assert!(!bare.contains("Subagent"), "{bare}");
     }
 
     #[test]

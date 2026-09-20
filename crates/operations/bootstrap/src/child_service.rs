@@ -29,6 +29,7 @@
 //! while pre-start stops skip work entirely via the runtime fast path.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -122,6 +123,17 @@ pub struct TurnChildService {
     /// Spawned requests by id, so `continue_task` can rebuild the parent
     /// profile (kind, run correlation, tool scope) for a follow-up child.
     history: Mutex<HashMap<String, TaskRequest>>,
+    /// Where each child task appends its own turn journal
+    /// (`sessions/children/<parent>/<child>.jsonl`). `None` when the session
+    /// has no home or id; writing is best-effort and never fails a run.
+    journal: Option<ChildJournal>,
+}
+
+/// Home plus parent session id, the pair naming a child's journal.
+#[derive(Debug, Clone)]
+struct ChildJournal {
+    home: PathBuf,
+    parent: String,
 }
 
 impl TurnChildService {
@@ -141,7 +153,16 @@ impl TurnChildService {
             allowlist,
             run_interrupts,
             history: Mutex::new(HashMap::new()),
+            journal: None,
         }
+    }
+
+    /// Record every child task's turns to its own journal under the parent
+    /// session's directory, so a long session can explain what a subagent
+    /// actually did instead of keeping only its returned summary.
+    pub fn with_child_journal(mut self, home: PathBuf, parent: String) -> Self {
+        self.journal = Some(ChildJournal { home, parent });
+        self
     }
 
     /// Attach the child system prompt (assembly-time; first set wins).
@@ -200,6 +221,7 @@ impl TaskService for TurnChildService {
         let effective = self.effective_surface(&request);
         let done = Arc::new(AtomicBool::new(false));
         let watcher_done = done.clone();
+        let journal_sink = self.journal.clone();
         // Depth/parent flow straight into the runtime spec: the runtime
         // owns cap enforcement, refusing depth past its max with an
         // explicit Failed outcome (no panic, visible through query), so
@@ -296,6 +318,22 @@ impl TaskService for TurnChildService {
                         .filter(|text| !text.is_empty())
                         .unwrap_or_else(|| "(no final answer text)".to_string()),
                 };
+                if let Some(journal) = &journal_sink {
+                    let pairs: Vec<(bool, String)> = snapshot
+                        .iter()
+                        .map(|entry| (entry.role == Role::Assistant, entry.text()))
+                        .collect();
+                    // Best-effort: a subagent's log must never fail the run
+                    // that spawned it.
+                    let _ = state_persistence::sessions::record_child_turn(
+                        &journal.home,
+                        &journal.parent,
+                        &ticket.task_id,
+                        &ticket.input,
+                        &pairs,
+                        &format!("{outcome:?}"),
+                    );
+                }
                 runtime_child::TaskResult {
                     status: match &outcome {
                         // Both ceilings end the child without a fault: the

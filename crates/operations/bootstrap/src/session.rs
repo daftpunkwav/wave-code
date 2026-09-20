@@ -597,12 +597,19 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // completes (they need the full catalog); spawns only start once the
     // actor runs, so every child observes them.
     let children = Arc::new(ChildRuntime::new());
-    let tasks = Arc::new(TurnChildService::new(
+    let mut child_service = TurnChildService::new(
         driver.clone() as Arc<dyn runtime_runner::TurnDriver>,
         children.clone(),
         run_allowlist,
         run_interrupts,
-    ));
+    );
+    // Subagent logs: each child task appends its own turns beside the
+    // session's journal, so a long run can explain what a child actually did
+    // instead of keeping only its returned summary.
+    if let (Some(home), Some(parent)) = (home.clone(), session_id.clone()) {
+        child_service = child_service.with_child_journal(home, parent);
+    }
+    let tasks = Arc::new(child_service);
     // Runtime plugins (service injection + middleware lifecycle): manifest
     // discovery warns-and-skips invalid plugins and never fails assembly.
     // The handle owns the started registry for the session's lifetime, so

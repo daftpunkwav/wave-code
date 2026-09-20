@@ -8,6 +8,20 @@
  *    killing the child); create on first use with the caller cwd, reuse
  *    afterwards, respawn transparently after the shell exits.
  *  - Drain output with a 30 KB cap mirroring the shell tool.
+ *  - Release every pseudoconsole it opens, on every path that can reach it.
+ *
+ *  Windows console lifetime (measured on a host where ConPTY children cannot
+ *  start at all): the only thing that terminates `conhost.exe --headless` is
+ *  `ClosePseudoConsole` — portable-pty's `Drop` for the master. A process
+ *  that merely exits while a console is open leaves the conhost behind, and
+ *  an orphaned headless conhost spins at ~40% of a core indefinitely (17 of
+ *  them saturated a 16-thread machine). The release itself blocks for
+ *  97–188 s while such a console tears down, so it never runs on a caller's
+ *  response path: consoles live in a shared slot and are released either
+ *  inline (a path that returns) or detached (a timeout arm, a wedged probe,
+ *  an eviction). The tool therefore probes host capability once per process
+ *  and, when ConPTY cannot start children, refuses with that reason instead
+ *  of opening one wedged console per call.
  *
  *  This module must not depend on: transport, frontend crates.
  */
@@ -115,9 +129,48 @@ fn scrub_command(cmd: &mut CommandBuilder, ctx: &ToolCtx) {
     }
 }
 
+/// Shared handle to the master side of one pseudoconsole.
+///
+/// The console must be released by `ClosePseudoConsole` (portable-pty's
+/// `Drop` for the master): a process that merely exits while a console is
+/// open leaves `conhost.exe --headless` behind, and on hosts where ConPTY
+/// child processes fail to start that conhost spins at ~40% of a core
+/// indefinitely. Measured on such a host: the release call itself *blocks*
+/// for 97–188 s while the wedged console tears down, so the handle lives in a
+/// shared slot that a supervisor (the tool's timeout arm) can reach even
+/// while a reader thread is blocked inside the console, and the release
+/// always happens off the caller's path.
+type MasterSlot = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
+
+/// Take the master out of `slot`; the caller owns the (possibly blocking)
+/// release from here.
+fn take_master(slot: &MasterSlot) -> Option<Box<dyn MasterPty + Send>> {
+    slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Release one owned master off the caller's path (the form used everywhere:
+/// see [`release_master_detached`] for why waiting is never an option).
+fn release_master_owned(master: Box<dyn MasterPty + Send>) {
+    std::thread::spawn(move || drop(master));
+}
+
+/// Release a pseudoconsole off the caller's path (detached plain thread).
+///
+/// This is the only release form the tool uses. `ClosePseudoConsole` (the
+/// master's drop) blocks until the console exits, which on a wedged console
+/// means minutes to hours (measured: >13 min); a thread that waits on it
+/// — a tokio blocking task included, which its runtime then waits for —
+/// hangs whatever called it. The detached thread instead lives as long as the
+/// release needs, and a healthy console closes in milliseconds.
+fn release_master_detached(slot: &MasterSlot) {
+    if let Some(master) = take_master(slot) {
+        release_master_owned(master);
+    }
+}
+
 /// One live shell behind the PTY master.
 struct Session {
-    master: Box<dyn MasterPty + Send>,
+    master: MasterSlot,
     child: Box<dyn portable_pty::Child + Send + Sync>,
     reader: Box<dyn Read + Send>,
     writer: Box<dyn Write + Send>,
@@ -143,16 +196,25 @@ impl Session {
             .slave
             .spawn_command(cmd)
             .map_err(|e| format!("pty spawn failed: {e}"))?;
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| format!("pty reader failed: {e}"))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| format!("pty writer failed: {e}"))?;
+        // Publish the console into the slot first: from here on the handle is
+        // reachable even if a later step wedges.
+        let master: MasterSlot = Arc::new(Mutex::new(Some(pair.master)));
+        let (reader, writer) = {
+            let guard = master.lock().unwrap_or_else(|e| e.into_inner());
+            let master = guard
+                .as_ref()
+                .ok_or_else(|| "pty master missing".to_string())?;
+            (
+                master
+                    .try_clone_reader()
+                    .map_err(|e| format!("pty reader failed: {e}"))?,
+                master
+                    .take_writer()
+                    .map_err(|e| format!("pty writer failed: {e}"))?,
+            )
+        };
         Ok(Self {
-            master: pair.master,
+            master,
             child,
             reader,
             writer,
@@ -165,7 +227,21 @@ impl Session {
     /// Respawn after the shell exited (same cwd and scrub list).
     fn respawn(&mut self) -> PtyResult<()> {
         let fresh = Self::spawn(&self.cwd.clone(), &self.deny_env.clone(), self.size)?;
-        *self = fresh;
+        // The freshly opened console goes into OUR slot (the registry's entry
+        // shares it, so its identity must survive); the old one is released
+        // off-thread — a wedged console would otherwise block this call for
+        // minutes.
+        let fresh_master = take_master(&fresh.master);
+        let old = std::mem::replace(
+            &mut *self.master.lock().unwrap_or_else(|e| e.into_inner()),
+            fresh_master,
+        );
+        if let Some(old) = old {
+            release_master_owned(old);
+        }
+        self.child = fresh.child;
+        self.reader = fresh.reader;
+        self.writer = fresh.writer;
         Ok(())
     }
 
@@ -177,6 +253,10 @@ impl Session {
 struct Entry {
     session: Arc<Mutex<Session>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    /// The session's pseudoconsole, shared so a supervisor can release it
+    /// without taking the session lock (a reader blocked inside the console
+    /// holds that lock).
+    master: MasterSlot,
 }
 
 struct Registry {
@@ -199,6 +279,9 @@ impl Registry {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .kill();
+            // Off-thread: this runs under the registry lock, and a wedged
+            // console's release blocks for minutes.
+            release_master_detached(&entry.master);
         }
     }
 }
@@ -223,41 +306,53 @@ fn get_or_create(name: &str, ctx: &ToolCtx, size: PtySize) -> PtyResult<Entry> {
     // before the mutable touch).
     {
         let mut reg = lock_registry();
-        if let Some((session, killer)) = reg
+        if let Some((session, killer, master)) = reg
             .sessions
             .get(name)
-            .map(|e| (e.session.clone(), e.killer.clone()))
+            .map(|e| (e.session.clone(), e.killer.clone(), e.master.clone()))
         {
             reg.touch(name);
-            return Ok(Entry { session, killer });
+            return Ok(Entry {
+                session,
+                killer,
+                master,
+            });
         }
     }
     // Slow path: spawn outside the registry lock, then insert. A racing
-    // creator for the same name wins; the loser kills its spare shell
-    // (dropping a live Child would leak the process).
+    // creator for the same name wins; the loser kills its spare shell and
+    // releases its console (dropping a live Child would leak the process).
     let mut spare = Session::spawn(&ctx.cwd, &ctx.deny_env, size)?;
     let mut reg = lock_registry();
-    if let Some((session, killer)) = reg
+    if let Some((session, killer, master)) = reg
         .sessions
         .get(name)
-        .map(|e| (e.session.clone(), e.killer.clone()))
+        .map(|e| (e.session.clone(), e.killer.clone(), e.master.clone()))
     {
         reg.touch(name);
         drop(reg);
         let _ = spare.child.kill();
-        return Ok(Entry { session, killer });
+        release_master_detached(&spare.master);
+        return Ok(Entry {
+            session,
+            killer,
+            master,
+        });
     }
     while reg.sessions.len() >= MAX_SESSIONS {
         reg.evict_oldest();
     }
     let killer: Box<dyn ChildKiller + Send + Sync> = spare.child.clone_killer();
+    let master = spare.master.clone();
     let entry = Entry {
         session: Arc::new(Mutex::new(spare)),
         killer: Arc::new(Mutex::new(killer)),
+        master: master.clone(),
     };
     let out = Entry {
         session: entry.session.clone(),
         killer: entry.killer.clone(),
+        master,
     };
     reg.sessions.insert(name.to_owned(), entry);
     reg.touch(name);
@@ -277,15 +372,25 @@ pub(crate) fn registry_contains_for_tests(name: &str) -> bool {
 #[cfg(test)]
 pub(crate) fn reset_registry_for_tests() {
     let mut reg = lock_registry();
+    let mut released = Vec::new();
     for entry in reg.sessions.values() {
         let _ = entry
             .killer
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .kill();
+        released.push(entry.master.clone());
     }
     reg.sessions.clear();
     reg.order.clear();
+    drop(reg);
+    // Off-thread for the same reason as everywhere else: a wedged console's
+    // close blocks for minutes to hours, and a test thread that waits on it
+    // hangs the run. Healthy consoles close in milliseconds, well before the
+    // process exits.
+    for slot in &released {
+        release_master_detached(slot);
+    }
 }
 
 /// Run one interaction on a live session: reset on exit, resize when asked,
@@ -303,7 +408,11 @@ fn interact(
     }
     if let Some(size) = size {
         guard.size = size;
-        let _ = guard.master.resize(size);
+        let master = guard.master.clone();
+        let guard = master.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(master) = guard.as_ref() {
+            let _ = master.resize(size);
+        }
     }
     let marker = format!(
         "{SENTINEL_PREFIX}{}__",
@@ -409,17 +518,42 @@ fn strip_marker(text: &str, marker: &str) -> String {
 
 /// One-shot PTY run: spawn `shell -c <command>`, read until EOF, wait for
 /// the exit code. Blocking; call from `spawn_blocking`.
+///
+/// Every path this task actually reaches closes the console before
+/// returning (blocking: fast on a healthy host, and the caller must not
+/// report success while a console is still unreleased). A task that is
+/// abandoned mid-read never returns — the tool's timeout arm closes the
+/// console from outside instead, which is why the slot is shared.
 fn run_one_shot(
     command: &str,
     ctx: &ToolCtx,
     size: PtySize,
     timeout: Duration,
     killer_slot: &Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    master_slot: &MasterSlot,
+) -> PtyResult<(String, i32)> {
+    let outcome = run_one_shot_inner(command, ctx, size, timeout, killer_slot, master_slot);
+    release_master_detached(master_slot);
+    outcome
+}
+
+fn run_one_shot_inner(
+    command: &str,
+    ctx: &ToolCtx,
+    size: PtySize,
+    timeout: Duration,
+    killer_slot: &Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
+    master_slot: &MasterSlot,
 ) -> PtyResult<(String, i32)> {
     let system = native_pty_system();
     let pair = system
         .openpty(size)
         .map_err(|e| format!("pty unavailable: {e}"))?;
+    // Publish the console into the shared slot before anything can wedge: the
+    // timeout arm reaches it from outside this (possibly abandoned) task, and
+    // a console that is never closed outlives the process as a spinning
+    // conhost.
+    *master_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(pair.master);
     let (program, flag) = shell_program();
     let mut cmd = CommandBuilder::new(program);
     cmd.arg(flag);
@@ -435,11 +569,23 @@ fn run_one_shot(
     // output must be killable from outside the blocked reader thread.
     *killer_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(child.clone_killer());
     drop(pair.slave);
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("pty reader failed: {e}"))?;
-    drop(pair.master.take_writer());
+    let mut reader = {
+        let guard = master_slot.lock().unwrap_or_else(|e| e.into_inner());
+        let master = guard
+            .as_ref()
+            .ok_or_else(|| "pty master missing".to_string())?;
+        master
+            .try_clone_reader()
+            .map_err(|e| format!("pty reader failed: {e}"))?
+    };
+    let writer = {
+        let guard = master_slot.lock().unwrap_or_else(|e| e.into_inner());
+        let master = guard
+            .as_ref()
+            .ok_or_else(|| "pty master missing".to_string())?;
+        master.take_writer()
+    };
+    drop(writer);
 
     let deadline = Instant::now() + timeout;
     let mut raw: Vec<u8> = Vec::new();
@@ -493,6 +639,145 @@ fn drain_available(reader: &mut Box<dyn Read + Send>, raw: &mut Vec<u8>) {
     let _ = reader
         .read(&mut chunk)
         .map(|n| raw.extend_from_slice(&chunk[..n]));
+}
+
+/// Answer whether this host can actually run a ConPTY child, probing once
+/// per process and remembering the verdict on disk.
+///
+/// Some Windows hosts fail every ConPTY child with `STATUS_DLL_INIT_FAILED`
+/// (observed as exit code 3221225794 = 0xC0000142) while plain pipe spawns
+/// work normally. On such a host every attempt additionally leaves a console
+/// spinning until it is closed — and the close itself can block for many
+/// minutes or longer (measured: 97 s, 188 s, and >13 min in one case). So the
+/// attempt is never repeated lightly: the verdict is cached in-process and,
+/// when negative, on disk for [`PTY_MARKER_TTL`], which keeps later runs
+/// (tests included) from opening a console at all. Deleting the marker
+/// retries immediately.
+static HOST_PTY: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+
+/// Nonce echoed by the capability probe; its absence means the console never
+/// ran the command.
+const PTY_PROBE_NONCE: &str = "WAVECODE_PTY_PROBE_OK";
+
+/// How long a recorded negative verdict suppresses further probes.
+const PTY_MARKER_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// File recording that this host's ConPTY cannot start children.
+fn pty_marker_path() -> Option<PathBuf> {
+    let home = wavecode_config::home_dir()?;
+    Some(home.join(".wavecode").join("pty-unavailable"))
+}
+
+/// Whether a fresh negative verdict is on disk (so no probe should run).
+fn pty_marker_fresh() -> bool {
+    let Some(path) = pty_marker_path() else {
+        return false;
+    };
+    std::fs::metadata(&path)
+        .and_then(|meta| meta.modified())
+        .map(|modified| {
+            modified
+                .elapsed()
+                .map(|age| age < PTY_MARKER_TTL)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false)
+}
+
+/// Record the negative verdict (best-effort: a read-only home only means the
+/// next process probes again).
+fn record_pty_unavailable(reason: &str) {
+    if let Some(path) = pty_marker_path()
+        && let Some(dir) = path.parent()
+    {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::write(
+            &path,
+            format!(
+                "ConPTY children cannot start on this host; pty_shell reports this instead of \
+                 opening a console that would spin.\nrecorded: {reason}\ndelete this file to \
+                 probe again (automatic after {} h).\n",
+                PTY_MARKER_TTL.as_secs() / 3600
+            ),
+        );
+    }
+}
+
+/// Clear the marker after a successful probe (a repaired host recovers).
+fn clear_pty_marker() {
+    if let Some(path) = pty_marker_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+async fn host_pty_supported(ctx: &ToolCtx) -> bool {
+    *HOST_PTY
+        .get_or_init(|| async {
+            if pty_marker_fresh() {
+                return false;
+            }
+            let ctx = ctx.clone();
+            let killer_slot: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>> =
+                Arc::new(Mutex::new(None));
+            let master_slot: MasterSlot = Arc::new(Mutex::new(None));
+            let killer = killer_slot.clone();
+            let master = master_slot.clone();
+            // A plain thread, not a runtime blocking task: a wedged probe never
+            // returns, and a runtime waits for its blocking tasks when it
+            // shuts down — which is exactly how a hung test process (and a
+            // hung runtime at exit) looked before. This thread is allowed to
+            // stay stuck; the console it holds is released from here.
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<PtyResult<()>>();
+            std::thread::spawn(move || {
+                let command = format!("echo {PTY_PROBE_NONCE}");
+                let result = run_one_shot(
+                    &command,
+                    &ctx,
+                    PtySize::default(),
+                    Duration::from_secs(6),
+                    &killer,
+                    &master,
+                )
+                .and_then(|(output, code)| {
+                    if code == 0 && output.contains(PTY_PROBE_NONCE) {
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "the console never ran the probe command (exit code {code})"
+                        ))
+                    }
+                });
+                let _ = done_tx.send(result);
+            });
+            match tokio::time::timeout(Duration::from_secs(12), done_rx).await {
+                Ok(Ok(Ok(()))) => {
+                    clear_pty_marker();
+                    true
+                }
+                // Failure (reported, dead thread, or wedged): kill the child and
+                // release the console off this task — the probe thread may be
+                // stuck mid-read and cannot do it. The release is detached
+                // because a wedged console's close blocks for minutes to hours;
+                // the recorded marker is what keeps the attempt from repeating.
+                other => {
+                    if let Some(mut killer) =
+                        killer_slot.lock().unwrap_or_else(|e| e.into_inner()).take()
+                    {
+                        let _ = killer.kill();
+                    }
+                    release_master_detached(&master_slot);
+                    let reason = match other {
+                        Ok(Ok(Err(reason))) => reason,
+                        Ok(Err(_)) => "the probe thread ended without a verdict".to_string(),
+                        Err(_) => "the probe did not finish (console wedged)".to_string(),
+                        Ok(Ok(Ok(()))) => unreachable!("handled above"),
+                    };
+                    record_pty_unavailable(&reason);
+                    false
+                }
+            }
+        })
+        .await
 }
 
 fn parse_timeout(input: &serde_json::Value) -> std::result::Result<u64, ToolOutput> {
@@ -589,6 +874,20 @@ impl Tool for PtyShell {
             .get("session")
             .and_then(|v| v.as_str())
             .map(|s| s.to_owned());
+        // Host capability first: creating a console on a host where ConPTY
+        // children cannot start leaves a spinning `conhost.exe` behind, so
+        // the tool answers with the real reason instead of a bare timeout.
+        if !host_pty_supported(ctx).await {
+            return Ok(err_output(
+                "pty_shell is unavailable on this host: a ConPTY child process could not start \
+                 (the console never ran the probe command; the failure matches Windows status \
+                 0xC0000142). Use the `shell` tool instead, or run the command without a \
+                 terminal. The verdict is recorded in ~/.wavecode/pty-unavailable and retried \
+                 automatically after 24 h; delete that file to probe again now. Note that \
+                 releasing a wedged console can take minutes, so a leftover \
+                 `conhost.exe --headless` may spin until it finishes.",
+            ));
+        }
         if let Some(name) = session {
             if name.is_empty() {
                 return Ok(err_output(
@@ -606,10 +905,13 @@ impl Tool for PtyShell {
             } else {
                 None
             };
-            // The killer stays outside the moved entry so the timeout arm can
-            // unblock the reader thread (which holds the session lock).
+            // The killer and console stay outside the moved entry so the
+            // timeout arm can unblock the reader thread (which holds the
+            // session lock) and release the pseudoconsole.
             let killer = entry.killer.clone();
+            let master = entry.master.clone();
             let label = command.clone();
+            let name = name.clone();
             let run =
                 tokio::task::spawn_blocking(move || interact(&entry, &command, size_opt, timeout));
             let (output, code) =
@@ -619,6 +921,16 @@ impl Tool for PtyShell {
                     Ok(Err(_join)) => return Ok(err_output("pty session task failed")),
                     Err(_) => {
                         let _ = killer.lock().unwrap_or_else(|e| e.into_inner()).kill();
+                        // The shell was killed, so the session's state is gone
+                        // anyway; forgetting the entry releases its console. The
+                        // abandoned reader still holds the session lock, which is
+                        // why the console is reached through the shared slot.
+                        {
+                            let mut reg = lock_registry();
+                            reg.sessions.remove(&name);
+                            reg.order.retain(|n| n != &name);
+                        }
+                        release_master_detached(&master);
                         return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
                     }
                 };
@@ -634,9 +946,11 @@ impl Tool for PtyShell {
             let label = command.clone();
             let killer_slot: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>> =
                 Arc::new(Mutex::new(None));
+            let master_slot: MasterSlot = Arc::new(Mutex::new(None));
             let slot = killer_slot.clone();
+            let master = master_slot.clone();
             let run = tokio::task::spawn_blocking(move || {
-                run_one_shot(&command, &ctx_owned, size, timeout, &slot)
+                run_one_shot(&command, &ctx_owned, size, timeout, &slot, &master)
             });
             let (output, code) =
                 match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
@@ -652,6 +966,10 @@ impl Tool for PtyShell {
                         {
                             let _ = killer.kill();
                         }
+                        // The task is abandoned mid-read and cannot close its
+                        // own console; do it here, off-thread (the release
+                        // blocks while a wedged console tears down).
+                        release_master_detached(&master_slot);
                         return Ok(err_output(format!("timeout after {timeout_ms}ms: {label}")));
                     }
                 };
@@ -670,6 +988,17 @@ mod tests {
     use crate::{Tool, ToolCtx};
 
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Releases every live session (and its pseudoconsole) when the test
+    /// ends, panics included: a console that is never closed outlives the
+    /// test process as a spinning `conhost.exe` (measured).
+    struct RegistryCleanup;
+
+    impl Drop for RegistryCleanup {
+        fn drop(&mut self) {
+            reset_registry_for_tests();
+        }
+    }
 
     fn ctx() -> (tempfile::TempDir, ToolCtx) {
         let dir = tempfile::tempdir().unwrap();
@@ -715,50 +1044,70 @@ mod tests {
         assert!(!stripped.contains("__WAVECODE_PTY_3__"));
     }
 
+    /// Whether the live PTY tests may run at all.
+    ///
+    /// Windows hosts can break ConPTY in a way that costs more than a failed
+    /// test: every attempt spawns a `conhost.exe --headless` that spins until
+    /// it is closed, so a plain `cargo test` would burn CPU and leak consoles
+    /// from the test process (measured: one orphan per run, ~40% of a core
+    /// each, for as long as the console stays open). Opt in explicitly:
+    ///
+    /// ```text
+    /// WAVECODE_PTY_TESTS=1 cargo test -p wavecode-tools pty::
+    /// ```
+    ///
+    /// Unix PTYs are unaffected and always run.
+    fn pty_tests_enabled() -> bool {
+        if cfg!(windows) {
+            std::env::var("WAVECODE_PTY_TESTS").is_ok_and(|v| v == "1")
+        } else {
+            true
+        }
+    }
+
     /// True when a real shell echoes through a PTY within budget.
     ///
-    /// `pty_available` only proves a PTY pair opens; some headless
-    /// environments open the pair while shell I/O never arrives, hanging
-    /// every live test on its timeout. This probe runs one end-to-end echo
-    /// (single-flight, ~10s worst case) so those environments skip instead
-    /// of burning minutes on timeouts.
+    /// The host capability probe inside `PtyShell` does the work (and caches
+    /// the verdict, on disk when negative); this wrapper only adds the opt-in
+    /// gate and reports why a skip happened instead of skipping silently.
     async fn pty_live() -> bool {
         static PROBE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
         *PROBE
             .get_or_init(|| async {
-                // A wedged ConPTY init can block openpty/spawn/read forever,
-                // defeating every in-band timeout (including the 8s echo
-                // below). Run the whole probe on a plain thread and bound it
-                // from the outside; a wedged probe leaks one thread and
-                // reports unavailable.
-                let (done_tx, done_rx) = std::sync::mpsc::channel();
-                std::thread::spawn(move || {
-                    let ok = native_pty_system()
-                        .openpty(PtySize::default())
-                        .is_ok()
-                        && {
-                            let (_d, c) = ctx();
-                            let rt = tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build();
-                            match rt {
-                                Err(_) => false,
-                                Ok(rt) => rt.block_on(async {
-                                    let probed = PtyShell
-                                        .execute(
-                                            serde_json::json!({"command": "echo WAVECODE_PTY_PROBE_OK", "timeout_ms": 8000}),
-                                            &c,
-                                        )
-                                        .await;
-                                    matches!(probed, Ok(out) if !out.is_error && out.content.contains("WAVECODE_PTY_PROBE_OK"))
-                                }),
-                            }
-                        };
-                    let _ = done_tx.send(ok);
-                });
-                done_rx
-                    .recv_timeout(std::time::Duration::from_secs(20))
-                    .unwrap_or(false)
+                if !pty_tests_enabled() {
+                    eprintln!(
+                        "pty live tests skipped: set WAVECODE_PTY_TESTS=1 to run them \
+                         (a ConPTY attempt can leave a spinning conhost on Windows)"
+                    );
+                    return false;
+                }
+                let (_d, c) = ctx();
+                let probed = PtyShell
+                    .execute(
+                        serde_json::json!({"command": format!("echo {PTY_PROBE_NONCE}"), "timeout_ms": 8000}),
+                        &c,
+                    )
+                    .await;
+                match probed {
+                    Ok(out) if !out.is_error && out.content.contains(PTY_PROBE_NONCE) => true,
+                    Ok(out) => {
+                        eprintln!(
+                            "pty live tests skipped: {}\n\
+                             If a `conhost.exe --headless` is left spinning, close it with:\n  \
+                             powershell -NoProfile -Command \"Get-CimInstance Win32_Process \
+                             -Filter 'Name=\\\"conhost.exe\\\"' | Where-Object {{ $_.CommandLine \
+                             -match '--headless' }} | Where-Object {{ -not (Get-CimInstance \
+                             Win32_Process -Filter ('ProcessId=' + $_.ParentProcessId)) }} | \
+                             Stop-Process -Id {{ $_.ProcessId }} -Force\"",
+                            out.content
+                        );
+                        false
+                    }
+                    Err(_) => {
+                        eprintln!("pty live tests skipped: the PTY probe failed");
+                        false
+                    }
+                }
             })
             .await
     }
@@ -816,6 +1165,7 @@ mod tests {
     #[cfg(unix)]
     async fn session_reuses_shell_state() {
         let _guard = TEST_LOCK.lock().unwrap();
+        let _cleanup = RegistryCleanup;
         if !pty_live().await {
             return;
         }
@@ -849,6 +1199,7 @@ mod tests {
     #[cfg(windows)]
     async fn session_reuses_shell_state() {
         let _guard = TEST_LOCK.lock().unwrap();
+        let _cleanup = RegistryCleanup;
         if !pty_live().await {
             return;
         }
@@ -881,6 +1232,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn session_resets_after_exit() {
         let _guard = TEST_LOCK.lock().unwrap();
+        let _cleanup = RegistryCleanup;
         if !pty_live().await {
             return;
         }
@@ -905,6 +1257,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn registry_evicts_lru_past_cap() {
         let _guard = TEST_LOCK.lock().unwrap();
+        let _cleanup = RegistryCleanup;
         if !pty_live().await {
             return;
         }

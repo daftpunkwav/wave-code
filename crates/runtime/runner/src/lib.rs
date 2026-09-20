@@ -1069,7 +1069,9 @@ where
             }
             conv.push_blocks(Role::User, blocks);
         }
-        emit_msg(EventMsg::TurnStarted);
+        emit_msg(EventMsg::TurnStarted {
+            model: self.cfg.model_name.clone(),
+        });
 
         let mut warned = false;
         let mut compacted = false;

@@ -70,7 +70,10 @@ model = "your-model-fast"
   interrupts the turn (exit 130).
 - `exec --image <path>`: attaches an image (PNG/JPEG/WebP/GIF, ≤5 MB) to
   the prompt for vision-capable models; repeatable. Providers without
-  vision reject it with a visible error.
+  vision reject it with a visible error. Each request carries only the two
+  newest images; older ones travel as `[image … omitted]` text placeholders
+  so a screenshot-heavy session keeps its budget (the stored session keeps
+  every image, and the placeholder names what was left out).
 - `exec --approvals`: opts in to answering parked approvals from stdin.
   Off by default, so unattended runs keep the fail-closed deny. The JSON
   dialect answers a specific request with one stdin line:
@@ -98,7 +101,11 @@ model = "your-model-fast"
   `/usage` shows token split, `/editor <cmd>` sets the Ctrl+G external
   editor. Completed turns journal under `~/.wavecode/sessions/`;
   `wavecode --session <id>` and `wavecode --continue` resume from the CLI
-  (text-level: tool blocks are not replayed).
+  (text-level: tool blocks are not replayed). When compaction replaces
+  earlier turns, the summary ends with a `## Context Recovery` note naming
+  that journal (and the live task list), so the agent can look up exact
+  earlier output instead of guessing; each `task` subagent logs its own
+  turns under `sessions/children/<parent>/`.
 - `resume`: `wavecode resume` lists recent legacy sessions newest-first;
   `wavecode resume <thread-id>` imports its history as text and continues
   interactively. Tool calls import as `[tool:name]` / `[error:...]` markers

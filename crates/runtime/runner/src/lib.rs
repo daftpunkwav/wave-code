@@ -19,6 +19,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde_json::Value;
 
@@ -28,7 +29,9 @@ use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
     check_budget, estimate_tokens,
 };
-use wavecode_wire::{ApprovalKind as WireApprovalKind, Event, EventMsg, ToolCallPreview};
+use wavecode_wire::{
+    ApprovalKind as WireApprovalKind, Event, EventMsg, ToolCallPreview, ToolOutcome,
+};
 
 /// Default ceiling for tool rounds inside one run.
 ///
@@ -1578,6 +1581,13 @@ where
     /// ToolCallEnd events follow in declaration order. Every declared call
     /// gets exactly one result slot, so pairing can never break.
     ///
+    /// Each end event also carries the pipeline exit that produced the
+    /// result ([`ToolOutcome`]) and, for calls that ran, the body's
+    /// wall-clock cost — the two signals the metrics ledger needs to tell a
+    /// weak tool apart from heavy approval friction. Every non-executing
+    /// exit registers its outcome in `kinds`; a call missing from that map
+    /// ran its body.
+    ///
     /// Duplicate call ids (model misbehavior, never well-formed output)
     /// collapse at admission: the first occurrence runs the full pipeline
     /// while later ones fill error slots without executing, reaching
@@ -1594,6 +1604,10 @@ where
         // post-tool); returned for the caller to fold into the
         // conversation, separated from tool outputs by construction.
         let mut hook_contexts: Vec<String> = Vec::new();
+        // Which pipeline exit produced each slot, for the end events.
+        let mut kinds: HashMap<String, ToolOutcome> = HashMap::new();
+        // Wall-clock milliseconds of each executed body, keyed by call id.
+        let mut ran_ms: HashMap<String, u64> = HashMap::new();
         for call in calls {
             emit(EventMsg::ToolCallBegin {
                 call_id: call.call_id.clone(),
@@ -1633,6 +1647,7 @@ where
             // as business errors so the model self-corrects, and never
             // reach hooks, policy, or the approval gate.
             if !self.run_allowlist.is_allowed(run_id, &call.name) {
+                kinds.insert(call.call_id.clone(), ToolOutcome::SurfaceBlocked);
                 blocked.insert(
                     call.call_id.clone(),
                     ToolResult {
@@ -1661,6 +1676,7 @@ where
             if report.allow {
                 live.push(call);
             } else {
+                kinds.insert(call.call_id.clone(), ToolOutcome::HookBlocked);
                 blocked.insert(
                     call.call_id.clone(),
                     ToolResult {
@@ -1687,6 +1703,7 @@ where
                     }
                 }
                 PolicyVerdict::Deny { reason } => {
+                    kinds.insert(call.call_id.clone(), ToolOutcome::Denied);
                     results.insert(
                         call.call_id.clone(),
                         ToolResult {
@@ -1732,16 +1749,19 @@ where
         // the declaration slice (and rustc's closure-variance inference
         // stays out of the way).
         let owned: Vec<ToolCall> = parallel.into_iter().cloned().collect();
-        let concurrent: Vec<(String, ToolCall, ToolResult)> = futures::stream::iter(owned)
+        let concurrent: Vec<(String, ToolCall, ToolResult, u64)> = futures::stream::iter(owned)
             .map(|call| async move {
                 let id = call.call_id.clone();
+                let started = Instant::now();
                 let output = self.executor.execute(call.clone()).await;
-                (id, call, output)
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                (id, call, output, elapsed_ms)
             })
             .buffer_unordered(READ_ONLY_CONCURRENCY)
             .collect()
             .await;
-        for (id, call, output) in concurrent {
+        for (id, call, output, elapsed_ms) in concurrent {
+            ran_ms.insert(id.clone(), elapsed_ms);
             if let Some(context) = self.post_tool(&call, &output, emit).await {
                 hook_contexts.push(format!("[hook:post-tool-use {}] {}", call.name, context));
             }
@@ -1764,6 +1784,7 @@ where
                             (call, true)
                         }
                         ApprovalResolution::Deny { reason } => {
+                            kinds.insert(call.call_id.clone(), ToolOutcome::Refused);
                             results.insert(
                                 call.call_id.clone(),
                                 ToolResult {
@@ -1775,6 +1796,7 @@ where
                             continue;
                         }
                         ApprovalResolution::Interrupted => {
+                            kinds.insert(call.call_id.clone(), ToolOutcome::Interrupted);
                             results.insert(call.call_id.clone(), interrupted_result(call));
                             continue;
                         }
@@ -1790,6 +1812,7 @@ where
                     let resolution = self.approvals.ask(&call.call_id, &question, &options).await;
                     match resolution {
                         QuestionResolution::Answered(text) => {
+                            kinds.insert(call.call_id.clone(), ToolOutcome::Answered);
                             let content = if text.trim().is_empty() {
                                 "the user dismissed the question without answering".to_string()
                             } else {
@@ -1806,6 +1829,7 @@ where
                             continue;
                         }
                         QuestionResolution::Unavailable { reason } => {
+                            kinds.insert(call.call_id.clone(), ToolOutcome::AskUnavailable);
                             results.insert(
                                 call.call_id.clone(),
                                 ToolResult {
@@ -1817,6 +1841,7 @@ where
                             continue;
                         }
                         QuestionResolution::Interrupted => {
+                            kinds.insert(call.call_id.clone(), ToolOutcome::Interrupted);
                             results.insert(call.call_id.clone(), interrupted_result(call));
                             continue;
                         }
@@ -1827,10 +1852,13 @@ where
                 continue;
             }
             if interrupt.is_triggered() {
+                kinds.insert(call.call_id.clone(), ToolOutcome::Interrupted);
                 results.insert(call.call_id.clone(), interrupted_result(call));
                 continue;
             }
+            let started = Instant::now();
             let output = self.executor.execute(call.clone()).await;
+            ran_ms.insert(call.call_id.clone(), started.elapsed().as_millis() as u64);
             if let Some(context) = self.post_tool(call, &output, emit).await {
                 hook_contexts.push(format!("[hook:post-tool-use {}] {}", call.name, context));
             }
@@ -1844,14 +1872,24 @@ where
         results.extend(blocked);
         let mut ordered = Vec::with_capacity(calls.len());
         for call in calls {
-            let result = results
-                .remove(&call.call_id)
-                .or_else(|| dupes.get(&call.call_id).cloned())
-                .unwrap_or_else(|| ToolResult {
-                    call_id: call.call_id.clone(),
-                    content: "internal error: missing tool result slot".to_string(),
-                    is_error: true,
-                });
+            let (result, outcome) = match results.remove(&call.call_id) {
+                // A slot the pipeline filled: the registered exit when there
+                // is one, otherwise the body ran (`is_error` says how).
+                Some(result) => (result, kinds.remove(&call.call_id).unwrap_or_default()),
+                // No slot: either a shared duplicate refusal (the id repeats
+                // more than twice, so this stays a `get`) or a defect.
+                None => match dupes.get(&call.call_id).cloned() {
+                    Some(result) => (result, ToolOutcome::Duplicate),
+                    None => (
+                        ToolResult {
+                            call_id: call.call_id.clone(),
+                            content: "internal error: missing tool result slot".to_string(),
+                            is_error: true,
+                        },
+                        ToolOutcome::Missing,
+                    ),
+                },
+            };
             emit(EventMsg::ToolCallEnd {
                 call_id: result.call_id.clone(),
                 is_error: result.is_error,
@@ -1859,6 +1897,8 @@ where
                     &result.content,
                     TOOL_OUTPUT_PREVIEW_BYTES,
                 )),
+                outcome,
+                duration_ms: ran_ms.remove(&call.call_id).unwrap_or(0),
             });
             ordered.push(result);
         }
@@ -3083,6 +3123,96 @@ mod run_loop_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(history.contains("not in this run's allowed tools"));
+    }
+
+    /// The metrics spine reads `ToolCallEnd.outcome` to tell a tool that ran
+    /// and failed apart from one the harness never started, so every pipeline
+    /// exit has to be visible on the wire — including the fact that a refused
+    /// call carries no duration.
+    #[tokio::test]
+    async fn tool_ends_report_their_pipeline_exit() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![
+                    SampleBlock::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                    SampleBlock::ToolUse {
+                        call_id: "c2".to_string(),
+                        name: "shell".to_string(),
+                        input: serde_json::Value::Null,
+                    },
+                ],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let task_loop = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        task_loop.run_allowlist().restrict(
+            &fx.ctx.run_id,
+            ["read_file".to_string()].into_iter().collect(),
+        );
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        task_loop
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        let ends: Vec<(String, ToolOutcome, bool)> = fx
+            .lock_events()
+            .iter()
+            .filter_map(|e| match &e.msg {
+                EventMsg::ToolCallEnd {
+                    call_id,
+                    outcome,
+                    duration_ms,
+                    is_error,
+                    ..
+                } => {
+                    // A body that never ran carries no wall-clock cost: a
+                    // refusal must not be readable as a slow tool. (The
+                    // reverse does not hold — a fast body reports 0ms.)
+                    assert!(
+                        matches!(outcome, ToolOutcome::Executed) || *duration_ms == 0,
+                        "{call_id} reported {outcome:?} with {duration_ms}ms"
+                    );
+                    Some((call_id.clone(), *outcome, *is_error))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            vec![
+                ("c1".to_string(), ToolOutcome::Executed, false),
+                ("c2".to_string(), ToolOutcome::SurfaceBlocked, true),
+            ]
+        );
     }
 
     #[tokio::test]

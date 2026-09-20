@@ -141,6 +141,37 @@ pub enum ApprovalKind {
     Write,
 }
 
+/// Which exit of the dispatch pipeline produced a tool result, carried on
+/// [`EventMsg::ToolCallEnd`]. `is_error` says the call did not succeed; this
+/// says *who* stopped it — the tool, the model's caller, the policy, a hook,
+/// or the user. Metrics read the distinction to rank tool quality separately
+/// from approval friction; nothing about execution behavior depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    /// The tool body ran (see `is_error` for what it reported).
+    #[default]
+    Executed,
+    /// Denied by a policy rule before execution.
+    Denied,
+    /// Refused at the approval prompt.
+    Refused,
+    /// A `PreToolUse` hook blocked the call.
+    HookBlocked,
+    /// Outside this run's declared tool surface (fork `allowed-tools`).
+    SurfaceBlocked,
+    /// Interrupted before the body ran.
+    Interrupted,
+    /// The model reused a call id; only the first occurrence runs.
+    Duplicate,
+    /// An interactive question's answer stood in for running the tool.
+    Answered,
+    /// No display could carry the question, so it was never asked.
+    AskUnavailable,
+    /// No result slot was filled: an internal defect, never a tool failure.
+    Missing,
+}
+
 /// Bounded head of a tool result, emitted with [`EventMsg::ToolCallEnd`]
 /// for transcript rendering. The harness caps the text and never splits a
 /// UTF-8 character; `truncated` marks a cut so frontends can hint at more.
@@ -244,6 +275,16 @@ pub enum EventMsg {
         /// Absent from senders that predate this field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<ToolCallPreview>,
+        /// Which of the dispatch pipeline's exits produced this result.
+        /// Distinguishes "the model's call was wrong" from "the harness
+        /// never ran it", which `is_error` alone conflates. Senders that
+        /// predate this field decode as [`ToolOutcome::default`].
+        #[serde(default)]
+        outcome: ToolOutcome,
+        /// Wall-clock milliseconds of the tool body. `0` when the body
+        /// never ran, so a duration is never read as a refusal.
+        #[serde(default)]
+        duration_ms: u64,
     },
     /// An approval request is parked and needs a user decision.
     ApprovalRequested {
@@ -447,6 +488,8 @@ mod tests {
                     call_id: "c".to_string(),
                     is_error: false,
                     output: None,
+                    outcome: ToolOutcome::Executed,
+                    duration_ms: 0,
                 },
                 "tool_call_end",
             ),
@@ -625,6 +668,8 @@ mod tests {
                 call_id: "c".to_string(),
                 is_error: false,
                 output: None,
+                outcome: ToolOutcome::Executed,
+                duration_ms: 0,
             }
         );
 
@@ -653,6 +698,8 @@ mod tests {
             call_id: "c".to_string(),
             is_error: false,
             output: None,
+            outcome: ToolOutcome::Executed,
+            duration_ms: 0,
         })
         .unwrap();
         assert!(plain.get("output").is_none());
@@ -664,8 +711,15 @@ mod tests {
                 text: "out".to_string(),
                 truncated: true,
             }),
+            outcome: ToolOutcome::SurfaceBlocked,
+            duration_ms: 1234,
         };
-        let back: EventMsg = serde_json::from_value(serde_json::to_value(&full).unwrap()).unwrap();
+        let wire = serde_json::to_value(&full).unwrap();
+        // Outcomes cross as snake_case tags; a metrics reader aggregates on
+        // them, so the spelling is part of the format.
+        assert_eq!(wire["outcome"], "surface_blocked");
+        assert_eq!(wire["duration_ms"], 1234);
+        let back: EventMsg = serde_json::from_value(wire).unwrap();
         assert_eq!(full, back);
     }
 

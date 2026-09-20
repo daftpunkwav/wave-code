@@ -221,7 +221,7 @@ pub fn read_events_jsonl(path: &std::path::Path) -> std::io::Result<Vec<Event>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wavecode_wire::ApprovalKind;
+    use wavecode_wire::{ApprovalKind, ToolOutcome};
 
     fn event(id: &str, msg: EventMsg) -> Event {
         Event {
@@ -364,6 +364,8 @@ mod tests {
                     call_id: "c9".into(),
                     is_error: false,
                     output: None,
+                    outcome: ToolOutcome::Executed,
+                    duration_ms: 0,
                 },
             ),
             event("s1", EventMsg::TurnCompleted { interrupted: false }),

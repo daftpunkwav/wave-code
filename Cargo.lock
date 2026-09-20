@@ -1335,6 +1335,7 @@ dependencies = [
 name = "operations-observe"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "wavecode-wire",
 ]
@@ -2921,6 +2922,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "wavecode-config",
  "wavecode-context",
  "wavecode-llm",
  "wavecode-sandbox",

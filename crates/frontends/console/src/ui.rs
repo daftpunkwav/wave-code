@@ -766,6 +766,7 @@ impl ConsoleUi {
                 call_id,
                 is_error,
                 output,
+                ..
             } => {
                 self.state.phase = StreamingPhase::Composing;
                 if let Some(index) = self.open_calls.remove(call_id)

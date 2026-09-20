@@ -110,6 +110,7 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wavecode_wire::ToolOutcome;
 
     fn event(msg: EventMsg) -> Event {
         Event {
@@ -131,6 +132,8 @@ mod tests {
                 call_id: "c1".to_string(),
                 is_error: true,
                 output: None,
+                outcome: ToolOutcome::Executed,
+                duration_ms: 0,
             }),
             event(EventMsg::AgentMessageComplete {
                 text: "hi".to_string(),
@@ -151,6 +154,8 @@ mod tests {
             call_id: "c9".to_string(),
             is_error: false,
             output: None,
+            outcome: ToolOutcome::Executed,
+            duration_ms: 0,
         })]);
         let replay = trajectory.replay();
         assert_eq!(replay.len(), 1);
@@ -208,6 +213,8 @@ mod tests {
                 call_id: "c1".to_string(),
                 is_error: false,
                 output: None,
+                outcome: ToolOutcome::Executed,
+                duration_ms: 0,
             }),
         ]);
         let seq = trajectory.steps()[0].seq;

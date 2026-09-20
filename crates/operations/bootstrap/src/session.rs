@@ -1160,6 +1160,76 @@ api_key = "k-inline"
         assert!(handle.client.next_event().await.is_none());
     }
 
+    /// Context budget gate: the advertised tool catalog is paid for on every
+    /// single request, so its size has to be a number someone chose. Run
+    /// `cargo test -p operations-bootstrap catalog -- --nocapture` to print
+    /// the per-tool breakdown; raise the ceiling deliberately, never silently.
+    #[tokio::test]
+    async fn advertised_tool_catalog_stays_within_its_budget() {
+        /// Ceiling in tokens for the always-on catalog, measured with the
+        /// same CJK-aware estimator the context budget uses.
+        const CATALOG_TOKEN_BUDGET: u64 = 9_000;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, CONFIG).unwrap();
+        let handle = assemble_session(AssembleOptions {
+            config_path: Some(path),
+            model_override: None,
+            provider_override: None,
+            permission_override: None,
+            thinking_override: None,
+            wave_denylist: Vec::new(),
+            cwd: dir.path().to_path_buf(),
+            home: Some(dir.path().to_path_buf()),
+            identity: DEFAULT_IDENTITY.to_string(),
+            headless: true,
+            initial_history: Vec::new(),
+            session_id: None,
+        })
+        .unwrap();
+
+        // What the model is actually offered: `ModelAdapter::tools` resolves
+        // every advertised name through this registry, so the registry's
+        // specs are the shipped catalog (no MCP servers configured here).
+        let specs = handle.tools_registry.specs();
+        let catalog_json = serde_json::to_string(&specs).unwrap();
+        let tokens = state_store::estimate_tokens(&catalog_json);
+        let json_chars = catalog_json.len() as u64;
+        let system_tokens = state_store::estimate_tokens(&handle.system);
+
+        let mut rows: Vec<(usize, String)> = specs
+            .iter()
+            .map(|spec| {
+                (
+                    serde_json::to_string(spec).unwrap().len(),
+                    spec.name.clone(),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.0));
+        println!(
+            "CATALOG tools={} json_chars={} est_tokens={} budget={CATALOG_TOKEN_BUDGET} system_tokens={}",
+            specs.len(),
+            json_chars,
+            tokens,
+            system_tokens
+        );
+        for (chars, name) in &rows {
+            println!("  {name}	{chars}");
+        }
+
+        assert_eq!(
+            specs.len(),
+            rows.len(),
+            "tool names must be unique: a duplicate would advertise twice"
+        );
+        assert!(
+            tokens <= CATALOG_TOKEN_BUDGET,
+            "advertised catalog costs {tokens} tokens, over the {CATALOG_TOKEN_BUDGET} budget"
+        );
+    }
+
     /// The actor's driver reaches the run loop through an `Arc<T>`
     /// blanket impl; that impl must forward the live-switch seams or
     /// `/model` and `/effort` silently reject in every production

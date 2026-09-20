@@ -1274,6 +1274,7 @@ dependencies = [
  "safety-gate",
  "serde_json",
  "state-goal",
+ "state-persistence",
  "state-plan",
  "state-store",
  "tempfile",

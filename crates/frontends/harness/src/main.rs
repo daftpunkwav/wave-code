@@ -396,6 +396,8 @@ async fn main() -> anyhow::Result<()> {
             wave_denylist: settings.wave_denylist,
             headless: false,
             initial_history: Vec::new(),
+            // The REPL keeps its history in memory and records no journal.
+            session_id: None,
         })
         .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
         handle.connect_mcp_servers().await;
@@ -497,6 +499,14 @@ async fn main() -> anyhow::Result<()> {
     let settings = console_ui::settings::UiSettings::load();
     let (model_override, provider_override) =
         model_provider_overrides(args.model.as_deref(), &settings);
+    // A headless turn leaves a resumable session behind (journal + meta
+    // line) when a home directory exists; the id is minted up front so the
+    // compaction footers can point at that journal.
+    let session = home.as_ref().map(|home| ExecSession {
+        id: Uuid::new_v4().to_string(),
+        home: home.clone(),
+        cwd: cwd.to_string_lossy().to_string(),
+    });
     let mut handle = assemble_session(AssembleOptions {
         config_path: args.config,
         model_override,
@@ -509,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
         identity: DEFAULT_IDENTITY.to_string(),
         headless,
         initial_history: Vec::new(),
+        session_id: session.as_ref().map(|s| s.id.clone()),
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
     handle.connect_mcp_servers().await;
@@ -523,13 +534,6 @@ async fn main() -> anyhow::Result<()> {
             approvals,
             image_paths,
         }) => {
-            // A headless turn still leaves a resumable session behind
-            // (journal + meta line) when a home directory exists.
-            let session = home.as_ref().map(|home| ExecSession {
-                id: Uuid::new_v4().to_string(),
-                home: home.clone(),
-                cwd: cwd.to_string_lossy().to_string(),
-            });
             let images = load_images(&image_paths)?;
             let outcome = run_exec(
                 &mut handle.client,
@@ -779,7 +783,9 @@ fn make_tui_factory(
                             settings.default_effort.clone(),
                         ),
                     };
+                let session_id = resume_id.unwrap_or_else(|| Uuid::new_v4().to_string());
                 let mut handle = assemble_session(AssembleOptions {
+                    session_id: Some(session_id.clone()),
                     config_path,
                     // A launch hint (the live /model choice) wins; a
                     // read-only side session runs in plan mode so
@@ -802,7 +808,6 @@ fn make_tui_factory(
                 })
                 .map_err(|e| format!("session assembly failed: {e}"))?;
                 handle.connect_mcp_servers().await;
-                let session_id = resume_id.unwrap_or_else(|| Uuid::new_v4().to_string());
                 let title = home.as_deref().and_then(|home_root| {
                     state_persistence::sessions::list_sessions(home_root)
                         .into_iter()
@@ -907,6 +912,7 @@ async fn run_tui_new(
         headless: false,
         initial_history,
         wave_denylist: settings.wave_denylist,
+        session_id: Some(session_id.clone()),
     }) {
         Ok(handle) => handle,
         Err(operations_bootstrap::SessionError::Config(e)) => {
@@ -1480,6 +1486,8 @@ async fn run_resume(
         headless: false,
         initial_history: history,
         wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
+        // Legacy thread import; the new session records under its own id.
+        session_id: None,
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
     handle.connect_mcp_servers().await;

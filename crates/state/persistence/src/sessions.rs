@@ -77,6 +77,14 @@ fn journal_path(home: &Path, id: &str) -> Result<PathBuf, SessionError> {
     Ok(sessions_dir(home).join(format!("{id}.jsonl")))
 }
 
+/// Journal file one session's turns are appended to, for callers that want
+/// to *name* it (a prompt note pointing at the on-disk record) rather than
+/// read or write it. `None` for an invalid id, so path escapes stay rejected
+/// at one place.
+pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
+    journal_path(home, id).ok()
+}
+
 /// Session id whitelist: non-empty, bounded, ASCII alphanumerics plus
 /// `-` and `_`, blocking `../` escapes from CLI arguments and picker
 /// payloads alike.

@@ -169,6 +169,13 @@ pub struct AssembleOptions {
     /// mode without a prompt. Malformed entries land in the startup
     /// warnings instead of failing assembly.
     pub wave_denylist: Vec<String>,
+    /// Session id whose turn journal this assembly will be recorded to, when
+    /// the caller already minted one. Compaction appends a pointer to that
+    /// journal so a post-compaction turn can look up exact earlier output
+    /// instead of guessing; `None` (unknown id, no home) keeps the pointer
+    /// out.
+    #[doc(hidden)]
+    pub session_id: Option<String>,
 }
 
 /// Resolve the effective permission mode: CLI override wins over config.
@@ -226,6 +233,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         headless,
         initial_history,
         wave_denylist,
+        session_id,
     } = options;
     let mut warnings = Vec::new();
 
@@ -345,6 +353,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         (provider.context_window(), provider.max_output_tokens())
     };
     Ok(assemble_session_with_model(WithModel {
+        session_id: session_id.clone(),
         config,
         model,
         model_name,
@@ -401,6 +410,9 @@ pub(crate) struct WithModel {
     pub initial_history: Vec<(bool, String)>,
     /// `wave`-mode denylist entries (Bash rule syntax).
     pub wave_denylist: Vec<String>,
+    /// Session id whose turn journal this assembly records to, when the
+    /// caller already minted one (see [`AssembleOptions::session_id`]).
+    pub session_id: Option<String>,
     /// Warnings accumulated before the model-independent half.
     pub warnings: Vec<String>,
 }
@@ -427,6 +439,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         headless,
         initial_history,
         wave_denylist,
+        session_id,
         mut warnings,
     } = parts;
     let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
@@ -510,8 +523,16 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             interrupt.clone(),
         ))
     };
-    let plans = TodoPlanTracker::new(todos);
-    let compactor = ContextCompactor::new(model.clone(), model_name.clone());
+    let plans = TodoPlanTracker::new(todos.clone());
+    // Compaction footers: the journal pointer needs a home plus the session
+    // id; the live plan shares the todo store the todo tool writes.
+    let journal = home.as_deref().and_then(|home| {
+        let id = session_id.as_deref()?;
+        state_persistence::sessions::session_journal_file(home, id)
+    });
+    let compactor = ContextCompactor::new(model.clone(), model_name.clone())
+        .with_footers(crate::compactor::CompactionFooters { journal })
+        .with_plans(todos);
 
     // 6. Run loop behind the shared driver pointer.
     let native = Arc::new(Mutex::new(NativeExecutor::new()));
@@ -1087,6 +1108,7 @@ api_key = "k-inline"
             identity: DEFAULT_IDENTITY.to_string(),
             headless: true,
             initial_history: Vec::new(),
+            session_id: None,
         })
         .unwrap();
         // Memory degrades with warnings instead of failing assembly.
@@ -1156,6 +1178,7 @@ api_key = "k-inline"
             identity: DEFAULT_IDENTITY.to_string(),
             headless: true,
             initial_history: Vec::new(),
+            session_id: None,
         })
         .unwrap();
         handle
@@ -1218,6 +1241,7 @@ api_key = "k-inline"
             identity: DEFAULT_IDENTITY.to_string(),
             headless: true,
             initial_history: Vec::new(),
+            session_id: None,
         })
         .unwrap();
         assert!(

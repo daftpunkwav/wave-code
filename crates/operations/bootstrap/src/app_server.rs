@@ -231,7 +231,16 @@ async fn create_session(
         .and_then(serde_json::Value::as_str)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| state.base.cwd.clone());
+    // Mint the id before assembly: the compaction footers point at the
+    // journal this id names.
+    let session_id = {
+        let mut next = state.next_session.lock().await;
+        let id = format!("sess-{}", *next);
+        *next += 1;
+        id
+    };
     let handle = match (state.assemble)(AssembleOptions {
+        session_id: Some(session_id.clone()),
         config_path: state.base.config_path.clone(),
         model_override: state.base.model_override.clone(),
         provider_override: None,
@@ -253,9 +262,6 @@ async fn create_session(
                 .into_response();
         }
     };
-    let next = state.next_session.lock().await;
-    let session_id = format!("sess-{}", *next);
-    drop(next);
 
     let permission_mode = handle.permission_mode.clone();
     // The pump owns the client exclusively: it fans events out to SSE
@@ -611,6 +617,7 @@ api_key = "k-inline"
                     context_window: 200_000,
                     max_output_tokens: 64,
                     headless: options.headless,
+                    session_id: options.session_id,
                     permission_override: options.permission_override,
                     cwd: options.cwd,
                     home: options.home,

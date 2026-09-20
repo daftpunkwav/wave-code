@@ -314,7 +314,12 @@ The above is the conversation history between a coding agent and the user. Compr
 ## Key decisions — confirmed technical choices, plans, and constraints (with reasons)
 ## File inventory — key files created / modified / read, with their status
 ## Todo — unfinished items and next steps
-Requirements: keep concrete filenames, paths, commands, and error messages; output only the summary itself, no pleasantries.";
+Requirements — the next turn sees only this summary and the most recent turns verbatim, so it must carry the task on its own:
+- Keep concrete filenames, paths, and commands, and prefer results over actions: the exact values, key output lines, and error text, since re-running to recover them may be slow or impossible. The session's full turn journal stays on disk, so summarize long output instead of transcribing it.
+- Keep decisions already settled separate from questions still open, and name what remains unknown: files or APIs assumed but never read, results never verified.
+- End with the forward plan: the exact next step, the sequence that follows, and any choice already made for it.
+- The session's task list is re-attached below the summary automatically; do not transcribe it.
+- Write in the language of the conversation, stay proportional to the task, and output only the summary itself — no pleasantries, no tool calls.";
 
 pub const SUMMARY_MESSAGE_PREFIX: &str =
     "[context compaction] earlier conversation compacted into the summary below:";

@@ -346,7 +346,12 @@ async fn new_session<W, F>(
         .and_then(|v| v.as_str())
         .map(PathBuf::from)
         .unwrap_or_else(|| base.cwd.clone());
+    // Mint the id before assembly: the compaction footers point at the
+    // journal this id names.
+    let session_id = format!("sess-{next_session}");
+    *next_session += 1;
     let handle = match assemble(AssembleOptions {
+        session_id: Some(session_id.clone()),
         config_path: base.config_path.clone(),
         model_override: base.model_override.clone(),
         provider_override: None,
@@ -375,8 +380,6 @@ async fn new_session<W, F>(
             return;
         }
     };
-    let session_id = format!("sess-{next_session}");
-    *next_session += 1;
     let mode = handle.permission_mode.clone();
     let (job_tx, job_rx) = mpsc::unbounded_channel();
     tokio::spawn(session_task(
@@ -1107,6 +1110,7 @@ api_key = "k-inline"
                 context_window: 200_000,
                 max_output_tokens: 64,
                 wave_denylist: Vec::new(),
+                session_id: None,
                 // Bypass approvals: scripted tools must execute instead of
                 // dying on the headless deny gate (the same ground as the
                 // session proof test). Approval-denied runs are orthogonal

@@ -661,7 +661,9 @@ mod tests {
                 .push(input.text.to_string());
             on_event(Event {
                 id: ctx.submission_id.clone(),
-                msg: EventMsg::TurnStarted,
+                msg: EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
             });
             if self.hold {
                 self.release.notified().await;
@@ -762,6 +764,96 @@ mod tests {
                     .expect("event stream must stay open");
             if keep(&event.msg) {
                 return event;
+            }
+        }
+    }
+
+    /// Event names the tap test compares against, so the assertion reads as
+    /// protocol vocabulary rather than Rust debug output.
+    fn event_kind(msg: &EventMsg) -> &'static str {
+        match serde_json::to_value(msg)
+            .ok()
+            .and_then(|value| value["type"].as_str().map(str::to_string))
+        {
+            Some(kind) => match kind.as_str() {
+                "turn_started" => "turn_started",
+                "turn_completed" => "turn_completed",
+                _ => "other",
+            },
+            None => "other",
+        }
+    }
+
+    /// The metrics tap is installed on the client, so it must see exactly
+    /// what the frontend sees, in the same order, without consuming
+    /// anything from the stream.
+    #[tokio::test]
+    async fn installed_tap_mirrors_the_events_a_frontend_receives() {
+        let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let collector = seen.clone();
+        let driver = FakeDriver {
+            inputs: Mutex::new(Vec::new()),
+            hold: false,
+            release: Arc::new(Notify::new()),
+            ended: Mutex::new(Vec::new()),
+            inbox: InboxHandle::new(),
+        };
+        let mut client = SessionActor::spawn(
+            driver,
+            seeded_conversation(1),
+            Arc::new(ChildRuntime::new()),
+            Arc::new(ApprovalGate::new()),
+            Arc::new(QuestionGate::new()),
+            InterruptHandle::new(),
+            "sys".to_string(),
+        )
+        .with_tap(Arc::new(move |event: &Event| {
+            let kind = event_kind(&event.msg);
+            collector
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(kind);
+        }));
+        client
+            .submit(Submission {
+                id: "p1".to_string(),
+                op: Op::UserInput {
+                    text: "hi".to_string(),
+                    images: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        let mut yielded = Vec::new();
+        loop {
+            let event = event_matching(&mut client, |_| true).await;
+            let done = matches!(event.msg, EventMsg::TurnCompleted { .. });
+            yielded.push(event_kind(&event.msg));
+            if done {
+                break;
+            }
+        }
+        assert_eq!(yielded.first(), Some(&"turn_started"), "{yielded:?}");
+        assert_eq!(yielded.last(), Some(&"turn_completed"), "{yielded:?}");
+        // Copy the guard out before the next await: holding it into the
+        // shutdown below would be a real deadlock risk, not just a lint.
+        let tapped: Vec<&'static str> = seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert_eq!(tapped, yielded, "the tap must not drop or duplicate events");
+
+        client
+            .submit(Submission {
+                id: "p-end".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+        while let Some(event) = client.next_event().await {
+            if matches!(event.msg, EventMsg::TurnCompleted { .. }) {
+                break;
             }
         }
     }

@@ -706,7 +706,7 @@ impl ConsoleUi {
     /// Handle one wire event; returns true when the frame changed.
     pub fn handle_wire_event(&mut self, msg: &EventMsg) -> bool {
         match msg {
-            EventMsg::TurnStarted => {
+            EventMsg::TurnStarted { .. } => {
                 self.state.phase = StreamingPhase::Waiting;
                 // Cheap .git/HEAD read: catches checkout/branch switches.
                 self.state.git_branch = crate::gitinfo::branch(&self.state.cwd);
@@ -2870,7 +2870,9 @@ mod tests {
     #[test]
     fn turn_end_settles_a_dangling_compaction_card() {
         let mut ui = ui();
-        ui.handle_wire_event(&EventMsg::TurnStarted);
+        ui.handle_wire_event(&EventMsg::TurnStarted {
+            model: "m".to_string(),
+        });
         ui.handle_wire_event(&EventMsg::CompactStarted {
             trigger: "auto".to_string(),
         });

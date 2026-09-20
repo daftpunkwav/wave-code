@@ -26,7 +26,7 @@ pub fn replay_to_trajectory(events: &[Event]) -> Trajectory {
     let mut open: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     for event in events {
         match &event.msg {
-            EventMsg::TurnStarted => {
+            EventMsg::TurnStarted { .. } => {
                 trajectory.push_action(ActionKind::Note, "turn started");
             }
             EventMsg::AgentMessageComplete { .. } => {
@@ -122,7 +122,9 @@ mod tests {
     #[test]
     fn replays_structure_in_order() {
         let trajectory = replay_to_trajectory(&[
-            event(EventMsg::TurnStarted),
+            event(EventMsg::TurnStarted {
+                model: "claude-test".to_string(),
+            }),
             event(EventMsg::ToolCallBegin {
                 call_id: "c1".to_string(),
                 name: "shell".to_string(),

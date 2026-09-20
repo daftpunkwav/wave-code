@@ -4,8 +4,11 @@
  *
  * Responsibilities:
  * - Fold every wire event variant into counters exactly once.
- * - Accumulate token usage for cost accounting.
+ * - Split tool results per tool so quality and approval friction stay
+ *   separable.
+ * - Accumulate token usage for cost accounting, including cache share.
  * - Expose point-in-time snapshots without stopping the fold.
+ * - Re-export the append-once ledger that persists those snapshots.
  *
  * This module must not depend on: any workspace crate except the wire
  * protocol data types. It observes; it never drives.
@@ -15,6 +18,10 @@
 //!
 //! Dashboards, cost guards, and evaluations all read [`Metrics`]; none of
 //! them can perturb execution because recording is a read-only fold.
+
+mod ledger;
+
+pub use ledger::{Ledger, LedgerRead, TurnSample};
 
 use std::collections::HashMap;
 
@@ -125,7 +132,7 @@ impl Metrics {
     /// Fold one event into the counters.
     pub fn record(&mut self, event: &Event) {
         match &event.msg {
-            EventMsg::TurnStarted => self.turns_started += 1,
+            EventMsg::TurnStarted { .. } => self.turns_started += 1,
             EventMsg::TurnCompleted { interrupted } => {
                 self.turns_completed += 1;
                 if *interrupted {
@@ -192,6 +199,38 @@ impl Metrics {
             // Deltas, partial completions, and compaction starts carry no
             // metric signal and are deliberately ignored.
             _ => {}
+        }
+    }
+
+    /// Fold another fold into this one.
+    ///
+    /// Ledger aggregation: each stored sample is one turn's fold, and the
+    /// read side merges them back into session- or model-level totals.
+    /// Merging stays here so the arithmetic lives beside the counters.
+    pub fn merge(&mut self, other: &Metrics) {
+        self.turns_started += other.turns_started;
+        self.turns_completed += other.turns_completed;
+        self.turns_interrupted += other.turns_interrupted;
+        self.tool_calls += other.tool_calls;
+        self.tool_errors += other.tool_errors;
+        self.approvals_requested += other.approvals_requested;
+        self.tokens_in += other.tokens_in;
+        self.tokens_out += other.tokens_out;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.compactions += other.compactions;
+        self.warnings += other.warnings;
+        self.errors += other.errors;
+        for (name, stat) in &other.tools {
+            let entry = self.tools.entry(name.clone()).or_default();
+            entry.executed_ok += stat.executed_ok;
+            entry.executed_failed += stat.executed_failed;
+            entry.denied += stat.denied;
+            entry.refused += stat.refused;
+            entry.blocked += stat.blocked;
+            entry.interrupted += stat.interrupted;
+            entry.other += stat.other;
+            entry.busy_ms += stat.busy_ms;
         }
     }
 
@@ -273,7 +312,9 @@ mod tests {
     fn folds_a_full_turn_sequence() {
         let mut metrics = Metrics::new();
         for msg in [
-            EventMsg::TurnStarted,
+            EventMsg::TurnStarted {
+                model: "claude-test".to_string(),
+            },
             EventMsg::ToolCallBegin {
                 call_id: "c1".to_string(),
                 name: "shell".to_string(),

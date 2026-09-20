@@ -93,7 +93,7 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
             violations.push(format!("#{index} ({id}): event after TurnCompleted"));
         }
         match &event.msg {
-            EventMsg::TurnStarted => {
+            EventMsg::TurnStarted { .. } => {
                 if !started.insert(id) {
                     violations.push(format!("#{index} ({id}): duplicate TurnStarted"));
                 }
@@ -234,7 +234,12 @@ mod tests {
     #[test]
     fn clean_session_passes_and_scores() {
         let events = vec![
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
             event("s1", EventMsg::AgentMessageDelta { text: "hel".into() }),
             event(
                 "s1",
@@ -276,7 +281,12 @@ mod tests {
                     input: serde_json::Value::Null,
                 },
             ),
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
             // Delta after the message completed.
             event(
                 "s1",
@@ -315,7 +325,12 @@ mod tests {
             ),
             event("s1", EventMsg::TurnCompleted { interrupted: false }),
             // Event after completion.
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
         ];
         let violations = validate_contract(&events);
         let joined = violations.join("\n");
@@ -332,7 +347,12 @@ mod tests {
     #[test]
     fn interrupted_turns_may_leave_calls_open() {
         let events = vec![
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
             event(
                 "s1",
                 EventMsg::ToolCallBegin {
@@ -349,7 +369,12 @@ mod tests {
     #[test]
     fn unpaired_end_is_a_violation_but_approval_flow_is_free() {
         let events = vec![
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
             event(
                 "s1",
                 EventMsg::ApprovalRequested {
@@ -378,7 +403,12 @@ mod tests {
     #[test]
     fn missing_expectations_fail_the_case() {
         let events = vec![
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
             event(
                 "s1",
                 EventMsg::AgentMessageComplete {
@@ -404,7 +434,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rec.jsonl");
         let events = vec![
-            event("s1", EventMsg::TurnStarted),
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
             event("s1", EventMsg::AgentMessageComplete { text: "hi".into() }),
             event("s1", EventMsg::TurnCompleted { interrupted: false }),
         ];

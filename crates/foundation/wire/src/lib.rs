@@ -237,8 +237,14 @@ pub struct Event {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventMsg {
-    /// A run started.
-    TurnStarted,
+    /// A run started, naming the model the loop samples.
+    TurnStarted {
+        /// Wire model name for this turn (`""` when the driver has none).
+        /// Recordings and the metrics ledger attribute per-turn results with
+        /// it, since `/model` can switch models mid-session.
+        #[serde(default)]
+        model: String,
+    },
     /// Incremental assistant text.
     AgentMessageDelta {
         /// New text since the previous delta.
@@ -456,7 +462,12 @@ mod tests {
         }
 
         let events = [
-            (EventMsg::TurnStarted, "turn_started"),
+            (
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+                "turn_started",
+            ),
             (
                 EventMsg::AgentMessageDelta {
                     text: "x".to_string(),

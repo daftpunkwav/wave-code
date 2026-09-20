@@ -849,6 +849,13 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         interrupt.clone(),
         system_for_actor,
     );
+    // A session that journals also measures: every finished turn appends one
+    // ledger sample keyed by the same id `resume` takes. Without a journal id
+    // (the in-memory REPL) there is nothing to attribute samples to.
+    let client = match (session_id.as_deref(), home.as_ref()) {
+        (Some(id), Some(home)) => client.with_tap(crate::metrics_tap::metrics_tap(home, id)),
+        _ => client,
+    };
 
     let mut mcp_pending: Vec<(String, wavecode_config::McpServerRaw)> =
         config.mcp_servers.clone().into_iter().collect();

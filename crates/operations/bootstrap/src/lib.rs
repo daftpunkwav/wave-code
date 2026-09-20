@@ -35,6 +35,7 @@ pub mod mcp_bridge;
 pub mod mcp_serve;
 pub mod memory_finish;
 pub mod memory_tool;
+pub mod metrics_tap;
 pub mod model_adapter;
 pub mod native;
 pub mod plan_adapter;

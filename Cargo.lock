@@ -727,6 +727,7 @@ dependencies = [
  "console-ui",
  "operations-actor",
  "operations-bootstrap",
+ "operations-observe",
  "reqwest",
  "rustyline",
  "serde",
@@ -1265,6 +1266,7 @@ dependencies = [
  "infrastructure-base",
  "infrastructure-ratelimit",
  "operations-actor",
+ "operations-observe",
  "reqwest",
  "runtime-child",
  "runtime-plugin",
@@ -1280,6 +1282,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "transport-mcp",
  "wavecode-config",
  "wavecode-context",
@@ -1337,6 +1340,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "wavecode-wire",
 ]
 

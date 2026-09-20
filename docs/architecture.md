@@ -153,7 +153,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 ### Wiring status
 
 A crate compiles and is unit-tested only when something depends on it. As of
-2026-09-21, **24 of the 58 library crates have no dependents** — they are not
+2026-09-21, **23 of the 58 library crates have no dependents** — they are not
 reachable from the `wavecode` binary. Everything above describes what each
 crate *does*, not what the product *offers*; this table is the correction.
 Check a crate's dependents (`cargo tree -q -i <crate>`) before citing it as a
@@ -162,7 +162,7 @@ feature, and move it out of this table in the same change that wires it up.
 | Unwired crate | Why it is not reachable |
 | --- | --- |
 | `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
-| `operations-observe`, `operations-replay`, `operations-eval`, `operations-simulate`, `operations-notify` | Library-only: no binary or adapter consumes them, so metrics folding, structural replay, and behavioural benchmarks are not product features yet |
+| `operations-replay`, `operations-eval`, `operations-simulate`, `operations-notify` | Library-only: no binary or adapter consumes them, so structural replay and behavioural benchmarks are not product features yet |
 | `action-kit`, `action-browser`, `action-retrieval` | The tool registry and the browser/retrieval seams have no implementer or consumer; `wavecode-tools` owns the live registry |
 | `infrastructure-cache`, `infrastructure-config`, `infrastructure-coord`, `infrastructure-routing` | Unused primitives: config layering, leases, and the route/fallback chain are each still hand-rolled where they are needed |
 | `runtime-capability`, `runtime-identity`, `runtime-skills` | The live skill path is `wavecode-skills` + `bootstrap`; these are parallel, unconsumed models of the same idea |

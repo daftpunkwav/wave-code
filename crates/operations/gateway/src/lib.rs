@@ -200,7 +200,9 @@ mod tests {
         ) -> StopReason {
             on_event(Event {
                 id: "s1".to_string(),
-                msg: EventMsg::TurnStarted,
+                msg: EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
             });
             on_event(Event {
                 id: "s1".to_string(),

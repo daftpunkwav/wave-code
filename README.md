@@ -18,6 +18,7 @@ wavecode resume                        # list previous sessions / resume one
 wavecode                               # fullscreen TUI on a TTY, REPL otherwise
 wavecode --plan                        # start in plan mode (-y for auto mode)
 wavecode --debug                       # debug-level file logging (~/.wavecode/logs)
+wavecode metrics                       # per-model, per-tool quality report
 wavecode doctor                        # validate local setup, no provider contact
 wavecode update                        # check for a newer published release
 ```
@@ -117,6 +118,12 @@ model = "your-model-fast"
   `POST /sessions/{id}/prompt` submits a turn; parked approvals and
   questions are answered via `POST .../approvals/{call_id}` and
   `.../questions/{call_id}`; `POST /shutdown` stops the server.
+- `metrics`: aggregates the local metrics ledger (`~/.wavecode/metrics/`)
+  into a per-model, per-tool table — executed calls with their success rate,
+  refusals and denials kept in separate columns, prompt-cache read share,
+  turns, approvals. Offline: it reads local files and never contacts a
+  provider. `--session <id>` narrows to one session; `--json` emits the
+  merged totals for scripts.
 - `doctor`: validates local setup without contacting any provider — config
   parse, provider api key resolution (never printed), `[models]` entries,
   console settings, custom themes, and session records. Exit 1 when any

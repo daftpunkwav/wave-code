@@ -24,7 +24,7 @@ pub mod durable;
 pub mod status;
 
 pub use actor::SessionActor;
-pub use client::{ActorClient, SubmitError};
+pub use client::{ActorClient, EventTap, SubmitError};
 pub use durable::{
     CheckpointSink, DurabilityConfig, persist_checkpoint, persist_then_act, render_snapshot,
     resume_checkpoint, turn_label,

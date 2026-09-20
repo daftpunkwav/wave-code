@@ -38,6 +38,26 @@ Timing policy lives in `benchmarks/baseline.json` (committed medians plus `warn_
 - Gates: `replay_goldens_stay_fast_against_baseline` (`crates/operations/replay/tests/snapshot_replay.rs`) times the four golden fixtures including rendering; `crates/runtime/runner/tests/benchmarks.rs` carries `continuation_micro_bench` (scripted model, 8 tool rounds through the real `RunLoop`) and `session_open_bench` (offline assembly + 5 scripted turns), both reporting JSON lines.
 - `benchmarks/run.rs` is the plain-documented harness — the human-readable spec, kept in sync with the executable tests when rounds, bounds, or fixture shapes change. See `benchmarks/README.md`.
 
+## Runtime measurement (what the tiers judge)
+
+The tiers above verify structure; they cannot say whether a real session got
+better. The runtime spine fills that gap:
+
+- `runtime-runner` tags every `ToolCallEnd` with the dispatch exit that
+  produced it (`ToolOutcome`) and the body's duration.
+- `operations-observe` folds a session's event stream into `Metrics`, with
+  per-tool `ToolStat` buckets and a `cache_read_share`.
+- `operations-bootstrap`'s `metrics_tap` attaches to the actor client, so
+  every journaled session appends one `TurnSample` per finished turn to
+  `~/.wavecode/metrics/turns.jsonl` (a failed write warns; it never fails the
+  turn it observes).
+- `wavecode metrics [--session <id>] [--json]` aggregates the ledger into a
+  per-model, per-tool table ranked by call volume. `success` covers executed
+  calls only, so a tool that is mostly refused is not scored as broken.
+
+Read-side numbers are the baseline for context-engineering and policy
+changes: run the command before and after, and quote both.
+
 ## When to touch which tier
 
 New user-visible structural behavior (a new `EventMsg` with trajectory semantics, a changed timeline rendering) → add or extend a tier-2 golden. A bug fix → tier-1 regression test next to the fix. Perf-sensitive loop changes → check the tier-4 gates print PASS, and re-baseline deliberately if the medians legitimately moved.

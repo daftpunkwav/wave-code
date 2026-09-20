@@ -20,6 +20,7 @@ runtime-scheduler = { path = "../../runtime/scheduler" }
 infrastructure-base = { path = "../../infrastructure/base" }
 safety-gate = { path = "../../safety/gate" }
 operations-actor = { path = "../actor" }
+operations-observe = { path = "../observe" }
 wavecode-wire = { path = "../../foundation/wire" }
 wavecode-tools = { path = "../../capabilities/tools" }
 wavecode-sandbox = { path = "../../capabilities/sandbox" }
@@ -38,6 +39,7 @@ async-trait.workspace = true
 tokio.workspace = true
 futures.workspace = true
 axum.workspace = true
+tracing.workspace = true
 async-stream.workspace = true
 infrastructure-ratelimit = { path = "../../infrastructure/ratelimit" }
 

@@ -298,9 +298,12 @@ impl TaskService for TurnChildService {
                 };
                 runtime_child::TaskResult {
                     status: match &outcome {
-                        StopReason::Completed | StopReason::MaxToolRounds => {
-                            runtime_child::TaskStatus::Completed
-                        }
+                        // Both ceilings end the child without a fault: the
+                        // repeat breaker hands back a text summary of the
+                        // blocker, exactly like the round ceiling.
+                        StopReason::Completed
+                        | StopReason::MaxToolRounds
+                        | StopReason::RepeatBreaker => runtime_child::TaskStatus::Completed,
                         StopReason::Interrupted => runtime_child::TaskStatus::Stopped,
                         StopReason::Error(_) => runtime_child::TaskStatus::Failed,
                     },

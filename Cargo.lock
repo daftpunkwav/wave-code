@@ -2827,6 +2827,7 @@ dependencies = [
  "tokio",
  "wavecode-config",
  "wavecode-llm",
+ "wavecode-wire",
 ]
 
 [[package]]

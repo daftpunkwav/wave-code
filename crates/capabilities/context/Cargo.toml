@@ -10,6 +10,7 @@ async-trait.workspace = true
 futures.workspace = true
 thiserror.workspace = true
 wavecode-config = { path = "../../foundation/config" }
+wavecode-wire = { path = "../../foundation/wire" }
 
 [dev-dependencies]
 tokio.workspace = true

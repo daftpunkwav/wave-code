@@ -47,7 +47,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 
 | Crate | Responsibility |
 | --- | --- |
-| `infrastructure-base` | OS runtime primitives: channel capacities, cooperative interrupt handle, truncation budgets |
+| `infrastructure-base` | OS runtime primitives: channel capacities, cooperative interrupt handle, truncation budgets, shared calendar-date rendering |
 | `infrastructure-cache` | Bounded TTL + LRU cache |
 | `infrastructure-config` | Layered key/value configuration with feature flags |
 | `infrastructure-coord` | Single-process leases with fencing tokens |
@@ -59,7 +59,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 
 | Crate | Responsibility |
 | --- | --- |
-| `operations-wire` | Frontend/backend wire types for submissions and events |
+| `operations-wire` | Frontend/backend wire types for submissions and events; the model-facing system-reminder marker |
 | `action-kit` | Tool registry, declarative tool attributes, execution context |
 | `wavecode-protocol` | Shared frontend-protocol vocabulary: permission modes, approval kinds |
 

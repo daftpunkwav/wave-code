@@ -757,22 +757,15 @@ pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<
 // ---------------------------------------------------------------------------
 
 /// Opening tag of an injected system reminder.
-pub const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
-
-/// Closing tag of an injected system reminder.
-pub const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+///
+/// Re-exported from `wavecode-wire`, which holds the single definition (the
+/// loop needs the same marker and may not depend on this crate).
+pub use wavecode_wire::{SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN, wrap_system_reminder};
 
 /// Default cap on pending (not yet injected) reminders. At the cap new
 /// reminders are dropped rather than queued — a bounded channel, never a
 /// silent queue growth.
 pub const DEFAULT_MAX_PENDING_REMINDERS: usize = 8;
-
-/// Wrap `text` in the canonical `<system-reminder>` block (the single
-/// injection format shared by compaction notices, plan nudges, and future
-/// callers).
-pub fn wrap_system_reminder(text: &str) -> String {
-    format!("{SYSTEM_REMINDER_OPEN}\n{text}\n{SYSTEM_REMINDER_CLOSE}")
-}
 
 /// True when `wrapped` is still present as a whole text block in
 /// `history`'s trailing user-role entry (i.e. not yet consumed by a model

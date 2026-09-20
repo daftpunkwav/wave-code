@@ -1,11 +1,14 @@
 /*!
  * @file RuntimeBase
- * @description OS runtime primitives: channels, interruption, and limits.
+ * @description OS runtime primitives: channels, interruption, limits, and
+ *   the shared calendar-date rendering.
  *
  * Responsibilities:
  * - Centralize channel capacities and timeout constants.
  * - Provide the cooperative interrupt handle shared across tasks.
  * - Document truncation budgets for event payloads.
+ * - Render the calendar date once for every layer that needs it (prompt
+ *   assembly and the loop's midnight-rollover notice).
  *
  * This module must not depend on: any other workspace crate.
  */
@@ -84,6 +87,57 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
     format!("{kept}...")
 }
 
+/// Weekday names indexed by `days_since_epoch % 7` with 1970-01-01 =
+/// Thursday (index 4).
+const WEEKDAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+
+/// Render `now` as `YYYY-MM-DD (Weekday)` in UTC.
+///
+/// One rendering for every layer that shows a date (the prompt's environment
+/// section and the loop's midnight-rollover notice), so the two can never
+/// disagree. UTC-vs-local skew only matters around midnight and is accepted
+/// in exchange for staying dependency-free.
+pub fn format_date(now: std::time::SystemTime) -> String {
+    // Whole days since the epoch, rounding toward negative infinity so a
+    // pre-epoch clock (a machine with an unset or badly set RTC) renders the
+    // real calendar day instead of silently clamping to 1970-01-01.
+    let days: i64 = match now.duration_since(std::time::UNIX_EPOCH) {
+        Ok(since) => (since.as_secs() / 86_400) as i64,
+        Err(before) => {
+            let secs = before.duration().as_secs();
+            // Ceil, then negate: 1 s before the epoch is 1969-12-31, not -0.
+            -(secs.div_ceil(86_400) as i64)
+        }
+    };
+    let (year, month, day) = civil_from_days(days);
+    let weekday = WEEKDAYS[(days + 4).rem_euclid(7) as usize];
+    format!("{year:04}-{month:02}-{day:02} ({weekday})")
+}
+
+/// Convert days since 1970-01-01 to a proleptic Gregorian (year, month,
+/// day); Howard Hinnant's civil-from-days algorithm, valid for negative
+/// day counts too.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (year + i64::from(month <= 2), month, day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +174,31 @@ mod tests {
             "\u{65e5}\u{672c}..."
         );
         assert_eq!(truncate("a\u{1f642}b", 2), "a\u{1f642}...");
+    }
+
+    #[test]
+    fn date_renders_known_days() {
+        let days = |n: u64| std::time::UNIX_EPOCH + Duration::from_secs(n * 86_400);
+        // 1970-01-01 was a Thursday.
+        assert_eq!(format_date(days(0)), "1970-01-01 (Thursday)");
+        // 2026-09-19 was a Saturday.
+        assert_eq!(format_date(days(20_715)), "2026-09-19 (Saturday)");
+        // 2000-02-29 (leap day, a Tuesday).
+        assert_eq!(format_date(days(11_016)), "2000-02-29 (Tuesday)");
+        // Year boundaries stay contiguous.
+        assert_eq!(format_date(days(364)), "1970-12-31 (Thursday)");
+        assert_eq!(format_date(days(365)), "1971-01-01 (Friday)");
+    }
+
+    #[test]
+    fn date_before_the_epoch_stays_correct() {
+        // 1969-12-31 was a Wednesday; a broken RTC must not render 1970.
+        let before = std::time::UNIX_EPOCH - Duration::from_secs(86_400);
+        assert_eq!(format_date(before), "1969-12-31 (Wednesday)");
+        // One second before the epoch is still the previous day.
+        let just_before = std::time::UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(format_date(just_before), "1969-12-31 (Wednesday)");
+        // Exactly the epoch boundary.
+        assert_eq!(format_date(std::time::UNIX_EPOCH), "1970-01-01 (Thursday)");
     }
 }

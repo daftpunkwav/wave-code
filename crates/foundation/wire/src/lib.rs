@@ -152,6 +152,26 @@ pub struct ToolCallPreview {
     pub truncated: bool,
 }
 
+/// Opening tag of a harness-injected system reminder.
+///
+/// The canonical marker for guidance the harness injects into model-facing
+/// history (plan nudges, repeat-breaker escalations, date-change notices):
+/// wrapping text in it tells the model the text is harness guidance rather
+/// than user-authored input. It lives here because both the loop
+/// (`runtime-runner`, restricted to wire/store/infrastructure deps) and the
+/// context layer need one definition; frontends may strip or restyle blocks
+/// carrying it.
+pub const SYSTEM_REMINDER_OPEN: &str = "<system-reminder>";
+
+/// Closing tag of a harness-injected system reminder (see
+/// [`SYSTEM_REMINDER_OPEN`]).
+pub const SYSTEM_REMINDER_CLOSE: &str = "</system-reminder>";
+
+/// Wrap `text` in the canonical `<system-reminder>` block.
+pub fn wrap_system_reminder(text: &str) -> String {
+    format!("{SYSTEM_REMINDER_OPEN}\n{text}\n{SYSTEM_REMINDER_CLOSE}")
+}
+
 impl ToolCallPreview {
     /// Character-boundary-safe head of `content` capped at `max_bytes`.
     pub fn head(content: &str, max_bytes: usize) -> Self {
@@ -326,6 +346,19 @@ pub enum EventMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reminder marker is protocol vocabulary: the loop writes it, the
+    /// context channel writes it, and frontends recognize it, so its literal
+    /// shape is locked here.
+    #[test]
+    fn reminder_marker_shape_is_locked() {
+        assert_eq!(SYSTEM_REMINDER_OPEN, "<system-reminder>");
+        assert_eq!(SYSTEM_REMINDER_CLOSE, "</system-reminder>");
+        assert_eq!(
+            wrap_system_reminder("notice"),
+            "<system-reminder>\nnotice\n</system-reminder>"
+        );
+    }
 
     #[test]
     fn wire_tags_are_locked() {

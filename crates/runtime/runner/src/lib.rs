@@ -70,6 +70,10 @@ pub enum StopReason {
     Interrupted,
     /// The tool-round ceiling was reached; the run stops without error.
     MaxToolRounds,
+    /// The same tool call repeated [`RunConfig::max_repeat_streak`] times in
+    /// a row; the loop stopped the turn instead of executing it again and
+    /// asked the model for a text handoff.
+    RepeatBreaker,
     /// The run failed; carries a human-readable cause.
     Error(String),
 }
@@ -90,6 +94,15 @@ pub(crate) struct TurnState {
     pub(crate) total_cache_creation_tokens: u64,
     /// How many tool dispatch rounds have executed in this run.
     pub(crate) tool_rounds: u32,
+    /// Consecutive dispatch rounds whose tool-call signature matched the
+    /// previous round's (0 = the last round differed or none ran yet).
+    pub(crate) repeat_streak: u32,
+    /// Escalation reminders already injected for the current streak, so each
+    /// [`REPEAT_REMINDER_AT`] threshold fires exactly once.
+    pub(crate) repeat_reminders_sent: u8,
+    /// Signature of the previous round's tool calls (see
+    /// [`TurnState::note_call_signature`]).
+    pub(crate) last_call_signature: Option<String>,
 }
 
 impl TurnState {
@@ -111,6 +124,22 @@ impl TurnState {
     /// Check the tool-round ceiling; the loop must stop, not error, on hit.
     pub fn rounds_exhausted(&self, max: u32) -> bool {
         self.tool_rounds >= max
+    }
+
+    /// Fold one dispatch round's tool-call signature into the repeat streak.
+    ///
+    /// Returns the new streak length; a different signature resets it to 1.
+    /// Escalation counters restart with the streak so each threshold fires
+    /// once per run of identical calls.
+    pub fn note_call_signature(&mut self, signature: &str) -> u32 {
+        if self.last_call_signature.as_deref() == Some(signature) {
+            self.repeat_streak = self.repeat_streak.saturating_add(1);
+        } else {
+            self.repeat_streak = 1;
+            self.repeat_reminders_sent = 0;
+            self.last_call_signature = Some(signature.to_string());
+        }
+        self.repeat_streak
     }
 }
 
@@ -513,6 +542,85 @@ impl InboxHandle {
 pub const CONTINUATION_PROMPT: &str =
     "Output token limit reached. Continue exactly where you left off.";
 
+/// Escalating reminders injected when the same tool call keeps repeating.
+///
+/// The sequence walks the model out of a stuck loop with a different demand
+/// each time: falsify the approach, ask for the missing input, conclude from
+/// what is already known. Inserted into history — never as a fresh user turn
+/// the model could mistake for the human — so they ride the next sample.
+fn repeat_reminder(level: usize, streak: u32) -> String {
+    let text = match level {
+        0 => format!(
+            "The same tool call has now been issued {streak} times in a row. \
+             Run the cheapest test that could disprove your current approach, \
+             or state why no such test exists."
+        ),
+        1 => format!(
+            "The same tool call has been issued {streak} times in a row and is \
+             not making progress. Either try a materially different approach, \
+             or tell the user precisely which information or decision you need \
+             to proceed."
+        ),
+        _ => format!(
+            "The same tool call has been issued {streak} times in a row. Stop \
+             repeating it: deliver your best answer from the evidence already \
+             gathered and list what remains uncertain."
+        ),
+    };
+    wavecode_wire::wrap_system_reminder(&text)
+}
+
+/// Handoff text attached to the synthetic tool results when the repeat
+/// breaker stops a turn (the call was not executed).
+fn repeat_handoff(streak: u32) -> String {
+    format!(
+        "The turn was stopped by the repeat breaker: the same tool call was \
+         issued {streak} times in a row, so it was not executed again. Reply \
+         in text covering the current blocker, what each attempt established, \
+         and what you need to continue."
+    )
+}
+
+/// The next escalation due for the current streak, if any: returns the
+/// threshold that just fired and its reminder text, advancing the sent
+/// counter. Each threshold fires once per streak.
+fn escalation(state: &mut TurnState) -> Option<(u32, String)> {
+    // How many thresholds the streak has crossed: the escalating levels run
+    // from the lowest to the highest, so counting is the right ladder (a
+    // `position` search would keep returning the first match).
+    let due = REPEAT_REMINDER_AT
+        .iter()
+        .filter(|&&at| at <= state.repeat_streak)
+        .count() as u8;
+    if due == 0 || due <= state.repeat_reminders_sent {
+        return None;
+    }
+    state.repeat_reminders_sent = due;
+    let index = usize::from(due - 1);
+    Some((
+        REPEAT_REMINDER_AT[index],
+        repeat_reminder(index, state.repeat_streak),
+    ))
+}
+
+/// Canonical signature of one round's tool calls: name plus argument JSON, in
+/// order, so a model that reshuffles argument order or call ids still counts
+/// as repeating. Object keys serialize sorted (`serde_json`'s default map
+/// ordering), making the signature stable for equivalent inputs.
+fn tool_call_signature(calls: &[ToolCall]) -> String {
+    calls
+        .iter()
+        .map(|call| format!("{} {}", call.name, signature_json(&call.input)))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Canonical JSON text of one tool input; non-serializable values fall back
+/// to their `Value` rendering (never panics on the loop's hot path).
+fn signature_json(input: &Value) -> String {
+    serde_json::to_string(input).unwrap_or_else(|_| input.to_string())
+}
+
 /// Maximum model continuations per turn (default for
 /// [`RunConfig::max_continuations`]).
 pub const MAX_CONTINUATIONS: u8 = 2;
@@ -522,6 +630,14 @@ pub const MAX_PLAN_NUDGES: u8 = 3;
 /// Maximum Stop-hook blocks per turn before the loop proceeds anyway
 /// (default for [`RunConfig::max_stop_blocks`]).
 pub const MAX_STOP_BLOCKS: u8 = 3;
+/// Consecutive identical tool-call repeats that force the turn to stop
+/// (default for [`RunConfig::max_repeat_streak`]); the escalations below
+/// fire first, so this is the last resort against a stuck loop.
+pub const MAX_REPEAT_STREAK: u32 = 12;
+/// Repeat streaks at which the loop injects an escalating reminder
+/// (a falsification check, then a request for the missing input, then an
+/// instruction to conclude). Each fires once per streak.
+pub const REPEAT_REMINDER_AT: [u32; 3] = [3, 5, 8];
 /// Byte budget of the per-call output preview carried on the wire with
 /// [`EventMsg::ToolCallEnd`]. Full results stay in conversation history;
 /// this bound keeps event frames small for slow transports.
@@ -547,6 +663,15 @@ pub struct RunConfig {
     pub max_stop_blocks: u8,
     /// Reactive compactions per turn on overlong prompts.
     pub max_reactive_compacts: u8,
+    /// Consecutive identical tool-call repeats that force the turn to stop
+    /// (see [`MAX_REPEAT_STREAK`]); `0` disables the breaker entirely.
+    pub max_repeat_streak: u32,
+    /// Calendar date rendered into the system prompt at assembly
+    /// ([`infrastructure_base::format_date`] format). The loop compares it
+    /// with the current date before sampling and injects a one-off reminder
+    /// when a long-lived session crosses midnight, so the model never works
+    /// from a stale date. `None` disables the check.
+    pub session_date: Option<String>,
 }
 
 /// User decision delivered for one parked approval request.
@@ -750,6 +875,11 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     run_allowlist: RunAllowlist,
     run_interrupts: RunInterrupts,
     inbox: InboxHandle,
+    /// Date already announced to the model: seeded from
+    /// [`RunConfig::session_date`], advanced when the loop notices the
+    /// calendar rolled over. Interior-mutable because the loop is shared
+    /// across turns behind `&self`.
+    announced_date: std::sync::Mutex<Option<String>>,
 }
 
 impl<E, P, H, M, A, T, C> RunLoop<E, P, H, M, A, T, C>
@@ -775,6 +905,7 @@ where
         cfg: RunConfig,
         interrupt: InterruptHandle,
     ) -> Self {
+        let announced_date = std::sync::Mutex::new(cfg.session_date.clone());
         Self {
             executor,
             policy,
@@ -788,6 +919,7 @@ where
             run_allowlist: RunAllowlist::default(),
             run_interrupts: RunInterrupts::default(),
             inbox: InboxHandle::new(),
+            announced_date,
         }
     }
 
@@ -827,6 +959,29 @@ where
     /// frontends can steer or inject mid-turn without touching the loop.
     pub fn inbox_handle(&self) -> InboxHandle {
         self.inbox.clone()
+    }
+
+    /// A reminder announcing a calendar rollover, or `None` while the
+    /// session's announced date still matches today.
+    ///
+    /// The announced date advances on the first check after midnight, so the
+    /// notice lands exactly once per change no matter how many turns follow.
+    fn date_change_notice(&self) -> Option<String> {
+        let announced = self.cfg.session_date.as_ref()?;
+        let today = infrastructure_base::format_date(std::time::SystemTime::now());
+        let mut slot = self
+            .announced_date
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let current = slot.as_ref().unwrap_or(announced);
+        if *current == today {
+            return None;
+        }
+        *slot = Some(today.clone());
+        Some(wavecode_wire::wrap_system_reminder(&format!(
+            "The calendar date has changed: today is {today}. The `Session date` \
+             line in the environment section is from when this session started."
+        )))
     }
 
     /// Run one turn to a terminal [`StopReason`].
@@ -931,6 +1086,13 @@ where
             for text in self.inbox.take_next_turn() {
                 conv.push(Role::User, text);
                 applied += 1;
+            }
+
+            // Calendar rollover: the environment section was rendered at
+            // assembly, so a session that outlives midnight would keep
+            // sampling with a stale date. Announce the new one once.
+            if let Some(notice) = self.date_change_notice() {
+                conv.push(Role::User, notice);
             }
 
             // Round ceiling stops with a settled turn, never with an error.
@@ -1258,6 +1420,50 @@ where
                 );
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
+            }
+
+            // Repeat breaker: the same call issued round after round is the
+            // signature failure mode of a stuck loop. Escalate with a
+            // reminder first; past the ceiling, refuse to execute again and
+            // hand the turn back for a text answer instead of burning
+            // rounds until the ceiling melts.
+            if self.cfg.max_repeat_streak > 0 {
+                let streak = state.note_call_signature(&tool_call_signature(&calls));
+                if streak >= self.cfg.max_repeat_streak {
+                    let handoff = repeat_handoff(streak);
+                    emit_msg(EventMsg::Warning {
+                        message: format!(
+                            "same tool call repeated {streak} times; stopping the turn for a text handoff"
+                        ),
+                    });
+                    let results: Vec<ToolResult> = calls
+                        .iter()
+                        .map(|call| ToolResult {
+                            call_id: call.call_id.clone(),
+                            content: handoff.clone(),
+                            is_error: true,
+                        })
+                        .collect();
+                    conv.push_blocks(Role::User, result_blocks(&results));
+                    settle(
+                        conv,
+                        &last_input,
+                        &state,
+                        self.cfg.context_window,
+                        &emit_msg,
+                    );
+                    emit_msg(EventMsg::TurnCompleted { interrupted: false });
+                    return StopReason::RepeatBreaker;
+                }
+                if let Some((threshold, text)) = escalation(&mut state) {
+                    emit_msg(EventMsg::Warning {
+                        message: format!(
+                            "same tool call repeated {streak} times; reminding the model ({threshold}/{})",
+                            self.cfg.max_repeat_streak
+                        ),
+                    });
+                    conv.push(Role::User, text);
+                }
             }
             let (results, hook_contexts) = self
                 .execute_calls(&ctx.run_id, &calls, &interrupt, &emit_msg)
@@ -2382,6 +2588,8 @@ mod run_loop_tests {
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                session_date: None,
             },
             interrupt,
         )
@@ -3002,6 +3210,8 @@ mod run_loop_tests {
                     max_plan_nudges: MAX_PLAN_NUDGES,
                     max_stop_blocks: MAX_STOP_BLOCKS,
                     max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                    max_repeat_streak: MAX_REPEAT_STREAK,
+                    session_date: None,
                 },
                 fx.interrupt.clone(),
             )
@@ -3212,6 +3422,8 @@ mod run_loop_tests {
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                session_date: None,
             },
             fx.interrupt.clone(),
         )
@@ -3640,6 +3852,8 @@ mod run_loop_tests {
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -3991,6 +4205,8 @@ mod run_loop_tests {
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                session_date: None,
             },
             fx.interrupt.clone(),
         )
@@ -4064,6 +4280,8 @@ mod run_loop_tests {
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -4093,6 +4311,272 @@ mod run_loop_tests {
                 .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a child turn start must not clear the shared gates"
+        );
+    }
+
+    /// Build the standard loop with a tuned config: the repeat ceiling and
+    /// the session date, plus an explicit tool-round ceiling.
+    #[allow(clippy::too_many_arguments)]
+    fn build_tuned_loop<M: ModelGateway, P: PolicyDecider>(
+        executor: FakeExecutor,
+        policy: P,
+        hooks: FakeHooks,
+        model: M,
+        approvals: FakeApprovals,
+        plans: FakePlans,
+        compactor: FakeCompactor,
+        max_tool_rounds: u32,
+        max_repeat_streak: u32,
+        session_date: Option<&str>,
+        interrupt: InterruptHandle,
+    ) -> RunLoop<FakeExecutor, P, FakeHooks, M, FakeApprovals, FakePlans, FakeCompactor> {
+        RunLoop::new(
+            executor,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak,
+                session_date: session_date.map(str::to_string),
+            },
+            interrupt,
+        )
+    }
+
+    /// One tool call with the given id, name, and input, as a model step.
+    fn call_step(call_id: &str, name: &str, input: serde_json::Value) -> ModelStep {
+        ModelStep::Answer(SampleResponse {
+            blocks: vec![SampleBlock::ToolUse {
+                call_id: call_id.to_string(),
+                name: name.to_string(),
+                input,
+            }],
+            input_tokens: Some(10),
+            output_tokens: Some(1),
+            truncated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        })
+    }
+
+    /// The same call round after round escalates at 3 and 5 repeats and stops
+    /// at the configured ceiling without executing the final repeat. The stop
+    /// is a handoff: synthetic error results carry the notice, pairing stays
+    /// valid, and the turn ends with `RepeatBreaker` instead of melting the
+    /// round ceiling.
+    #[tokio::test]
+    async fn repeated_identical_calls_escalate_then_stop_the_turn() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        // Six identical samples: reminders at streak 3 and 5, stop at 6.
+        for index in 0..6 {
+            let step = call_step(
+                &format!("c{index}"),
+                "read_file",
+                serde_json::json!({"path": "a"}),
+            );
+            model.steps.lock().unwrap().push_back(step);
+        }
+        let run = build_tuned_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            6,
+            None,
+            fx.interrupt.clone(),
+        );
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e)
+            })
+            .await;
+        assert_eq!(outcome, StopReason::RepeatBreaker);
+        // Five rounds ran; the sixth repeat was refused.
+        assert_eq!(run.executor.lock_executed().len(), 5);
+
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Both escalations fired, each once.
+        assert_eq!(
+            history.matches("has now been issued 3 times").count(),
+            1,
+            "{history}"
+        );
+        assert_eq!(
+            history.matches("has been issued 5 times").count(),
+            1,
+            "{history}"
+        );
+        // The handoff names the refusal so the model can explain the blocker.
+        assert!(
+            history.contains("stopped by the repeat breaker"),
+            "{history}"
+        );
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|event| match &event.msg {
+                EventMsg::Warning { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("repeated 6 times")),
+            "{warnings:?}"
+        );
+    }
+
+    /// A different call between repeats resets the streak: the breaker must
+    /// never fire on a model that keeps varying its calls.
+    #[tokio::test]
+    async fn a_different_call_resets_the_repeat_streak() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        for index in 0..4 {
+            let path = if index % 2 == 0 { "a" } else { "b" };
+            let step = call_step(
+                &format!("c{index}"),
+                "read_file",
+                serde_json::json!({"path": path}),
+            );
+            model.steps.lock().unwrap().push_back(step);
+        }
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let run = build_tuned_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            2,
+            None,
+            fx.interrupt.clone(),
+        );
+        let conv = &mut Conversation::new();
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(run.executor.lock_executed().len(), 4);
+    }
+
+    /// Argument order must not launder a repeat: keys are canonicalized, so
+    /// reordering the same input still counts as the same call.
+    #[tokio::test]
+    async fn reordered_arguments_still_count_as_a_repeat() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model.steps.lock().unwrap().push_back(call_step(
+            "c1",
+            "read_file",
+            serde_json::json!({"path": "a", "limit": 5}),
+        ));
+        model.steps.lock().unwrap().push_back(call_step(
+            "c2",
+            "read_file",
+            serde_json::json!({"limit": 5, "path": "a"}),
+        ));
+        let run = build_tuned_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            2,
+            None,
+            fx.interrupt.clone(),
+        );
+        let conv = &mut Conversation::new();
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::RepeatBreaker);
+        assert_eq!(run.executor.lock_executed().len(), 1);
+    }
+
+    /// A session that outlives midnight gets one notice naming the new date;
+    /// later turns stay quiet.
+    #[tokio::test]
+    async fn a_stale_session_date_is_announced_once() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("one")));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("two")));
+        let run = build_tuned_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            MAX_REPEAT_STREAK,
+            // Stale by construction: the loop compares against today.
+            Some("1970-01-01 (Thursday)"),
+            fx.interrupt.clone(),
+        );
+        let conv = &mut Conversation::new();
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("again"), "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            history.matches("calendar date has changed").count(),
+            1,
+            "{history}"
         );
     }
 }

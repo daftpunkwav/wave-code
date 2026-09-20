@@ -523,6 +523,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             wavecode_context::spill::default_spill_store_root(),
         ),
     );
+    // One clock read seeds both the environment paragraph and the loop's
+    // midnight-rollover check, so the two can never disagree about the date.
+    let session_now = std::time::SystemTime::now();
+    let session_date = crate::environment::format_date(session_now);
     let worker = Arc::new(RunLoop::new(
         executor,
         policy,
@@ -540,6 +544,8 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
             max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
             max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
+            max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,
+            session_date: Some(session_date),
         },
         interrupt.clone(),
     ));
@@ -741,7 +747,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         memory_index: memory_index.clone(),
         skill_catalog,
         tool_note: format!("Available tools: {}", tool_names.join(", ")),
-        environment: crate::environment::describe(&cwd, std::time::SystemTime::now()),
+        environment: crate::environment::describe(&cwd, session_now),
         summary: String::new(),
     });
 
@@ -1417,6 +1423,8 @@ api_key = "k-inline"
                 max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
                 max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
                 max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,
+                session_date: None,
             },
             interrupt,
         )

@@ -623,6 +623,7 @@ fn _outcome_docs(outcome: StopReason) -> &'static str {
         StopReason::Completed => "turn ended normally",
         StopReason::Interrupted => "turn stopped at a safe point",
         StopReason::MaxToolRounds => "round ceiling reached",
+        StopReason::RepeatBreaker => "turn stopped after repeated identical tool calls",
         StopReason::Error(_) => "turn failed after settle",
     }
 }

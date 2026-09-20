@@ -29,7 +29,10 @@ Cache-preserving micro-compaction, also in `crates/capabilities/context/src/lib.
 - Never touched: the first `anchored_prefix = 4` messages (stable head ⇒ Anthropic prompt-cache prefix extends to the first change), the last `recent_window = 10` messages (aligned with full compaction's verbatim tail), and all non-tool-result content.
 - Tool results are recognized structurally (`ContentBlock::ToolResult`), never parsed out of text; the stub keeps `tool_use_id` and `is_error`, so pairing checks still pass.
 - Stubs are deterministic in `(tool_use_id, tool_name)` starting with `EVICTED_RESULT_MARKER_PREFIX = "[evicted tool result"` — running the pass twice reproduces the same bytes, which is what makes it **idempotent**.
-- Fires when estimated usage reaches `DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS = 100_000`; overlapping prefix/window on short histories passes the history through unchanged (saturating arithmetic).
+- **Demand-driven, not all-or-nothing**: `DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS = 100_000` doubles as trigger and reclamation target, so the pass reclaims oldest-first only until the stubs free `total - soft_threshold` tokens. A history already under the line passes through byte-for-byte even when the caller invokes the pass, and recent evidence survives until it is actually needed.
+- **Batch-aligned frontier**: the boundary only lands on a multiple of `batch_messages` (`DEFAULT_EVICTION_BATCH_MESSAGES = 12`) from the anchor, so the ordinary turn that appends one message changes no request bytes at all.
+- Measured on synthetic growth (one `grep` with a ~1k-token result per turn, 159 request transitions): a per-message boundary diverged **62** times, the batched boundary **16**. Every divergence re-reads everything behind it at full input price, so this is a bill, not a nicety. Pinned by `crates/operations/bootstrap/tests/cache_prefix_stability.rs`, which also asserts zero divergence below the threshold and idempotency.
+- Overlapping prefix/window on short histories leaves the evictable range empty, so the history passes through unchanged (saturating arithmetic, never panics).
 
 ## The `<system-reminder>` channel
 

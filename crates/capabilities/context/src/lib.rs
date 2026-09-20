@@ -631,6 +631,14 @@ pub const DEFAULT_EVICTION_RECENT_WINDOW: usize = DEFAULT_KEEP_RECENT;
 /// layer (same convention as [`Thresholds`]).
 pub const DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS: u64 = 100_000;
 
+/// Default number of messages the eviction frontier moves at a time.
+///
+/// The frontier only ever sits on a multiple of this distance from the anchor,
+/// so the ordinary turn that adds one message changes no request bytes and
+/// keeps the provider cache prefix intact. Without batching, the boundary
+/// advances every turn and re-reads everything behind it at full price.
+pub const DEFAULT_EVICTION_BATCH_MESSAGES: usize = 12;
+
 /// Parameters of the eviction pass (see [`evict_old_tool_results`]).
 #[derive(Debug, Clone)]
 pub struct EvictionConfig {
@@ -642,6 +650,9 @@ pub struct EvictionConfig {
     /// Soft threshold (estimated tokens) above which
     /// [`should_evict_tool_results`] fires.
     pub soft_threshold_tokens: u64,
+    /// Messages per eviction step (see
+    /// [`DEFAULT_EVICTION_BATCH_MESSAGES`]); `0` is treated as `1`.
+    pub batch_messages: usize,
 }
 
 impl Default for EvictionConfig {
@@ -650,6 +661,7 @@ impl Default for EvictionConfig {
             anchored_prefix: DEFAULT_EVICTION_ANCHORED_PREFIX,
             recent_window: DEFAULT_EVICTION_RECENT_WINDOW,
             soft_threshold_tokens: DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS,
+            batch_messages: DEFAULT_EVICTION_BATCH_MESSAGES,
         }
     }
 }
@@ -706,11 +718,103 @@ fn evicted_result_stub(tool_use_id: &str, tool_name: Option<&str>) -> String {
 /// replaced; the block keeps its `tool_use_id` and `is_error`, so pairing
 /// integrity ([`find_pairing_violations`]) is unaffected.
 ///
+/// How much is evicted is demand-driven, not all-or-nothing (see
+/// [`eviction_frontier`]): the pass reclaims oldest-first only until the stubs
+/// free `total - cfg.soft_threshold_tokens` tokens (the threshold doubles as
+/// the reclamation target, so no caller has to pass it twice), and the
+/// frontier only advances in `cfg.batch_messages` groups. A history already
+/// under the threshold therefore passes through byte-for-byte even when the
+/// caller invokes the pass.
+///
 /// Idempotent: the stub is a pure function of `(tool_use_id, tool name)`, so
 /// running the pass again reproduces the same stubs and changes nothing
 /// further. When the anchored prefix and the recent window overlap (short
 /// history), the evictable range is empty and the history passes through
 /// unchanged (saturating arithmetic, never panics).
+/// Estimated tokens of one text, using the same split accounting as
+/// [`estimate_tokens`]. Wrapping in a single-block message makes the flat
+/// per-message overhead cancel out of any difference of two such values.
+fn text_tokens(text: &str) -> u64 {
+    estimate_tokens(
+        &[Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+        }],
+        DEFAULT_CHARS_PER_TOKEN,
+    )
+}
+
+/// Tokens freed by stubbing every tool result in one message: payload cost
+/// minus the stub it is replaced with. Non-tool content never shrinks, and a
+/// message that is already a stub saves nothing, which is what keeps the
+/// pass idempotent.
+fn eviction_saving(message: &Message, names: &HashMap<&str, &str>) -> u64 {
+    if message.role != Role::User {
+        return 0;
+    }
+    message
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } => Some((tool_use_id, content)),
+            _ => None,
+        })
+        .map(|(tool_use_id, content)| {
+            let stub = evicted_result_stub(tool_use_id, names.get(tool_use_id.as_str()).copied());
+            text_tokens(content).saturating_sub(text_tokens(&stub))
+        })
+        .sum()
+}
+
+/// Exclusive index the eviction frontier stops at for this history.
+///
+/// Two rules make the pass cache-safe:
+/// - **reclaim only what is asked for**: oldest-first, until the stubs free at
+///   least `total - soft_threshold` tokens, so recent evidence survives until
+///   it is actually needed;
+/// - **move in batches**: the frontier advances a whole `batch_messages` group
+///   at a time, so turns that merely append one message keep the request bytes
+///   identical and the cached prefix alive.
+fn eviction_frontier(
+    history: &[Message],
+    cfg: &EvictionConfig,
+    names: &HashMap<&str, &str>,
+    start: usize,
+    end: usize,
+) -> usize {
+    if start >= end {
+        return start;
+    }
+    let total = estimate_tokens(history, DEFAULT_CHARS_PER_TOKEN);
+    let needed = total.saturating_sub(cfg.soft_threshold_tokens);
+    if needed == 0 {
+        return start;
+    }
+    let step = cfg.batch_messages.max(1);
+    let savings: Vec<u64> = (start..end)
+        .map(|i| eviction_saving(&history[i], names))
+        .collect();
+    let mut freed = 0u64;
+    let mut frontier = start;
+    while frontier < end {
+        let group_end = (frontier + step).min(end);
+        while frontier < group_end {
+            freed += savings[frontier - start];
+            frontier += 1;
+        }
+        if freed >= needed {
+            break;
+        }
+    }
+    frontier
+}
+
 pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<Message> {
     let end = history.len().saturating_sub(cfg.recent_window);
     let start = cfg.anchored_prefix.min(end);
@@ -718,11 +822,12 @@ pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<
         return history.to_vec();
     }
     let names = tool_use_names(history);
+    let limit = eviction_frontier(history, cfg, &names, start, end);
     let mut out = Vec::with_capacity(history.len());
     for (i, m) in history.iter().enumerate() {
         let has_tool_result = m.role == Role::User
             && i >= start
-            && i < end
+            && i < limit
             && m.content
                 .iter()
                 .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
@@ -1450,12 +1555,53 @@ Concurrent stock-deduction test; settlement ledger integration.";
         ]
     }
 
+    /// The pass is demand-driven: it reclaims only what the soft threshold
+    /// asks for, oldest first. Barely crossing the line must stub far less
+    /// than being asked to reclaim everything.
+    #[test]
+    fn evict_reclaims_only_what_the_threshold_asks_for() {
+        let history = eviction_history();
+        let stubbed = |soft_threshold_tokens: u64| {
+            let cfg = EvictionConfig {
+                anchored_prefix: 1,
+                recent_window: 1,
+                batch_messages: 1,
+                soft_threshold_tokens,
+            };
+            evict_old_tool_results(&history, &cfg)
+                .iter()
+                .flat_map(|m| m.content.iter())
+                .filter(|b| {
+                    matches!(b, ContentBlock::ToolResult { content, .. }
+                    if content.starts_with(EVICTED_RESULT_MARKER_PREFIX))
+                })
+                .count()
+        };
+        let total = estimate_tokens(&history, DEFAULT_CHARS_PER_TOKEN);
+        // Demand for exactly nothing: the history is over the line by one
+        // token, so a single reclaim step (or none) is enough.
+        let barely = stubbed(total.saturating_sub(1));
+        let everything = stubbed(0);
+        assert!(
+            barely < everything,
+            "barely-over cleared {barely} of {everything}: the pass is still all-or-nothing"
+        );
+        assert_eq!(everything, stubbed(0), "fixture must be stable");
+        assert!(
+            everything > 0,
+            "fixture evicts nothing: comparison is vacuous"
+        );
+    }
+
     #[test]
     fn evict_preserves_anchored_prefix_and_recent_window() {
         let history = eviction_history();
         let cfg = EvictionConfig {
             anchored_prefix: 2,
             recent_window: 2,
+            // Reclaim-everything demand: these fixtures assert the pass does
+            // stub the middle range, so the frontier must reach the range end.
+            soft_threshold_tokens: 0,
             ..Default::default()
         };
         let out = evict_old_tool_results(&history, &cfg);
@@ -1531,6 +1677,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let cfg = EvictionConfig {
             anchored_prefix: 2,
             recent_window: 1,
+            soft_threshold_tokens: 0,
             ..Default::default()
         };
         let out = evict_old_tool_results(&history, &cfg);
@@ -1564,6 +1711,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let cfg = EvictionConfig {
             anchored_prefix: 1,
             recent_window: 1,
+            soft_threshold_tokens: 0,
             ..Default::default()
         };
         let out = evict_old_tool_results(&history, &cfg);

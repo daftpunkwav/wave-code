@@ -213,12 +213,14 @@ mod tests {
         )
     }
 
-    /// Well under any threshold.
+    /// Well under any threshold, and stepping one message at a time so the
+    /// fixtures can assert on individual stubs (the shipped default batches).
     fn tiny_config() -> EvictionConfig {
         EvictionConfig {
             anchored_prefix: 1,
             recent_window: 2,
             soft_threshold_tokens: 10,
+            batch_messages: 1,
         }
     }
 

@@ -15,7 +15,10 @@
  */
 
 use state_store::{Block, HistoryEntry, Role, estimate_tokens};
-use wavecode_context::{EvictionConfig, evict_old_tool_results, should_evict_tool_results};
+use wavecode_context::{
+    DEFAULT_EVICTION_BATCH_MESSAGES, EvictionConfig, evict_old_tool_results,
+    should_evict_tool_results,
+};
 use wavecode_llm::{ContentBlock, Message, Role as LlmRole};
 
 /// One turn of history: prompt, tool call, and a chatty ~1k-token result.
@@ -174,4 +177,43 @@ fn advertised_catalog_order_is_a_function_of_its_names() {
     let mut sorted = first.clone();
     sorted.sort();
     assert_eq!(first, sorted, "catalog must stay name-sorted");
+}
+
+/// Quantified reason for batching. With the same history growth, a
+/// per-message frontier rewrites the request on nearly every turn, while the
+/// default batched frontier rewrites once per batch. Each rewrite costs a
+/// full-price re-read of everything behind it, so the count is the cost.
+#[test]
+fn batched_frontier_diverges_far_less_often_than_per_message() {
+    let breaks_for = |batch_messages: usize| -> usize {
+        let cfg = EvictionConfig {
+            batch_messages,
+            ..EvictionConfig::default()
+        };
+        let mut history: Vec<HistoryEntry> = Vec::new();
+        let mut previous: Option<Vec<Message>> = None;
+        let mut breaks = 0usize;
+        for round in 0..160 {
+            history.extend(turn_entries(round));
+            let (request, _) = projected(&history, &cfg);
+            if let Some(previous) = &previous
+                && divergence(previous, &request) < previous.len()
+            {
+                breaks += 1;
+            }
+            previous = Some(request);
+        }
+        breaks
+    };
+
+    let per_message = breaks_for(1);
+    let batched = breaks_for(DEFAULT_EVICTION_BATCH_MESSAGES);
+    assert!(
+        per_message > 20,
+        "the fixture must actually exercise eviction: per-message broke {per_message} times"
+    );
+    assert!(
+        batched * 3 < per_message,
+        "batching saved nothing: batched={batched} per_message={per_message}"
+    );
 }

@@ -121,6 +121,18 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    /// Reasoning the model emitted alongside its turn (see
+    /// [`state_store::Block::Thinking`]): the Anthropic wire requires the
+    /// block back on a tool-call turn, so the adapter preserves it in
+    /// history. Providers with no thinking wire shape skip it.
+    Thinking {
+        /// Reasoning text as streamed by the model.
+        text: String,
+        /// Provider signature binding the text to its turn; `None` for
+        /// endpoints streaming unsigned thinking.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
 }
 
 /// Key used by [`normalize_tool_input`] when wrapping a non-object payload.
@@ -161,14 +173,24 @@ pub struct ToolSpec {
 /// Token usage statistics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage {
+    /// Total prompt tokens of the request, cache traffic included.
+    ///
+    /// Normalized across wire formats: Anthropic reports `input_tokens` as
+    /// the *uncached remainder* and the parser adds the cache counters to
+    /// it, while an OpenAI-compatible `prompt_tokens` already covers
+    /// `cached_tokens` (a subset detail) and is passed through. Context
+    /// accounting and the context meter compare this value against the
+    /// window, so it must be the full request size on both paths.
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// Tokens served from the provider's prompt cache (Anthropic
     /// `cache_read_input_tokens`); 0 for providers without caching.
+    /// Informational: already counted inside [`Self::input_tokens`].
     pub cache_read_tokens: u64,
     /// Tokens written to the provider's prompt cache by this request
     /// (Anthropic `cache_creation_input_tokens`); 0 for providers without
     /// caching. Cache writes are billed at a premium, reads at a discount.
+    /// Informational: already counted inside [`Self::input_tokens`].
     pub cache_creation_tokens: u64,
 }
 
@@ -177,14 +199,23 @@ pub struct Usage {
 pub enum StreamEvent {
     /// Text delta.
     TextDelta { text: String },
-    /// Extended-thinking text delta (Anthropic `thinking_delta`). Thinking
-    /// blocks are per-turn reasoning: consumers may display them, and the
-    /// text-protocol seam deliberately does not round-trip them in history.
+    /// Extended-thinking text delta (Anthropic `thinking_delta`): forwarded
+    /// incrementally for live display, then summarized by one
+    /// [`Self::ThinkingComplete`] at the block's end.
     ThinkingDelta { text: String },
     /// Signature delta accompanying a thinking block (Anthropic
-    /// `signature_delta`). Only meaningful for consumers that round-trip
-    /// signed thinking blocks; the text seam ignores it.
+    /// `signature_delta`). Only meaningful to consumers that round-trip
+    /// signed thinking blocks; others may ignore it.
     SignatureDelta { signature: String },
+    /// A thinking block finished; carries the full text and signature so
+    /// history can preserve the block (the Anthropic wire requires it back
+    /// on tool-call turns). Emitted by parsers that can see block
+    /// boundaries; parsers without them (Chat Completions) never emit it
+    /// and their reasoning stays display-only.
+    ThinkingComplete {
+        text: String,
+        signature: Option<String>,
+    },
     /// Start of a tool-call block.
     ToolUseBegin { id: String, name: String },
     /// Incremental input JSON of a tool call.

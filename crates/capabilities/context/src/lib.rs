@@ -85,6 +85,12 @@ pub fn estimate_tokens(messages: &[Message], chars_per_token: usize) -> u64 {
                 ContentBlock::Image { base64, .. } => {
                     count_ascii_split(base64, &mut ascii, &mut non_ascii)
                 }
+                // Thinking is wire-round-trip state (see `Block::Thinking`):
+                // it is re-sent with its assistant turn, so it does occupy
+                // context — count it like any other text block.
+                ContentBlock::Thinking { text, .. } => {
+                    count_ascii_split(text, &mut ascii, &mut non_ascii)
+                }
             };
         }
     }

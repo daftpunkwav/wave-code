@@ -212,6 +212,11 @@ fn api_error_with_retry_after(
 /// `stream_options.include_usage` asks the server to report token usage).
 /// `reasoning_effort` is best-effort: `Some` adds the top-level
 /// `reasoning_effort` param, `None` omits it entirely.
+///
+/// `tools` is omitted entirely when empty (not sent as `[]`): some gateways
+/// validate the array as non-empty and 400 on an empty one, and a tool-less
+/// request has nothing to declare. The token cap rides the field the model
+/// family accepts — see [`uses_max_completion_tokens`].
 pub(crate) fn build_request_body(
     req: &ChatRequest,
     model: &str,
@@ -220,15 +225,51 @@ pub(crate) fn build_request_body(
     let mut body = serde_json::json!({
         "model": model,
         "messages": translate_messages(&req.system, &req.messages),
-        "tools": req.tools.iter().map(translate_tool).collect::<Vec<_>>(),
-        "max_tokens": req.max_tokens,
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+    if !req.tools.is_empty() {
+        body["tools"] =
+            serde_json::Value::Array(req.tools.iter().map(translate_tool).collect::<Vec<_>>());
+    }
+    let cap_field = if uses_max_completion_tokens(model) {
+        "max_completion_tokens"
+    } else {
+        "max_tokens"
+    };
+    body[cap_field] = serde_json::json!(req.max_tokens);
     if let Some(effort) = reasoning_effort {
         body["reasoning_effort"] = serde_json::Value::String(effort.to_string());
     }
     body
+}
+
+/// True for model families whose Chat Completions endpoint rejects
+/// `max_tokens` and requires `max_completion_tokens` (OpenAI o-series and
+/// gpt-5; the reasoning budget shares the cap with visible output there).
+/// The name test matches a whole family prefix: `o1`, `o3-mini`, `o4.1`,
+/// `gpt-5`, `gpt-5.2-codex`, but never `openai/gpt-4o` or `opus`.
+fn uses_max_completion_tokens(model: &str) -> bool {
+    // A vendor prefix (`openai/o3`) must not hide the family name.
+    let normalized = model.to_ascii_lowercase();
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    o_series(name) || name.strip_prefix("gpt-5").is_some_and(has_family_boundary)
+}
+
+/// True for o-series names (`o1`, `o3-mini`, `o4.1`), never `opus` or a bare
+/// `openai/o`.
+fn o_series(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('o') else {
+        return false;
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && has_family_boundary(&rest[digits..])
+}
+
+/// True when the rest of a family name is empty or continues with a
+/// separator, so `o1-preview` matches and `opus` does not.
+fn has_family_boundary(rest: &str) -> bool {
+    rest.is_empty() || rest.starts_with('-') || rest.starts_with('.')
 }
 
 /// Translates one tool definition into `{type: function, function: {...}}` wire shape.
@@ -308,6 +349,11 @@ fn translate_user(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
                 content,
                 is_error,
             } => results.push((tool_use_id, content, *is_error)),
+            // Reasoning is Anthropic-wire state; Chat Completions has no
+            // input slot for it (echoing `reasoning_content` back is
+            // rejected by some gateways and ignored by the rest), so the
+            // block is dropped here by design.
+            ContentBlock::Thinking { .. } => {}
         }
     }
     let mut out = Vec::new();
@@ -365,6 +411,9 @@ fn translate_assistant(blocks: &[ContentBlock]) -> Vec<serde_json::Value> {
                 // fold it into the text so the failure stays visible.
                 texts.push(tool_result_text(content, *is_error));
             }
+            // Reasoning: no assistant-side input slot on this wire (see
+            // `translate_user`).
+            ContentBlock::Thinking { .. } => {}
         }
     }
     let text = texts.join("\n");
@@ -424,11 +473,9 @@ fn feed_openai_data(state: &mut OpenAiStreamState, data: &str) -> Result<Vec<Str
             events.push(StreamEvent::TextDelta {
                 text: content.clone(),
             });
-        } else if let Some(reasoning) = choice.delta.reasoning_content.as_ref()
-            && !reasoning.is_empty()
-        {
+        } else if let Some(reasoning) = choice.delta.reasoning_text() {
             events.push(StreamEvent::TextDelta {
-                text: reasoning.clone(),
+                text: reasoning.to_string(),
             });
         }
         for call in &choice.delta.tool_calls {
@@ -521,6 +568,9 @@ fn finish_turn(state: &OpenAiStreamState) -> Vec<StreamEvent> {
     events.push(StreamEvent::MessageComplete {
         stop_reason,
         usage: Usage {
+            // `prompt_tokens` already covers `cached_tokens` (a subset
+            // detail), so it passes through as the full prompt; folding the
+            // cache counters in is the Anthropic parser's job.
             input_tokens: state.prompt_tokens,
             output_tokens: state.completion_tokens,
             cache_read_tokens: state.cached_tokens,
@@ -570,13 +620,29 @@ struct OpenAiChoice {
 struct OpenAiDelta {
     #[serde(default)]
     content: Option<String>,
-    /// Reasoning-first models (DeepSeek reasoner) stream thinking here
-    /// instead of `content`; surfaced as text only when `content` is
+    /// Reasoning text, under whichever dialect the peer speaks: DeepSeek's
+    /// `reasoning_content` (Moonshot, most gateways), OpenRouter's
+    /// `reasoning_details` (array shape, ignored), or `reasoning` (current
+    /// vLLM, gpt-oss guidance). Surfaced as text only when `content` is
     /// absent so chat models never duplicate output.
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
     tool_calls: Vec<OpenAiToolCallDelta>,
+}
+
+impl OpenAiDelta {
+    /// The reasoning text of this delta, if the peer sent any. First
+    /// non-empty of the known dialects wins; array-shaped
+    /// `reasoning_details` is skipped rather than guessed at.
+    fn reasoning_text(&self) -> Option<&str> {
+        [self.reasoning_content.as_deref(), self.reasoning.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|text| !text.is_empty())
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -630,14 +696,29 @@ pub struct ModelCapabilities {
 impl ModelCapabilities {
     /// Looks up approximate limits by wire model name (case-insensitive and
     /// prefix-tolerant, so dated variants like `kimi-k2-0905` or
-    /// `gpt-4o-2024-11-20` match). Returns `None` for unknown names so the
-    /// caller falls back to the session defaults already in use.
+    /// `gpt-4o-2024-11-20` match). A vendor prefix (`openai/o4-mini`,
+    /// `deepseek/deepseek-chat`) is stripped first, matching how gateways
+    /// spell the same model. Returns `None` for unknown names so the caller
+    /// falls back to the session defaults already in use.
     pub fn for_model(name: &str) -> Option<Self> {
-        let name = name.trim().to_lowercase();
+        let lowered = name.trim().to_lowercase();
+        let name = lowered.rsplit('/').next().unwrap_or(&lowered).to_owned();
         if name.starts_with("deepseek-chat") || name.starts_with("deepseek-reasoner") {
             Some(Self {
                 context_window: 128_000,
                 max_output_tokens: 8_192,
+            })
+        } else if name.starts_with("gpt-5") {
+            // Reasoning family: 400k window, and the output cap covers
+            // reasoning tokens plus visible output.
+            Some(Self {
+                context_window: 400_000,
+                max_output_tokens: 128_000,
+            })
+        } else if o_series(&name) {
+            Some(Self {
+                context_window: 200_000,
+                max_output_tokens: 100_000,
             })
         } else if name.starts_with("gpt-4o-mini") || name.starts_with("gpt-4o") {
             Some(Self {
@@ -659,7 +740,9 @@ impl ModelCapabilities {
                 context_window: 200_000,
                 max_output_tokens: 8_192,
             })
-        } else if name.contains("ollama") || name.starts_with("local-") {
+        } else if lowered.contains("ollama") || name.starts_with("local-") {
+            // `ollama/llama3` names the *server* in the prefix, so this
+            // marker reads the full spelling, not the stripped model name.
             Some(Self::local_default())
         } else {
             None
@@ -853,6 +936,42 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
     }
 
+    /// Reasoning model families get `max_completion_tokens`; everything else
+    /// keeps `max_tokens`, and a tool-less request omits `tools` entirely.
+    #[test]
+    fn request_body_switches_the_token_cap_field_per_model_family() {
+        let req = |tools: Vec<ToolSpec>| ChatRequest {
+            model: String::new(),
+            system: String::new(),
+            messages: std::sync::Arc::new(Vec::new()),
+            tools,
+            max_tokens: 4096,
+        };
+        let reasoning = build_request_body(&req(Vec::new()), "o3-mini", None);
+        assert_eq!(reasoning["max_completion_tokens"], 4096);
+        assert!(reasoning.get("max_tokens").is_none());
+
+        let gpt5 = build_request_body(&req(Vec::new()), "gpt-5.2-codex", None);
+        assert_eq!(gpt5["max_completion_tokens"], 4096);
+
+        let prefixed = build_request_body(&req(Vec::new()), "openai/o1-preview", None);
+        assert_eq!(prefixed["max_completion_tokens"], 4096);
+
+        for legacy in ["gpt-4o", "deepseek-chat", "opus-4", "o-orca", "gpt-5x"] {
+            let body = build_request_body(&req(Vec::new()), legacy, None);
+            assert_eq!(body["max_tokens"], 4096, "{legacy} keeps max_tokens");
+            assert!(
+                body.get("max_completion_tokens").is_none(),
+                "{legacy} must not send max_completion_tokens"
+            );
+        }
+
+        // Empty tool list: omitted, never an empty array (gateways 400 on []).
+        assert!(reasoning.get("tools").is_none());
+        let with_tools = build_request_body(&req(vec![tool_spec()]), "gpt-4o", None);
+        assert_eq!(with_tools["tools"][0]["function"]["name"], "read_file");
+    }
+
     #[test]
     fn request_body_forwards_reasoning_effort_when_set() {
         let req = ChatRequest {
@@ -999,6 +1118,28 @@ mod tests {
             .collect();
         // Reasoning-only chunk surfaces; content wins when both present.
         assert_eq!(texts, vec!["thinking", "answer"]);
+    }
+
+    /// The `reasoning` dialect (current vLLM, gpt-oss guidance) surfaces
+    /// like `reasoning_content`; an empty value falls through to the next
+    /// dialect instead of emitting an empty delta.
+    #[tokio::test]
+    async fn reasoning_dialect_surfaces_and_skips_empties() {
+        let results = run_decode(vec![
+            b"data: {\"choices\":[{\"delta\":{\"reasoning\":\"vllm-think\"}}]}\n\n",
+            b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\",\"reasoning\":\"deepseek-think\"}}]}\n\n",
+            b"data: [DONE]\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["vllm-think", "deepseek-think"]);
     }
 
     #[tokio::test]
@@ -1188,6 +1329,23 @@ mod tests {
                 .unwrap()
                 .context_window,
             256_000
+        );
+        // Reasoning families (the Responses API's core users) carry their
+        // real windows instead of the 200k/8k session default.
+        let gpt5 = ModelCapabilities::for_model("gpt-5.2-codex").unwrap();
+        assert_eq!(gpt5.context_window, 400_000);
+        assert_eq!(gpt5.max_output_tokens, 128_000);
+        let o3 = ModelCapabilities::for_model("o3-mini").unwrap();
+        assert_eq!(o3.context_window, 200_000);
+        assert_eq!(o3.max_output_tokens, 100_000);
+        // `opus` is not an o-series model, and a vendor prefix is skipped.
+        assert!(ModelCapabilities::for_model("claude-opus-4-1").is_none());
+        assert_eq!(
+            ModelCapabilities::for_model("openai/o4-mini").unwrap(),
+            ModelCapabilities {
+                context_window: 200_000,
+                max_output_tokens: 100_000,
+            }
         );
         assert_eq!(
             ModelCapabilities::for_model("glm-4.6")

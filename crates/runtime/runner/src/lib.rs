@@ -241,7 +241,10 @@ pub struct SampleRequest {
 pub struct SampleResponse {
     /// Ordered content blocks of the assistant message.
     pub blocks: Vec<SampleBlock>,
-    /// Input tokens reported by the provider, if any.
+    /// Prompt tokens of the request, if any: every input token the provider
+    /// billed, prompt-cache traffic included (the provider adapters normalize
+    /// their wire formats to this; see `llm::Usage::input_tokens`). The
+    /// budget check and the context meter compare it against the window.
     pub input_tokens: Option<u64>,
     /// Output tokens reported by the provider, if any.
     pub output_tokens: Option<u64>,
@@ -1176,6 +1179,10 @@ where
                     // Responses never carry images today; if one ever
                     // does, the block still belongs in history.
                     SampleBlock::Image { .. } => {}
+                    // Reasoning: kept in history without joining the text
+                    // (providers that require the block back read it from
+                    // the block list).
+                    SampleBlock::Thinking { .. } => {}
                 }
                 if !matches!(block, SampleBlock::ToolResult { .. }) {
                     blocks.push(block.clone());

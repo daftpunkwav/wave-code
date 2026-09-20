@@ -71,6 +71,24 @@ pub enum Block {
         /// Base64-encoded image bytes.
         base64: String,
     },
+    /// Reasoning the model emitted alongside its turn (Anthropic extended
+    /// thinking and compatible reasoning streams).
+    ///
+    /// Kept in history because the Anthropic wire requires it back: a
+    /// tool-call turn whose thinking is missing is rejected outright, so
+    /// multi-round tool use needs these blocks preserved. Providers with no
+    /// thinking wire shape drop the block at translation. It is deliberately
+    /// invisible to [`HistoryEntry::text`] so token estimates, compaction
+    /// and resume keep their prose-only view.
+    Thinking {
+        /// Reasoning text as streamed by the model.
+        text: String,
+        /// Provider signature binding the text to its turn (Anthropic
+        /// `signature`). `None` for endpoints that stream unsigned
+        /// thinking; Claude models reject unsigned blocks, so translation
+        /// emits those only for other models.
+        signature: Option<String>,
+    },
 }
 
 /// One message in the persisted conversation history.
@@ -88,29 +106,32 @@ impl HistoryEntry {
     /// Text blocks join with newlines; tool payloads render in the
     /// bracketed convention the text-only history used before blocks
     /// existed, so text-based consumers (resume import, token estimates)
-    /// keep seeing the same shape.
+    /// keep seeing the same shape. Thinking blocks render nothing: they are
+    /// wire-round-trip state, not prose, and folding per-turn reasoning
+    /// into estimates or resumed transcripts would inflate both.
     pub fn text(&self) -> String {
         self.blocks
             .iter()
-            .map(|block| match block {
-                Block::Text(text) => text.clone(),
+            .filter_map(|block| match block {
+                Block::Text(text) => Some(text.clone()),
                 Block::ToolUse {
                     call_id,
                     name,
                     input,
-                } => format!("[{call_id}] call {name} {input}"),
+                } => Some(format!("[{call_id}] call {name} {input}")),
                 Block::ToolResult {
                     call_id,
                     content,
                     is_error,
-                } => format!(
+                } => Some(format!(
                     "[{call_id}] {}: {content}",
                     if *is_error { "error" } else { "ok" }
-                ),
-                Block::Image { id, mime, .. } => match id {
+                )),
+                Block::Image { id, mime, .. } => Some(match id {
                     Some(label) => format!("[image {mime}: {label}]"),
                     None => format!("[image {mime}]"),
-                },
+                }),
+                Block::Thinking { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -374,6 +395,25 @@ mod tests {
             "before\n[c1] ok: ls out\n[c2] error: boom\n[c3] call shell {\"command\":\"ls\"}"
         );
         assert_eq!(entry.prose(), "before");
+    }
+
+    /// Reasoning blocks stay in the block list (the Anthropic wire needs them
+    /// back) but never leak into the text views that feed estimates, resume
+    /// and summaries.
+    #[test]
+    fn thinking_blocks_are_invisible_to_text_views() {
+        let entry = HistoryEntry {
+            role: Role::Assistant,
+            blocks: vec![
+                Block::Thinking {
+                    text: "weighing the options".to_string(),
+                    signature: Some("sig".to_string()),
+                },
+                Block::Text("done".to_string()),
+            ],
+        };
+        assert_eq!(entry.text(), "done");
+        assert_eq!(entry.prose(), "done");
     }
 
     #[test]

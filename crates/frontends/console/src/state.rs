@@ -42,18 +42,20 @@ pub struct TodoEntry {
 /// samples (each sample reports its own input/output split).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
-    /// Sum of sample input tokens.
+    /// Sum of sample input tokens, prompt-cache traffic included (the
+    /// provider adapters fold cache counters into the input total).
     pub input: u64,
     /// Sum of sample output tokens.
     pub output: u64,
-    /// Sum of prompt-cache read tokens.
+    /// Sum of prompt-cache read tokens (a breakdown of `input`).
     pub cache_read: u64,
-    /// Sum of prompt-cache write tokens.
+    /// Sum of prompt-cache write tokens (a breakdown of `input`).
     pub cache_creation: u64,
 }
 
 impl TokenUsage {
-    /// Input + output (cache traffic excluded, matching billing totals).
+    /// Input + output. Cache read/write are a breakdown of the input column,
+    /// so they are shown beside it rather than added to the total.
     pub fn total(self) -> u64 {
         self.input + self.output
     }

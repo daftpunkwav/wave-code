@@ -166,7 +166,7 @@ pub(crate) fn build_request_body(
     thinking_budget: Option<u32>,
 ) -> serde_json::Value {
     let merged = merge_adjacent_same_role(&req.messages);
-    let mut messages = translate_messages(&merged);
+    let mut messages = translate_messages(&merged, &req.model);
     if prompt_caching
         && let Some(last) = messages.last_mut()
         && let Some(last_block) = last
@@ -257,8 +257,11 @@ fn thinking_body(budget: u32, max_tokens: u32) -> Option<serde_json::Value> {
 /// Images become `image` blocks with a base64 source (mime/size validated);
 /// invalid images become a visible text block naming the constraint, never a
 /// silent drop. Text / tool_use / tool_result shapes match the unified serde
-/// form so existing wire expectations are unchanged.
-pub(crate) fn translate_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+/// form so existing wire expectations are unchanged. Thinking blocks go back
+/// as `thinking` (see [`translate_block`]); `for_model` decides whether
+/// unsigned ones may be emitted at all.
+pub(crate) fn translate_messages(messages: &[Message], for_model: &str) -> Vec<serde_json::Value> {
+    let unsigned_ok = allows_unsigned_thinking(for_model);
     messages
         .iter()
         .map(|m| {
@@ -266,15 +269,31 @@ pub(crate) fn translate_messages(messages: &[Message]) -> Vec<serde_json::Value>
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            let content: Vec<serde_json::Value> = m.content.iter().map(translate_block).collect();
+            let content: Vec<serde_json::Value> = m
+                .content
+                .iter()
+                .filter_map(|block| translate_block(block, unsigned_ok))
+                .collect();
             serde_json::json!({"role": role, "content": content})
         })
         .collect()
 }
 
-/// Translates one content block into its Anthropic wire shape.
-fn translate_block(block: &ContentBlock) -> serde_json::Value {
-    match block {
+/// Whether an unsigned thinking block may travel to `model`.
+///
+/// api.anthropic.com validates the signature and rejects unsigned blocks from
+/// Claude models, so those keep only signed history. Anthropic-compatible
+/// endpoints stream thinking with no `signature_delta` yet reject a tool-call
+/// turn whose thinking is missing, so their blocks must survive unsigned.
+fn allows_unsigned_thinking(model: &str) -> bool {
+    !model.to_ascii_lowercase().contains("claude")
+}
+
+/// Translates one content block into its Anthropic wire shape; `None` drops
+/// the block (an unsigned thinking block bound for a Claude model, which can
+/// only reject it).
+fn translate_block(block: &ContentBlock, unsigned_ok: bool) -> Option<serde_json::Value> {
+    let translated = match block {
         ContentBlock::Text { text } => serde_json::json!({"type": "text", "text": text}),
         ContentBlock::Image { mime, base64, .. } => match validate_image(mime, base64) {
             Ok(_) => serde_json::json!({
@@ -307,7 +326,27 @@ fn translate_block(block: &ContentBlock) -> serde_json::Value {
             "content": content,
             "is_error": is_error,
         }),
-    }
+        ContentBlock::Thinking { text, signature } => match signature {
+            // Signed thinking (what api.anthropic.com always sends) goes
+            // back verbatim: a tool-call turn whose thinking is missing is
+            // rejected.
+            Some(signature) => serde_json::json!({
+                "type": "thinking",
+                "thinking": text,
+                "signature": signature,
+            }),
+            // Unsigned thinking comes from Anthropic-compatible backends
+            // that stream no signature_delta yet still reject a tool-call
+            // turn whose thinking is gone. Claude models reject unsigned
+            // blocks, so those history entries are dropped instead.
+            None if unsigned_ok => serde_json::json!({
+                "type": "thinking",
+                "thinking": text,
+            }),
+            None => return None,
+        },
+    };
+    Some(translated)
 }
 
 /// Merges adjacent same-role messages: the official endpoint auto-merges consecutive same-role
@@ -915,14 +954,17 @@ mod image_translation_tests {
     #[test]
     fn image_maps_to_anthropic_image_block() {
         let b64 = tiny_png_base64();
-        let out = translate_messages(&[Message {
-            role: Role::User,
-            content: vec![ContentBlock::Image {
-                id: Some("a".to_string()),
-                mime: "image/png".to_string(),
-                base64: b64.clone(),
+        let out = translate_messages(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    id: Some("a".to_string()),
+                    mime: "image/png".to_string(),
+                    base64: b64.clone(),
+                }],
             }],
-        }]);
+            "claude-sonnet-4-5",
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "user");
         let block = &out[0]["content"][0];
@@ -934,14 +976,17 @@ mod image_translation_tests {
 
     #[test]
     fn invalid_image_becomes_text_naming_constraint() {
-        let out = translate_messages(&[Message {
-            role: Role::User,
-            content: vec![ContentBlock::Image {
-                id: None,
-                mime: "image/tiff".to_string(),
-                base64: "aaaa".to_string(),
+        let out = translate_messages(
+            &[Message {
+                role: Role::User,
+                content: vec![ContentBlock::Image {
+                    id: None,
+                    mime: "image/tiff".to_string(),
+                    base64: "aaaa".to_string(),
+                }],
             }],
-        }]);
+            "claude-sonnet-4-5",
+        );
         let block = &out[0]["content"][0];
         assert_eq!(block["type"], "text");
         assert!(
@@ -954,14 +999,62 @@ mod image_translation_tests {
 
     #[test]
     fn text_tool_shapes_unchanged() {
-        let out = translate_messages(&[Message {
-            role: Role::Assistant,
-            content: vec![ContentBlock::ToolUse {
-                id: "t1".to_string(),
-                name: "read_file".to_string(),
-                input: serde_json::json!({"path": "a"}),
+        let out = translate_messages(
+            &[Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "t1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "a"}),
+                }],
             }],
-        }]);
+            "claude-sonnet-4-5",
+        );
         assert_eq!(out[0]["content"][0]["type"], "tool_use");
+    }
+
+    /// A signed thinking block goes back verbatim on a tool-call turn (the
+    /// API rejects the turn if its thinking is gone); an unsigned one is
+    /// preserved for Anthropic-compatible models, which stream no signature
+    /// yet still require the block, and dropped for Claude models, which
+    /// reject unsigned blocks outright.
+    #[test]
+    fn thinking_blocks_round_trip_per_model() {
+        let history = |signature: Option<&str>| {
+            vec![Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "weighing options".to_string(),
+                        signature: signature.map(str::to_string),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "t1".to_string(),
+                        name: "read_file".to_string(),
+                        input: serde_json::json!({"path": "a"}),
+                    },
+                ],
+            }]
+        };
+
+        let signed = translate_messages(&history(Some("sig-1")), "claude-sonnet-4-5");
+        assert_eq!(signed[0]["content"][0]["type"], "thinking");
+        assert_eq!(signed[0]["content"][0]["thinking"], "weighing options");
+        assert_eq!(signed[0]["content"][0]["signature"], "sig-1");
+
+        // Claude + unsigned: the block cannot be sent, so it is dropped and
+        // the tool call still travels.
+        let claude_unsigned = translate_messages(&history(None), "claude-opus-4-1");
+        assert_eq!(claude_unsigned[0]["content"].as_array().unwrap().len(), 1);
+        assert_eq!(claude_unsigned[0]["content"][0]["type"], "tool_use");
+
+        // Anthropic-compatible model + unsigned: preserved without a signature.
+        let compat_unsigned = translate_messages(&history(None), "kimi-k2-thinking");
+        assert_eq!(compat_unsigned[0]["content"][0]["type"], "thinking");
+        assert_eq!(
+            compat_unsigned[0]["content"][0]["thinking"],
+            "weighing options"
+        );
+        assert!(compat_unsigned[0]["content"][0].get("signature").is_none());
     }
 }

@@ -112,6 +112,10 @@ fn from_content_block(block: &ContentBlock) -> Block {
             content: content.clone(),
             is_error: *is_error,
         },
+        ContentBlock::Thinking { text, signature } => Block::Thinking {
+            text: text.clone(),
+            signature: signature.clone(),
+        },
     }
 }
 

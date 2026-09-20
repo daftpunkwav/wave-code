@@ -32,7 +32,9 @@ pub fn render_plan(blocks: &[SampleBlock]) -> Vec<String> {
                 name,
                 input,
             } => Some(format!("run {name} ({call_id}) with {input}")),
-            SampleBlock::ToolResult { .. } | SampleBlock::Image { .. } => None,
+            SampleBlock::ToolResult { .. }
+            | SampleBlock::Image { .. }
+            | SampleBlock::Thinking { .. } => None,
         })
         .collect()
 }
@@ -65,7 +67,9 @@ pub fn summarize(blocks: &[SampleBlock]) -> PlanSummary {
         match block {
             SampleBlock::Text(_) => summary.speeches += 1,
             SampleBlock::ToolUse { .. } => summary.tool_calls += 1,
-            SampleBlock::ToolResult { .. } | SampleBlock::Image { .. } => {}
+            SampleBlock::ToolResult { .. }
+            | SampleBlock::Image { .. }
+            | SampleBlock::Thinking { .. } => {}
         }
     }
     summary
@@ -80,9 +84,10 @@ pub fn tool_names(blocks: &[SampleBlock]) -> Vec<&str> {
         .iter()
         .filter_map(|block| match block {
             SampleBlock::ToolUse { name, .. } => Some(name.as_str()),
-            SampleBlock::Text(_) | SampleBlock::ToolResult { .. } | SampleBlock::Image { .. } => {
-                None
-            }
+            SampleBlock::Text(_)
+            | SampleBlock::ToolResult { .. }
+            | SampleBlock::Image { .. }
+            | SampleBlock::Thinking { .. } => None,
         })
         .collect()
 }

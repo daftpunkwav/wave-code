@@ -19,12 +19,16 @@ use crate::{LlmError, Result, StreamEvent, Usage};
 ///
 /// Stateful: records the input_tokens reported by `message_start` (a repeated
 /// one replaces, never accumulates) and returns them when synthesizing
-/// [`StreamEvent::MessageComplete`] on `message_delta`.
+/// [`StreamEvent::MessageComplete`] on `message_delta`. Also accumulates an
+/// open thinking block's text and signature so its end can hand the whole
+/// block over in one [`StreamEvent::ThinkingComplete`].
 #[derive(Default)]
 pub struct SseParser {
     input_tokens: u64,
     cache_read_tokens: u64,
     cache_creation_tokens: u64,
+    /// Open thinking block: `(text, signature)`; `None` outside one.
+    thinking: Option<(String, Option<String>)>,
 }
 
 impl SseParser {
@@ -45,7 +49,9 @@ impl SseParser {
     ///   `thinking_delta` becomes [`StreamEvent::ThinkingDelta`],
     ///   `signature_delta` becomes [`StreamEvent::SignatureDelta`],
     ///   `input_json_delta` becomes [`StreamEvent::ToolUseInputDelta`], others are ignored;
-    /// - `content_block_stop`: [`StreamEvent::BlockEnd`];
+    /// - `content_block_stop`: [`StreamEvent::ThinkingComplete`] when the block
+    ///   that just closed was a reasoning block (carrying its whole text and
+    ///   signature, so history can send it back), otherwise [`StreamEvent::BlockEnd`];
     /// - `message_delta`: synthesize [`StreamEvent::MessageComplete`] (with the accumulated
     ///   input_tokens and cache counters; a null `stop_reason` is treated as an empty string);
     /// - `error`: classified via `classify_api_error` - the too-long shape becomes
@@ -62,7 +68,19 @@ impl SseParser {
                 // Assignment, never accumulation: one stream declares exactly
                 // one message_start, so a duplicated one (broken proxy) must
                 // replace the counters instead of doubling them.
-                self.input_tokens = ev.message.usage.input_tokens;
+                //
+                // Anthropic's `input_tokens` is the uncached remainder, so the
+                // full prompt is the sum of the three counters (see
+                // [`crate::Usage::input_tokens`]); the context meter and the
+                // compaction budget compare the sum against the window, and a
+                // warm cache would otherwise make a 100k-token prompt read as
+                // a handful of fresh tokens.
+                self.input_tokens = ev
+                    .message
+                    .usage
+                    .input_tokens
+                    .saturating_add(ev.message.usage.cache_read_input_tokens)
+                    .saturating_add(ev.message.usage.cache_creation_input_tokens);
                 self.cache_read_tokens = ev.message.usage.cache_read_input_tokens;
                 self.cache_creation_tokens = ev.message.usage.cache_creation_input_tokens;
                 Ok(None)
@@ -74,7 +92,11 @@ impl SseParser {
                     StartedBlock::ToolUse { id, name } => {
                         Ok(Some(StreamEvent::ToolUseBegin { id, name }))
                     }
-                    StartedBlock::Text | StartedBlock::Thinking | StartedBlock::Other => Ok(None),
+                    StartedBlock::Thinking => {
+                        self.thinking = Some((String::new(), None));
+                        Ok(None)
+                    }
+                    StartedBlock::Text | StartedBlock::Other => Ok(None),
                 }
             }
             "content_block_delta" => {
@@ -82,9 +104,20 @@ impl SseParser {
                 match ev.delta {
                     Delta::TextDelta { text } => Ok(Some(StreamEvent::TextDelta { text })),
                     Delta::ThinkingDelta { thinking } => {
+                        if let Some((text, _)) = self.thinking.as_mut() {
+                            text.push_str(&thinking);
+                        }
                         Ok(Some(StreamEvent::ThinkingDelta { text: thinking }))
                     }
                     Delta::SignatureDelta { signature } => {
+                        if let Some((_, slot)) = self.thinking.as_mut() {
+                            // Concatenate: the signature is one opaque token
+                            // split across deltas on some gateways.
+                            match slot {
+                                Some(existing) => existing.push_str(&signature),
+                                None => *slot = Some(signature.clone()),
+                            }
+                        }
                         Ok(Some(StreamEvent::SignatureDelta { signature }))
                     }
                     Delta::InputJsonDelta { partial_json } => {
@@ -93,7 +126,12 @@ impl SseParser {
                     Delta::Other => Ok(None),
                 }
             }
-            "content_block_stop" => Ok(Some(StreamEvent::BlockEnd)),
+            "content_block_stop" => match self.thinking.take() {
+                Some((text, signature)) => {
+                    Ok(Some(StreamEvent::ThinkingComplete { text, signature }))
+                }
+                None => Ok(Some(StreamEvent::BlockEnd)),
+            },
             "message_delta" => {
                 let ev: MessageDeltaEvent = serde_json::from_value(value)?;
                 Ok(Some(StreamEvent::MessageComplete {
@@ -518,8 +556,10 @@ mod tests {
         assert!(p.feed("{not json").is_err());
     }
 
-    /// Extended-thinking blocks surface as ThinkingDelta / SignatureDelta and
-    /// never break the surrounding text/tool events.
+    /// Extended-thinking blocks surface as ThinkingDelta / SignatureDelta and,
+    /// at the block's end, one ThinkingComplete carrying the whole block so
+    /// history can send it back on the next tool round. The surrounding
+    /// text/tool events are untouched.
     #[test]
     fn parses_thinking_and_signature_deltas() {
         let mut p = SseParser::new();
@@ -536,30 +576,62 @@ mod tests {
             })
         );
         assert_eq!(
-            p.feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig9"}}"#)
+            p.feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" check"}}"#)
                 .unwrap(),
-            Some(StreamEvent::SignatureDelta {
-                signature: "sig9".into()
+            Some(StreamEvent::ThinkingDelta {
+                text: " check".into()
             })
         );
-        // The thinking block ends like any other block.
+        assert_eq!(
+            p.feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#)
+                .unwrap(),
+            Some(StreamEvent::SignatureDelta {
+                signature: "sig".into()
+            })
+        );
+        // A split signature concatenates instead of replacing.
+        assert_eq!(
+            p.feed(r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"9"}}"#)
+                .unwrap(),
+            Some(StreamEvent::SignatureDelta {
+                signature: "9".into()
+            })
+        );
+        // The block's end hands over the accumulated reasoning block.
         assert_eq!(
             p.feed(r#"{"type":"content_block_stop","index":0}"#)
+                .unwrap(),
+            Some(StreamEvent::ThinkingComplete {
+                text: "let me check".into(),
+                signature: Some("sig9".into()),
+            })
+        );
+        // Text blocks still close with a plain BlockEnd.
+        assert!(
+            p.feed(r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            p.feed(r#"{"type":"content_block_stop","index":1}"#)
                 .unwrap(),
             Some(StreamEvent::BlockEnd)
         );
         // A redacted_thinking block (no deltas) is ignored like Other.
         assert!(
-            p.feed(r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"x"}}"#)
+            p.feed(r#"{"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","data":"x"}}"#)
                 .unwrap()
                 .is_none()
         );
     }
 
-    /// Cache counters from message_start flow into MessageComplete.usage;
-    /// gateways that omit them degrade to 0 without breaking the stream.
+    /// Cache counters from message_start flow into MessageComplete.usage, and
+    /// the cache portions are folded into `input_tokens`: a cache hit means
+    /// most of the prompt is served from cache, and the context meter must
+    /// still see the whole prompt. Gateways that omit the counters degrade to
+    /// 0 without breaking the stream.
     #[test]
-    fn cache_usage_accumulates() {
+    fn cache_usage_accumulates_into_the_full_prompt() {
         let mut p = SseParser::new();
         assert!(
             p.feed(r#"{"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":7}}}"#)
@@ -574,7 +646,8 @@ mod tests {
             Some(StreamEvent::MessageComplete {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
-                    input_tokens: 10,
+                    // 10 uncached + 100 read + 7 written.
+                    input_tokens: 117,
                     output_tokens: 3,
                     cache_read_tokens: 100,
                     cache_creation_tokens: 7,

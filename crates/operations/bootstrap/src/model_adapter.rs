@@ -120,6 +120,10 @@ pub(crate) fn to_content_block(block: &Block) -> ContentBlock {
             mime: mime.clone(),
             base64: base64.clone(),
         },
+        Block::Thinking { text, signature } => ContentBlock::Thinking {
+            text: text.clone(),
+            signature: signature.clone(),
+        },
     }
 }
 
@@ -288,15 +292,28 @@ impl ModelGateway for ModelAdapter {
                     on_delta(SampleDelta::Text(delta));
                 }
                 StreamEvent::ThinkingDelta { text } => {
-                    // Thinking is per-turn reasoning: forwarded for live
-                    // display, never folded into the block list (the text
-                    // seam does not round-trip signed thinking blocks).
+                    // Forwarded for live display; the whole block arrives
+                    // again in `ThinkingComplete`, which is what history keeps
+                    // (providers that require the block back — Anthropic on a
+                    // tool-call turn — read it from there).
                     on_delta(SampleDelta::Thinking(text));
                 }
                 StreamEvent::SignatureDelta { .. } => {
-                    // Signature deltas only matter for consumers that
-                    // round-trip signed thinking blocks; this adapter does
-                    // not, so the delta is dropped here by design.
+                    // Signatures only matter for the preserved block; the
+                    // parser accumulates them and reports them with
+                    // `ThinkingComplete`.
+                }
+                StreamEvent::ThinkingComplete {
+                    text: thinking,
+                    signature,
+                } => {
+                    if !thinking.is_empty() {
+                        flush_text(&mut text, &mut blocks);
+                        blocks.push(SampleBlock::Thinking {
+                            text: thinking,
+                            signature,
+                        });
+                    }
                 }
                 StreamEvent::ToolUseBegin { id, name } => {
                     flush_text(&mut text, &mut blocks);

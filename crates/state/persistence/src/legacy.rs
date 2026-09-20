@@ -104,6 +104,8 @@ fn journal_path(root: &Path, thread_id: &str) -> Result<PathBuf, LegacyError> {
 ///
 /// Text blocks pass through; tool calls collapse to one bracketed line
 /// each so pairing structure survives without the old block schema.
+/// Reasoning blocks are dropped: the import seam is text-only, and reasoning
+/// has no text meaning outside its own provider turn.
 fn message_text(message: &Message) -> (bool, String) {
     let from_model = matches!(message.role, Role::Assistant);
     let mut parts = Vec::new();
@@ -121,6 +123,7 @@ fn message_text(message: &Message) -> (bool, String) {
                     parts.push(content.clone());
                 }
             }
+            ContentBlock::Thinking { .. } => {}
         }
     }
     (from_model, parts.join("\n"))

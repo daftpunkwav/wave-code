@@ -638,6 +638,15 @@ pub const MAX_REPEAT_STREAK: u32 = 12;
 /// (a falsification check, then a request for the missing input, then an
 /// instruction to conclude). Each fires once per streak.
 pub const REPEAT_REMINDER_AT: [u32; 3] = [3, 5, 8];
+/// How many images the wire projection keeps per request (default for
+/// [`RunConfig::max_wire_images`]).
+///
+/// Images are the densest blocks in a conversation (a single screenshot is
+/// worth more tokens than a whole tool round), and old ones rarely change the
+/// next decision, so a long session keeps only the newest few on the wire.
+/// Every dropped image leaves a visible text placeholder — never a silent
+/// drop — and the stored history is untouched.
+pub const MAX_WIRE_IMAGES: u32 = 2;
 /// Byte budget of the per-call output preview carried on the wire with
 /// [`EventMsg::ToolCallEnd`]. Full results stay in conversation history;
 /// this bound keeps event frames small for slow transports.
@@ -666,6 +675,10 @@ pub struct RunConfig {
     /// Consecutive identical tool-call repeats that force the turn to stop
     /// (see [`MAX_REPEAT_STREAK`]); `0` disables the breaker entirely.
     pub max_repeat_streak: u32,
+    /// Images kept per sampled request, counted from the newest backwards;
+    /// older images travel as text placeholders (0 keeps every image, for
+    /// callers that want full fidelity).
+    pub max_wire_images: u32,
     /// Calendar date rendered into the system prompt at assembly
     /// ([`infrastructure_base::format_date`] format). The loop compares it
     /// with the current date before sampling and injects a one-off reminder
@@ -1215,7 +1228,7 @@ where
 
             let request = SampleRequest {
                 system: system.to_string(),
-                messages: history_messages(conv),
+                messages: project_images(&history_messages(conv), self.cfg.max_wire_images),
                 // Restricted runs never see denied tools: the model plans
                 // within its surface instead of hitting refusals.
                 tools: self
@@ -2198,6 +2211,48 @@ fn history_messages(conv: &Conversation) -> Vec<HistoryEntry> {
     conv.snapshot().as_ref().clone()
 }
 
+/// Keep only the newest `keep` images in a request projection; every older
+/// image block becomes a text placeholder naming what was dropped.
+///
+/// Sampling and compaction both go through here: an image-heavy session
+/// would otherwise carry every past screenshot in every request, and one
+/// screenshot is worth more tokens than a whole tool round. `keep == 0`
+/// disables the projection (full fidelity), and the stored conversation is
+/// never modified — only the wire copy is.
+fn project_images(entries: &[HistoryEntry], keep: u32) -> Vec<HistoryEntry> {
+    if keep == 0 {
+        return entries.to_vec();
+    }
+    let total = entries
+        .iter()
+        .flat_map(|entry| entry.blocks.iter())
+        .filter(|block| matches!(block, state_store::Block::Image { .. }))
+        .count();
+    let mut seen = 0usize;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut projected = entry.clone();
+        for block in &mut projected.blocks {
+            let state_store::Block::Image { mime, id, .. } = block else {
+                continue;
+            };
+            seen += 1;
+            if total.saturating_sub(seen) < keep as usize {
+                continue;
+            }
+            let label = id
+                .as_deref()
+                .map(|label| format!(": {label}"))
+                .unwrap_or_default();
+            *block = state_store::Block::Text(format!(
+                "[image {mime}{label} omitted from this request: only the newest {keep}                  image(s) are sent to save context]"
+            ));
+        }
+        out.push(projected);
+    }
+    out
+}
+
 /// Display name of one compaction trigger for event payloads.
 fn trigger_name(trigger: &CompactTrigger) -> &'static str {
     match trigger {
@@ -2589,6 +2644,7 @@ mod run_loop_tests {
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
                 session_date: None,
             },
             interrupt,
@@ -3211,6 +3267,7 @@ mod run_loop_tests {
                     max_stop_blocks: MAX_STOP_BLOCKS,
                     max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                     max_repeat_streak: MAX_REPEAT_STREAK,
+                    max_wire_images: MAX_WIRE_IMAGES,
                     session_date: None,
                 },
                 fx.interrupt.clone(),
@@ -3423,6 +3480,7 @@ mod run_loop_tests {
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
                 session_date: None,
             },
             fx.interrupt.clone(),
@@ -3853,6 +3911,7 @@ mod run_loop_tests {
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
                 session_date: None,
             },
             fx.interrupt.clone(),
@@ -4206,6 +4265,7 @@ mod run_loop_tests {
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
                 session_date: None,
             },
             fx.interrupt.clone(),
@@ -4281,6 +4341,7 @@ mod run_loop_tests {
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
                 session_date: None,
             },
             fx.interrupt.clone(),
@@ -4348,6 +4409,7 @@ mod run_loop_tests {
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak,
+                max_wire_images: MAX_WIRE_IMAGES,
                 session_date: session_date.map(str::to_string),
             },
             interrupt,
@@ -4578,5 +4640,53 @@ mod run_loop_tests {
             1,
             "{history}"
         );
+    }
+
+    /// The wire projection keeps only the newest images and leaves visible
+    /// placeholders for the rest; the stored history is untouched.
+    #[test]
+    fn image_projection_keeps_only_the_newest_images() {
+        let shot = |name: &str| HistoryEntry {
+            role: Role::User,
+            blocks: vec![
+                state_store::Block::Text(format!("look at {name}")),
+                state_store::Block::Image {
+                    id: Some(name.to_string()),
+                    mime: "image/png".to_string(),
+                    base64: "aGk=".to_string(),
+                },
+            ],
+        };
+        let history = vec![shot("first"), shot("second"), shot("third")];
+        let projected = project_images(&history, 2);
+        // Newest two keep their payload.
+        assert!(matches!(
+            projected[1].blocks[1],
+            state_store::Block::Image { .. }
+        ));
+        assert!(matches!(
+            projected[2].blocks[1],
+            state_store::Block::Image { .. }
+        ));
+        // The oldest becomes a placeholder naming why, with its label kept.
+        match &projected[0].blocks[1] {
+            state_store::Block::Text(text) => {
+                assert!(text.contains("omitted from this request"), "{text}");
+                assert!(text.contains("first"), "{text}");
+                assert!(text.contains("newest 2"), "{text}");
+            }
+            other => panic!("expected a text placeholder, got {other:?}"),
+        }
+        // The caller's conversation is never modified.
+        assert!(matches!(
+            history[0].blocks[1],
+            state_store::Block::Image { .. }
+        ));
+        // keep == 0 disables the projection entirely.
+        let full = project_images(&history, 0);
+        assert!(matches!(
+            full[0].blocks[1],
+            state_store::Block::Image { .. }
+        ));
     }
 }

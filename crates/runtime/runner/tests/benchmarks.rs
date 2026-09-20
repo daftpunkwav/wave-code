@@ -183,6 +183,7 @@ fn bench_config() -> RunConfig {
         max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
         max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
         max_repeat_streak: 0,
+        max_wire_images: 0,
         session_date: None,
         max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
     }

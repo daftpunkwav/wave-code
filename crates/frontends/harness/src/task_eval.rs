@@ -694,6 +694,51 @@ mod tests {
     }
 
     #[test]
+    fn the_cli_handler_reports_a_failing_suite() {
+        // End to end through the same entry point `wavecode eval tasks`
+        // uses, with no model: `--agent-bin` points the agent step at this
+        // test binary, which cannot run a turn, so every task must come back
+        // failed and the handler must say so. One task only, to keep the
+        // spawned child a single quick process.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("report.json");
+        let ok = run_tasks(TasksRequest {
+            tasks_dir: committed_tasks_dir(),
+            filter: Some("write-hello".to_string()),
+            tag: None,
+            work_root: Some(dir.path().join("work")),
+            agent_bin: Some(std::env::current_exe().unwrap()),
+            forward: Vec::new(),
+            json: false,
+            out: Some(out.clone()),
+        })
+        .expect("the handler runs offline");
+        assert!(!ok, "an agent that cannot run a turn must not pass");
+        assert!(dir.path().join("work").join("write-hello").is_dir());
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(report["total"], 1);
+        assert_eq!(report["passed"], 0);
+        assert_eq!(report["tasks"][0]["id"], "write-hello");
+    }
+
+    #[test]
+    fn a_missing_tasks_directory_is_an_error_not_an_empty_pass() {
+        let err = run_tasks(TasksRequest {
+            tasks_dir: PathBuf::from("no-such-suite"),
+            filter: None,
+            tag: None,
+            work_root: None,
+            agent_bin: None,
+            forward: Vec::new(),
+            json: false,
+            out: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("no task directory"), "{err}");
+    }
+
+    #[test]
     fn copy_tree_merges_and_keeps_nested_layout() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
@@ -710,15 +755,20 @@ mod tests {
         );
     }
 
-    /// The committed suite, loaded the way the CLI loads it.
-    fn committed_suite() -> Vec<TaskSpec> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+    /// Where the committed suite lives — resolved from this crate's manifest
+    /// dir so the test never depends on the caller's working directory.
+    fn committed_tasks_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("..")
             .join("benchmarks")
-            .join("tasks");
-        let (specs, errors) = load_tasks(&dir);
+            .join("tasks")
+    }
+
+    /// The committed suite, loaded the way the CLI loads it.
+    fn committed_suite() -> Vec<TaskSpec> {
+        let (specs, errors) = load_tasks(&committed_tasks_dir());
         assert!(
             errors.is_empty(),
             "every committed manifest must load: {errors:?}"

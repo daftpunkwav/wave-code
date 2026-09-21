@@ -8,7 +8,9 @@ license.workspace = true
 runtime-runner = { path = "../../runtime/runner" }
 state-store = { path = "../../state/store" }
 wavecode-wire = { path = "../../foundation/wire" }
+serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 

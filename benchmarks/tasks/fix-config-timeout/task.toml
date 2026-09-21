@@ -1,0 +1,26 @@
+id = "fix-config-timeout"
+prompt = """README.md states the requirement the client config has to meet. Bring app.toml in line with it without changing any other key, and leave notes/ alone."""
+fixture = "workspace"
+tags = ["basic", "edit"]
+
+[[assertion]]
+kind = "file_contains"
+path = "app.toml"
+text = "timeout = 30"
+
+[[assertion]]
+kind = "file_not_contains"
+path = "app.toml"
+# The newline anchors the value: `timeout = 3` is a prefix of `timeout = 30`.
+text = """
+timeout = 3
+"""
+
+[[assertion]]
+kind = "file_contains"
+path = "app.toml"
+text = "retry = 2"
+
+[[assertion]]
+kind = "file_unchanged"
+path = "notes/release.txt"

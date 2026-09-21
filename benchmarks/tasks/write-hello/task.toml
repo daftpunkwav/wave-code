@@ -1,0 +1,13 @@
+id = "write-hello"
+prompt = """Create hello.txt in this workspace containing exactly the text `wavecode-smoke-ok` with no trailing newline. Do not touch README.md."""
+fixture = "workspace"
+tags = ["basic", "create"]
+
+[[assertion]]
+kind = "file_equals"
+path = "hello.txt"
+content = "wavecode-smoke-ok"
+
+[[assertion]]
+kind = "file_unchanged"
+path = "README.md"

@@ -1,0 +1,15 @@
+id = "make-test-pass"
+prompt = """Implement `word_count` in src/lib.rs so that every test in the crate passes. Do not change or delete the tests."""
+fixture = "workspace"
+tags = ["rust", "implement"]
+
+[[assertion]]
+kind = "file_not_contains"
+path = "src/lib.rs"
+text = "unimplemented!"
+
+[[assertion]]
+kind = "command"
+program = "cargo"
+args = ["test", "--offline"]
+timeout_secs = 300

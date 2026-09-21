@@ -1,0 +1,13 @@
+id = "sum-data"
+prompt = """Write total.txt containing the number of tickets closed across the whole week in data/week.csv, as digits only with no trailing newline. Leave data/ untouched."""
+fixture = "workspace"
+tags = ["basic", "read-and-write"]
+
+[[assertion]]
+kind = "file_equals"
+path = "total.txt"
+content = "49"
+
+[[assertion]]
+kind = "file_unchanged"
+path = "data/week.csv"

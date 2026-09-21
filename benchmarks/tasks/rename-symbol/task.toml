@@ -1,0 +1,20 @@
+id = "rename-symbol"
+prompt = """Rename the public function `fetch_rows` to `load_events` everywhere it is defined or used in this workspace. Behaviour must not change."""
+fixture = "workspace"
+tags = ["edit", "multi-file"]
+
+[[assertion]]
+kind = "file_not_contains"
+path = "src/lib.rs"
+text = "fetch_rows"
+
+[[assertion]]
+kind = "file_contains"
+path = "src/report.rs"
+text = "load_events"
+
+[[assertion]]
+kind = "command"
+program = "cargo"
+args = ["test", "--offline"]
+timeout_secs = 300

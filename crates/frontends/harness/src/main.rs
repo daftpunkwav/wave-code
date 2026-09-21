@@ -30,6 +30,7 @@ use uuid::Uuid;
 use wavecode_wire::{EventMsg, Op, Submission, WireDecision};
 
 mod logging;
+mod task_eval;
 mod update;
 
 /// Single-turn headless execution and interactive REPL over the new stack.
@@ -148,6 +149,13 @@ enum Command {
         #[command(subcommand)]
         command: GrantsCommand,
     },
+    /// Task-level benchmark suites: each task runs a real turn over a
+    /// throwaway copy of a fixture and is judged by its assertions.
+    Eval {
+        /// Eval surface to run.
+        #[command(subcommand)]
+        command: EvalCommand,
+    },
     /// Serve live sessions over local HTTP (REST + SSE). Binds the
     /// loopback interface only; the bearer token prints on startup.
     Serve {
@@ -186,6 +194,40 @@ enum GrantsCommand {
     },
     /// Revoke every stored grant.
     Clear,
+}
+
+/// Task-level benchmark surfaces.
+#[derive(Debug, clap::Subcommand)]
+enum EvalCommand {
+    /// Run every task manifest in a directory against a real model.
+    ///
+    /// Each task copies its fixture into a throwaway work root, drives one
+    /// `exec` turn there, then judges the workspace. Unattended runs need
+    /// room to act: pass `--permission-mode wave` (or grant ahead of time),
+    /// otherwise a parked approval denies and the task fails.
+    Tasks {
+        /// Directory holding `task.toml` manifests, searched recursively.
+        #[arg(long, default_value = "benchmarks/tasks")]
+        dir: PathBuf,
+        /// Keep only tasks whose id contains this substring.
+        #[arg(long)]
+        filter: Option<String>,
+        /// Keep only tasks carrying this exact tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Where per-task work roots are created (default: a temp directory).
+        #[arg(long)]
+        work_root: Option<PathBuf>,
+        /// `wavecode` binary each task drives (default: this executable).
+        #[arg(long)]
+        agent_bin: Option<PathBuf>,
+        /// Print the report as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+        /// Also write the JSON report to this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 /// The permission mode the session should start in: an explicit
@@ -502,6 +544,52 @@ async fn main() -> anyhow::Result<()> {
             Outcome::Failed.exit_code()
         })
     }
+    // Eval assembles no session of its own: every task spawns its own
+    // `exec` child, which reads credentials and config from the same place
+    // an interactive run does. The flags that steer a turn are forwarded.
+    if let Some(Command::Eval {
+        command:
+            EvalCommand::Tasks {
+                dir,
+                filter,
+                tag,
+                work_root,
+                agent_bin,
+                json,
+                out,
+            },
+    }) = args.command
+    {
+        let mut forward = Vec::new();
+        if let Some(config) = args.config.as_deref() {
+            forward.extend([
+                "--config".to_string(),
+                config.to_string_lossy().into_owned(),
+            ]);
+        }
+        if let Some(model) = args.model.as_deref() {
+            forward.push("--model".to_string());
+            forward.push(model.to_string());
+        }
+        if let Some(mode) = permission_mode.as_deref() {
+            forward.extend(["--permission-mode".to_string(), mode.to_string()]);
+        }
+        let ok = task_eval::run_tasks(task_eval::TasksRequest {
+            tasks_dir: dir,
+            filter,
+            tag,
+            work_root,
+            agent_bin,
+            forward,
+            json,
+            out,
+        })?;
+        std::process::exit(if ok {
+            Outcome::Completed.exit_code()
+        } else {
+            Outcome::Failed.exit_code()
+        })
+    }
     // Update check talks only to the GitHub releases API: no session
     // assembly, no provider credentials. A failed probe exits 1 so
     // scripts can tell "no update" from "could not tell".
@@ -609,13 +697,15 @@ async fn main() -> anyhow::Result<()> {
             run_resume(thread_id, permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        // Mcp/Plugin/Acp/Doctor/Grants/Update/Serve return before assembly above.
+        // Mcp/Plugin/Acp/Doctor/Metrics/Grants/Eval/Update/Serve return
+        // before assembly above.
         Some(Command::Mcp { .. })
         | Some(Command::Plugin { .. })
         | Some(Command::Acp)
         | Some(Command::Doctor)
         | Some(Command::Metrics { .. })
         | Some(Command::Grants { .. })
+        | Some(Command::Eval { .. })
         | Some(Command::Update)
         | Some(Command::Serve { .. }) => {
             unreachable!("early-return surfaces never reach assembly")
@@ -3005,8 +3095,8 @@ model = "m2"
 
     /// Crate boundary: the binary's workspace edges stay exactly the
     /// composition it was assembled against (actor, bootstrap, observe,
-    /// wire, persistence, config, tui). New internal deps need a deliberate
-    /// matrix update, not a silent Cargo.toml line.
+    /// eval, wire, persistence, config, tui). New internal deps need a
+    /// deliberate matrix update, not a silent Cargo.toml line.
     #[test]
     fn dependency_matrix_locked() {
         let mut in_deps = false;
@@ -3028,6 +3118,7 @@ model = "m2"
                 "console-ui",
                 "operations-actor",
                 "operations-bootstrap",
+                "operations-eval",
                 "operations-observe",
                 "state-persistence",
                 "wavecode-config",

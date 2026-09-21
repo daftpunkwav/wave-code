@@ -727,6 +727,7 @@ dependencies = [
  "console-ui",
  "operations-actor",
  "operations-bootstrap",
+ "operations-eval",
  "operations-observe",
  "reqwest",
  "rustyline",
@@ -1303,10 +1304,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "runtime-runner",
+ "serde",
  "serde_json",
  "state-store",
  "tempfile",
  "tokio",
+ "toml",
  "wavecode-wire",
 ]
 

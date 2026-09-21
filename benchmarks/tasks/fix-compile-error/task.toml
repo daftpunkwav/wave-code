@@ -1,0 +1,10 @@
+id = "fix-compile-error"
+prompt = """This crate does not compile. Fix the error with the smallest change that keeps `bump` adding two, as its test specifies."""
+fixture = "workspace"
+tags = ["rust", "fix"]
+
+[[assertion]]
+kind = "command"
+program = "cargo"
+args = ["test", "--offline"]
+timeout_secs = 300

@@ -1,0 +1,7 @@
+[package]
+name = "rename-symbol"
+version = "0.1.0"
+edition = "2021"
+
+# Detaches this fixture from any enclosing cargo workspace.
+[workspace]

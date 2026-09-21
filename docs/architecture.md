@@ -162,7 +162,7 @@ feature, and move it out of this table in the same change that wires it up.
 | Unwired crate | Why it is not reachable |
 | --- | --- |
 | `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
-| `operations-replay`, `operations-eval`, `operations-simulate`, `operations-notify` | Library-only: no binary or adapter consumes them, so structural replay and behavioural benchmarks are not product features yet |
+| `operations-replay`, `operations-simulate`, `operations-notify` | Library-only: no binary or adapter consumes them, so structural replay and scenario simulation are not product features yet (`operations-eval` left this list when `wavecode eval tasks` started consuming it) |
 | `action-kit`, `action-browser`, `action-retrieval` | The tool registry and the browser/retrieval seams have no implementer or consumer; `wavecode-tools` owns the live registry |
 | `infrastructure-cache`, `infrastructure-config`, `infrastructure-coord`, `infrastructure-routing` | Unused primitives: config layering, leases, and the route/fallback chain are each still hand-rolled where they are needed |
 | `runtime-capability`, `runtime-identity`, `runtime-skills` | The live skill path is `wavecode-skills` + `bootstrap`; these are parallel, unconsumed models of the same idea |

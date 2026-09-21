@@ -1,0 +1,18 @@
+id = "append-changelog"
+prompt = """The session timeout fix (client timeout raised from 3 to 30 seconds) needs a bullet under `## Unreleased` in CHANGELOG.md. Keep every existing line and heading; do not bump the package version."""
+fixture = "workspace"
+tags = ["basic", "edit"]
+
+[[assertion]]
+kind = "file_contains"
+path = "CHANGELOG.md"
+text = "## 1.3.0 - 2026-08-14"
+
+[[assertion]]
+kind = "file_contains"
+path = "CHANGELOG.md"
+text = "timeout"
+
+[[assertion]]
+kind = "file_unchanged"
+path = "Cargo.toml"

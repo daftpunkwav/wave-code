@@ -1,26 +1,35 @@
 /*!
  * @file Eval
- * @description Behavioural benchmarks and recorded-session replay checks.
+ * @description Behavioural benchmarks, recorded-session replay, task scoring.
  *
  * Responsibilities:
  * - Run scripted cases with fresh conversations each.
  * - Check history for expected content per case.
  * - Validate recorded wire-event sessions against the protocol contract
  *   and score their assistant output (keyless regression tier).
+ * - Score task-level benchmarks: assertions over a workspace an agent just
+ *   modified, aggregated into a pass rate (the `task` module).
  * - Report pass rates without touching execution.
  *
- * This module must not depend on: concrete drivers, tools, or models.
- * Cases run through the TurnDriver seam with dropped events; replay is a
- * pure read-only fold over recorded events.
+ * This module must not depend on: concrete drivers, tools, models, or
+ * processes. Cases run through the TurnDriver seam with dropped events,
+ * replay is a pure read-only fold over recorded events, and task scoring
+ * judges observations a caller hands back through `World`.
  */
 
 //! Evaluation: scripted expectations against observable history.
 
 mod replay;
+mod task;
 
 pub use replay::{
     RecordedCase, ReplayReport, ReplayResult, evaluate_recorded, read_events_jsonl,
     validate_contract,
+};
+pub use task::{
+    AgentRecord, Assertion, AssertionResult, CommandOutput, DEFAULT_AGENT_TIMEOUT_SECS,
+    DEFAULT_CHECK_TIMEOUT_SECS, MANIFEST_NAME, OUTPUT_TAIL_CHARS, SuiteReport, TaskLoadError,
+    TaskScore, TaskSpec, World, load_tasks, parse_task, score_assertion, score_task, tail_of,
 };
 
 use runtime_runner::{RunContext, StopReason, TurnDriver, TurnInput};

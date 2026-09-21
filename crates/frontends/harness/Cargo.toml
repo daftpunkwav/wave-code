@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 operations-actor = { path = "../../operations/actor" }
 operations-bootstrap = { path = "../../operations/bootstrap" }
+operations-eval = { path = "../../operations/eval" }
 operations-observe = { path = "../../operations/observe" }
 wavecode-wire = { path = "../../foundation/wire" }
 wavecode-tools = { path = "../../capabilities/tools" }

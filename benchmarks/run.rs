@@ -1,17 +1,19 @@
 /*!
  * @file BenchmarkHarness
- * @description Documented spec for offline benches and replay goldens.
+ * @description Documented spec for offline benches, replay goldens, tasks.
  *
  * Responsibilities:
  * - Document bench foci, bounds, reports, and baseline policy.
  * - Mirror the executable integration tests in readable form.
  * - Define fixture shapes and live-gate behavior for humans.
+ * - State the task-level suite's judging rules and offline gates.
  *
  * This module must not depend on: any workspace crate. It is a plain
  * documented harness, not a cargo target; the executable form lives in
- * crates/runtime/runner/tests/benchmarks.rs and
- * crates/operations/replay/tests/snapshot_replay.rs. Keep this file in
- * sync with those tests when changing rounds, bounds, or fixtures.
+ * crates/runtime/runner/tests/benchmarks.rs,
+ * crates/operations/replay/tests/snapshot_replay.rs, and the `task_eval`
+ * module of crates/frontends/harness/src. Keep this file in sync with those
+ * tests when changing rounds, bounds, or fixture shapes.
  */
 
 //! Benchmark + snapshot-replay harness spec.
@@ -106,3 +108,52 @@ pub fn live_gate(live_var: Option<&str>, provider_key_present: bool) -> LiveDeci
 /// Committed transcript fixtures pinning user-visible replay behavior.
 /// Each file is a JSON array of wire events; see `fixtures/*.json`.
 pub const FIXTURES: &[&str] = &["basic", "approval", "interrupt", "truncation"];
+
+/// Task-level suite (`tasks/<id>/task.toml` + `workspace/`): the one tier
+/// that drives a real model. Lower bound on the committed task count, which
+/// `committed_tasks_are_well_formed` asserts against the directory itself —
+/// the list lives on disk, so this file only states the floor.
+pub const MIN_TASKS: usize = 8;
+
+/// How a task is judged. The agent edits a copy of `workspace/`; then:
+///
+/// - every assertion must hold, and
+/// - the turn must have ended cleanly (exit 0). A crashed, interrupted, or
+///   capped turn fails regardless of what the files look like, because a
+///   crash leaves no basis for trusting them.
+///
+/// Assertion kinds: `command` (argv, no shell, expected exit code),
+/// `file_equals`, `file_contains`, `file_not_contains`, `file_exists`,
+/// `file_absent`, and `file_unchanged` (byte-for-byte against the pre-turn
+/// copy — the check that a fix did not trample a neighbour).
+///
+/// Text comparisons normalize CRLF to LF, because the fixture reaches the
+/// work root through a git checkout whose line endings differ per platform.
+/// `file_unchanged` does not: "unchanged" means the same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskVerdict {
+    /// Turn clean, every assertion satisfied.
+    Pass,
+    /// Turn failed, or at least one assertion did not hold.
+    Fail,
+}
+
+/// The three offline gates that keep the suite worth running at all. They
+/// execute inside ordinary `cargo test` and need no credentials:
+///
+/// 1. well-formed — manifests load, ids are unique and match their
+///    directory, and a cargo fixture carries its own `[workspace]` table so
+///    the enclosing workspace cannot swallow it;
+/// 2. not already solved — the pristine fixture must fail an assertion, or
+///    the task hands out a free point;
+/// 3. solvable — a known-good end state must satisfy every assertion, so a
+///    mistyped expectation is caught here instead of by a live run.
+///
+/// Gate 2 and 3 skip `command` assertions on purpose: running them would put
+/// a real build on the critical path of every CI job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskGate {
+    WellFormed,
+    NotAlreadySolved,
+    Solvable,
+}

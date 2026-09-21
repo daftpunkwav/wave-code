@@ -20,6 +20,7 @@ wavecode --plan                        # start in plan mode (-y for auto mode)
 wavecode --debug                       # debug-level file logging (~/.wavecode/logs)
 wavecode metrics                       # per-model, per-tool quality report
 wavecode grants list                   # what "always allow" has been approving since
+wavecode eval tasks                    # task-level suite: real turns, judged workspaces
 wavecode doctor                        # validate local setup, no provider contact
 wavecode update                        # check for a newer published release
 ```
@@ -147,6 +148,17 @@ model = "your-model-fast"
   permission rules (invalid entries, and allows a deny rule shadows), the OS
   confinement backend, console settings, custom themes, and session records.
   Exit 1 when any check fails.
+- `eval tasks`: runs the task-level suite under `benchmarks/tasks/` (run it
+  from the repo root). Each task copies its fixture into a throwaway work
+  root, drives one real `exec` turn there, then judges the workspace with
+  assertions — a check command run by argv, or a file that must match,
+  contain, stop containing, exist, or stay byte-for-byte as it was. A task
+  passes only if the turn ended cleanly *and* every assertion holds, so a
+  crashed step cannot pass on files something else left behind. Costs real
+  tokens: this is a nightly measurement, not a per-PR gate. `--filter`,
+  `--tag`, `--json`, `--out <path>` and `--agent-bin <path>` (compare two
+  builds) narrow a run; `--permission-mode wave` is what lets an unattended
+  suite act at all. Exit 1 unless every selected task passes.
 
 Diagnostics: every surface logs to a daily rolling file under
 `~/.wavecode/logs/` (14 days retained), never to stdout/stderr, so the

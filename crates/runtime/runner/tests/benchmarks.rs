@@ -182,6 +182,7 @@ fn bench_config() -> RunConfig {
         max_continuations: runtime_runner::MAX_CONTINUATIONS,
         max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
         max_goal_continuations: runtime_runner::MAX_GOAL_CONTINUATIONS,
+        max_goal_rearms: runtime_runner::MAX_GOAL_REARMS,
         max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
         max_repeat_streak: 0,
         max_wire_images: 0,

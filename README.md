@@ -208,13 +208,16 @@ backend is live and how far it reaches.
 ## Long-running work
 
 - **Goals keep the turn going.** An objective recorded through the `goal` tool
-  (`/goal` shows its status; per home, CAS-versioned) steers the loop: when the
-  model stops making tool calls while the goal is still `Active`, the turn
-  continues — up to 5 times — and each continuation states what is left of the
-  context, tool-round and continuation budgets, so the model can wrap up instead
-  of opening work it cannot finish. Marking the goal `completed`, `blocked` or
-  `paused` stops the steering at once; those are statements that work should
-  stop, and the loop never writes goal state itself.
+  (`/goal` shows its status; per home, CAS-versioned) steers the loop twice
+  over: when the model stops making tool calls while the goal is still
+  `Active`, the turn continues — up to 5 times — and when the turn hits its
+  32-round ceiling with the goal still open, the ceiling re-arms — 8 ceilings
+  per turn, 256 rounds, matching the cap the goal driver sets on itself. Every
+  one of those nudges states what is left of the context, round, re-arm and
+  continuation budgets, so the model can wrap up instead of opening work it
+  cannot finish. Marking the goal `completed`, `blocked` or `paused` stops all
+  steering at once; those are statements that work should stop, and the loop
+  never writes goal state itself.
 - **History is durable per mutation.** Every conversation change appends a
   synced record to `~/.wavecode/sessions/<id>.history.jsonl`, so a crash costs
   at most the step that was in flight, a resumed session keeps its tool calls

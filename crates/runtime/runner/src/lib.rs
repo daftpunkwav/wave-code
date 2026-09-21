@@ -97,6 +97,9 @@ pub(crate) struct TurnState {
     pub(crate) total_cache_creation_tokens: u64,
     /// How many tool dispatch rounds have executed in this run.
     pub(crate) tool_rounds: u32,
+    /// Times the round ceiling has been re-armed because the session goal was
+    /// still open (see [`RunConfig::max_goal_rearms`]).
+    pub(crate) round_rearms: u8,
     /// Consecutive dispatch rounds whose tool-call signature matched the
     /// previous round's (0 = the last round differed or none ran yet).
     pub(crate) repeat_streak: u32,
@@ -637,6 +640,16 @@ pub const MAX_PLAN_NUDGES: u8 = 3;
 /// samples a history that only grows, so an open goal nudges a bounded number
 /// of times per turn instead of driving an unbounded loop.
 pub const MAX_GOAL_CONTINUATIONS: u8 = 5;
+/// Times one turn may re-arm the tool-round ceiling while the session goal is
+/// still open (default for [`RunConfig::max_goal_rearms`]).
+///
+/// Reaching `max_tool_rounds` with an open goal is the long-horizon case, not
+/// an error: the model was mid-objective when the ceiling cut it off. The
+/// default gives a turn 8 ceilings in total (the re-arm plus seven more),
+/// which at the shipped `DEFAULT_MAX_TOOL_ROUNDS = 32` is 256 rounds — the
+/// same cap `state-goal` puts on its own round driver, so the two notions of
+/// "how long is too long" cannot disagree. A closed goal never re-arms.
+pub const MAX_GOAL_REARMS: u8 = 7;
 /// Maximum Stop-hook blocks per turn before the loop proceeds anyway
 /// (default for [`RunConfig::max_stop_blocks`]).
 pub const MAX_STOP_BLOCKS: u8 = 3;
@@ -680,6 +693,8 @@ pub struct RunConfig {
     pub max_plan_nudges: u8,
     /// Goal-driven continuations per turn while the session goal stays open.
     pub max_goal_continuations: u8,
+    /// Round-ceiling re-arms per turn while the session goal stays open.
+    pub max_goal_rearms: u8,
     /// Stop-hook blocks per turn before the loop proceeds anyway.
     pub max_stop_blocks: u8,
     /// Reactive compactions per turn on overlong prompts.
@@ -993,10 +1008,16 @@ where
     /// model. A continuation without these numbers invites the model to open
     /// new work it has no room to finish; with them it can choose to wrap up,
     /// compact, or report the blocker instead.
-    fn budget_line(&self, used: u64, round: u32, continuations: u8) -> String {
+    fn budget_line(&self, used: u64, state: &TurnState, continuations: u8) -> String {
+        let ceiling = self
+            .cfg
+            .max_tool_rounds
+            .saturating_mul(state.round_rearms as u32 + 1);
+        let round = state.tool_rounds;
+        let rearms = state.round_rearms;
         format!(
-            "Budget: {used} of {} context tokens used; tool round {round} of {} in this turn; goal continuation {continuations} of {}.",
-            self.cfg.context_window, self.cfg.max_tool_rounds, self.cfg.max_goal_continuations
+            "Budget: {used} of {} context tokens used; tool round {round} of {ceiling} (ceiling re-armed {rearms} of {}); goal continuation {continuations} of {}.",
+            self.cfg.context_window, self.cfg.max_goal_rearms, self.cfg.max_goal_continuations
         )
     }
 
@@ -1175,16 +1196,48 @@ where
                 conv.push(Role::User, notice);
             }
 
+            // Context use feeds both gates below. The incremental estimator
+            // must see an iteration exactly once, so it runs here rather than
+            // inside the budget branch.
+            let used = match last_input {
+                Some(input_tokens) => input_tokens + state.total_output_tokens,
+                None => {
+                    let carry = conv.usage_carry();
+                    if carry.input_tokens > 0 {
+                        carry.input_tokens + carry.output_tokens
+                    } else {
+                        estimate_cache.estimate(conv) + CONTEXT_OVERHEAD_TOKENS
+                    }
+                }
+            };
+
             // Round ceiling stops with a settled turn, never with an error.
             // Checked before the budget line so a zero ceiling melts the
             // very first iteration. The stop reason names the ceiling so
-            // callers can tell it from a natural completion.
-            if state.rounds_exhausted(self.cfg.max_tool_rounds) {
+            // callers can tell it from a natural completion. An open session
+            // goal re-arms the ceiling instead: hitting the limit mid-objective
+            // is the long-horizon case, and the alternative is a human typing
+            // "continue" every 32 rounds. The re-arm count bounds it, and a
+            // blocked / paused / completed goal re-arms nothing.
+            let ceiling = self
+                .cfg
+                .max_tool_rounds
+                .saturating_mul(state.round_rearms as u32 + 1);
+            if state.rounds_exhausted(ceiling) {
+                if self.goals.open() && state.round_rearms < self.cfg.max_goal_rearms {
+                    state.round_rearms += 1;
+                    emit_msg(EventMsg::Warning {
+                        message: format!(
+                            "tool round limit reached with the session goal open; re-arming the ceiling ({}/{})",
+                            state.round_rearms, self.cfg.max_goal_rearms
+                        ),
+                    });
+                    let budget = self.budget_line(used, &state, 0);
+                    conv.push(Role::User, self.goals.reminder(&budget));
+                    continue;
+                }
                 emit_msg(EventMsg::Warning {
-                    message: format!(
-                        "tool round limit reached ({}); stopping this turn",
-                        self.cfg.max_tool_rounds
-                    ),
+                    message: format!("tool round limit reached ({ceiling}); stopping this turn",),
                 });
                 settle(
                     conv,
@@ -1198,18 +1251,8 @@ where
             }
 
             // Pre-turn budget check with per-turn once-only warning and
-            // auto-compaction flags (locals, never carried across turns).
-            let used = match last_input {
-                Some(input_tokens) => input_tokens + state.total_output_tokens,
-                None => {
-                    let carry = conv.usage_carry();
-                    if carry.input_tokens > 0 {
-                        carry.input_tokens + carry.output_tokens
-                    } else {
-                        estimate_cache.estimate(conv) + CONTEXT_OVERHEAD_TOKENS
-                    }
-                }
-            };
+            // auto-compaction flags (the flags are locals, never carried
+            // across turns; `used` was computed above for the round ceiling).
             let remaining = self.cfg.context_window.saturating_sub(used);
             match check_budget(remaining) {
                 BudgetLevel::Ok => {}
@@ -1471,7 +1514,7 @@ where
                             goal_continuations, self.cfg.max_goal_continuations
                         ),
                     });
-                    let budget = self.budget_line(used, state.tool_rounds, goal_continuations);
+                    let budget = self.budget_line(used, &state, goal_continuations);
                     conv.push(Role::User, self.goals.reminder(&budget));
                     continue;
                 }
@@ -2763,6 +2806,7 @@ mod run_loop_tests {
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -3477,6 +3521,7 @@ mod run_loop_tests {
                     max_continuations,
                     max_plan_nudges: MAX_PLAN_NUDGES,
                     max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                    max_goal_rearms: MAX_GOAL_REARMS,
                     max_stop_blocks: MAX_STOP_BLOCKS,
                     max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                     max_repeat_streak: MAX_REPEAT_STREAK,
@@ -3691,6 +3736,7 @@ mod run_loop_tests {
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4123,6 +4169,7 @@ mod run_loop_tests {
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4478,6 +4525,7 @@ mod run_loop_tests {
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4555,6 +4603,7 @@ mod run_loop_tests {
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4624,6 +4673,7 @@ mod run_loop_tests {
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
                 max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak,
@@ -5059,6 +5109,125 @@ mod run_loop_tests {
         assert_eq!(
             counted(conv, "GOAL-REMINDER"),
             MAX_GOAL_CONTINUATIONS as usize
+        );
+        // The goal nudge reports the re-arm state, not just the round number.
+        assert!(counted(conv, "ceiling re-armed 0 of ") > 0);
+    }
+
+    /// The model kept calling tools when the ceiling cut it off: with an open
+    /// objective that is the long-horizon case, not a stop.
+    #[tokio::test]
+    async fn an_open_goal_rearms_the_round_ceiling() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        for round in 0..12 {
+            model.steps.lock().unwrap().push_back(call_step(
+                &format!("c{round}"),
+                "read_file",
+                serde_json::json!({ "path": format!("f{round}") }),
+            ));
+        }
+        let events = fx.events.clone();
+        let conv = &mut Conversation::new();
+        let outcome = build_tuned_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            2,
+            MAX_REPEAT_STREAK,
+            None,
+            fx.interrupt.clone(),
+        )
+        .with_goals(std::sync::Arc::new(FakeGoal { open: true }))
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        // A 2-round ceiling, re-armed, let all twelve calls through.
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            fx.event_kinds()
+                .iter()
+                .filter(|kind| *kind == "tool_call_begin")
+                .count(),
+            12
+        );
+        let warnings: Vec<String> = fx
+            .lock_events()
+            .iter()
+            .filter_map(|event| match &event.msg {
+                EventMsg::Warning { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("re-arming the ceiling")),
+            "{warnings:?}"
+        );
+        // The model was told the re-arm explicitly, not just its round count.
+        assert!(
+            counted(conv, "ceiling re-armed 1 of ") > 0,
+            "no re-arm budget reached the model"
+        );
+    }
+
+    /// The re-arm is bounded: a goal that never closes cannot hold the loop
+    /// open past `max_goal_rearms` ceilings.
+    #[tokio::test]
+    async fn rearming_stops_at_its_own_bound() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        for round in 0..12 {
+            model.steps.lock().unwrap().push_back(call_step(
+                &format!("c{round}"),
+                "read_file",
+                serde_json::json!({ "path": format!("f{round}") }),
+            ));
+        }
+        let events = fx.events.clone();
+        let conv = &mut Conversation::new();
+        let outcome = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 2,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: 1,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+                session_date: None,
+            },
+            fx.interrupt.clone(),
+        )
+        .with_goals(std::sync::Arc::new(FakeGoal { open: true }))
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        // One re-arm of a 2-round ceiling is 4 calls, then the turn stops.
+        assert_eq!(outcome, StopReason::MaxToolRounds);
+        assert_eq!(
+            fx.event_kinds()
+                .iter()
+                .filter(|kind| *kind == "tool_call_begin")
+                .count(),
+            4
         );
     }
 }

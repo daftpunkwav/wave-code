@@ -205,6 +205,22 @@ lifetime and count — no filesystem or network boundary, so an approved command
 there runs with your own account's privileges. `wavecode doctor` prints which
 backend is live and how far it reaches.
 
+## Long-running work
+
+- **Goals keep the turn going.** An objective recorded through the `goal` tool
+  (`/goal` shows its status; per home, CAS-versioned) steers the loop: when the
+  model stops making tool calls while the goal is still `Active`, the turn
+  continues — up to 5 times — and each continuation states what is left of the
+  context, tool-round and continuation budgets, so the model can wrap up instead
+  of opening work it cannot finish. Marking the goal `completed`, `blocked` or
+  `paused` stops the steering at once; those are statements that work should
+  stop, and the loop never writes goal state itself.
+- **History is durable per mutation.** Every conversation change appends a
+  synced record to `~/.wavecode/sessions/<id>.history.jsonl`, so a crash costs
+  at most the step that was in flight, a resumed session keeps its tool calls
+  and results rather than only prose, and a tool whose result never landed is
+  reported as unresolved instead of silently re-run.
+
 ## Skills, memory, MCP
 
 - Skills: Markdown files with frontmatter discovered from home and project

@@ -79,6 +79,12 @@ impl GoalStore {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Current state, for readers that must not hold the lock across an
+    /// await (the loop's continuation check is one; see `goal_adapter`).
+    pub fn snapshot(&self) -> GoalState {
+        self.lock().clone()
+    }
+
     /// Persist a snapshot taken under the lock (runs on the blocking
     /// pool; IO failures feed back to the model as business errors).
     async fn persist(

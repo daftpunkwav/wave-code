@@ -675,29 +675,57 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // midnight-rollover check, so the two can never disagree about the date.
     let session_now = std::time::SystemTime::now();
     let session_date = crate::environment::format_date(session_now);
-    let worker = Arc::new(RunLoop::new(
-        executor,
-        policy,
-        HookAdapter::new(hooks, cwd.clone()),
-        model_adapter,
-        gate_source,
-        plans,
-        compactor,
-        RunConfig {
-            model_name: model_name.clone(),
-            context_window,
-            max_output_tokens,
-            max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
-            max_continuations: runtime_runner::MAX_CONTINUATIONS,
-            max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
-            max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
-            max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
-            max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,
-            max_wire_images: runtime_runner::MAX_WIRE_IMAGES,
-            session_date: Some(session_date),
-        },
-        interrupt.clone(),
+    // Durable goal service (persisted objective with CAS): the store path
+    // derives from home (`<home>/.wavecode/goals/<session>.json`) so resume
+    // in the same home reopens the same goal. Corrupt content warns and
+    // starts empty, never a hard stop. The tool mutates goal state, not the
+    // repo, so assembly classifies it as in-session state (no approval gate
+    // in any mode). Assembled before the loop because the loop reads it: an
+    // open objective keeps a long task running after the model stops, which
+    // is what removes the human "continue" from the loop. The round counter
+    // stays model-driven (`tick`); only continuation is loop-driven.
+    let (goal_state, goal_warning) = crate::goal_tools::load_for_session(
+        home.as_deref(),
+        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
+    );
+    if let Some(warning) = goal_warning {
+        warnings.push(warning);
+    }
+    let goal_store = Arc::new(crate::goal_tools::GoalStore::new(
+        goal_state,
+        home.as_deref(),
+        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
     ));
+    registry.register(Arc::new(crate::goal_tools::GoalTool::new(
+        goal_store.clone(),
+    )));
+    let worker = Arc::new(
+        RunLoop::new(
+            executor,
+            policy,
+            HookAdapter::new(hooks, cwd.clone()),
+            model_adapter,
+            gate_source,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: model_name.clone(),
+                context_window,
+                max_output_tokens,
+                max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
+                max_continuations: runtime_runner::MAX_CONTINUATIONS,
+                max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
+                max_goal_continuations: runtime_runner::MAX_GOAL_CONTINUATIONS,
+                max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
+                max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,
+                max_wire_images: runtime_runner::MAX_WIRE_IMAGES,
+                session_date: Some(session_date),
+            },
+            interrupt.clone(),
+        )
+        .with_goals(goal_store),
+    );
     // Per-run tool allowlist for fork-scoped skill surfaces; the handle
     // is Arc-backed, so grabbing it before `worker` moves is enough.
     let run_allowlist = worker.run_allowlist();
@@ -857,28 +885,6 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
     ));
     registry.register(Arc::new(crate::plan_tools::PlanTool::new(plan_store)));
-
-    // Durable goal service (persisted per-session objective with CAS and a
-    // tools-only round driver): the store path derives from home
-    // (`<home>/.wavecode/goals/<session>.json`) so resume in the same home
-    // reopens the same goal. Corrupt content warns and starts empty, never
-    // a hard stop. The tool mutates goal state, not the repo, and assembly
-    // classifies it as in-session state (no approval gate in any mode).
-    // The driver has no loop hook yet: the model calls the tick action
-    // once per round.
-    let (goal_state, goal_warning) = crate::goal_tools::load_for_session(
-        home.as_deref(),
-        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
-    );
-    if let Some(warning) = goal_warning {
-        warnings.push(warning);
-    }
-    let goal_store = Arc::new(crate::goal_tools::GoalStore::new(
-        goal_state,
-        home.as_deref(),
-        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
-    ));
-    registry.register(Arc::new(crate::goal_tools::GoalTool::new(goal_store)));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     // Plan mode adds a soft guidance paragraph: read-only exploration,
@@ -1912,6 +1918,7 @@ api_key = "k-inline"
                 max_tool_rounds: 8,
                 max_continuations: runtime_runner::MAX_CONTINUATIONS,
                 max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
+                max_goal_continuations: runtime_runner::MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: runtime_runner::MAX_STOP_BLOCKS,
                 max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,

@@ -40,7 +40,7 @@ Honest status (updated 2026-09-18): the journal now has a production consumer (t
 ## Plan and goal state
 
 - `crates/state/plan/src/lib.rs`: `PlanState` is a reviewed state machine — `propose` → `approve` → `begin` → `complete` / `abandon`, with `feedback` returning to review; `PlanStatus::is_terminal` gates transitions; plans live per session under a plans root (`plan_path_for_session`, `validate_session_id`).
-- `crates/state/goal/src/lib.rs`: one durable objective per session with **CAS versioning** — every mutation bumps `GoalState::version`, and the goal tool's `update` action requires the expected version; a mismatch names both versions and tells the model to reload with `status`. Statuses: Active / Blocked / Paused / Completed (terminal). An optional `sub_goals` list (text + in_progress/achieved) decomposes the objective; a fresh `set` clears it.
+- `crates/state/goal/src/lib.rs`: one durable objective per session with **CAS versioning** — every mutation bumps `GoalState::version`, and the goal tool's `update` action requires the expected version; a mismatch names both versions and tells the model to reload with `status`. Statuses: Active / Blocked / Paused / Completed (terminal). An optional `sub_goals` list (text + in_progress/achieved) decomposes the objective; a fresh `set` clears it. The run loop reads this state (never writes it) to continue a turn the model ended while the objective stayed `Active` — see `operations-bootstrap/src/goal_adapter.rs` and the continuation ladder in `docs/subsystems/core-loop.md`.
 
 ## Replay: the structural fold (`crates/operations/replay/src/lib.rs`)
 

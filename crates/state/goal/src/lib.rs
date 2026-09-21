@@ -17,10 +17,11 @@
 //! action), mutates them under optimistic concurrency (the `update`
 //! action requires the expected version), reads the whole tree (the
 //! `status` action), and advances the round driver once per round (the
-//! `tick` action). The driver is tools-only: no loop hook calls
-//! `round_tick` automatically yet, so the model must tick once per
-//! round. State survives resume because the file path derives from the
-//! home directory.
+//! `tick` action). The loop reads this state to decide whether a turn should
+//! continue after the model stops (`GoalTracker` in runtime-runner, wired by
+//! `operations-bootstrap::goal_adapter`); it never writes it, so the tool
+//! stays the single writer. State survives resume because the file path
+//! derives from the home directory.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

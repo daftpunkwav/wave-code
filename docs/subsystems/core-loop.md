@@ -14,9 +14,10 @@ The RunLoop lives in `crates/runtime/runner/src/lib.rs` and owns one turn end to
 | `HookGateway` | Runs lifecycle hooks; only blocking points may veto | `hook_adapter.rs` |
 | `ApprovalSource` | Parks a wait until a user decision or timeout | `gate_adapter.rs` over `safety-gate` |
 | `PlanTracker` | Unfinished plan items + reminder text (plan nudges) | plan tools |
+| `GoalTracker` | Whether the durable objective is still open + reminder text (goal continuations) | `goal_adapter.rs` over the goal store (`NoGoal` by default) |
 | `Compactor` | Summarizes history on trigger | `ContextCompactor` (`crates/operations/bootstrap/src/compactor.rs`) |
 
-Actors never name these seven types; they drive a `TurnDriver` (blanket-impl'd for every `RunLoop` and `Arc<T>`), which also exposes `set_permission_mode`, `set_model`, `end_session`, and the shared `inbox_handle`. Per-run interrupt overrides live on the loop's `RunInterrupts` registry (`RunLoop::run_interrupts()`), not on the driver trait: the child task service registers one handle per child, so a `task_stop` bridges into exactly that turn.
+Actors never name these eight types; they drive a `TurnDriver` (blanket-impl'd for every `RunLoop` and `Arc<T>`), which also exposes `set_permission_mode`, `set_model`, `end_session`, and the shared `inbox_handle`. Per-run interrupt overrides live on the loop's `RunInterrupts` registry (`RunLoop::run_interrupts()`), not on the driver trait: the child task service registers one handle per child, so a `task_stop` bridges into exactly that turn.
 
 ## Turn lifecycle (`run_turn`)
 
@@ -32,6 +33,7 @@ Actors never name these seven types; they drive a `TurnDriver` (blanket-impl'd f
 10. Emit `AgentMessageComplete`, then:
     - no calls + `truncated` → push `CONTINUATION_PROMPT` and continue (`MAX_CONTINUATIONS = 2`);
     - unfinished plan items → nudge (`MAX_PLAN_NUDGES = 3`);
+    - open session goal (`Active` with a non-empty objective) → continue with the goal's own status render plus the loop's live **budget line** (context used / tool round of the ceiling / continuation of cap), `MAX_GOAL_CONTINUATIONS = 5` per turn, then stop anyway. This is what removes the human "continue" from a long task; a `Blocked` / `Paused` / `Completed` goal never steers, because those are statements that work should stop. Child runs and sessions without a goal store use `NoGoal` (no continuation, as before);
     - `Stop` hook block → feed the reason back and continue (`MAX_STOP_BLOCKS = 3`, then proceed anyway);
     - otherwise break with `Completed`.
 11. **Checkpoint 3 — pre-tool**: an interrupt here synthesizes `interrupted` results for every declared call, preserving call/result pairing without executing anything.

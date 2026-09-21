@@ -630,6 +630,13 @@ pub const MAX_CONTINUATIONS: u8 = 2;
 /// Maximum plan-steering reminders per turn (default for
 /// [`RunConfig::max_plan_nudges`]).
 pub const MAX_PLAN_NUDGES: u8 = 3;
+/// Maximum goal-driven continuations per turn once the model stops with an
+/// open objective (default for [`RunConfig::max_goal_continuations`]).
+///
+/// The cap is the cost guard, not a politeness limit: every continuation
+/// samples a history that only grows, so an open goal nudges a bounded number
+/// of times per turn instead of driving an unbounded loop.
+pub const MAX_GOAL_CONTINUATIONS: u8 = 5;
 /// Maximum Stop-hook blocks per turn before the loop proceeds anyway
 /// (default for [`RunConfig::max_stop_blocks`]).
 pub const MAX_STOP_BLOCKS: u8 = 3;
@@ -671,6 +678,8 @@ pub struct RunConfig {
     pub max_continuations: u8,
     /// Plan-steering reminders per turn while todos stay unfinished.
     pub max_plan_nudges: u8,
+    /// Goal-driven continuations per turn while the session goal stays open.
+    pub max_goal_continuations: u8,
     /// Stop-hook blocks per turn before the loop proceeds anyway.
     pub max_stop_blocks: u8,
     /// Reactive compactions per turn on overlong prompts.
@@ -757,6 +766,35 @@ pub trait PlanTracker: Send + Sync {
 
     /// Reminder text pushed to the model when items are unfinished.
     fn reminder(&self) -> String;
+}
+
+/// Read-only view of the session's durable objective, so the loop can keep a
+/// long task moving after the model decides it is done.
+pub trait GoalTracker: Send + Sync {
+    /// True while the objective is open: set, and not terminal (completed)
+    /// or parked (blocked/paused) by the last mutation.
+    fn open(&self) -> bool;
+
+    /// Reminder text pushed to the model when it stops with the goal open.
+    /// `budget` is the loop's own account of what is left (context, rounds,
+    /// continuations): only the loop knows those numbers, and the reminder is
+    /// the one place they reach the model.
+    fn reminder(&self, budget: &str) -> String;
+}
+
+/// No goal tracked: the loop stops where it stopped before goals could steer
+/// it (child runs, tests, sessions with no goal store).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoGoal;
+
+impl GoalTracker for NoGoal {
+    fn open(&self) -> bool {
+        false
+    }
+
+    fn reminder(&self, _budget: &str) -> String {
+        String::new()
+    }
 }
 
 /// Result of one context compaction.
@@ -886,6 +924,10 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     approvals: A,
     plans: T,
     compactor: C,
+    /// Goal seam, defaulted to [`NoGoal`] and swapped by
+    /// [`RunLoop::with_goals`]: sessions with an objective steer the loop,
+    /// child runs and tests do not.
+    goals: std::sync::Arc<dyn GoalTracker>,
     cfg: RunConfig,
     interrupt: InterruptHandle,
     run_allowlist: RunAllowlist,
@@ -930,6 +972,7 @@ where
             approvals,
             plans,
             compactor,
+            goals: std::sync::Arc::new(NoGoal),
             cfg,
             interrupt,
             run_allowlist: RunAllowlist::default(),
@@ -937,6 +980,24 @@ where
             inbox: InboxHandle::new(),
             announced_date,
         }
+    }
+
+    /// Let the session's durable objective continue the loop when the model
+    /// stops with work outstanding (builder; default [`NoGoal`]).
+    pub fn with_goals(mut self, goals: std::sync::Arc<dyn GoalTracker>) -> Self {
+        self.goals = goals;
+        self
+    }
+
+    /// What is left of the budgets only the loop can see, phrased for the
+    /// model. A continuation without these numbers invites the model to open
+    /// new work it has no room to finish; with them it can choose to wrap up,
+    /// compact, or report the blocker instead.
+    fn budget_line(&self, used: u64, round: u32, continuations: u8) -> String {
+        format!(
+            "Budget: {used} of {} context tokens used; tool round {round} of {} in this turn; goal continuation {continuations} of {}.",
+            self.cfg.context_window, self.cfg.max_tool_rounds, self.cfg.max_goal_continuations
+        )
     }
 
     /// Queue a steering message for `target`; empty texts are dropped
@@ -1077,6 +1138,7 @@ where
         let mut compacted = false;
         let mut continuations: u8 = 0;
         let mut nudges: u8 = 0;
+        let mut goal_continuations: u8 = 0;
         let mut stop_blocks: u8 = 0;
         let mut reactive_compacts: u8 = 0;
         let mut state = TurnState::new();
@@ -1394,6 +1456,23 @@ where
                         ),
                     });
                     conv.push(Role::User, self.plans.reminder());
+                    continue;
+                }
+                // Goal steering: a long task should not need a human typing
+                // "continue" every time the model decides it is done. The cap
+                // keeps this from becoming an unbounded sampler of a history
+                // that only grows, and the budget line exists so the model can
+                // choose to wrap up rather than start work it cannot finish.
+                if self.goals.open() && goal_continuations < self.cfg.max_goal_continuations {
+                    goal_continuations += 1;
+                    emit_msg(EventMsg::Warning {
+                        message: format!(
+                            "session goal still open; continuing ({}/{})",
+                            goal_continuations, self.cfg.max_goal_continuations
+                        ),
+                    });
+                    let budget = self.budget_line(used, state.tool_rounds, goal_continuations);
+                    conv.push(Role::User, self.goals.reminder(&budget));
                     continue;
                 }
                 let stop = self.hooks.run(HookPoint::Stop, "").await;
@@ -2683,6 +2762,7 @@ mod run_loop_tests {
                 max_tool_rounds,
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -3396,6 +3476,7 @@ mod run_loop_tests {
                     max_tool_rounds: 8,
                     max_continuations,
                     max_plan_nudges: MAX_PLAN_NUDGES,
+                    max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                     max_stop_blocks: MAX_STOP_BLOCKS,
                     max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                     max_repeat_streak: MAX_REPEAT_STREAK,
@@ -3609,6 +3690,7 @@ mod run_loop_tests {
                 max_tool_rounds: 8,
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4040,6 +4122,7 @@ mod run_loop_tests {
                 max_tool_rounds: 8,
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4394,6 +4477,7 @@ mod run_loop_tests {
                 max_tool_rounds: 8,
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4470,6 +4554,7 @@ mod run_loop_tests {
                 max_tool_rounds: 8,
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
@@ -4538,6 +4623,7 @@ mod run_loop_tests {
                 max_tool_rounds,
                 max_continuations: MAX_CONTINUATIONS,
                 max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
                 max_stop_blocks: MAX_STOP_BLOCKS,
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak,
@@ -4820,5 +4906,159 @@ mod run_loop_tests {
             full[0].blocks[1],
             state_store::Block::Image { .. }
         ));
+    }
+
+    struct FakeGoal {
+        open: bool,
+    }
+
+    impl GoalTracker for FakeGoal {
+        fn open(&self) -> bool {
+            self.open
+        }
+
+        fn reminder(&self, budget: &str) -> String {
+            format!("GOAL-REMINDER | {budget}")
+        }
+    }
+
+    fn counted(conv: &Conversation, needle: &str) -> usize {
+        conv.with_entries(|entries| {
+            entries
+                .iter()
+                .filter(|entry| entry.text().contains(needle))
+                .count()
+        })
+    }
+
+    /// The point of the seam: a long task should not need a human typing
+    /// "continue" every time the model decides it is done.
+    #[tokio::test]
+    async fn an_open_goal_continues_the_turn_up_to_its_cap() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        let events = fx.events.clone();
+        let conv = &mut Conversation::new();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .with_goals(std::sync::Arc::new(FakeGoal { open: true }))
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        // One sample plus one per continuation, then the turn ends anyway:
+        // the cap is what stops a growing history being sampled forever.
+        assert_eq!(
+            counted(conv, "GOAL-REMINDER"),
+            MAX_GOAL_CONTINUATIONS as usize
+        );
+        // One sample, then one per continuation: the cap is what ends it.
+        assert_eq!(
+            fx.event_kinds()
+                .iter()
+                .filter(|kind| *kind == "agent_message_complete")
+                .count(),
+            MAX_GOAL_CONTINUATIONS as usize + 1
+        );
+        // Every continuation tells the model what is left, so it can wrap up
+        // instead of opening work it cannot finish.
+        assert_eq!(counted(conv, "Budget:"), MAX_GOAL_CONTINUATIONS as usize);
+        assert!(
+            conv.with_entries(|entries| entries
+                .iter()
+                .any(|entry| entry.text().contains("context tokens used")
+                    && entry.text().contains("goal continuation 1 of "))),
+            "no budget numbers reached the model"
+        );
+        let warnings: Vec<String> = fx
+            .lock_events()
+            .iter()
+            .filter_map(|event| match &event.msg {
+                EventMsg::Warning { message } => Some(message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.contains("session goal still open"))
+                .count(),
+            MAX_GOAL_CONTINUATIONS as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_goal_does_not_extend_the_turn() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        let events = fx.events.clone();
+        let conv = &mut Conversation::new();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .with_goals(std::sync::Arc::new(FakeGoal { open: false }))
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(counted(conv, "GOAL-REMINDER"), 0);
+        assert_eq!(
+            fx.event_kinds()
+                .iter()
+                .filter(|kind| *kind == "agent_message_complete")
+                .count(),
+            1
+        );
+    }
+
+    /// Unfinished plan items are the narrower signal, so they steer first;
+    /// the goal picks up only once that budget is spent.
+    #[tokio::test]
+    async fn plan_reminders_take_their_turn_before_the_goal() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, _plans, compactor) = default_parts();
+        let plans = FakePlans { unfinished: 2 };
+        let events = fx.events.clone();
+        let conv = &mut Conversation::new();
+        build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .with_goals(std::sync::Arc::new(FakeGoal { open: true }))
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(counted(conv, "PLAN-REMINDER"), MAX_PLAN_NUDGES as usize);
+        assert_eq!(
+            counted(conv, "GOAL-REMINDER"),
+            MAX_GOAL_CONTINUATIONS as usize
+        );
     }
 }

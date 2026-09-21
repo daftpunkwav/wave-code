@@ -953,20 +953,18 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     });
 
     // 9. Actor task and client handle, sharing the child runtime with
-    // the task tools so completions re-enter turns. Imported history
-    // seeds the conversation before the first turn snapshot.
+    // the task tools so completions re-enter turns. History comes from the
+    // session's own block journal when it has one — that is the only source
+    // carrying tool calls, results, thinking and images.
     let system_for_actor = system.clone();
-    let mut conv = Conversation::new();
-    for (from_model, text) in &initial_history {
-        conv.push(
-            if *from_model {
-                state_store::Role::Assistant
-            } else {
-                state_store::Role::User
-            },
-            text.clone(),
-        );
-    }
+    let journal = match (home.as_deref(), session_id.as_deref()) {
+        (Some(home), Some(id)) => state_persistence::sessions::session_history_file(home, id)
+            .map(state_persistence::history::HistoryJournal::new),
+        // No journal id (the in-memory REPL, a child run): history lives in
+        // memory only, exactly as before.
+        _ => None,
+    };
+    let conv = seed_conversation(journal, &initial_history, &mut warnings);
     let client = SessionActor::spawn(
         driver,
         conv,
@@ -1011,6 +1009,70 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         plugins: runtime_plugins,
         status,
         mcp_pending,
+    }
+}
+
+/// Build the conversation a session starts with.
+///
+/// The block journal wins whenever it holds anything: it is the only source
+/// that preserves tool calls, tool results, thinking and images across a
+/// restart. The caller's text seed stays the fallback for sessions written
+/// before the journal existed, and in that case the seed is journaled too —
+/// otherwise the journal would describe only the tail of the session, and a
+/// later crash would recover a history silently missing its head.
+fn seed_conversation(
+    journal: Option<state_persistence::history::HistoryJournal>,
+    initial_history: &[(bool, String)],
+    warnings: &mut Vec<String>,
+) -> Conversation {
+    let Some(journal) = journal else {
+        let mut conv = Conversation::new();
+        push_text_seed(&mut conv, initial_history);
+        return conv;
+    };
+    let replayed = crate::history_journal::replay_history(&journal);
+    if replayed.torn_tail {
+        warnings.push(
+            "history journal ended inside a record; the unfinished step was dropped".to_string(),
+        );
+    }
+    if replayed.gapped {
+        warnings.push(
+            "history journal is missing a record; resumed from the prefix it could verify"
+                .to_string(),
+        );
+    }
+    if !replayed.lost_calls.is_empty() {
+        warnings.push(format!(
+            "{} tool call(s) lost their outcome when the session died and are marked unresolved: {}",
+            replayed.lost_calls.len(),
+            replayed.lost_calls.join(", ")
+        ));
+    }
+    let mut conv = Conversation::with_sink(std::sync::Arc::new(
+        crate::history_journal::JournalSink::new(journal, replayed.next_seq),
+    ));
+    if replayed.entries.is_empty() {
+        push_text_seed(&mut conv, initial_history);
+    } else {
+        // One replace record rather than re-appending every entry: replaying
+        // a journal must not lengthen it.
+        conv.replace(replayed.entries);
+    }
+    conv
+}
+
+/// Import the caller's flattened history (the text-level resume shape).
+fn push_text_seed(conv: &mut Conversation, initial_history: &[(bool, String)]) {
+    for (from_model, text) in initial_history {
+        conv.push(
+            if *from_model {
+                state_store::Role::Assistant
+            } else {
+                state_store::Role::User
+            },
+            text.clone(),
+        );
     }
 }
 
@@ -1260,6 +1322,75 @@ api_key = "k-inline"
                 "the backend no longer documents {phrase:?}: update the summary"
             );
         }
+    }
+
+    /// The text seed is journaled as its baseline, so a session created
+    /// before the block journal existed does not end up with a journal that
+    /// describes only its tail.
+    #[test]
+    fn a_text_seed_becomes_the_journal_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = state_persistence::history::HistoryJournal::new(dir.path().join("h.jsonl"));
+        let seed = vec![
+            (false, "fix the test".to_string()),
+            (true, "done".to_string()),
+        ];
+        let mut warnings = Vec::new();
+        let conv = seed_conversation(Some(journal.clone()), &seed, &mut warnings);
+        assert_eq!(conv.len(), 2);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // Resume once: the journal is now the source, and re-resuming must
+        // not lengthen the history.
+        for _ in 0..2 {
+            let mut warnings = Vec::new();
+            let conv = seed_conversation(Some(journal.clone()), &seed, &mut warnings);
+            assert_eq!(conv.len(), 2, "resume grew the history");
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+    }
+
+    /// A call whose result never reached disk closes as unresolved, and the
+    /// human is told instead of the gap being papered over.
+    #[test]
+    fn a_lost_tool_call_closes_and_warns_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = state_persistence::history::HistoryJournal::new(dir.path().join("h.jsonl"));
+        {
+            let mut conversation = Conversation::with_sink(std::sync::Arc::new(
+                crate::history_journal::JournalSink::new(journal.clone(), 0),
+            ));
+            conversation.push(state_store::Role::User, "write it");
+            conversation.push_blocks(
+                state_store::Role::Assistant,
+                vec![state_store::Block::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "write".to_string(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                }],
+            );
+            // process dies before the result lands
+        }
+        let mut warnings = Vec::new();
+        let conv = seed_conversation(Some(journal), &[], &mut warnings);
+        assert_eq!(conv.len(), 3, "the closing result is appended");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("lost their outcome"), "{warnings:?}");
+        assert!(warnings[0].contains("c1"), "{warnings:?}");
+    }
+
+    /// No journal means the previous behavior exactly: the caller's seed is
+    /// the whole story, held in memory only.
+    #[test]
+    fn without_a_journal_the_seed_is_all_there_is() {
+        let mut warnings = Vec::new();
+        let conv = seed_conversation(
+            None,
+            &[(false, "a".to_string()), (true, "b".to_string())],
+            &mut warnings,
+        );
+        assert_eq!(conv.len(), 2);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// `[permissions]` reaches the tables, and bare denylist entries keep
@@ -1756,6 +1887,14 @@ api_key = "k-inline"
         let plans = TodoPlanTracker::new(todos);
         let compactor = ContextCompactor::new(model.clone(), "scripted".to_string());
         let interrupt = infrastructure_base::InterruptHandle::new();
+        // Durability rides the same conversation a live session would use:
+        // the journal is attached at construction, so every history mutation
+        // the run loop makes is mirrored here.
+        let journal =
+            state_persistence::history::HistoryJournal::new(dir.path().join("s-1.history.jsonl"));
+        let mut conversation = Conversation::with_sink(Arc::new(
+            crate::history_journal::JournalSink::new(journal.clone(), 0),
+        ));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let seen_events = seen.clone();
         let outcome = RunLoop::new(
@@ -1788,7 +1927,7 @@ api_key = "k-inline"
                 input: "write and report".to_string(),
                 images: Vec::new(),
             },
-            &mut Conversation::new(),
+            &mut conversation,
             runtime_runner::TurnInput::text("write and report"),
             "sys",
             &|event| {
@@ -1829,5 +1968,50 @@ api_key = "k-inline"
         );
         assert_eq!(kinds.iter().filter(|k| *k == "tool_call_begin").count(), 1);
         assert_eq!(kinds.iter().filter(|k| *k == "tool_call_end").count(), 1);
+
+        // Every entry the run appended is on disk, and the tool call
+        // survives as a block pair rather than as flattened prose.
+        let replayed = crate::history_journal::replay_history(&journal);
+        assert_eq!(
+            replayed.entries.len(),
+            conversation.len(),
+            "journal fell behind the conversation"
+        );
+        assert!(replayed.lost_calls.is_empty(), "{:?}", replayed.lost_calls);
+        assert!(
+            !replayed.gapped && !replayed.torn_tail,
+            "clean run reported damage"
+        );
+        let calls: Vec<&str> = replayed
+            .entries
+            .iter()
+            .flat_map(|entry| entry.blocks.iter())
+            .filter_map(|block| match block {
+                state_store::Block::ToolUse { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, ["write"]);
+        assert!(
+            replayed
+                .entries
+                .iter()
+                .flat_map(|entry| entry.blocks.iter())
+                .any(|block| matches!(
+                    block,
+                    state_store::Block::ToolResult {
+                        is_error: false,
+                        ..
+                    }
+                )),
+            "the tool result never reached the journal"
+        );
+
+        // Resuming from that journal yields the same history, and doing it
+        // twice must not grow it: the journal, not the caller, is the source.
+        let first = seed_conversation(Some(journal.clone()), &[], &mut Vec::new());
+        let second = seed_conversation(Some(journal), &[], &mut Vec::new());
+        assert_eq!(first.len(), conversation.len());
+        assert_eq!(second.len(), first.len());
     }
 }

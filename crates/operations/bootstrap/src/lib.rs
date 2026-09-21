@@ -30,6 +30,7 @@ pub mod evicting_gateway;
 pub mod gate_adapter;
 pub mod goal_tools;
 pub mod grants_sink;
+pub mod history_journal;
 pub mod hook_adapter;
 pub mod job_tools;
 pub mod mcp_bridge;

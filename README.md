@@ -110,10 +110,14 @@ model = "your-model-fast"
   with optional steering, `/export [path]` and `/copy` take the dialogue out,
   `/usage` shows token split, `/editor <cmd>` sets the Ctrl+G external
   editor. Completed turns journal under `~/.wavecode/sessions/`;
-  `wavecode --session <id>` and `wavecode --continue` resume from the CLI
-  (text-level: tool blocks are not replayed). When compaction replaces
-  earlier turns, the summary ends with a `## Context Recovery` note naming
-  that journal (and the live task list), so the agent can look up exact
+  `wavecode --session <id>` and `wavecode --continue` resume from the CLI.
+  Resume is block-level — tool calls, tool results and images come back
+  intact — because each session keeps a write-ahead history journal beside
+  its turn snapshot; a tool whose result was lost to a crash is reported as
+  unresolved rather than re-run. Sessions written before that journal existed
+  resume from their text snapshot. When compaction replaces earlier turns,
+  the summary ends with a `## Context Recovery` note naming that journal
+  (and the live task list), so the agent can look up exact
   earlier output instead of guessing; each `task` subagent logs its own
   turns under `sessions/children/<parent>/`.
 - `resume`: `wavecode resume` lists recent legacy sessions newest-first;

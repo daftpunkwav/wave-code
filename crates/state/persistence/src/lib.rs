@@ -20,6 +20,9 @@
 /// Legacy engine journal import for session resume.
 pub mod legacy;
 
+/// Write-ahead record log of conversation history mutations.
+pub mod history;
+
 /// Persisted always-allow grants shared by every session.
 pub mod grants;
 

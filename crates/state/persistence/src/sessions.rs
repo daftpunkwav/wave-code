@@ -87,6 +87,14 @@ pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
     journal_path(home, id).ok()
 }
 
+/// History journal file for one session: `<id>.history.jsonl` beside the turn
+/// journal, sharing its id validation (path-escape guard). The turn journal
+/// records what happened per turn for the picker and the text-level fallback;
+/// this file is the block-level write-ahead log that resume samples from.
+pub fn session_history_file(home: &Path, id: &str) -> Option<PathBuf> {
+    Some(journal_path(home, id).ok()?.with_extension("history.jsonl"))
+}
+
 /// Journal file for one child task of a session:
 /// `.../sessions/children/<parent>/<child>.jsonl`, keeping a session's own
 /// log and its subagents' logs together without mixing them.

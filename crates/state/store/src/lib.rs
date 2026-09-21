@@ -4,6 +4,8 @@
  *
  * Responsibilities:
  * - Own the append-only message history behind a single write entry.
+ * - Report every mutation to an optional durability sink (no push may bypass
+ *   the journal by forgetting a second write).
  * - Track cross-run token usage carried over after each sample.
  * - Evaluate three-level context budgets and normalize history pairing.
  *
@@ -26,7 +28,8 @@ pub const BUDGET_AUTO_COMPACT_REMAINING: u64 = 13_000;
 pub const BUDGET_BLOCKING_REMAINING: u64 = 3_000;
 
 /// Author of one history entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     /// Human or tool-result content.
     User,
@@ -39,7 +42,8 @@ pub enum Role {
 /// Text carries prose; ToolUse / ToolResult preserve the request-result
 /// pairing across samples so providers see structured tool history
 /// instead of flattened text.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Block {
     /// Plain message text.
     Text(String),
@@ -92,7 +96,7 @@ pub enum Block {
 }
 
 /// One message in the persisted conversation history.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HistoryEntry {
     /// Who produced this entry.
     pub role: Role,
@@ -237,6 +241,20 @@ pub fn estimate_tokens(text: &str) -> u64 {
     ascii.div_ceil(4) + non_ascii
 }
 
+/// Notification seam for every committed history mutation.
+///
+/// The store owns history; it does not know where durability lives. A journal
+/// attaches here instead of trusting each call site to remember a second
+/// write — a push that skips the journal is a durable gap nobody can see.
+/// Implementations must be cheap and non-fatal: they run inside the append
+/// path, on the turn's critical way.
+pub trait HistorySink: Send + Sync + std::fmt::Debug {
+    /// One entry was appended.
+    fn appended(&self, entry: &HistoryEntry);
+    /// The whole history was replaced (compaction, rewind).
+    fn replaced(&self, entries: &[HistoryEntry]);
+}
+
 /// Append-only conversation with frozen snapshots.
 ///
 /// All mutations flow through [`Conversation::push`]; readers hold an `Arc`
@@ -245,12 +263,22 @@ pub fn estimate_tokens(text: &str) -> u64 {
 pub struct Conversation {
     entries: Vec<HistoryEntry>,
     usage_carry: Usage,
+    sink: Option<std::sync::Arc<dyn HistorySink>>,
 }
 
 impl Conversation {
     /// Create an empty conversation.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a conversation that reports every mutation to `sink`.
+    pub fn with_sink(sink: std::sync::Arc<dyn HistorySink>) -> Self {
+        Self {
+            entries: Vec::new(),
+            usage_carry: Usage::default(),
+            sink: Some(sink),
+        }
     }
 
     /// Append one entry; the single write entry of this store.
@@ -260,7 +288,11 @@ impl Conversation {
 
     /// Append one entry from content blocks.
     pub fn push_blocks(&mut self, role: Role, blocks: Vec<Block>) {
-        self.entries.push(HistoryEntry { role, blocks });
+        let entry = HistoryEntry { role, blocks };
+        if let Some(sink) = &self.sink {
+            sink.appended(&entry);
+        }
+        self.entries.push(entry);
     }
 
     /// Number of persisted entries.
@@ -288,6 +320,9 @@ impl Conversation {
     ///
     /// The caller owns re-establishing the usage carry via [`Conversation::settle`].
     pub fn replace(&mut self, entries: Vec<HistoryEntry>) {
+        if let Some(sink) = &self.sink {
+            sink.replaced(&entries);
+        }
         self.entries = entries;
     }
 
@@ -331,9 +366,216 @@ pub fn find_pairing_violations(entries: &[HistoryEntry]) -> Vec<usize> {
     bad
 }
 
+/// Close every tool call that has no result, appending one error result per
+/// lost call; returns the repaired history and the affected call ids.
+///
+/// Providers reject an assistant entry whose `tool_use` has no matching
+/// `tool_result`, so a history restored from a partial store (a journal
+/// whose last round never settled) must be closed before it is sampled
+/// again. The closing result says the outcome is *unknown* rather than
+/// "failed": the side effect may well have happened, and the model must not
+/// be invited to repeat it.
+pub fn close_open_calls(entries: &[HistoryEntry], note: &str) -> (Vec<HistoryEntry>, Vec<String>) {
+    use std::collections::HashSet;
+
+    let answered: HashSet<&str> = entries
+        .iter()
+        .flat_map(|entry| entry.blocks.iter())
+        .filter_map(|block| match block {
+            Block::ToolResult { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut lost: Vec<String> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for entry in entries {
+        for block in &entry.blocks {
+            if let Block::ToolUse { call_id, .. } = block
+                && !answered.contains(call_id.as_str())
+                && seen.insert(call_id.as_str())
+            {
+                lost.push(call_id.clone());
+            }
+        }
+    }
+    if lost.is_empty() {
+        return (entries.to_vec(), lost);
+    }
+    let mut repaired = entries.to_vec();
+    repaired.push(HistoryEntry {
+        role: Role::User,
+        blocks: lost
+            .iter()
+            .map(|call_id| Block::ToolResult {
+                call_id: call_id.clone(),
+                content: note.to_string(),
+                is_error: true,
+            })
+            .collect(),
+    });
+    (repaired, lost)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records what the store reports, in order.
+    #[derive(Debug, Default)]
+    struct RecordingSink(std::sync::Mutex<Vec<String>>);
+
+    impl RecordingSink {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        }
+    }
+
+    impl HistorySink for RecordingSink {
+        fn appended(&self, entry: &HistoryEntry) {
+            let role = if entry.role == Role::User { "u" } else { "a" };
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("append {role} {}", entry.blocks.len()));
+        }
+        fn replaced(&self, entries: &[HistoryEntry]) {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(format!("replace {}", entries.len()));
+        }
+    }
+
+    /// A journal hangs off this seam, so no mutation may bypass it — both
+    /// writers, including the history-replacing one.
+    #[test]
+    fn sink_sees_appends_and_replacements() {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut conv = Conversation::with_sink(sink.clone());
+        conv.push(Role::User, "hello");
+        conv.push_blocks(
+            Role::Assistant,
+            vec![
+                Block::Text("working".to_string()),
+                Block::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                },
+            ],
+        );
+        conv.replace(vec![HistoryEntry {
+            role: Role::User,
+            blocks: vec![Block::Text("[compact summary]".to_string())],
+        }]);
+        assert_eq!(sink.lines(), vec!["append u 1", "append a 2", "replace 1"]);
+        // An unsunk conversation keeps working (tests, subagents without a
+        // durability owner).
+        let mut plain = Conversation::new();
+        plain.push(Role::User, "x");
+        assert_eq!(plain.len(), 1);
+    }
+
+    #[test]
+    fn open_calls_close_with_an_unknown_outcome() {
+        let entries = vec![
+            HistoryEntry {
+                role: Role::User,
+                blocks: vec![Block::Text("read a.txt".to_string())],
+            },
+            HistoryEntry {
+                role: Role::Assistant,
+                blocks: vec![
+                    Block::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "read".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                    Block::ToolUse {
+                        call_id: "c2".to_string(),
+                        name: "read".to_string(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+            },
+            HistoryEntry {
+                role: Role::User,
+                blocks: vec![Block::ToolResult {
+                    call_id: "c1".to_string(),
+                    content: "ok".to_string(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let (repaired, lost) = close_open_calls(&entries, "outcome lost");
+        // Only the unanswered call closes, and pairing is restored.
+        assert_eq!(lost, vec!["c2".to_string()]);
+        assert_eq!(repaired.len(), entries.len() + 1);
+        let closing = repaired.last().unwrap();
+        assert_eq!(closing.role, Role::User);
+        assert_eq!(closing.blocks.len(), 1);
+        match &closing.blocks[0] {
+            Block::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(call_id, "c2");
+                assert_eq!(content, "outcome lost");
+                assert!(is_error);
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+        // Already-paired history is returned untouched and reports nothing.
+        let clean = vec![HistoryEntry {
+            role: Role::User,
+            blocks: vec![Block::Text("hi".to_string())],
+        }];
+        let (same, lost) = close_open_calls(&clean, "outcome lost");
+        assert_eq!(same, clean);
+        assert!(lost.is_empty());
+    }
+
+    /// The journal format is this type's serde form: a lost block shape must
+    /// fail here, not silently at resume time.
+    #[test]
+    fn history_round_trips_through_json() {
+        let entries = vec![
+            HistoryEntry {
+                role: Role::User,
+                blocks: vec![
+                    Block::Text("look".to_string()),
+                    Block::Image {
+                        id: Some("img1".to_string()),
+                        mime: "image/png".to_string(),
+                        base64: "AAAA".to_string(),
+                    },
+                ],
+            },
+            HistoryEntry {
+                role: Role::Assistant,
+                blocks: vec![
+                    Block::Thinking {
+                        text: "reasoning".to_string(),
+                        signature: None,
+                    },
+                    Block::ToolUse {
+                        call_id: "c1".to_string(),
+                        name: "read".to_string(),
+                        input: serde_json::json!({"path": "a.txt"}),
+                    },
+                    Block::ToolResult {
+                        call_id: "c1".to_string(),
+                        content: "file body".to_string(),
+                        is_error: true,
+                    },
+                ],
+            },
+        ];
+        let text = serde_json::to_string(&entries).unwrap();
+        let back: Vec<HistoryEntry> = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, entries);
+    }
 
     #[test]
     fn snapshots_stay_frozen_after_further_pushes() {

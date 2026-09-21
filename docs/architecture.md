@@ -182,7 +182,7 @@ prevent.
 3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
 4. Tool executions pass the `safety-gate` approval flow; verdicts come from `safety-policy` rules plus permission modes, with OS-level isolation from `safety-sandbox`.
 5. Every step emits `operations-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
-6. Turn records append to `state-persistence`'s JSONL journal, which `resume` replays as text.
+6. History mutations append to `state-persistence`'s block-level write-ahead journal (`<id>.history.jsonl`), which `resume` replays; completed turns additionally append a text snapshot to `<id>.jsonl` for the picker and for sessions written before the journal existed.
 
 ## Benchmarks
 

@@ -4,7 +4,7 @@ Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and 
 
 ## Permission modes and policy
 
-`crates/foundation/protocol/src/lib.rs` owns `PermissionMode` with locked wire strings: `plan` (read-only tools only; the rest deny straight back to the model; the system prompt nudges the model to propose via the plan tool), `guarded` (command execution and destructive tools ask per call; file edits and other non-exec writes flow through), `auto` (approve everything — deny rules still apply). A unit test locks the serde tags; `parse` rejects case drift and maps legacy names (`default`/`acceptEdits` → `guarded`, `bypassPermissions` → `auto`) onto their successors.
+`crates/foundation/protocol/src/lib.rs` owns `PermissionMode` with locked wire strings: `plan` (read-only tools only; the rest deny straight back to the model; the system prompt nudges the model to propose via the plan tool), `auto` (command execution and destructive tools ask per call; file edits and other non-exec writes flow through), `wave` (approve everything — deny rules still apply). A unit test locks the serde tags; `parse` rejects case drift and maps legacy names (`guarded`/`default`/`acceptEdits` → `auto`, `bypassPermissions`/`yolo` → `wave`) onto their successors. Note the rename hazard: `auto` used to mean "approve everything" (what `wave` means now), so old config files land one notch more conservative, never less.
 
 `crates/safety/policy/src/lib.rs` is pure data: `Rule` (exact or `prefix*` wildcard), `ToolPolicy::evaluate` with **deny-wins merging** (Deny > Ask > Allow regardless of rule order) and an unmatched default of `Ask` — a missing rule can never silently permit execution. `explain` cites the winning rules for audit output. `ExecutionPolicy` carries ceilings (32 rounds, 120 s approval timeout, 5 consecutive errors) and rejects zero ceilings at startup.
 
@@ -24,7 +24,24 @@ Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and 
 4. In-session state-tool exemptions (`todowrite` and the merged `goal` / `plan` tools need no approval in any mode — they write harness-owned coordination state, never the repo) and interactive-question routing (`ask_user`) — except `plan` with `action: "approve"`, which asks in every mode: only the user may approve a proposal.
 5. The mode's default policy.
 
-`allow_always` derives one exact, session-level allow rule from the approved call (shared through `Arc` so clones — including subagents — see it; deny-first is unaffected). Session allow rules are in-memory only; persisting them to config is not wired yet. Invalid rule entries fail construction at startup — explicit failure, never silent skips. `PolicyAdapter` (`crates/operations/bootstrap/src/policy_adapter.rs`) maps these verdicts onto the runner seam, sourcing attributes from the registry.
+`allow_always` derives one exact, session-level allow rule from the approved call (shared through `Arc` so clones — including subagents — see it; deny-first is unaffected) and hands the same rule to the grant sink, which stores it for later sessions.
+
+## Where the startup rules come from (`operations-bootstrap`, `session::load_permissions`)
+
+Allow has two sources, deny two. Widened authority is only ever human-authored:
+
+| Source | File | Contents |
+| --- | --- | --- |
+| `[permissions] allow` / `deny` | `~/.wavecode/config.toml` | rule entries a human wrote, wildcards allowed (`Bash(cargo test *)`) |
+| persisted grants | `~/.wavecode/grants.jsonl` | literal entries appended when a human answers "always allow" |
+| `permission_mode` / `wave_denylist` | `~/.wavecode/console-settings.json` | mode plus bare command fragments, Bash-scoped on load |
+
+Two bounds keep the persistent half from becoming a way to widen authority by accident:
+
+- **User-level only.** The planned project layer (`.wavecode/config.toml` inside the working directory) stays unwired for these tables: the agent can write that file, so a repo-scoped allow table would let a session grant its own future exemptions.
+- **Grants are literals.** `add_grant` refuses any entry carrying `*` or `?`. A derived rule compared *literally* in the session it was approved in; storing it and re-parsing it as a config entry on the next load would silently promote the approved text into a wildcard allow surface. Approved commands that happen to contain glob characters still exempt for the rest of that session (with a `tracing::warn!`), and a human who wants a wildcard writes one in the config file.
+
+Entries validate one at a time (`Rule::parse` per line): an invalid entry costs only itself and surfaces as a startup finding, never as a dropped table — losing the deny table over a typo in an allow line would widen authority silently. One asymmetry is deliberate: a persisted `File(...)` grant re-loads as a non-exact rule, so it never exempts the sensitive-credential ask (step 2 above requires an *exact* rule) — approving one read of `.env` does not buy a permanent one, and the ask returns next session. Grants and rules are reported by `wavecode doctor` (`permissions: …`), which also flags an allow rule a deny rule provably shadows (`Rule::is_covered_by`, conservative: it can miss a dead rule, never invent one), and `wavecode grants list|remove <i>|clear` reads and revokes the grant table (revocation rewrites the file write-then-rename, so a crash cannot leave it truncated into "no grants"). `PolicyAdapter` (`crates/operations/bootstrap/src/policy_adapter.rs`) maps verdicts onto the runner seam, sourcing attributes from the registry.
 
 ## OS sandbox: fail-closed chain (`crates/capabilities/sandbox/src/chain.rs`)
 

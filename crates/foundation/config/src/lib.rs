@@ -6,13 +6,18 @@
 //!
 //! The planned layered merge (CLI args > project-level `.wavecode/config.toml` > user-level >
 //! built-in defaults) and capabilities like `profiles` land in later milestones; raw
-//! parsing of `mcp_servers` landed in P9 (SPEC sections 10/13).
+//! parsing of `mcp_servers` landed in P9 (SPEC sections 10/13) and of
+//! `[permissions]` in the approval-de-fatigue slice. `[permissions]` is the
+//! deliberate exception to that plan: widened authority is only ever read
+//! from the user-level file, never from a repo-local one (the agent can
+//! write the repo-local file, see the module doc in `permissions.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 mod hooks;
 mod mcp;
+mod permissions;
 mod provider;
 
 /// Top-level config.
@@ -29,6 +34,11 @@ pub struct Config {
     /// P2 lands only this single field; layered merges like profiles / projects overrides stay for later milestones.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Authored permission rules (`[permissions] allow` / `deny`, sandbox
+    /// rule syntax). The config layer only does raw parsing; entry validity
+    /// is checked by the assembly layer through the sandbox crate.
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
     /// hooks config (SPEC section 9): a `[hooks.<EventPoint>]` table or array of tables.
     /// The config layer only does raw parsing (config has no in-workspace dependencies, SPEC section 3 matrix);
     /// event-point validity checks and execution semantics land in core via the hooks crate.
@@ -79,6 +89,7 @@ pub fn home_dir() -> Option<PathBuf> {
 
 pub use hooks::{ConfigError, HookRule, HookRuleSet};
 pub use mcp::McpServerRaw;
+pub use permissions::PermissionsConfig;
 pub use provider::{
     DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, ProviderConfig, ProviderKind,
 };
@@ -282,6 +293,29 @@ reasoning_effort = "high"
         assert_eq!(cfg.permission_mode, Some("plan".to_owned()));
     }
 
+    /// `[permissions]`: both lists optional (absent table means no authored
+    /// rules), and entries stay raw strings — the sandbox owns their syntax.
+    #[test]
+    fn permissions_parse_authored_rule_entries() {
+        let cfg: Config = toml::from_str(TOML_OK).unwrap();
+        assert!(cfg.permissions.allow.is_empty());
+        assert!(cfg.permissions.deny.is_empty());
+        let cfg: Config = toml::from_str(&format!(
+            r#"{TOML_OK}
+[permissions]
+allow = ["Bash(cargo test *)", "File(src/**)"]
+deny = ["Bash(rm -rf *)"]
+"#
+        ))
+        .unwrap();
+        assert_eq!(
+            cfg.permissions.allow,
+            vec!["Bash(cargo test *)".to_string(), "File(src/**)".to_string()]
+        );
+        assert_eq!(cfg.permissions.deny, vec!["Bash(rm -rf *)".to_string()]);
+    }
+
+    /// hooks config (P7, SPEC section 9): single-table and array-of-tables forms; empty map by default.
     /// hooks config (P7, SPEC section 9): single-table and array-of-tables forms; empty map by default.
     /// Event-point validity is not checked in the config layer (no in-workspace deps; core checks during conversion).
     #[test]

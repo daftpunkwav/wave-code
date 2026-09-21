@@ -5,6 +5,7 @@
  * Responsibilities:
  * - Resolve tool attributes from the tool itself, never from names.
  * - Translate sandbox verdicts into policy verdict data objects.
+ * - Forward human "always allow" decisions to the grant sink.
  *
  * This module must not depend on: runtime internals beyond its trait seam.
  */
@@ -25,6 +26,9 @@ use runtime_runner::{AskKind, PolicyDecider, PolicyVerdict, ToolCall};
 pub struct PolicyAdapter {
     sandbox: wavecode_sandbox::Sandbox,
     registry: Arc<wavecode_tools::Registry>,
+    /// Where "always allow" decisions are persisted; `None` keeps them
+    /// in-session only (no home directory, or a session without identity).
+    grants: Option<crate::grants_sink::GrantSink>,
 }
 
 impl PolicyAdapter {
@@ -33,7 +37,17 @@ impl PolicyAdapter {
         sandbox: wavecode_sandbox::Sandbox,
         registry: Arc<wavecode_tools::Registry>,
     ) -> Self {
-        Self { sandbox, registry }
+        Self {
+            sandbox,
+            registry,
+            grants: None,
+        }
+    }
+
+    /// Persist "always allow" decisions through `grants` (builder).
+    pub fn with_grants(mut self, grants: crate::grants_sink::GrantSink) -> Self {
+        self.grants = Some(grants);
+        self
     }
 }
 
@@ -86,9 +100,15 @@ impl PolicyDecider for PolicyAdapter {
 
     /// Derive one literally exact session rule from the approved call so
     /// later identical calls skip the ask (degrades to one-shot allow when
-    /// the input carries no derivable `command`/`path` text).
+    /// the input carries no derivable `command`/`path` text), and hand the
+    /// same rule to the grant sink so the next session starts exempt too.
     fn remember_always(&self, call: &ToolCall) {
-        self.sandbox.allow_always(&call.name, &call.input);
+        let Some(rule) = self.sandbox.allow_always(&call.name, &call.input) else {
+            return;
+        };
+        if let Some(grants) = &self.grants {
+            grants.record(&call.name, &rule);
+        }
     }
 }
 
@@ -145,5 +165,47 @@ mod tests {
             .decide(&call("shell", serde_json::json!({"command": "ls"})))
             .await;
         assert!(matches!(verdict, PolicyVerdict::Deny { .. }));
+    }
+
+    /// "Always allow" both exempts for the rest of this session and leaves a
+    /// durable record for the next one.
+    #[tokio::test]
+    async fn always_allow_forwards_the_derived_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = PolicyAdapter::new(
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Auto),
+            registry(),
+        )
+        .with_grants(crate::grants_sink::GrantSink::new(dir.path(), "s1"));
+
+        let fmt = call("shell", serde_json::json!({"command": "cargo fmt"}));
+        assert!(matches!(
+            adapter.decide(&fmt).await,
+            PolicyVerdict::Ask { .. }
+        ));
+        adapter.remember_always(&fmt);
+        assert_eq!(adapter.decide(&fmt).await, PolicyVerdict::Allow);
+        let stored = state_persistence::grants::load_grants(dir.path());
+        assert_eq!(
+            stored
+                .grants
+                .iter()
+                .map(|grant| grant.rule.as_str())
+                .collect::<Vec<_>>(),
+            ["Bash(cargo fmt)"]
+        );
+    }
+
+    /// Without a sink the decision still applies for the session; it just
+    /// has nowhere durable to go.
+    #[tokio::test]
+    async fn always_allow_without_a_sink_stays_in_session() {
+        let adapter = PolicyAdapter::new(
+            wavecode_sandbox::Sandbox::without_rules(wavecode_protocol::PermissionMode::Auto),
+            registry(),
+        );
+        let ls = call("shell", serde_json::json!({"command": "ls"}));
+        adapter.remember_always(&ls);
+        assert_eq!(adapter.decide(&ls).await, PolicyVerdict::Allow);
     }
 }

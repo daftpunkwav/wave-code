@@ -124,8 +124,9 @@ enum Command {
     /// Each `session/new` assembles a headless session from config, so
     /// this surface needs provider credentials like `exec`.
     Acp,
-    /// Validate local configuration, settings, themes, and session
-    /// records without contacting any provider.
+    /// Validate local configuration, permission rules, settings, themes,
+    /// session records, and the OS confinement backend, without contacting
+    /// any provider.
     Doctor,
     /// Aggregate the metrics ledger into per-model, per-tool quality
     /// numbers (offline: reads `~/.wavecode/metrics` only).
@@ -140,6 +141,13 @@ enum Command {
     /// Compare the running version against the newest published GitHub
     /// release.
     Update,
+    /// List and revoke the "always allow" grants sessions persisted
+    /// (offline: reads `~/.wavecode/grants.jsonl` only).
+    Grants {
+        /// Grant surface to run.
+        #[command(subcommand)]
+        command: GrantsCommand,
+    },
     /// Serve live sessions over local HTTP (REST + SSE). Binds the
     /// loopback interface only; the bearer token prints on startup.
     Serve {
@@ -164,6 +172,20 @@ enum McpCommand {
 enum PluginCommand {
     /// List installed plugins with skill/MCP/hook counts.
     List,
+}
+
+/// Grant surfaces on the new stack.
+#[derive(Debug, Parser)]
+enum GrantsCommand {
+    /// Show every stored grant with the index `remove` takes.
+    List,
+    /// Revoke the grant at a `list` index.
+    Remove {
+        /// Index shown by `grants list`.
+        index: usize,
+    },
+    /// Revoke every stored grant.
+    Clear,
 }
 
 /// The permission mode the session should start in: an explicit
@@ -471,6 +493,15 @@ async fn main() -> anyhow::Result<()> {
         run_metrics(home.as_deref(), session.as_deref(), json);
         std::process::exit(Outcome::Completed.exit_code())
     }
+    // Grants inspects and edits one local file: no session, no credentials.
+    if let Some(Command::Grants { command }) = args.command {
+        let ok = run_grants(home.as_deref(), command);
+        std::process::exit(if ok {
+            Outcome::Completed.exit_code()
+        } else {
+            Outcome::Failed.exit_code()
+        })
+    }
     // Update check talks only to the GitHub releases API: no session
     // assembly, no provider credentials. A failed probe exits 1 so
     // scripts can tell "no update" from "could not tell".
@@ -578,12 +609,13 @@ async fn main() -> anyhow::Result<()> {
             run_resume(thread_id, permission_mode, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
-        // Mcp/Plugin/Acp/Doctor/Update/Serve return before assembly above.
+        // Mcp/Plugin/Acp/Doctor/Grants/Update/Serve return before assembly above.
         Some(Command::Mcp { .. })
         | Some(Command::Plugin { .. })
         | Some(Command::Acp)
         | Some(Command::Doctor)
         | Some(Command::Metrics { .. })
+        | Some(Command::Grants { .. })
         | Some(Command::Update)
         | Some(Command::Serve { .. }) => {
             unreachable!("early-return surfaces never reach assembly")
@@ -735,6 +767,70 @@ fn run_metrics(home: Option<&Path>, session: Option<&str>, json: bool) {
     );
     println!();
     println!("{}", metrics_report(&totals));
+}
+
+/// `grants`: inspect and revoke the persisted always-allow table.
+///
+/// Every action here only tightens authority (a revoked grant goes back to
+/// asking), so no confirmation gate is warranted. The exit code separates
+/// "nothing to do" from "could not tell".
+fn run_grants(home: Option<&Path>, command: GrantsCommand) -> bool {
+    use state_persistence::grants;
+    let Some(home) = home else {
+        eprintln!("grants: no home directory available");
+        return false;
+    };
+    let read = grants::load_grants(home);
+    if read.malformed > 0 {
+        eprintln!(
+            "[warn] {} malformed grant line(s) skipped in {}",
+            read.malformed,
+            grants::grants_path(home).display()
+        );
+    }
+    match command {
+        GrantsCommand::List => {
+            println!(
+                "grants {} ({} stored)",
+                grants::grants_path(home).display(),
+                read.grants.len()
+            );
+            for (index, grant) in read.grants.iter().enumerate() {
+                println!(
+                    "  {index:<3} {:<48} {:<8} {}",
+                    grant.rule, grant.tool, grant.session
+                );
+            }
+            true
+        }
+        GrantsCommand::Remove { index } => match grants::remove_grant(home, index) {
+            Ok(Some(grant)) => {
+                println!("revoked {}", grant.rule);
+                true
+            }
+            Ok(None) => {
+                eprintln!(
+                    "grants: no grant at index {index} ({} stored)",
+                    read.grants.len()
+                );
+                false
+            }
+            Err(error) => {
+                eprintln!("grants: {error}");
+                false
+            }
+        },
+        GrantsCommand::Clear => match grants::clear_grants(home) {
+            Ok(count) => {
+                println!("revoked {count} grant(s)");
+                true
+            }
+            Err(error) => {
+                eprintln!("grants: {error}");
+                false
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -1525,6 +1621,20 @@ fn fail(line: impl Into<String>) -> DoctorCheck {
 /// provider credentials, UI settings, custom themes, and session
 /// records — without contacting any provider. Secrets are never
 /// printed, only where a key was found.
+/// The `wave` denylist stored in the console settings under `home`.
+///
+/// Missing or unreadable settings yield no entries: the settings check in
+/// [`doctor_checks`] is what reports why, rather than every consumer
+/// repeating the warning.
+fn settings_denylist(home: &Path) -> Vec<String> {
+    let path = home.join(".wavecode").join("console-settings.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<console_ui::settings::UiSettings>(&text).ok())
+        .map(|settings| settings.wave_denylist)
+        .unwrap_or_default()
+}
+
 fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let Some(home) = home else {
@@ -1595,6 +1705,27 @@ fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> 
                     None => checks.push(fail(format!(
                         "secondary_model: alias {alias:?} is not in [models]"
                     ))),
+                }
+            }
+            // Permission rules: built by the same function session
+            // assembly uses, so this report cannot drift from what a
+            // session actually loads. A rule that never applied is not a
+            // crash — it is the one thing the user will otherwise hunt for.
+            let permissions = operations_bootstrap::load_permissions(
+                &config,
+                Some(home),
+                &settings_denylist(home),
+            );
+            if permissions.findings.is_empty() {
+                checks.push(ok(format!(
+                    "permissions: {} allow, {} grant(s), {} deny",
+                    permissions.authored_allow,
+                    permissions.persisted_grants,
+                    permissions.deny.len()
+                )));
+            } else {
+                for finding in &permissions.findings {
+                    checks.push(fail(format!("permissions: {finding}")));
                 }
             }
         }
@@ -1682,6 +1813,14 @@ fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> 
             }
         }
     }
+    // OS confinement: policy rules on intent, this is the machine boundary
+    // behind it. Report what actually holds rather than letting an
+    // "available" backend read like a jail (the Windows job backend controls
+    // process trees only — no filesystem or network boundary).
+    checks.push(ok(format!(
+        "sandbox: {}",
+        operations_bootstrap::confinement_status()
+    )));
     checks
 }
 
@@ -2662,6 +2801,111 @@ model = "test-model-fast"
         );
     }
 
+    /// A typo in a rule and an allow a deny rule fully shadows are both
+    /// things the user cannot see from behavior alone: the first loads as
+    /// nothing, the second loads and never fires.
+    #[test]
+    fn doctor_reports_invalid_and_dead_permission_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "test-model"
+model_provider = "test-provider"
+
+[model_providers.test-provider]
+type = "anthropic"
+base_url = "https://api.example.com"
+api_key = "k"
+
+[permissions]
+allow = ["not a rule", "Bash(git *)"]
+deny = ["Bash(*)"]
+"#,
+        )
+        .unwrap();
+        let lines: Vec<String> = doctor_checks(None, Some(dir.path()))
+            .into_iter()
+            .filter(|check| check.line.starts_with("permissions:"))
+            .map(|check| check.line)
+            .collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("invalid allow rule")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Bash(git *)") && l.contains("can never apply")),
+            "{lines:?}"
+        );
+    }
+
+    /// The denylist lives in console settings, so the grant report has to
+    /// read that file to agree with what a session will enforce.
+    #[test]
+    fn doctor_sees_the_settings_denylist() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("console-settings.json"),
+            r#"{"wave_denylist":["rm -rf"]}"#,
+        )
+        .unwrap();
+        assert_eq!(settings_denylist(dir.path()), vec!["rm -rf".to_string()]);
+        assert!(settings_denylist(&std::path::PathBuf::from("/no/such/home")).is_empty());
+    }
+
+    /// Grants CLI contract: list always answers, revoke reports what it
+    /// could not find, and a real removal empties the table.
+    #[test]
+    fn grants_list_remove_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(run_grants(Some(dir.path()), GrantsCommand::List));
+        let grant = state_persistence::grants::Grant {
+            rule: "Bash(cargo fmt)".to_string(),
+            tool: "shell".to_string(),
+            granted_at_secs: 1,
+            session: "s1".to_string(),
+        };
+        state_persistence::grants::add_grant(dir.path(), &grant).unwrap();
+
+        assert!(!run_grants(
+            Some(dir.path()),
+            GrantsCommand::Remove { index: 7 }
+        ));
+        assert!(run_grants(
+            Some(dir.path()),
+            GrantsCommand::Remove { index: 0 }
+        ));
+        assert!(
+            state_persistence::grants::load_grants(dir.path())
+                .grants
+                .is_empty()
+        );
+        assert!(run_grants(Some(dir.path()), GrantsCommand::Clear));
+        assert!(!run_grants(None, GrantsCommand::List));
+    }
+
+    /// Every run reports the machine boundary it actually has, so a partial
+    /// backend is never presented as a jail.
+    #[test]
+    fn doctor_discloses_the_confinement_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = doctor_checks(None, Some(dir.path()))
+            .into_iter()
+            .map(|check| check.line)
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.starts_with("sandbox: ")),
+            "{lines:?}"
+        );
+    }
+
     /// A broken console-settings.json surfaces here even though runtime
     /// loading silently falls back to defaults.
     #[test]
@@ -3177,6 +3421,7 @@ model = "m2"
             model_provider: "anthropic".to_string(),
             model_providers,
             permission_mode: None,
+            permissions: wavecode_config::PermissionsConfig::default(),
             hooks: std::collections::HashMap::new(),
             mcp_servers: std::collections::HashMap::new(),
             models,

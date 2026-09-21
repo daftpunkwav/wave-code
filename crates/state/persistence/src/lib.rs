@@ -7,6 +7,7 @@
  * - Reload records in order, skipping corrupt lines explicitly.
  * - Count skipped lines so strict callers can refuse partial loads.
  * - Serve the tail for quick resume previews.
+ * - Store the always-allow grant table (see the `grants` submodule).
  *
  * This module must not depend on: drivers, tools, or sessions. History
  * entries travel as plain model/user text pairs owned by the caller;
@@ -18,6 +19,9 @@
 
 /// Legacy engine journal import for session resume.
 pub mod legacy;
+
+/// Persisted always-allow grants shared by every session.
+pub mod grants;
 
 /// New-stack session registry: identity, index, and turn journaling.
 pub mod sessions;

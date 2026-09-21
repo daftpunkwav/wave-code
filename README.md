@@ -19,6 +19,7 @@ wavecode                               # fullscreen TUI on a TTY, REPL otherwise
 wavecode --plan                        # start in plan mode (-y for auto mode)
 wavecode --debug                       # debug-level file logging (~/.wavecode/logs)
 wavecode metrics                       # per-model, per-tool quality report
+wavecode grants list                   # what "always allow" has been approving since
 wavecode doctor                        # validate local setup, no provider contact
 wavecode update                        # check for a newer published release
 ```
@@ -59,6 +60,14 @@ model = "your-model-fast"
 # /model choice in the session still wins, and a dangling alias degrades
 # to the primary with a warning (doctor reports it).
 # secondary_model = "fast"
+
+# Optional: permission rules, `Scope(pattern)` syntax. Allow entries skip
+# approval; deny entries refuse in every mode (deny always wins). `*` matches
+# any run of characters, `?` one. Read from this home file only — never from a
+# repo-local config, because the working directory is the agent's to write in.
+# [permissions]
+# allow = ["Bash(cargo test *)", "File(docs/**)"]
+# deny  = ["Bash(curl *)"]
 ```
 
 ## Surfaces
@@ -124,10 +133,16 @@ model = "your-model-fast"
   turns, approvals. Offline: it reads local files and never contacts a
   provider. `--session <id>` narrows to one session; `--json` emits the
   merged totals for scripts.
+- `grants`: lists the "always allow" decisions previous sessions persisted
+  (`~/.wavecode/grants.jsonl`) with the index `wavecode grants remove <i>`
+  takes; `grants clear` revokes all of them. Every action here only tightens
+  authority — a revoked grant goes back to asking. Exit 1 when a revoke could
+  not be carried out or the index is not in the table.
 - `doctor`: validates local setup without contacting any provider — config
   parse, provider api key resolution (never printed), `[models]` entries,
-  console settings, custom themes, and session records. Exit 1 when any
-  check fails.
+  permission rules (invalid entries, and allows a deny rule shadows), the OS
+  confinement backend, console settings, custom themes, and session records.
+  Exit 1 when any check fails.
 
 Diagnostics: every surface logs to a daily rolling file under
 `~/.wavecode/logs/` (14 days retained), never to stdout/stderr, so the
@@ -159,6 +174,32 @@ Legacy names still parse (`guarded`/`default`/`acceptEdits` → `auto`,
 `bypassPermissions`/`yolo` → `wave`) with a startup warning. Unknown values
 warn and fall back to `auto`. Shift+Tab (or `/permissions` in the REPL)
 cycles the mode for the running session.
+
+Rules sit under the modes: `deny` entries refuse in every mode, `allow`
+entries skip the prompt (with `[permissions]` in the home config, see the
+template above). Two bounds are worth knowing when you write one: a wildcard
+allow never exempts a compound Bash command — `git status && curl …` still
+asks, because `*` spans command separators — and one entry with a bad syntax
+costs only itself, reported as a startup warning rather than dropping the
+table it sat in.
+
+Answering **always allow** stores that exact command or path in
+`~/.wavecode/grants.jsonl`, so the next session starts exempt to the same
+call instead of asking you again. Stored grants are literals on purpose: an
+entry carrying `*` or `?` would re-parse as a wildcard and approve more than
+the human did, so those stay in-memory for the session that approved them,
+with a warning in that session's log. Revoke with `wavecode grants list` /
+`grants remove <i>` / `grants clear`.
+
+Approval is intent, not containment. OS confinement of shell spawns is
+opt-in via `WAVECODE_SANDBOX_OS=1`; when enabled, the first available backend
+wins (bwrap → Landlock → seatbelt → Windows job object) and a platform with
+none fails closed instead of running unconfined. Note what that means per
+platform: Linux and macOS backends bound the filesystem (cwd + temp writable,
+no network for shell spawns), while the Windows job object bounds only process
+lifetime and count — no filesystem or network boundary, so an approved command
+there runs with your own account's privileges. `wavecode doctor` prints which
+backend is live and how far it reaches.
 
 ## Skills, memory, MCP
 

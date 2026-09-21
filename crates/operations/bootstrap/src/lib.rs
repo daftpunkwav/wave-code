@@ -29,6 +29,7 @@ pub mod environment;
 pub mod evicting_gateway;
 pub mod gate_adapter;
 pub mod goal_tools;
+pub mod grants_sink;
 pub mod hook_adapter;
 pub mod job_tools;
 pub mod mcp_bridge;
@@ -56,6 +57,7 @@ pub use child_service::TurnChildService;
 pub use compactor::ContextCompactor;
 pub use composite::CompositeExecutor;
 pub use gate_adapter::{Approvals, GateApprovalSource, HeadlessDeny};
+pub use grants_sink::GrantSink;
 pub use hook_adapter::HookAdapter;
 pub use mcp_bridge::{McpConnectReport, StdioMcpClient, connect_all};
 pub use memory_finish::{MemoryFinisher, SessionMemory};
@@ -69,8 +71,8 @@ pub use plan_tools::{
 };
 pub use policy_adapter::PolicyAdapter;
 pub use session::{
-    APPROVAL_TIMEOUT, AssembleOptions, DEFAULT_IDENTITY, DEFAULT_MAX_TOOL_ROUNDS, SessionError,
-    SessionHandle, assemble_session,
+    APPROVAL_TIMEOUT, AssembleOptions, DEFAULT_IDENTITY, DEFAULT_MAX_TOOL_ROUNDS, Permissions,
+    SessionError, SessionHandle, assemble_session, confinement_status, load_permissions,
 };
 pub use skill_tool::SkillTool;
 pub use status_queries::SessionStatus;

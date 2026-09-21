@@ -215,6 +215,141 @@ pub fn resolve_permission_mode(
         .unwrap_or(wavecode_protocol::PermissionMode::Auto)
 }
 
+/// The startup permission tables plus what a human needs to know about them.
+///
+/// One builder serves both consumers: session assembly takes the tables,
+/// `wavecode doctor` takes the counts and findings. A separate audit path
+/// could drift from what sessions actually load, which is worse than no
+/// audit at all.
+pub struct Permissions {
+    /// Validated allow rules in source order (authored entries, then grants).
+    pub allow: Vec<wavecode_sandbox::Rule>,
+    /// Validated deny rules in source order (authored entries, then the
+    /// session denylist). Deny-first ordering lives in the sandbox, not here.
+    pub deny: Vec<wavecode_sandbox::Rule>,
+    /// Authored `[permissions] allow` entries that parsed.
+    pub authored_allow: usize,
+    /// Persisted "always allow" grants that loaded.
+    pub persisted_grants: usize,
+    /// One line per entry needing a human: invalid syntax, or an allow a
+    /// deny rule provably shadows. Assembly surfaces these as startup
+    /// warnings; doctor fails on them.
+    pub findings: Vec<String>,
+}
+
+/// Build the startup permission tables.
+///
+/// Allow comes from two sources: entries a human authored in the user-level
+/// config (`[permissions] allow`) and the literal grants earlier sessions
+/// persisted through "always allow". Deny is config plus the session
+/// denylist.
+///
+/// Config entries must already be `Scope(pattern)`; only denylist entries get
+/// bare-command Bash scoping (they come from a settings field of command
+/// fragments, not rule syntax). Entries validate one at a time: a typo costs
+/// only its own line and surfaces as a finding, rather than failing the table
+/// it sits in — losing the deny table over a bad allow entry would silently
+/// widen authority. Matching semantics stay entirely in the sandbox.
+pub fn load_permissions(
+    config: &wavecode_config::Config,
+    home: Option<&std::path::Path>,
+    session_denylist: &[String],
+) -> Permissions {
+    let mut findings = Vec::new();
+    let mut allow_entries = config.permissions.allow.clone();
+    let mut grants = 0usize;
+    if let Some(home) = home {
+        let stored = state_persistence::grants::load_grants(home);
+        if stored.malformed > 0 {
+            findings.push(format!(
+                "{} always-allow grant line(s) in {} are unreadable and were skipped",
+                stored.malformed,
+                state_persistence::grants::grants_path(home).display()
+            ));
+        }
+        grants = stored.grants.len();
+        allow_entries.extend(stored.grants.into_iter().map(|grant| grant.rule));
+    }
+    let deny_entries: Vec<String> = config
+        .permissions
+        .deny
+        .iter()
+        .cloned()
+        .chain(session_denylist.iter().map(String::as_str).map(bash_scope))
+        .collect();
+    let allow = validate_entries(&allow_entries, "allow", &mut findings);
+    let deny = validate_entries(&deny_entries, "deny", &mut findings);
+    // Deny-first means an allow a deny rule fully covers can never change a
+    // verdict: still harmless, but the human writing it expects otherwise.
+    for rule in &allow {
+        if let Some(ban) = deny.iter().find(|ban| rule.is_covered_by(ban)) {
+            findings.push(format!(
+                "allow rule {rule} can never apply: {ban} denies everything it matches"
+            ));
+        }
+    }
+    let authored_allow = allow.len().saturating_sub(grants);
+    Permissions {
+        allow,
+        deny,
+        authored_allow,
+        persisted_grants: grants,
+        findings,
+    }
+}
+
+/// Parse entries one at a time, reporting each failure instead of stopping.
+fn validate_entries(
+    entries: &[String],
+    table: &str,
+    findings: &mut Vec<String>,
+) -> Vec<wavecode_sandbox::Rule> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            wavecode_sandbox::Rule::parse(entry)
+                .map_err(|error| findings.push(format!("invalid {table} rule: {error}")))
+                .ok()
+        })
+        .collect()
+}
+
+/// One line on the OS confinement a session's shell spawns will get.
+///
+/// Frontends read this through the composition root so they never name the
+/// sandbox crate. The Windows job backend gets its documented gap appended:
+/// a status line saying "available" would otherwise overstate what the
+/// platform boundary actually holds.
+pub fn confinement_status() -> String {
+    let backend = wavecode_sandbox::Sandbox::detect_backend();
+    let line = wavecode_sandbox::status_line(&backend);
+    if backend.backend_name() == "job"
+        && matches!(
+            backend.enforcement(),
+            wavecode_sandbox::EnforcementLevel::Partial
+        )
+    {
+        return format!("{line}; {JOB_GAP}");
+    }
+    line
+}
+
+/// The job backend's gap, phrased for a status line. A test pins every claim
+/// here against the sandbox's own documented reason, so the short form
+/// cannot drift into overstating what the platform boundary holds.
+const JOB_GAP: &str = "process-tree lifetime control and process-count limits only: no filesystem write boundary, no network policy";
+
+/// Bare denylist entries get the Bash scope; already-scoped ones pass
+/// through untouched.
+fn bash_scope(entry: &str) -> String {
+    let trimmed = entry.trim();
+    if trimmed.starts_with("Bash(") || trimmed.starts_with("File(") {
+        entry.to_string()
+    } else {
+        format!("Bash({entry})")
+    }
+}
+
 /// Assemble a live session: config to client handle.
 ///
 /// Must be called inside a tokio runtime (the actor task spawns here).
@@ -464,24 +599,10 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // match, so a future PermissionMode variant fails compilation here
     // instead of silently displaying under the wrong mode name.
     let permission_mode_raw = permission_mode.as_str().to_string();
-    let deny_rules: Vec<String> = wave_denylist
-        .iter()
-        .map(|entry| {
-            // Bare commands get the Bash scope; scoped entries pass through.
-            if entry.trim().starts_with("Bash(") || entry.trim().starts_with("File(") {
-                entry.clone()
-            } else {
-                format!("Bash({entry})")
-            }
-        })
-        .collect();
+    let permissions = load_permissions(&config, home.as_deref(), &wave_denylist);
+    warnings.extend(permissions.findings);
     let sandbox =
-        wavecode_sandbox::Sandbox::new(permission_mode, &[], &deny_rules).unwrap_or_else(|error| {
-            warnings.push(format!(
-                "wave denylist rejected: {error}; continuing without it"
-            ));
-            wavecode_sandbox::Sandbox::without_rules(permission_mode)
-        });
+        wavecode_sandbox::Sandbox::from_rules(permission_mode, permissions.allow, permissions.deny);
 
     // 4. Context sources with warn-and-continue degradation.
     let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
@@ -498,7 +619,13 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             deny_env,
         },
     );
-    let policy = PolicyAdapter::new(sandbox, registry.clone());
+    let policy = match (home.as_deref(), session_id.as_deref()) {
+        (Some(home), Some(session_id)) => PolicyAdapter::new(sandbox, registry.clone())
+            .with_grants(crate::grants_sink::GrantSink::new(home, session_id)),
+        // No home or no session identity: "always allow" stays in-session,
+        // because a grant needs somewhere to live and a writer to attribute.
+        _ => PolicyAdapter::new(sandbox, registry.clone()),
+    };
     // Tool-result eviction rides the gateway seam: every sample crosses
     // the pass, stored history keeps original payloads.
     let model_adapter = crate::evicting_gateway::EvictingGateway::new(ModelAdapter::new(
@@ -1105,6 +1232,122 @@ type = "anthropic"
 base_url = "https://api.example.com/anthropic"
 api_key = "k-inline"
 "#;
+
+    /// Load a config built on the default fixture text.
+    fn config_with(tail: &str) -> wavecode_config::Config {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, format!("{CONFIG}{tail}")).unwrap();
+        wavecode_config::Config::load_from(&path).unwrap()
+    }
+
+    fn displayed(rules: &[wavecode_sandbox::Rule]) -> Vec<String> {
+        rules.iter().map(|rule| rule.to_string()).collect()
+    }
+
+    /// The one-line status copy must not claim more (or less) than the
+    /// backend's own documented limitation.
+    #[test]
+    fn job_gap_summary_agrees_with_the_backend_reason() {
+        for phrase in [
+            "process-tree lifetime control",
+            "no filesystem write boundary",
+            "no network policy",
+        ] {
+            assert!(JOB_GAP.contains(phrase), "summary omits {phrase:?}");
+            assert!(
+                wavecode_sandbox::WINDOWS_UNAVAILABLE_REASON.contains(phrase),
+                "the backend no longer documents {phrase:?}: update the summary"
+            );
+        }
+    }
+
+    /// `[permissions]` reaches the tables, and bare denylist entries keep
+    /// their historical Bash scoping.
+    #[test]
+    fn authored_rules_load_into_both_tables() {
+        let config = config_with(
+            r#"
+[permissions]
+allow = ["Bash(git *)"]
+deny = ["File(.env)"]
+"#,
+        );
+        let perms = load_permissions(&config, None, &["rm -rf".to_string()]);
+        assert_eq!(displayed(&perms.allow), ["Bash(git *)"]);
+        assert_eq!(displayed(&perms.deny), ["File(.env)", "Bash(rm -rf)"]);
+        assert_eq!((perms.authored_allow, perms.persisted_grants), (1, 0));
+        assert!(perms.findings.is_empty(), "{:?}", perms.findings);
+    }
+
+    /// Grants a previous session persisted are startup allow rules, and the
+    /// report tells authored entries apart from clicked ones.
+    #[test]
+    fn persisted_grants_join_the_allow_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let grant = state_persistence::grants::Grant {
+            rule: "Bash(cargo test --locked)".to_string(),
+            tool: "shell".to_string(),
+            granted_at_secs: 1,
+            session: "older".to_string(),
+        };
+        state_persistence::grants::add_grant(dir.path(), &grant).unwrap();
+        let config = config_with(
+            r#"
+[permissions]
+allow = ["Bash(git status)"]
+"#,
+        );
+        let perms = load_permissions(&config, Some(dir.path()), &[]);
+        assert_eq!(
+            displayed(&perms.allow),
+            ["Bash(git status)", "Bash(cargo test --locked)"]
+        );
+        assert_eq!((perms.authored_allow, perms.persisted_grants), (1, 1));
+        assert!(perms.findings.is_empty(), "{:?}", perms.findings);
+    }
+
+    /// The whole point of per-entry validation: one typo must never cost the
+    /// other table, and never fail silently. A bare config entry is a typo
+    /// too — only the denylist gets Bash scoping.
+    #[test]
+    fn an_invalid_entry_costs_only_itself() {
+        let config = config_with(
+            r#"
+[permissions]
+allow = ["Bash(git *)", "not a rule"]
+deny = ["also not a rule", "File(.env)"]
+"#,
+        );
+        let perms = load_permissions(&config, None, &[]);
+        assert_eq!(displayed(&perms.allow), ["Bash(git *)"]);
+        assert_eq!(displayed(&perms.deny), ["File(.env)"]);
+        assert_eq!(perms.findings.len(), 2, "{:?}", perms.findings);
+        assert!(perms.findings.iter().all(|f| f.starts_with("invalid")));
+    }
+
+    /// Deny-first makes a fully shadowed allow dead; doctor says so instead
+    /// of letting the human wonder why the prompt never went away.
+    #[test]
+    fn shadowed_allow_rules_are_reported_as_dead() {
+        let config = config_with(
+            r#"
+[permissions]
+allow = ["Bash(git commit *)", "Bash(git status)"]
+deny = ["Bash(git *)"]
+"#,
+        );
+        let perms = load_permissions(&config, None, &[]);
+        assert_eq!(perms.allow.len(), 2, "dead allows stay loaded");
+        assert_eq!(
+            perms
+                .findings
+                .iter()
+                .filter(|finding| finding.contains("can never apply"))
+                .count(),
+            2
+        );
+    }
 
     #[tokio::test]
     async fn assembly_builds_a_live_client_offline() {

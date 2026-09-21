@@ -234,6 +234,19 @@ impl Rule {
             RuleScope::File => is_file_edit(tool),
         }
     }
+
+    /// Conservative dead-rule test: true when `ban` provably hits every call
+    /// this rule hits, which under deny-first ordering means this rule can
+    /// never change a verdict.
+    ///
+    /// The test is pattern-inclusion via the same matcher (`ban` matching
+    /// this rule's own pattern text implies every string this pattern matches
+    /// also matches `ban`), so it under-reports rather than over-reports:
+    /// callers may miss a dead rule, never flag a live one. Scopes must agree
+    /// — a `File` ban cannot shadow a `Bash` rule.
+    pub fn is_covered_by(&self, ban: &Rule) -> bool {
+        self.scope == ban.scope && ban.matches_text(&self.pattern)
+    }
 }
 
 /// Segments a command for rule matching: AST extraction when the parse
@@ -412,10 +425,10 @@ pub enum Verdict {
 /// The mode and the allow table are shared via `Arc<Mutex<..>>` (a clone
 /// shares: actors switch modes mid-turn via [`Sandbox::mode_handle`], and
 /// session-level rules appended by "always allow" ([`Sandbox::allow_always`])
-/// take effect on every clone's next verdict; persisting allow rules to
-/// config files waits on config layering (section 17.5 M3) wiring). The deny
-/// table is a read-only snapshot (parsed at construction — explicit bans are
-/// never appended mid-session).
+/// take effect on every clone's next verdict). Startup rules come from the
+/// assembly layer: authored config entries plus grants a previous session
+/// persisted, validated one by one and handed over by [`Sandbox::from_rules`].
+/// The deny table is a read-only snapshot (never appended mid-session).
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     mode: Arc<Mutex<PermissionMode>>,
@@ -435,12 +448,19 @@ impl Sandbox {
                 .map(|e| Rule::parse(e))
                 .collect::<Result<Vec<_>, _>>()
         };
-        Ok(Self {
+        Ok(Self::from_rules(mode, parse_all(allow)?, parse_all(deny)?))
+    }
+
+    /// Create from already-parsed rules: infallible by construction, for
+    /// assembly layers that validate entries one at a time (keeping the good
+    /// ones and warning about the bad) instead of failing on the first.
+    pub fn from_rules(mode: PermissionMode, allow: Vec<Rule>, deny: Vec<Rule>) -> Self {
+        Self {
             mode: Arc::new(Mutex::new(mode)),
-            allow: Arc::new(Mutex::new(parse_all(allow)?)),
-            deny: parse_all(deny)?,
+            allow: Arc::new(Mutex::new(allow)),
+            deny,
             backend: detect_backend(),
-        })
+        }
     }
 
     /// Shortcut construction with empty rules (tests and default assembly).
@@ -486,9 +506,9 @@ impl Sandbox {
     /// `None` (callers degrade to a one-shot allow).
     ///
     /// Semantics and bounds:
-    /// - Session-level: the rule lives only on the in-memory `Sandbox`
-    ///   instance and dies with the process; persisting to config files waits
-    ///   on config layering (section 17.5 M3) wiring;
+    /// - In-session table: the rule is appended to the shared allow table and
+    ///   dies with the process unless the caller persists it (the composition
+    ///   root does, as a literal grant — see `state_persistence::grants`);
     /// - Shared clones: shared via `Arc`, so a clone held by a subagent sees
     ///   the new rule on its next `decide` (matching "always allow" session
     ///   semantics);
@@ -1500,6 +1520,14 @@ mod tests {
             exact.decide("read", &file_input(".env"), true, false),
             Verdict::Allow
         ));
+        // And the exactness is what carries it: the same text loaded as a
+        // config entry (which is how a persisted grant re-loads next
+        // session) is not exact, so the ask returns.
+        let persisted = Sandbox::new(PermissionMode::Wave, &["File(.env)".into()], &[]).unwrap();
+        assert!(matches!(
+            persisted.decide("read", &file_input(".env"), true, false),
+            Verdict::Ask { .. }
+        ));
         // Deny still outranks the sensitive ask.
         let denied = Sandbox::new(PermissionMode::Wave, &[], &["File(.env)".into()]).unwrap();
         assert!(matches!(
@@ -1660,5 +1688,66 @@ mod tests {
             deny.decide("mcp__srv__run", &shell_input("curl evil"), false, false),
             Verdict::Deny { .. }
         ));
+    }
+
+    /// An assembly layer that validates entries one by one hands the parsed
+    /// rules over directly: a bad entry then costs only itself.
+    #[test]
+    fn from_rules_keeps_the_valid_ones() {
+        let rules = |entries: &[String]| {
+            entries
+                .iter()
+                .filter_map(|e| Rule::parse(e).ok())
+                .collect::<Vec<_>>()
+        };
+        let sb = Sandbox::from_rules(
+            PermissionMode::Auto,
+            rules(&["Bash(git *)".into(), "not a rule".into()]),
+            rules(&["Bash(rm *)".into()]),
+        );
+        assert_eq!(
+            sb.decide("shell", &shell_input("git status"), false, false),
+            Verdict::Allow
+        );
+        assert!(matches!(
+            sb.decide("shell", &shell_input("rm -rf target"), false, false),
+            Verdict::Deny { .. }
+        ));
+    }
+
+    /// Dead-rule detection may miss a dead rule but must never flag a live
+    /// one: `wavecode doctor` reports these as "can never apply".
+    #[test]
+    fn dead_rule_detection_is_conservative() {
+        let rule = |entry: &str| Rule::parse(entry).unwrap();
+        // A broader ban covers the allow entirely: the allow can never fire.
+        assert!(rule("Bash(git commit *)").is_covered_by(&rule("Bash(git *)")));
+        assert!(rule("Bash(git *)").is_covered_by(&rule("Bash(*)")));
+        // The other direction stays live: `Bash(git *)` still exempts
+        // `git status` even though a `git commit` ban exists.
+        assert!(!rule("Bash(git *)").is_covered_by(&rule("Bash(git commit *)")));
+        // Scopes never cross.
+        assert!(!rule("Bash(ls)").is_covered_by(&rule("File(**)")));
+        // A ban that cannot match the allow's own text leaves it live.
+        assert!(!rule("Bash(*push)").is_covered_by(&rule("Bash(git status)")));
+    }
+
+    /// The grant table stores `Display` output and re-parses it at startup,
+    /// so literal parentheses inside a pattern must survive the trip (they
+    /// do: the scope prefix never contains `(`, so the first one delimits).
+    #[test]
+    fn rule_display_roundtrips_through_parse() {
+        for command in [
+            "cargo test --locked",
+            "echo \"(hi)\"",
+            "echo x)",
+            "ls (a",
+            "grep -n \"(\" src/lib.rs",
+        ] {
+            let rule = Rule::exact(RuleScope::Bash, command);
+            let reparsed = Rule::parse(&rule.to_string()).expect("display is valid entry syntax");
+            assert_eq!(reparsed.pattern(), command);
+            assert_eq!(reparsed.scope(), RuleScope::Bash);
+        }
     }
 }

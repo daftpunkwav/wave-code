@@ -33,7 +33,8 @@
 //! then Landlock; macOS seatbelt; Windows a partial Job-Object backend —
 //! process-tree lifetime control plus limits only, no filesystem or network
 //! boundary): a command that policy allows runs under the first available
-//! backend, or is refused when `sandbox_os` is on and nothing is available.
+//! backend, or is refused when `WAVECODE_SANDBOX_OS` is on and nothing is
+//! available.
 //! Without confinement a spawned process runs with the user's own OS
 //! privileges — treat the policy gate as intent ruling, and the backend
 //! chain as the containment boundary only where it reports availability.

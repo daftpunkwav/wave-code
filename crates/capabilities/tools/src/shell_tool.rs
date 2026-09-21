@@ -54,10 +54,11 @@ fn shell_invocation() -> (String, &'static str) {
 
 /// Whether OS-level confinement applies to shell spawns.
 ///
-/// Default off: set `WAVECODE_SANDBOX_OS=1` (the config layer's `sandbox_os`
-/// flag maps to this variable) to require it. When enabled and the platform
-/// has no backend, the command fails closed with a business error — execution
-/// never silently downgrades to an unconfined spawn.
+/// Default off: set `WAVECODE_SANDBOX_OS=1` in the environment to require it
+/// (there is no config-file equivalent — the variable is the only switch).
+/// When enabled and the platform has no backend, the command fails closed
+/// with a business error — execution never silently downgrades to an
+/// unconfined spawn.
 fn os_sandbox_enabled() -> bool {
     std::env::var("WAVECODE_SANDBOX_OS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }

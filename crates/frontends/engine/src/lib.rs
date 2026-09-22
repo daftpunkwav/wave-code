@@ -34,6 +34,7 @@ pub mod fuzzy;
 pub mod keys;
 pub mod loader;
 pub mod markdown;
+pub mod paste_burst;
 pub mod sanitize;
 pub mod screen;
 pub mod select_list;

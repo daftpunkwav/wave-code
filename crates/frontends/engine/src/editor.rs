@@ -30,6 +30,16 @@ use crate::width::{self, Token};
 /// for it, strips it, and positions the hardware cursor there (IME support).
 pub const CURSOR_MARKER: &str = "\x1b_wc\x07";
 
+/// Where the last yank inserted text: yank-pop replaces exactly that
+/// span while cycling the ring.
+#[derive(Debug, Clone, Copy)]
+struct YankRecord {
+    row: usize,
+    /// Grapheme column the yanked text starts at.
+    col: usize,
+    ring_index: usize,
+}
+
 /// Editor visual style knobs, themed by the application layer.
 #[derive(Debug, Clone)]
 pub struct EditorStyle {
@@ -122,7 +132,15 @@ pub struct Editor {
     argument_hint: Option<String>,
     history: History,
     undo: Vec<(Vec<String>, usize, usize)>,
-    kill_ring: String,
+    /// Killed text, newest first (capped); Ctrl+Y yanks `[0]`, Alt+Y
+    /// cycles through the rest.
+    kill_ring: Vec<String>,
+    /// Cursor position where the current kill sequence last ended; a
+    /// new kill merges into the same entry only when the cursor has
+    /// not moved since (Emacs-style consecutive kills).
+    last_kill_pos: Option<(usize, usize)>,
+    /// Where the last yank landed, for Alt+Y yank-pop cycling.
+    last_yank: Option<YankRecord>,
     paste_markers: Vec<PasteMarker>,
     next_paste_id: usize,
     provider: Option<Box<dyn CompletionProvider>>,
@@ -147,7 +165,9 @@ impl Editor {
             argument_hint: None,
             history: History::default(),
             undo: Vec::new(),
-            kill_ring: String::new(),
+            kill_ring: Vec::new(),
+            last_kill_pos: None,
+            last_yank: None,
             paste_markers: Vec::new(),
             next_paste_id: 1,
             provider: None,
@@ -259,6 +279,8 @@ impl Editor {
     }
 
     fn undo_push(&mut self) {
+        // Any non-kill edit makes a pending yank-pop span stale.
+        self.last_yank = None;
         self.undo.push((self.lines.clone(), self.row, self.col));
         if self.undo.len() > 100 {
             self.undo.remove(0);
@@ -429,16 +451,39 @@ impl Editor {
         }
     }
 
+    /// Push killed text onto the ring. A kill starting exactly where
+    /// the previous kill ended merges into the same entry (Emacs-style
+    /// `C-u C-u` accumulates); `at` is the pre-kill cursor position.
+    fn kill_push(&mut self, text: String, forward: bool, at: (usize, usize)) {
+        if !text.is_empty() {
+            let merge = self.last_kill_pos == Some(at) && !self.kill_ring.is_empty();
+            if merge {
+                let front = &mut self.kill_ring[0];
+                if forward {
+                    front.push_str(&text);
+                } else {
+                    front.insert_str(0, &text);
+                }
+            } else {
+                self.kill_ring.insert(0, text);
+                self.kill_ring.truncate(32);
+            }
+        }
+        self.last_kill_pos = Some((self.row, self.col));
+    }
+
     fn kill_to_line_end(&mut self) {
         let count = self.graphemes(self.row).len();
         if self.col >= count {
             return;
         }
         self.undo_push();
+        let at = (self.row, self.col);
         let line = self.lines[self.row].clone();
         let start = grapheme_byte_offset(&line, self.col);
-        self.kill_ring = line[start..].to_string();
+        let killed = line[start..].to_string();
         self.lines[self.row].truncate(start);
+        self.kill_push(killed, true, at);
         self.refresh_popup();
     }
 
@@ -447,11 +492,13 @@ impl Editor {
             return;
         }
         self.undo_push();
+        let at = (self.row, self.col);
         let line = self.lines[self.row].clone();
         let end = grapheme_byte_offset(&line, self.col);
-        self.kill_ring = line[..end].to_string();
+        let killed = line[..end].to_string();
         self.lines[self.row] = line[end..].to_string();
         self.col = 0;
+        self.kill_push(killed, false, at);
         self.refresh_popup();
     }
 
@@ -461,6 +508,7 @@ impl Editor {
             return;
         }
         self.undo_push();
+        let at = (self.row, self.col);
         let line = self.lines[self.row].clone();
         let graphemes: Vec<&str> = line.graphemes(true).collect();
         let mut end = self.col;
@@ -473,17 +521,62 @@ impl Editor {
         }
         let byte_start = grapheme_byte_offset(&line, start);
         let byte_end = grapheme_byte_offset(&line, self.col);
-        self.kill_ring = line[byte_start..byte_end].to_string();
+        let killed = line[byte_start..byte_end].to_string();
         self.lines[self.row].replace_range(byte_start..byte_end, "");
         self.col = start;
+        self.kill_push(killed, false, at);
         self.refresh_popup();
     }
 
     fn yank(&mut self) {
-        if !self.kill_ring.is_empty() {
-            let ring = self.kill_ring.clone();
-            self.insert_text(&ring);
+        let Some(text) = self.kill_ring.first().filter(|t| !t.is_empty()).cloned() else {
+            return;
+        };
+        let col = self.col;
+        let row = self.row;
+        self.insert_text(&text);
+        self.last_yank = Some(YankRecord {
+            row,
+            col,
+            ring_index: 0,
+        });
+    }
+
+    /// Alt+Y right after a yank: replace the just-yanked span with the
+    /// next ring entry, cycling. Anything that invalidates the recorded
+    /// span (a move across lines, another edit) disarms it.
+    fn yank_pop(&mut self) {
+        let Some(record) = self.last_yank else {
+            return;
+        };
+        let Some(current) = self.kill_ring.get(record.ring_index).cloned() else {
+            self.last_yank = None;
+            return;
+        };
+        let valid = self.row == record.row && self.col >= record.col && {
+            let line = &self.lines[self.row];
+            let byte_start = grapheme_byte_offset(line, record.col);
+            let byte_end = grapheme_byte_offset(line, self.col);
+            line.get(byte_start..byte_end) == Some(current.as_str())
+        };
+        if !valid {
+            self.last_yank = None;
+            return;
         }
+        let next_index = (record.ring_index + 1) % self.kill_ring.len();
+        let next = self.kill_ring[next_index].clone();
+        self.undo_push();
+        let line = &mut self.lines[self.row];
+        let byte_start = grapheme_byte_offset(line, record.col);
+        let byte_end = grapheme_byte_offset(line, self.col);
+        line.replace_range(byte_start..byte_end, &next);
+        self.col = record.col + next.graphemes(true).count();
+        self.last_yank = Some(YankRecord {
+            row: self.row,
+            col: record.col,
+            ring_index: next_index,
+        });
+        self.refresh_popup();
     }
 
     // ----- cursor movement ---------------------------------------------------
@@ -762,6 +855,10 @@ impl Editor {
             }
             (Key::Char('y'), m) if m.ctrl => {
                 self.yank();
+                EditorAction::Handled
+            }
+            (Key::Char('y'), m) if m.alt && !m.ctrl => {
+                self.yank_pop();
                 EditorAction::Handled
             }
             (Key::Char('-'), m) if m.ctrl => {
@@ -1282,6 +1379,85 @@ mod tests {
         type_string(&mut editor, "hello world ");
         editor.handle_key(KeyEvent::new(Key::Char('w'), Mods::CTRL));
         assert_eq!(editor.text(), "hello ");
+    }
+
+    #[test]
+    fn consecutive_same_position_kills_merge() {
+        let mut editor = editor();
+        type_string(&mut editor, "one two three");
+        editor.handle_key(KeyEvent::new(Key::Char('b'), Mods::ALT));
+        assert_eq!(editor.col, 8, "start of the last word");
+        // Two kills starting at the same cursor position accumulate
+        // into one yankable entry.
+        editor.handle_key(KeyEvent::new(Key::Char('k'), Mods::CTRL));
+        assert_eq!(editor.text(), "one two ");
+        editor.handle_key(KeyEvent::new(Key::Char('w'), Mods::CTRL));
+        assert_eq!(editor.text(), "one ");
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::CTRL));
+        assert_eq!(editor.text(), "one two three", "merged kill yanks as one");
+    }
+
+    #[test]
+    fn kills_from_different_positions_split_entries() {
+        let mut editor = editor();
+        type_string(&mut editor, "alpha beta");
+        editor.handle_key(KeyEvent::new(Key::Char('b'), Mods::ALT));
+        editor.handle_key(KeyEvent::new(Key::Char('u'), Mods::CTRL));
+        assert_eq!(editor.text(), "beta");
+        // A kill from a different position starts a new ring entry: the
+        // next yank returns the newest kill, Alt+Y cycles back.
+        editor.handle_key(KeyEvent::new(Key::Char('e'), Mods::CTRL));
+        editor.handle_key(KeyEvent::new(Key::Char('w'), Mods::CTRL));
+        assert_eq!(editor.text(), "");
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::CTRL));
+        assert_eq!(editor.text(), "beta");
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::ALT));
+        assert_eq!(editor.text(), "alpha ");
+    }
+
+    #[test]
+    fn alt_y_cycles_through_the_ring() {
+        let mut editor = editor();
+        type_string(&mut editor, "alpha beta");
+        // Kill "alpha " backward, then part of "beta" forward: two
+        // entries (the cursor must sit before the line end for the
+        // forward kill to take text).
+        editor.handle_key(KeyEvent::new(Key::Char('b'), Mods::ALT));
+        editor.handle_key(KeyEvent::new(Key::Char('u'), Mods::CTRL));
+        assert_eq!(editor.text(), "beta");
+        editor.handle_key(KeyEvent::new(Key::Char('b'), Mods::ALT));
+        editor.handle_key(KeyEvent::new(Key::Right, Mods::NONE));
+        editor.handle_key(KeyEvent::new(Key::Right, Mods::NONE));
+        editor.handle_key(KeyEvent::new(Key::Char('k'), Mods::CTRL));
+        assert_eq!(editor.text(), "be");
+        // Clear the remaining draft (not a kill: the ring keeps its
+        // three entries).
+        editor.handle_key(KeyEvent::new(Key::Char('e'), Mods::CTRL));
+        editor.handle_key(KeyEvent::plain(Key::Backspace));
+        editor.handle_key(KeyEvent::plain(Key::Backspace));
+        assert_eq!(editor.text(), "");
+        // Yank inserts the newest kill; Alt+Y cycles both entries and
+        // wraps.
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::CTRL));
+        assert_eq!(editor.text(), "ta");
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::ALT));
+        assert_eq!(editor.text(), "alpha ");
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::ALT));
+        assert_eq!(editor.text(), "ta");
+    }
+
+    #[test]
+    fn edit_between_yank_and_alt_y_disarms_the_cycle() {
+        let mut editor = editor();
+        type_string(&mut editor, "ab");
+        editor.handle_key(KeyEvent::new(Key::Char('a'), Mods::CTRL));
+        editor.handle_key(KeyEvent::new(Key::Char('k'), Mods::CTRL));
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::CTRL));
+        assert_eq!(editor.text(), "ab");
+        // Typing after the yank invalidates the recorded span.
+        editor.handle_key(KeyEvent::plain(Key::Char('X')));
+        editor.handle_key(KeyEvent::new(Key::Char('y'), Mods::ALT));
+        assert_eq!(editor.text(), "abX", "stale yank-pop must not rewrite");
     }
 
     #[test]

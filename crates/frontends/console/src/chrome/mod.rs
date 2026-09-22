@@ -2,6 +2,7 @@
 
 pub mod footer;
 pub mod notify;
+pub mod statusline;
 pub mod symbols;
 pub mod title;
 pub mod todo;

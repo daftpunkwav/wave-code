@@ -21,7 +21,7 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 30] = [
+pub const COMMANDS: [&str; 31] = [
     "help",
     "btw",
     "new",
@@ -49,6 +49,7 @@ pub const COMMANDS: [&str; 30] = [
     "compact",
     "undo",
     "editor",
+    "reload",
     "copy",
     "export",
     "exit",
@@ -100,7 +101,7 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
         "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
         "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" | "undo"
-        | "editor" => {
+        | "editor" | "reload" => {
             // Dialogs and local panels: the caller owns the behavior.
             Effect::Ops(Vec::new())
         }
@@ -225,6 +226,7 @@ pub fn help_lines() -> Vec<String> {
             .to_string(),
         "  /undo [n] — drop the last n turns from the conversation (default 1)".to_string(),
         "  /editor <cmd> — set the external editor for ctrl+g".to_string(),
+        "  /reload — re-read settings and the theme from disk".to_string(),
         "  /copy — copy the last assistant message".to_string(),
         "  /export [path] — write the dialogue to markdown".to_string(),
         "  /exit, /quit — end the session".to_string(),
@@ -328,7 +330,7 @@ mod tests {
         // Caller-handled commands dispatch as no-ops on the wire.
         for name in [
             "btw", "new", "sessions", "resume", "fork", "title", "init", "mcp", "status", "undo",
-            "editor",
+            "editor", "reload",
         ] {
             let effect = dispatch(
                 &parse(&format!("/{name}")).unwrap(),

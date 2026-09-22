@@ -75,6 +75,16 @@ pub struct UiSettings {
     /// External editor command for Ctrl+G (`/editor <cmd>`); falls back
     /// to `$VISUAL` then `$EDITOR` when unset.
     pub editor_command: Option<String>,
+    /// External status-line command (Claude Code-compatible: JSON
+    /// session snapshot on stdin, first stdout line replaces footer
+    /// row 1). Applied by the poll loop about once per second.
+    pub status_line_command: Option<String>,
+    /// Turn-finished notifications: `Some(false)` disables them; unset
+    /// falls back to `WAVECODE_NOTIFY=0`.
+    pub notifications_enabled: Option<bool>,
+    /// Notification delivery style (`osc9` / `bell` / `both`); unset
+    /// falls back to `WAVECODE_NOTIFY_STYLE`.
+    pub notification_style: Option<String>,
 }
 
 impl Default for UiSettings {
@@ -89,6 +99,9 @@ impl Default for UiSettings {
             default_provider: None,
             default_effort: None,
             editor_command: None,
+            status_line_command: None,
+            notifications_enabled: None,
+            notification_style: None,
         }
     }
 }
@@ -176,5 +189,11 @@ impl SharedSettings {
         if self.persist {
             guard.save();
         }
+    }
+
+    /// Discard live values and reload from disk (`/reload`); holders
+    /// of this handle see the fresh values on their next read.
+    pub fn reload(&self) {
+        *self.inner.lock().expect("settings lock") = UiSettings::load();
     }
 }

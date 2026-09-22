@@ -2,6 +2,7 @@
 //! streaming phase, context usage, and queued input.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 /// What the harness is doing right now; drives the input pulse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,13 @@ pub struct DialogueEntry {
     pub text: String,
 }
 
+/// The active goal, shown as a timed badge in the footer row 1.
+#[derive(Debug, Clone)]
+pub struct GoalBadge {
+    /// When the goal was set (this run), for the elapsed timer.
+    pub since: Instant,
+}
+
 /// Mutable UI state snapshot; components read it during rendering.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -118,6 +126,13 @@ pub struct AppState {
     /// Full user/assistant dialogue for `/export` and `/copy`; unlike
     /// the transcript this is never trimmed.
     pub dialogue: Vec<DialogueEntry>,
+    /// Active goal (GoalSet until GoalCompleted); renders as a timed
+    /// footer badge. Not restored on resume — the badge only reflects
+    /// goals seen this run.
+    pub goal: Option<GoalBadge>,
+    /// First line of the external status-line command, replacing
+    /// footer row 1 when present.
+    pub status_line: Option<String>,
 }
 
 impl AppState {
@@ -149,6 +164,8 @@ impl AppState {
             git_branch: None,
             update_notice: None,
             dialogue: Vec::new(),
+            goal: None,
+            status_line: None,
         }
     }
 

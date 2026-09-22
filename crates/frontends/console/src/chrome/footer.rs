@@ -43,6 +43,10 @@ pub fn row1(state: &AppState, tip: Option<&str>, columns: usize) -> String {
             &format!(" {} {branch}", crate::chrome::symbols::BRANCH),
         ));
     }
+    if let Some(goal) = &state.goal {
+        let minutes = (goal.since.elapsed().as_secs() / 60).max(1);
+        line.push_str(&theme.paint(Token::Primary, &format!("  goal ● {minutes}m")));
+    }
     if let Some(tip) = tip {
         let used = width::width(&line);
         let tip_text = theme.paint(Token::TextMuted, &format!(" | {tip}"));
@@ -141,6 +145,21 @@ mod tests {
         assert!(plain.contains("⎇ feat/console-ui"), "{plain}");
         let bare = row1(&state(), None, 120);
         assert!(!width::strip_ansi(&bare).contains("⎇"), "{bare}");
+    }
+
+    #[test]
+    fn row1_shows_goal_badge_while_active() {
+        theme::set(theme::Theme::dark());
+        let mut with_goal = state();
+        with_goal.goal = Some(crate::state::GoalBadge {
+            since: std::time::Instant::now(),
+        });
+        let line = row1(&with_goal, None, 120);
+        let plain = width::strip_ansi(&line);
+        assert!(plain.contains("goal ●"), "{plain}");
+        assert!(plain.contains("1m"), "{plain}");
+        let bare = row1(&state(), None, 120);
+        assert!(!width::strip_ansi(&bare).contains("goal ●"), "{bare}");
     }
 
     #[test]

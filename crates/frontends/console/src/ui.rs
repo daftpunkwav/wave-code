@@ -57,7 +57,7 @@ use crate::messages::usage::UsagePanel;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
 use crate::slash;
-use crate::state::{AppState, StreamingPhase, TodoEntry, TodoStatus};
+use crate::state::{AppState, GoalBadge, StreamingPhase, TodoEntry, TodoStatus};
 use crate::theme::{self, Token};
 use crate::transcript::Transcript;
 use crate::welcome::Welcome;
@@ -250,6 +250,11 @@ pub struct ConsoleUi {
     pending_external_edit: Option<String>,
     /// Last idle Esc press, for the double-Esc rewind picker.
     last_esc_at: Option<Instant>,
+    /// External status-line command runner (footer row 1 takeover).
+    status_line: crate::chrome::statusline::StatusLine,
+    /// Name of the live theme (`/theme` argument), re-applied by
+    /// `/reload` so edited theme files show up.
+    theme_name: String,
     version: String,
 }
 
@@ -266,6 +271,8 @@ impl ConsoleUi {
             state,
             status: ctx.status.clone(),
             link,
+            status_line: crate::chrome::statusline::StatusLine::new(None),
+            theme_name: "auto".to_string(),
             editor: {
                 let mut editor = Editor::new(editor_style());
                 let mut command_names: Vec<String> =
@@ -334,6 +341,8 @@ impl ConsoleUi {
         ui.state.session_title = ctx.session_title.clone();
         ui.state.home = ctx.home.clone();
         ui.state.git_branch = crate::gitinfo::branch(&ui.state.cwd);
+        ui.status_line
+            .set_command(ui.settings.get().status_line_command.clone());
         let info = welcome_info_of(&ui.state, &ui.version);
         ui.transcript.push_new_turn(Box::new(Welcome::new(info)));
         ui
@@ -835,10 +844,14 @@ impl ConsoleUi {
                 true
             }
             EventMsg::GoalSet { objective } => {
+                self.state.goal = Some(GoalBadge {
+                    since: Instant::now(),
+                });
                 self.push_status(&format!("goal set: {objective}"), false);
                 true
             }
             EventMsg::GoalCompleted => {
+                self.state.goal = None;
                 self.push_status("goal completed", false);
                 true
             }
@@ -908,10 +921,15 @@ impl ConsoleUi {
                 // events track that); queued follow-ups keep the session
                 // visibly active.
                 let queued_next = !self.state.queued.is_empty();
-                if !*interrupted && !queued_next && notify::enabled() && !self.terminal_focused {
+                let view = self.settings.get();
+                if !*interrupted
+                    && !queued_next
+                    && notify::enabled_with(&view)
+                    && !self.terminal_focused
+                {
                     // Composed (style + tmux passthrough), not the bare
-                    // OSC 9: delivery must follow WAVECODE_NOTIFY_STYLE.
-                    self.pending_sequence = Some(notify::notification("turn finished"));
+                    // OSC 9: delivery follows the configured style.
+                    self.pending_sequence = Some(notify::notification_for("turn finished", &view));
                 }
                 // Trim old turns now that the frame is stable; no calls
                 // span turns, so the open-call index resets with it.
@@ -1166,6 +1184,8 @@ impl ConsoleUi {
                         self.start_new_session();
                     } else if invocation.name == "theme" {
                         self.apply_theme(&invocation.args);
+                    } else if invocation.name == "reload" {
+                        self.reload_local_config();
                     } else if invocation.name == "copy" {
                         self.copy_last_assistant();
                     } else if invocation.name == "export" {
@@ -1844,6 +1864,7 @@ verify from the repository.";
     /// Apply a `/theme light|dark|auto` switch locally.
     fn apply_theme(&mut self, args: &str) {
         let name = args.trim();
+        self.theme_name = name.to_string();
         match name {
             "light" => theme::set(theme::Theme::light()),
             "dark" => theme::set(theme::Theme::dark()),
@@ -1890,6 +1911,19 @@ verify from the repository.";
         self.editor.set_style(editor_style());
         self.screen.invalidate();
         self.push_status(&format!("theme switched ({name})"), false);
+    }
+
+    /// `/reload`: re-read settings and the theme from disk, refresh
+    /// the git branch, and re-arm the external status line.
+    fn reload_local_config(&mut self) {
+        self.settings.reload();
+        let view = self.settings.get();
+        self.status_line
+            .set_command(view.status_line_command.clone());
+        let theme_name = self.theme_name.clone();
+        self.apply_theme(&theme_name);
+        self.state.git_branch = crate::gitinfo::branch(&self.state.cwd);
+        self.push_status("reloaded settings, theme, and git state", false);
     }
 
     /// `/copy`: put the last assistant message on the clipboard via
@@ -2053,9 +2087,20 @@ verify from the repository.";
             self.tip_index = self.tip_index.wrapping_add(1);
             self.tip_rotated_at = Instant::now();
         }
-        let tip = footer_chrome::TIPS[self.tip_index % footer_chrome::TIPS.len()];
+        // An external status line owns row 1 outright when it has
+        // produced output.
+        if let Some(line) = self.state.status_line.clone() {
+            let row1 = tui_engine::width::truncate_to_width(&line, columns);
+            let hint = if self.exit_armed() {
+                TransientHint::ExitConfirm
+            } else {
+                TransientHint::None
+            };
+            return vec![row1, footer_chrome::row2(&self.state, &hint, columns)];
+        }
         // A release notice outranks the rotating tip: same right-hand
         // slot, so it inherits the width guard and right alignment.
+        let tip = footer_chrome::TIPS[self.tip_index % footer_chrome::TIPS.len()];
         let right = self.state.update_notice.as_deref().unwrap_or(tip);
         let hint = if self.exit_armed() {
             TransientHint::ExitConfirm
@@ -2066,6 +2111,38 @@ verify from the repository.";
             footer_chrome::row1(&self.state, Some(right), columns),
             footer_chrome::row2(&self.state, &hint, columns),
         ]
+    }
+
+    /// Tick work for the external status line: spawn when due, pick up
+    /// a finished line. True when the footer needs a repaint.
+    pub fn poll_statusline(&mut self) -> bool {
+        if self.status_line.command().is_none() {
+            return false;
+        }
+        self.status_line.maybe_spawn(self.status_snapshot());
+        let line = self.status_line.current();
+        if line != self.state.status_line {
+            self.state.status_line = line;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The JSON session snapshot handed to the status-line command on
+    /// stdin (Claude Code-compatible field set).
+    fn status_snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "model": self.state.model_name,
+            "provider": self.state.provider_id,
+            "cwd": self.state.cwd.display().to_string(),
+            "git_branch": self.state.git_branch,
+            "permission_mode": self.state.permission_mode,
+            "session_id": self.state.session_id,
+            "session_title": self.state.session_title,
+            "context_used": self.state.context_used,
+            "context_window": self.state.context_window,
+        })
     }
 
     /// Assemble the full frame at (columns, rows).
@@ -2591,11 +2668,16 @@ pub async fn run_with_factory(
             }
             _ = tick.tick() => {
                 // Spinner animation, streaming flush cadence, the live
-                // shell card, the btw panel, and the release notice.
+                // shell card, the btw panel, the release notice, and
+                // the external status line.
                 let shell_changed = ui.poll_shell();
                 let btw_changed = ui.poll_btw();
                 let update_changed = ui.poll_update_notice();
-                if ((shell_changed || btw_changed || update_changed)
+                let statusline_changed = ui.poll_statusline();
+                if ((shell_changed
+                    || btw_changed
+                    || update_changed
+                    || statusline_changed)
                     || ui.needs_tick_render())
                     && let Err(e) = ui.render(&mut stdout.lock(), columns, rows)
                 {

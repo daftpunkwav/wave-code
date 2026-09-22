@@ -8,6 +8,8 @@
 //! OSC 9 payload rides a DCS passthrough so the outer terminal sees
 //! it. Disabled entirely with `WAVECODE_NOTIFY=0`.
 
+use crate::settings::UiSettings;
+
 /// The module id used in notification payloads.
 const APP: &str = "WaveCode";
 
@@ -27,6 +29,27 @@ pub fn enabled() -> bool {
     std::env::var_os("WAVECODE_NOTIFY")
         .map(|value| value != "0")
         .unwrap_or(true)
+}
+
+/// True when notifications are on: the settings switch wins when set;
+/// otherwise the env kill-switch (`WAVECODE_NOTIFY=0`) decides.
+pub fn enabled_with(settings: &UiSettings) -> bool {
+    settings.notifications_enabled.unwrap_or_else(enabled)
+}
+
+/// The configured delivery style, honoring the settings style over the
+/// env style (`WAVECODE_NOTIFY_STYLE`).
+pub fn style_with(settings: &UiSettings) -> Style {
+    settings
+        .notification_style
+        .as_deref()
+        .map(parse_style)
+        .unwrap_or_else(style)
+}
+
+/// The full notification output for one finished turn, from settings.
+pub fn notification_for(body: &str, settings: &UiSettings) -> String {
+    notification_with(body, style_with(settings), in_tmux())
 }
 
 /// The configured delivery style (`WAVECODE_NOTIFY_STYLE`); unknown
@@ -117,6 +140,38 @@ pub fn emit(body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_switch_wins_over_env() {
+        let mut view = UiSettings::default();
+        view.notifications_enabled = Some(true);
+        assert!(
+            enabled_with(&view),
+            "settings on wins even under WAVECODE_NOTIFY=0"
+        );
+        view.notifications_enabled = Some(false);
+        assert!(!enabled_with(&view), "settings off wins");
+        view.notifications_enabled = None;
+        assert_eq!(
+            enabled_with(&view),
+            enabled(),
+            "unset settings falls back to the env switch"
+        );
+    }
+
+    #[test]
+    fn settings_style_wins_over_env() {
+        let mut view = UiSettings::default();
+        view.notification_style = Some("bell".to_string());
+        assert_eq!(style_with(&view), Style::Bell);
+        assert_eq!(
+            notification_for("done", &view),
+            "\x07",
+            "settings style composes the output"
+        );
+        view.notification_style = None;
+        assert_eq!(style_with(&view), style(), "unset falls back to env style");
+    }
 
     #[test]
     fn sequence_carries_app_and_body() {

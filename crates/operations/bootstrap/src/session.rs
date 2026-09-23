@@ -105,6 +105,9 @@ pub struct SessionHandle {
     pub status: Arc<dyn operations_actor::StatusQueries>,
     /// MCP servers awaiting live connection (sorted by name).
     mcp_pending: Vec<(String, wavecode_config::McpServerRaw)>,
+    /// Credential store the journal redaction gate masks with; shared
+    /// with the child journals. `None` only in tests.
+    secrets: Option<std::sync::Arc<safety_secrets::SecretsStore>>,
 }
 
 impl SessionHandle {
@@ -132,6 +135,17 @@ impl SessionHandle {
     /// Started runtime plugins (service map and lifecycle).
     pub fn plugins(&self) -> &runtime_plugin::Registry {
         &self.plugins
+    }
+
+    /// The credential mask every persisted text should ride (`None`
+    /// in tests): wraps the shared store, so frontends journal with
+    /// the same redaction the child journals use.
+    pub fn secret_redactor(&self) -> Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>> {
+        self.secrets.clone().map(|store| {
+            let moved: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> =
+                std::sync::Arc::new(move |text: &str| store.redact(text));
+            moved
+        })
     }
 }
 
@@ -771,6 +785,15 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     if let (Some(home), Some(parent)) = (home.clone(), session_id.clone()) {
         child_service = child_service.with_child_journal(home, parent);
     }
+    // Child journals ride the same credential mask as the session
+    // journal: no provider key survives into readable history. One
+    // store is shared by the child gate and the handle (frontends
+    // fetch it for their own writers).
+    let secrets = std::sync::Arc::new(build_secret_store(&config));
+    let redactor = secrets.clone();
+    child_service = child_service
+        .with_journal_redaction(std::sync::Arc::new(move |text: &str| redactor.redact(text)));
+    let secrets_handle = Some(secrets);
     let tasks = Arc::new(child_service);
     // Runtime plugins (service injection + middleware lifecycle): manifest
     // discovery warns-and-skips invalid plugins and never fails assembly.
@@ -1021,6 +1044,7 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         plugins: runtime_plugins,
         status,
         mcp_pending,
+        secrets: secrets_handle,
     }
 }
 
@@ -1102,6 +1126,25 @@ const CHILD_FORBIDDEN_TOOLS: [&str; 6] = [
 ];
 
 /// Register child task tools against a task service.
+/// The credential values the journal redaction gate masks: every
+/// provider's env-var key (read now) and inline key. Best-effort
+/// hygiene — only values known to config/env are masked — but it keeps
+/// provider credentials from surviving into readable session history.
+pub fn build_secret_store(config: &wavecode_config::Config) -> safety_secrets::SecretsStore {
+    let providers = config.model_providers.values().collect::<Vec<_>>();
+    let env_names: Vec<&str> = providers
+        .iter()
+        .filter_map(|provider| provider.env_key.as_deref())
+        .collect();
+    let mut store = safety_secrets::SecretsStore::from_env(&env_names);
+    for (index, provider) in providers.iter().enumerate() {
+        if let Some(key) = &provider.api_key {
+            store.insert(format!("inline-{index}"), key.clone());
+        }
+    }
+    store
+}
+
 fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChildService>) {
     let spawn_service = tasks.clone();
     native

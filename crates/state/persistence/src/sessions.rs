@@ -113,6 +113,11 @@ pub fn child_journal_dir(home: &Path, parent: &str) -> PathBuf {
 /// Append one completed child task's turn to its own journal. Best-effort by
 /// contract (callers ignore failures): a subagent's log must never fail the
 /// run that spawned it.
+///
+/// Every persisted text rides `redact` first: the journal is the resume
+/// surface, so callers pass their credential mask (see `safety/secrets`)
+/// to keep secrets from surviving into readable history. Pass a
+/// `|text| text.to_string()` closure in tests.
 pub fn record_child_turn(
     home: &Path,
     parent: &str,
@@ -120,6 +125,7 @@ pub fn record_child_turn(
     input: &str,
     history: &[(bool, String)],
     outcome: &str,
+    redact: &dyn Fn(&str) -> String,
 ) -> Result<PathBuf, SessionError> {
     let path = child_journal_file(home, parent, child)
         .ok_or_else(|| SessionError::InvalidId(child.to_string()))?;
@@ -128,9 +134,12 @@ pub fn record_child_turn(
     }
     JsonlJournal::new(path.clone()).append_turn(&crate::TurnRecord {
         run_id: child.to_string(),
-        input: input.to_string(),
-        history: history.to_vec(),
-        outcome: outcome.to_string(),
+        input: redact(input),
+        history: history
+            .iter()
+            .map(|(from_model, text)| (*from_model, redact(text)))
+            .collect(),
+        outcome: redact(outcome),
     })?;
     Ok(path)
 }
@@ -225,15 +234,19 @@ pub fn record_turn(
     input: &str,
     history: &[(bool, String)],
     outcome: &str,
+    redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
     let path = journal_path(home, id)?;
     std::fs::create_dir_all(sessions_dir(home))?;
     let journal = JsonlJournal::new(path);
     journal.append_turn(&crate::TurnRecord {
         run_id: id.to_string(),
-        input: input.to_string(),
-        history: history.to_vec(),
-        outcome: outcome.to_string(),
+        input: redact(input),
+        history: history
+            .iter()
+            .map(|(from_model, text)| (*from_model, redact(text)))
+            .collect(),
+        outcome: redact(outcome),
     })?;
     let now = now_secs();
     let existing = list_sessions(home).into_iter().find(|entry| entry.id == id);
@@ -265,6 +278,7 @@ pub fn record_rewind(
     cwd: &str,
     history: &[(bool, String)],
     turns_removed: u32,
+    redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
     let path = journal_path(home, id)?;
     std::fs::create_dir_all(sessions_dir(home))?;
@@ -272,8 +286,11 @@ pub fn record_rewind(
     journal.append_turn(&crate::TurnRecord {
         run_id: id.to_string(),
         input: String::new(),
-        history: history.to_vec(),
-        outcome: "Rewound".to_string(),
+        history: history
+            .iter()
+            .map(|(from_model, text)| (*from_model, redact(text)))
+            .collect(),
+        outcome: redact("Rewound"),
     })?;
     let now = now_secs();
     let existing = list_sessions(home).into_iter().find(|entry| entry.id == id);
@@ -375,13 +392,69 @@ mod tests {
     }
 
     #[test]
+    fn recorded_text_rides_the_redaction_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mask = |text: &str| text.replace("sk-secret-1", "***");
+        record_turn(
+            dir.path(),
+            "s-redact",
+            "/tmp",
+            "my key is sk-secret-1",
+            &[(false, "echo sk-secret-1".to_string())],
+            "Completed",
+            &mask,
+        )
+        .unwrap();
+        let journal = JsonlJournal::new(journal_path(dir.path(), "s-redact").unwrap());
+        let records = journal.load_all().unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.input, "my key is ***");
+        assert_eq!(record.history[0].1, "echo ***");
+        assert_eq!(record.outcome, "Completed");
+        let joined = format!(
+            "{} {} {}",
+            record.input,
+            record
+                .history
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            record.outcome
+        );
+        assert!(
+            !joined.contains("sk-secret-1"),
+            "the raw value must not survive anywhere in the journal"
+        );
+    }
+
+    #[test]
     fn turn_recording_builds_and_updates_the_index() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        let meta = record_turn(home, "s-1", "/tmp", "hello", &history(), "Completed").unwrap();
+        let meta = record_turn(
+            home,
+            "s-1",
+            "/tmp",
+            "hello",
+            &history(),
+            "Completed",
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
         assert_eq!(meta.title, "hello");
         assert_eq!(meta.turns, 1);
-        let second = record_turn(home, "s-1", "/tmp", "more", &history(), "Completed").unwrap();
+        let second = record_turn(
+            home,
+            "s-1",
+            "/tmp",
+            "more",
+            &history(),
+            "Completed",
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
         assert_eq!(second.turns, 2);
         // Titles stick to the first user message, later turns keep them.
         assert_eq!(second.title, "hello");
@@ -409,7 +482,16 @@ mod tests {
     fn rename_and_fork_create_independent_entries() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        record_turn(home, "src", "/tmp", "hello", &history(), "Completed").unwrap();
+        record_turn(
+            home,
+            "src",
+            "/tmp",
+            "hello",
+            &history(),
+            "Completed",
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
         let renamed = set_title(home, "src", "renamed session").unwrap().unwrap();
         assert_eq!(renamed.title, "renamed session");
         // Empty titles are rejected, not silently applied.
@@ -436,7 +518,16 @@ mod tests {
         std::fs::write(index_path(home), "{not json").unwrap();
         assert!(list_sessions(home).is_empty());
         // Recording heals the index by upserting over the broken file.
-        record_turn(home, "s-2", "/tmp", "hi", &history(), "Completed").unwrap();
+        record_turn(
+            home,
+            "s-2",
+            "/tmp",
+            "hi",
+            &history(),
+            "Completed",
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
         assert_eq!(list_sessions(home).len(), 1);
     }
 
@@ -444,16 +535,29 @@ mod tests {
     fn rewind_appends_a_truncated_snapshot() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        record_turn(home, "s-1", "/tmp", "one", &history(), "Completed").unwrap();
+        record_turn(
+            home,
+            "s-1",
+            "/tmp",
+            "one",
+            &history(),
+            "Completed",
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
         let two = vec![
             (false, "one".to_string()),
             (true, "hi there".to_string()),
             (false, "two".to_string()),
             (true, "more".to_string()),
         ];
-        record_turn(home, "s-1", "/tmp", "two", &two, "Completed").unwrap();
+        record_turn(home, "s-1", "/tmp", "two", &two, "Completed", &|t: &str| {
+            t.to_string()
+        })
+        .unwrap();
         let rewound = vec![(false, "one".to_string()), (true, "hi there".to_string())];
-        let meta = record_rewind(home, "s-1", "/tmp", &rewound, 1).unwrap();
+        let meta =
+            record_rewind(home, "s-1", "/tmp", &rewound, 1, &|t: &str| t.to_string()).unwrap();
         // Resume replays the rewound dialogue, not the dropped turn.
         assert_eq!(load_session_history(home, "s-1").unwrap(), rewound);
         // The index turn count follows the rewind.

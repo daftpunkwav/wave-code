@@ -33,6 +33,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 sha2.workspace = true
+safety-secrets = { path = "../../safety/secrets" }
 
 [dev-dependencies]
 tempfile.workspace = true

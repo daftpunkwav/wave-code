@@ -38,7 +38,8 @@ pub use state::AppState;
 pub use tui_engine::sanitize::{sanitize_terminal, truncate_chars};
 pub use tui_engine::terminal::install_panic_restore;
 pub use ui::{
-    ConsoleUi, LaunchSpec, SessionFactory, SessionLaunch, UiContext, run, run_with_factory,
+    ConsoleUi, LaunchSpec, Redactor, SessionFactory, SessionLaunch, UiContext, run,
+    run_with_factory,
 };
 
 #[cfg(test)]

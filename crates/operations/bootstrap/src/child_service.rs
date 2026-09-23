@@ -129,11 +129,14 @@ pub struct TurnChildService {
     journal: Option<ChildJournal>,
 }
 
-/// Home plus parent session id, the pair naming a child's journal.
-#[derive(Debug, Clone)]
+/// Home plus parent session id, the pair naming a child's journal,
+/// plus the credential mask every persisted text rides (assembly
+/// injects it; `None` keeps bytes verbatim, as tests do).
+#[derive(Clone)]
 struct ChildJournal {
     home: PathBuf,
     parent: String,
+    redact: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>,
 }
 
 impl TurnChildService {
@@ -161,7 +164,24 @@ impl TurnChildService {
     /// session's directory, so a long session can explain what a subagent
     /// actually did instead of keeping only its returned summary.
     pub fn with_child_journal(mut self, home: PathBuf, parent: String) -> Self {
-        self.journal = Some(ChildJournal { home, parent });
+        self.journal = Some(ChildJournal {
+            home,
+            parent,
+            redact: None,
+        });
+        self
+    }
+
+    /// Mask credentials out of the child journals' persisted text; the
+    /// closure comes from the composition root's secret store.
+    pub fn with_journal_redaction(
+        mut self,
+        redact: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>,
+    ) -> Self {
+        match &mut self.journal {
+            Some(journal) => journal.redact = Some(redact),
+            None => self.journal = None, // nothing to journal: no gate either
+        }
         self
     }
 
@@ -325,6 +345,8 @@ impl TaskService for TurnChildService {
                         .collect();
                     // Best-effort: a subagent's log must never fail the run
                     // that spawned it.
+                    let noop = |text: &str| text.to_string();
+                    let redact = journal.redact.as_deref().unwrap_or(&noop);
                     let _ = state_persistence::sessions::record_child_turn(
                         &journal.home,
                         &journal.parent,
@@ -332,6 +354,7 @@ impl TaskService for TurnChildService {
                         &ticket.input,
                         &pairs,
                         &format!("{outcome:?}"),
+                        redact,
                     );
                 }
                 runtime_child::TaskResult {

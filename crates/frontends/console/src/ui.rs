@@ -96,6 +96,12 @@ impl SessionLink for ActorClient {
     }
 }
 
+/// Credential mask applied before any text reaches persistent storage
+/// (turn journals, rewind snapshots). The harness injects it from its
+/// provider secrets; `None` keeps bytes verbatim (tests). Kept as a
+/// plain closure type so the console carries no secrets dependency.
+pub type Redactor = std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 /// Session facts the UI cannot derive from the wire.
 #[derive(Clone)]
 pub struct UiContext {
@@ -132,6 +138,8 @@ pub struct UiContext {
     /// release exists; the footer picks it up on a later tick. `None`
     /// skips the check (non-TUI surfaces, tests).
     pub update_notice: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    /// Credential mask for persisted text; `None` in tests.
+    pub redactor: Option<Redactor>,
 }
 
 /// What the UI asks the factory to launch: a fresh session (`history`
@@ -256,6 +264,8 @@ pub struct ConsoleUi {
     last_esc_at: Option<Instant>,
     /// External status-line command runner (footer row 1 takeover).
     status_line: crate::chrome::statusline::StatusLine,
+    /// Credential mask for persisted text (see [`UiContext::redactor`]).
+    redactor: Option<Redactor>,
     /// Name of the live theme (`/theme` argument), re-applied by
     /// `/reload` so edited theme files show up.
     theme_name: String,
@@ -276,6 +286,7 @@ impl ConsoleUi {
             status: ctx.status.clone(),
             link,
             status_line: crate::chrome::statusline::StatusLine::new(None),
+            redactor: ctx.redactor.clone(),
             theme_name: "auto".to_string(),
             editor: {
                 let mut editor = Editor::new(editor_style());
@@ -1096,6 +1107,11 @@ impl ConsoleUi {
         } else {
             "Completed"
         };
+        let fallback = |text: &str| text.to_string();
+        let redact: &dyn Fn(&str) -> String = match &self.redactor {
+            Some(gate) => gate.as_ref(),
+            None => &fallback,
+        };
         let _ = state_persistence::sessions::record_turn(
             &home,
             &session_id,
@@ -1103,6 +1119,7 @@ impl ConsoleUi {
             &input,
             &history,
             outcome,
+            redact,
         );
     }
 
@@ -1580,12 +1597,18 @@ impl ConsoleUi {
             // Dialogue flags users; the journal flags the model side.
             .map(|entry| (!entry.from_user, entry.text.clone()))
             .collect();
+        let fallback = |text: &str| text.to_string();
+        let redact: &dyn Fn(&str) -> String = match &self.redactor {
+            Some(gate) => gate.as_ref(),
+            None => &fallback,
+        };
         if let Err(error) = state_persistence::sessions::record_rewind(
             &home,
             &self.state.session_id,
             &self.state.cwd.to_string_lossy(),
             &history,
             turns_removed,
+            redact,
         ) {
             self.push_status(&format!("rewind journaling failed: {error}"), true);
         }
@@ -2811,6 +2834,7 @@ mod tests {
                 model_entries: Vec::new(),
                 home: None,
                 update_notice: None,
+                redactor: None,
             },
             "0.1.0",
         );
@@ -3829,6 +3853,7 @@ mod tests {
                 model_entries: Vec::new(),
                 home: None,
                 update_notice: None,
+                redactor: None,
             },
             "0.1.0",
         );
@@ -4083,6 +4108,7 @@ mod tests {
                 (true, "earlier answer".to_string()),
             ],
             "Completed",
+            &|t: &str| t.to_string(),
         )
         .unwrap();
         let mut ui = ui();
@@ -4108,6 +4134,7 @@ mod tests {
                 model_entries: Vec::new(),
                 home: None,
                 update_notice: None,
+                redactor: None,
             };
             Ok(SessionLaunch {
                 link: Box::new(TestLink::new()),
@@ -4276,6 +4303,7 @@ mod tests {
                     model_entries: Vec::new(),
                     home: None,
                     update_notice: None,
+                    redactor: None,
                 },
                 history: Vec::new(),
             })
@@ -4408,6 +4436,7 @@ mod tests {
                     model_entries: Vec::new(),
                     home: None,
                     update_notice: None,
+                    redactor: None,
                 },
                 history: Vec::new(),
             })

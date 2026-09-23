@@ -20,6 +20,7 @@ action-workflow = { path = "../../action/workflow" }
 runtime-scheduler = { path = "../../runtime/scheduler" }
 infrastructure-base = { path = "../../infrastructure/base" }
 safety-gate = { path = "../../safety/gate" }
+safety-secrets = { path = "../../safety/secrets" }
 operations-actor = { path = "../actor" }
 operations-observe = { path = "../observe" }
 wavecode-wire = { path = "../../foundation/wire" }

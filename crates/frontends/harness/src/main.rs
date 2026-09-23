@@ -648,10 +648,11 @@ async fn main() -> anyhow::Result<()> {
     // A headless turn leaves a resumable session behind (journal + meta
     // line) when a home directory exists; the id is minted up front so the
     // compaction footers can point at that journal.
-    let session = home.as_ref().map(|home| ExecSession {
+    let mut session = home.as_ref().map(|home| ExecSession {
         id: Uuid::new_v4().to_string(),
         home: home.clone(),
         cwd: cwd.to_string_lossy().to_string(),
+        redactor: None,
     });
     let mut handle = assemble_session(AssembleOptions {
         config_path: args.config,
@@ -668,6 +669,10 @@ async fn main() -> anyhow::Result<()> {
         session_id: session.as_ref().map(|s| s.id.clone()),
     })
     .map_err(|e| anyhow::anyhow!("session assembly failed: {e}"))?;
+    // The journal gate rides the assembled handle's provider secrets.
+    if let Some(sess) = &mut session {
+        sess.redactor = handle.secret_redactor();
+    }
     handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
         eprintln!("[warn] {warning}");
@@ -1197,6 +1202,7 @@ fn ui_ctx_of(
         model_entries,
         home: home.clone(),
         update_notice,
+        redactor: handle.secret_redactor(),
     }
 }
 
@@ -2299,6 +2305,9 @@ struct ExecSession {
     id: String,
     home: PathBuf,
     cwd: String,
+    /// Credential mask for the journal; filled once the session handle
+    /// exists (constructed before assembly, gate arrives after).
+    redactor: Option<console_ui::Redactor>,
 }
 
 impl ExecSession {
@@ -2322,6 +2331,11 @@ impl ExecSession {
             Outcome::Interrupted => "Interrupted",
             Outcome::Failed => "Failed",
         };
+        let fallback = |text: &str| text.to_string();
+        let redact: &dyn Fn(&str) -> String = match &self.redactor {
+            Some(gate) => gate.as_ref(),
+            None => &fallback,
+        };
         if let Err(e) = state_persistence::sessions::record_turn(
             &self.home,
             &self.id,
@@ -2329,6 +2343,7 @@ impl ExecSession {
             prompt,
             &[(false, prompt.to_string()), (true, answer.to_string())],
             name,
+            redact,
         ) {
             eprintln!("[warn] session journal update failed: {e}");
         }
@@ -3276,6 +3291,7 @@ model = "m2"
                 "operations-bootstrap",
                 "operations-eval",
                 "operations-observe",
+                "safety-secrets",
                 "state-persistence",
                 "wavecode-config",
                 "wavecode-skills",
@@ -3760,6 +3776,7 @@ model = "m2"
             "hello",
             &history,
             "Completed",
+            &|t: &str| t.to_string(),
         )
         .unwrap();
         let seed = resolve_tui_seed(

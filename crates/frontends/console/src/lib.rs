@@ -8,9 +8,9 @@
  * - Translate key input into submissions, approvals, and commands.
  *
  * Rendering is delegated to `tui-engine`; session interaction crosses
- * only the wire protocol and the actor client. This crate must not
- * depend on: runtime, state, action, safety, transport, or the
- * composition root.
+ * only the wire protocol and the actor client, while session identity
+ * and journaling ride `state-persistence`. This crate must not depend
+ * on: runtime, action, safety, transport, or the composition root.
  */
 
 //! The inline console frontend: themed chrome over the session wire.

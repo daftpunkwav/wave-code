@@ -48,6 +48,7 @@ pub mod prune_adapter;
 pub mod rate_limit;
 pub mod session;
 pub mod skill_tool;
+pub mod snapshot_tools;
 pub mod status_queries;
 pub mod task_tools;
 pub mod tool_adapter;

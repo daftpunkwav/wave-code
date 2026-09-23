@@ -26,6 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use operations_actor::StatusQueries;
+use state_checkpoint::SnapshotStore;
 use state_goal::GoalState;
 use state_plan::PlanState;
 
@@ -40,7 +41,7 @@ const HEAD_CHARS: usize = 500;
 /// plan / goal / snapshot state lives and in what shape.
 pub struct SessionStatus {
     home: Option<std::path::PathBuf>,
-    snapshots: wavecode_tools::snapshot::SnapshotStore,
+    snapshots: SnapshotStore,
 }
 
 impl SessionStatus {
@@ -50,7 +51,7 @@ impl SessionStatus {
     pub fn new(home: Option<&Path>, snapshot_root: std::path::PathBuf) -> Self {
         Self {
             home: home.map(Path::to_path_buf),
-            snapshots: wavecode_tools::snapshot::SnapshotStore::new(snapshot_root),
+            snapshots: SnapshotStore::new(snapshot_root),
         }
     }
 

@@ -6,27 +6,38 @@
  * - Expose the checkpoint file-content snapshot store as model tools.
  * - Keep snapshot policy flags explicit (snapshot is read-only, restore
  *   is destructive and approval-gated).
- * - Re-export the store surface for session assembly and slash display.
  *
- * This module must not depend on: git, the network, or any crate beyond
- * the tools crate's existing dependencies plus state-checkpoint.
+ * This module must not depend on: drivers, actors, sessions, or models.
+ * The walk, caps, and rewind semantics live in state-checkpoint; this
+ * module only maps tool input/output, like the other state-store tools
+ * in this crate.
  */
 
 //! Snapshot tools: thin [`Tool`] adapters over the checkpoint crate's
-//! file-content snapshot store; the walk, caps, and rewind semantics live
-//! in state-checkpoint, this module only maps tool input/output.
+//! file-content snapshot store.
 
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
+use state_checkpoint::SnapshotStore;
+use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput, ToolsError};
 
-pub use state_checkpoint::{
-    MAX_FILE_BYTES, MAX_FILE_COUNT, MAX_TOTAL_BYTES, SnapshotCaps, SnapshotCreateReport,
-    SnapshotInfo, SnapshotRestoreReport, SnapshotStore, default_snapshot_store_root,
-    snapshot_store_root_for_session, validate_snapshot_label,
-};
+/// Build a business-failure output (reason is fed back to the model).
+fn err_output(reason: impl Into<String>) -> ToolOutput {
+    ToolOutput {
+        content: reason.into(),
+        is_error: true,
+    }
+}
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
+/// Extract a required string parameter; missing or mistyped params yield
+/// a business-failure output.
+fn req_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, ToolOutput> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| err_output(format!("missing or invalid parameter '{key}' (string required)")))
+}
 
 /// Map a store error onto the tools error surface: business failures
 /// (bad label, unknown snapshot, corrupt manifest) feed back to the

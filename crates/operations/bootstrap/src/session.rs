@@ -889,14 +889,14 @@ pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         .as_deref()
         .map(wavecode_memory::MemoryStore::default_root);
     let snapshot_root =
-        wavecode_tools::snapshot::snapshot_store_root_for_session(snapshot_memory_root.as_deref());
+        state_checkpoint::snapshot_store_root_for_session(snapshot_memory_root.as_deref());
     // The frontend status views read the same root the tools write, so
     // /snapshots and /rewind never drift from what `snapshot` produced.
     let status_snapshot_root = snapshot_root.clone();
-    registry.register(Arc::new(wavecode_tools::snapshot::SnapshotTool::new(
+    registry.register(Arc::new(crate::snapshot_tools::SnapshotTool::new(
         snapshot_root.clone(),
     )));
-    registry.register(Arc::new(wavecode_tools::snapshot::RestoreTool::new(
+    registry.register(Arc::new(crate::snapshot_tools::RestoreTool::new(
         snapshot_root,
     )));
     // Reviewed plan mode (explore -> present -> approve -> execute) rides

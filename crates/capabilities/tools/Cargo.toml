@@ -8,7 +8,6 @@ license.workspace = true
 [dependencies]
 # Shared platform-shell resolution (shell_invocation) for command strings.
 infrastructure-base = { path = "../../infrastructure/base" }
-state-checkpoint = { path = "../../state/checkpoint" }
 wavecode-sandbox = { path = "../sandbox" }
 wavecode-llm = { path = "../../foundation/llm" }
 wavecode-config = { path = "../../foundation/config" }

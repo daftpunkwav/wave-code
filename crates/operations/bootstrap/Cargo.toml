@@ -11,6 +11,7 @@ runtime-child = { path = "../../runtime/child" }
 runtime-plugin = { path = "../../runtime/plugin" }
 runtime-prompt = { path = "../../runtime/prompt" }
 state-store = { path = "../../state/store" }
+state-checkpoint = { path = "../../state/checkpoint" }
 state-plan = { path = "../../state/plan" }
 state-goal = { path = "../../state/goal" }
 state-persistence = { path = "../../state/persistence" }

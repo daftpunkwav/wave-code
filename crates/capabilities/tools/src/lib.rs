@@ -20,7 +20,6 @@ mod pty;
 mod script;
 mod search;
 mod shell_tool;
-pub mod snapshot;
 mod spill_tool;
 mod todo_tool;
 mod web_fetch;

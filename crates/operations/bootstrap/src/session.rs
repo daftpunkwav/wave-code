@@ -140,14 +140,18 @@ impl SessionHandle {
     /// The credential mask every persisted text should ride (`None`
     /// in tests): wraps the shared store, so frontends journal with
     /// the same redaction the child journals use.
-    pub fn secret_redactor(&self) -> Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>> {
+    pub fn secret_redactor(&self) -> Option<std::sync::Arc<SecretRedactor>> {
         self.secrets.clone().map(|store| {
-            let moved: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> =
+            let moved: std::sync::Arc<SecretRedactor> =
                 std::sync::Arc::new(move |text: &str| store.redact(text));
             moved
         })
     }
 }
+
+/// Shared credential mask: maps persisted text to its redacted form
+/// without leaking the store behind it.
+pub type SecretRedactor = dyn Fn(&str) -> String + Send + Sync;
 
 /// Assembly inputs, all caller-owned.
 pub struct AssembleOptions {

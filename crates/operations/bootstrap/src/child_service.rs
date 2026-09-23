@@ -136,7 +136,7 @@ pub struct TurnChildService {
 struct ChildJournal {
     home: PathBuf,
     parent: String,
-    redact: Option<std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>>,
+    redact: Option<std::sync::Arc<crate::session::SecretRedactor>>,
 }
 
 impl TurnChildService {

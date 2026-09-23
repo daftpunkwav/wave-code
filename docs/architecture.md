@@ -9,7 +9,7 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 1. **Everything may depend on `infrastructure/`.** These crates are leaf primitives with zero internal dependencies.
 2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `wavecode-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
 3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to name concrete capability crates and adapt them to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends.
-4. **Policy never matches tool names.** Tools carry declarative attributes (`action-kit` `ToolAttrs`), and policy decisions consume those attributes, so adding a tool cannot silently drift the policy layer.
+4. **Policy never matches tool names.** Tools carry declarative attributes (`wavecode_tools::Tool::is_read_only` / `is_destructive`), and policy decisions consume those attributes (`operations_bootstrap::policy_adapter`), so adding a tool cannot silently drift the policy layer.
 5. **New behavior lands on extension points, not loop changes.** Changing `runtime/runner` requires updating this document.
 
 ## Layer map
@@ -17,8 +17,9 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 ```
 frontends      wavecode binary (exec / repl / resume / TUI launch) and the TUI client
                  │
-operations     wire protocol, session actor, bootstrap composition root,
-               RPC gateway, eval, observe, replay, notify, simulate
+operations     wire protocol, session actor, bootstrap composition root
+               (which also hosts the live ACP / HTTP+SSE / MCP-serve RPC
+               surfaces), eval, observe, replay, notify, simulate
                  │
 runtime        RunLoop, child turns, scheduler, prompt assembly, plugin seam,
                capability inventory, identity, skill routing
@@ -86,7 +87,6 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | `safety-guardrail` | Heuristic prompt-injection screening and taint tracking |
 | `safety-audit` | Append-only audit trail of security-relevant decisions |
 | `safety-secrets` | Secret storage with redaction for logs and transcripts |
-| `safety-sandbox` | OS isolation backends (seatbelt, bubblewrap, Windows restrictions) behind a fail-closed chain |
 
 ### `runtime/` — execution core
 
@@ -134,7 +134,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | --- | --- |
 | `operations-actor` | Serial session driver: submission routing plus turn driving |
 | `operations-bootstrap` | Composition root adapting concrete capabilities to runner traits |
-| `operations-gateway` | NDJSON JSON-RPC 2.0 gateway over the session actor |
+| `operations-gateway` | NDJSON JSON-RPC 2.0 gateway over the session actor (unwired; the live RPC surfaces — `acp`, `app_server`, `mcp_serve` — are modules of `operations-bootstrap`) |
 | `operations-eval` | Behavioural benchmarks over any turn driver |
 | `operations-observe` | Folds turn wire events into cumulative operations metrics |
 | `operations-replay` | Structural replay of recorded wire events to trajectories |
@@ -152,8 +152,10 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 
 ### Wiring status
 
-A crate compiles and is unit-tested only when something depends on it. As of
-2026-09-21, **23 of the 58 library crates have no dependents** — they are not
+Wired means reachable from the `wavecode` binary through normal
+dependencies. `cargo test --workspace` builds and tests every crate either
+way, so a green suite is not evidence of wiring. As of 2026-09-24, **23 of
+the 58 library crates are unwired** — they are not
 reachable from the `wavecode` binary. Everything above describes what each
 crate *does*, not what the product *offers*; this table is the correction.
 Check a crate's dependents (`cargo tree -q -i <crate>`) before citing it as a
@@ -162,11 +164,11 @@ feature, and move it out of this table in the same change that wires it up.
 | Unwired crate | Why it is not reachable |
 | --- | --- |
 | `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
-| `operations-replay`, `operations-simulate`, `operations-notify` | Library-only: no binary or adapter consumes them, so structural replay and scenario simulation are not product features yet (`operations-eval` left this list when `wavecode eval tasks` started consuming it) |
+| `operations-replay`, `operations-simulate`, `operations-notify`, `state-trajectory` | Library-only: no binary or adapter consumes them, so structural replay and scenario simulation are not product features yet (`operations-eval` left this list when `wavecode eval tasks` started consuming it; `state-trajectory` is reachable only through `operations-replay`, so it rides along unwired) |
 | `action-kit`, `action-browser`, `action-retrieval` | The tool registry and the browser/retrieval seams have no implementer or consumer; `wavecode-tools` owns the live registry |
-| `infrastructure-cache`, `infrastructure-config`, `infrastructure-coord`, `infrastructure-routing` | Unused primitives: config layering, leases, and the route/fallback chain are each still hand-rolled where they are needed |
+| `infrastructure-cache`, `infrastructure-config`, `infrastructure-coord`, `infrastructure-routing`, `infrastructure-schema` | Unused primitives: config layering, leases, and the route/fallback chain are each still hand-rolled where they are needed; `infrastructure-schema` is consumed only by `action-kit`, which is itself unwired |
 | `runtime-capability`, `runtime-identity`, `runtime-skills` | The live skill path is `wavecode-skills` + `bootstrap`; these are parallel, unconsumed models of the same idea |
-| `safety-policy`, `safety-guardrail`, `safety-audit`, `safety-secrets` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice |
+| `safety-policy`, `safety-guardrail`, `safety-audit` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice (`safety-secrets` left this list when the composition root wired the secrets redaction store) |
 | `state-artifact`, `state-profile`, `state-workspace` | `state-persistence` / `state-store` carry the durable data the product uses |
 | `wavecode-auth` | Provider credentials resolve through `wavecode-config`'s `env_key` path |
 
@@ -180,7 +182,7 @@ prevent.
 1. A frontend (`harness-cli`, TUI, or an HTTP/SSE client through `wavecode serve`) submits a prompt as a wire submission.
 2. `operations-actor` serializes submissions per session and drives `runtime-runner`.
 3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
-4. Tool executions pass the `safety-gate` approval flow; verdicts come from `safety-policy` rules plus permission modes, with OS-level isolation from `safety-sandbox`.
+4. Tool executions pass the `safety-gate` approval flow; verdicts combine permission modes with the tool's declarative attributes (`is_read_only` / `is_destructive`), and OS-level isolation comes from `wavecode-sandbox`.
 5. Every step emits `wavecode-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
 6. History mutations append to `state-persistence`'s block-level write-ahead journal (`<id>.history.jsonl`), which `resume` replays; completed turns additionally append a text snapshot to `<id>.jsonl` for the picker and for sessions written before the journal existed.
 

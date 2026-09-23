@@ -20,6 +20,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+        env:
+          # Live PTY tests stay opt-in on Windows so a ConPTY-broken host
+          # cannot leak a spinning conhost per test run; CI runners are
+          # ephemeral, so the coverage is safe to turn on here. Unix legs run
+          # them by default.
+          WAVECODE_PTY_TESTS: ${{ matrix.os == 'windows-latest' && '1' || '' }}
       - name: E2E smoke (binary boots, MCP protocol answers)
         shell: bash
         run: |

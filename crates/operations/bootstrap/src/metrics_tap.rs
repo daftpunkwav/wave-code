@@ -93,7 +93,7 @@ mod tests {
     use super::*;
     use wavecode_wire::{ToolCallPreview, ToolOutcome};
 
-    fn ev(id: &str, msg: EventMsg) -> Event {
+    fn event(id: &str, msg: EventMsg) -> Event {
         Event {
             id: id.to_string(),
             msg,
@@ -107,13 +107,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tap = metrics_tap(dir.path(), "s1");
         let events = [
-            ev(
+            event(
                 "t1",
                 EventMsg::TurnStarted {
                     model: "opus".into(),
                 },
             ),
-            ev(
+            event(
                 "t1",
                 EventMsg::ToolCallBegin {
                     call_id: "c1".into(),
@@ -121,7 +121,7 @@ mod tests {
                     input: serde_json::Value::Null,
                 },
             ),
-            ev(
+            event(
                 "t1",
                 EventMsg::ToolCallEnd {
                     call_id: "c1".into(),
@@ -131,14 +131,14 @@ mod tests {
                     duration_ms: 3,
                 },
             ),
-            ev("t1", EventMsg::TurnCompleted { interrupted: false }),
-            ev(
+            event("t1", EventMsg::TurnCompleted { interrupted: false }),
+            event(
                 "t2",
                 EventMsg::TurnStarted {
                     model: "sonnet".into(),
                 },
             ),
-            ev("t2", EventMsg::TurnCompleted { interrupted: true }),
+            event("t2", EventMsg::TurnCompleted { interrupted: true }),
         ];
         for event in &events {
             tap(event);
@@ -162,7 +162,7 @@ mod tests {
     async fn holds_partial_turns_until_completion() {
         let dir = tempfile::tempdir().unwrap();
         let tap = metrics_tap(dir.path(), "s1");
-        tap(&ev(
+        tap(&event(
             "t1",
             EventMsg::TurnStarted {
                 model: "opus".into(),

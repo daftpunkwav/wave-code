@@ -15,6 +15,7 @@ dependencies = [
 name = "action-jobs"
 version = "0.1.0"
 dependencies = [
+ "infrastructure-base",
  "libc",
  "runtime-child",
  "thiserror 2.0.19",
@@ -2844,6 +2845,7 @@ dependencies = [
 name = "wavecode-hooks"
 version = "0.1.0"
 dependencies = [
+ "infrastructure-base",
  "serde_json",
  "tokio",
 ]
@@ -2922,6 +2924,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "glob",
+ "infrastructure-base",
  "portable-pty",
  "regex",
  "reqwest",

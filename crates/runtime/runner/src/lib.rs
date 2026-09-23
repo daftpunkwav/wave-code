@@ -150,7 +150,7 @@ impl TurnState {
 }
 
 /// Maximum reactive compactions per turn (default for
-/// [`RunConfig::max_reactive_compacts`).
+/// [`RunConfig::max_reactive_compacts`]).
 ///
 /// Counts consecutive prompt-too-long failures like the legacy loop: two
 /// successful compactions are attempted and the third consecutive failure
@@ -590,7 +590,7 @@ fn repeat_handoff(streak: u32) -> String {
 /// The next escalation due for the current streak, if any: returns the
 /// threshold that just fired and its reminder text, advancing the sent
 /// counter. Each threshold fires once per streak.
-fn escalation(state: &mut TurnState) -> Option<(u32, String)> {
+fn next_escalation(state: &mut TurnState) -> Option<(u32, String)> {
     // How many thresholds the streak has crossed: the escalating levels run
     // from the lowest to the highest, so counting is the right ladder (a
     // `position` search would keep returning the first match).
@@ -840,7 +840,6 @@ pub trait Compactor: Send + Sync {
     ) -> Result<Compacted, CompactError>;
 }
 
-/// The turn state machine, generic over all seams for testability.
 /// Per-run tool allowlist for turns sharing one driver.
 ///
 /// Child turns run on the session driver, so a fork-scoped `allowed-tools`
@@ -931,6 +930,7 @@ impl TurnInterrupt {
     }
 }
 
+/// The turn state machine, generic over all seams for testability.
 pub struct RunLoop<E, P, H, M, A, T, C> {
     executor: E,
     policy: P,
@@ -1595,7 +1595,7 @@ where
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::RepeatBreaker;
                 }
-                if let Some((threshold, text)) = escalation(&mut state) {
+                if let Some((threshold, text)) = next_escalation(&mut state) {
                     emit_msg(EventMsg::Warning {
                         message: format!(
                             "same tool call repeated {streak} times; reminding the model ({threshold}/{})",
@@ -2055,11 +2055,6 @@ where
     }
 }
 
-/// Turn-driving seam consumed by session actors.
-///
-/// The blanket implementation below wires every [`RunLoop`] automatically;
-/// actors stay generic over this trait instead of the seven concrete seam
-/// types, so transport never names capabilities.
 /// The user input driving one turn: text plus optional inline images.
 /// Images ride into conversation history as `Block::Image` and reach
 /// vision-capable providers as image content parts; providers without
@@ -2076,6 +2071,11 @@ impl<'a> TurnInput<'a> {
     }
 }
 
+/// Turn-driving seam consumed by session actors.
+///
+/// The blanket implementation below wires every [`RunLoop`] automatically;
+/// actors stay generic over this trait instead of the seven concrete seam
+/// types, so transport never names capabilities.
 #[async_trait::async_trait]
 pub trait TurnDriver: Send + Sync {
     /// Drive one turn, emitting wire events through `on_event`.
@@ -2225,7 +2225,6 @@ where
         self.as_ref().clear_stale();
     }
 }
-///
 /// Composition roots hold `Arc<dyn TurnDriver>`; this blanket forward
 /// keeps every concrete driver working unchanged behind the pointer.
 #[async_trait::async_trait]
@@ -2409,7 +2408,7 @@ fn project_images(entries: &[HistoryEntry], keep: u32) -> Vec<HistoryEntry> {
                 .map(|label| format!(": {label}"))
                 .unwrap_or_default();
             *block = state_store::Block::Text(format!(
-                "[image {mime}{label} omitted from this request: only the newest {keep}                  image(s) are sent to save context]"
+                "[image {mime}{label} omitted from this request: only the newest {keep} image(s) are sent to save context]"
             ));
         }
         out.push(projected);

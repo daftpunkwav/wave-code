@@ -168,7 +168,7 @@ fn word_set(text: &str) -> HashSet<String> {
 mod tests {
     use super::*;
 
-    fn s(items: &[&str]) -> Vec<String> {
+    fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
     }
 
@@ -177,7 +177,7 @@ mod tests {
     /// entry survives untouched.
     #[test]
     fn older_near_duplicate_is_dropped_newest_kept() {
-        let entries = s(&[
+        let entries = strings(&[
             "repo uses pnpm workspaces",
             "repo uses pnpm workspaces consistently", // 4/5 = 0.8
             "ci runs on linux",                       // unrelated
@@ -191,7 +191,7 @@ mod tests {
     /// the threshold (2/4 = 0.5) — all survive.
     #[test]
     fn dissimilar_entries_plan_no_merges() {
-        let entries = s(&[
+        let entries = strings(&[
             "repo uses pnpm",
             "prefers compact replies",
             "repo uses yarn",
@@ -203,7 +203,7 @@ mod tests {
     /// newest, dropping both older indices in ascending order.
     #[test]
     fn duplicate_chain_collapses_to_newest() {
-        let entries = s(&["alpha beta", "alpha beta", "alpha beta"]);
+        let entries = strings(&["alpha beta", "alpha beta", "alpha beta"]);
         assert_eq!(plan_merges(&entries, MERGE_SIMILARITY), vec![0, 1]);
     }
 
@@ -213,7 +213,7 @@ mod tests {
     /// is planned after the middle entry it outranks.
     #[test]
     fn plan_is_deterministic_and_sorted() {
-        let entries = s(&["alpha", "alpha beta", "alpha beta", "alpha"]);
+        let entries = strings(&["alpha", "alpha beta", "alpha beta", "alpha"]);
         assert_eq!(plan_merges(&entries, MERGE_SIMILARITY), vec![0, 1]);
     }
 

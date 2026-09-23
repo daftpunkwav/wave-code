@@ -33,10 +33,11 @@ fn err_output(reason: impl Into<String>) -> ToolOutput {
 /// Extract a required string parameter; missing or mistyped params yield
 /// a business-failure output.
 fn req_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, ToolOutput> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| err_output(format!("missing or invalid parameter '{key}' (string required)")))
+    input.get(key).and_then(Value::as_str).ok_or_else(|| {
+        err_output(format!(
+            "missing or invalid parameter '{key}' (string required)"
+        ))
+    })
 }
 
 /// Map a store error onto the tools error surface: business failures

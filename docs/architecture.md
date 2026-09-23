@@ -8,7 +8,7 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 
 1. **Everything may depend on `infrastructure/`.** These crates are leaf primitives with zero internal dependencies.
 2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `wavecode-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
-3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to name concrete capability crates and adapt them to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends.
+3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to name concrete capability crates and adapt them to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends (its tests excepted: the gateway's server tests use its hermetic assembly seam as a dev-dependency). The gateway's MCP-serve module is a serving skin that names `wavecode_tools` registry types only; executor construction stays in bootstrap.
 4. **Policy never matches tool names.** Tools carry declarative attributes (`wavecode_tools::Tool::is_read_only` / `is_destructive`), and policy decisions consume those attributes (`operations_bootstrap::policy_adapter`), so adding a tool cannot silently drift the policy layer.
 5. **New behavior lands on extension points, not loop changes.** Changing `runtime/runner` requires updating this document.
 
@@ -17,9 +17,10 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 ```
 frontends      wavecode binary (exec / repl / resume / TUI launch) and the TUI client
                  │
-operations     wire protocol, session actor, bootstrap composition root
-               (which also hosts the live ACP / HTTP+SSE / MCP-serve RPC
-               surfaces), eval, observe, simulate
+operations     wire protocol, session actor (with the shared session
+               contract), bootstrap composition root, RPC gateway (the
+               live ACP / HTTP+SSE / MCP-serve surfaces), eval, observe,
+               simulate
                  │
 runtime        RunLoop, child turns, scheduler, prompt assembly, plugin seam,
                capability inventory, identity, skill routing
@@ -118,9 +119,9 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 
 | Crate | Responsibility |
 | --- | --- |
-| `operations-actor` | Serial session driver: submission routing plus turn driving |
+| `operations-actor` | Serial session driver: submission routing plus turn driving; also owns the shared session contract (assembly options and failures, plus the `SessionSurface` the RPC servers consume) |
 | `operations-bootstrap` | Composition root adapting concrete capabilities to runner traits |
-| `operations-gateway` | NDJSON JSON-RPC 2.0 gateway over the session actor (unwired; the live RPC surfaces — `acp`, `app_server`, `mcp_serve` — are modules of `operations-bootstrap`) |
+| `operations-gateway` | The live RPC surfaces: ACP (JSON-RPC over stdio), the app server (REST + SSE over loopback HTTP), and MCP serve (tools over stdio), each a serving skin over the session contract |
 | `operations-eval` | Behavioural benchmarks over any turn driver |
 | `operations-observe` | Folds turn wire events into cumulative operations metrics |
 | `operations-simulate` | Dry-run rendering of model-planned actions (plan preview) |
@@ -138,7 +139,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 
 Wired means reachable from the `wavecode` binary through normal
 dependencies. `cargo test --workspace` builds and tests every crate either
-way, so a green suite is not evidence of wiring. As of 2026-09-24, **8 of
+way, so a green suite is not evidence of wiring. As of 2026-09-24, **7 of
 the 43 library crates are unwired** — they are not
 reachable from the `wavecode` binary. Everything above describes what each
 crate *does*, not what the product *offers*; this table is the correction.
@@ -147,7 +148,6 @@ feature, and move it out of this table in the same change that wires it up.
 
 | Unwired crate | Why it is not reachable |
 | --- | --- |
-| `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
 | `operations-simulate` | Library-only: dry-run rendering of planned actions is not a product feature yet |
 | `action-browser`, `action-retrieval` | The browser seam and term-overlap retrieval have no implementer or consumer; `wavecode-tools` owns the live registry |
 | `safety-guardrail`, `safety-audit` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice |
@@ -160,8 +160,6 @@ These crates are deliberate seeds for future work, not dead weight. They
 compile and test in the workspace and stay out of the shipped binary until
 their feature lands:
 
-- `operations-gateway` — the RPC protocol surface; being wired now (the
-  live ACP / HTTP+SSE / MCP-serve servers are moving into it).
 - `action-browser` — browser automation behind an async tab seam, for
   agent projects that need a browser.
 - `action-retrieval` — term-overlap retrieval over chunked documents, for

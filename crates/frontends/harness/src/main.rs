@@ -1462,8 +1462,6 @@ fn model_provider_overrides(
     (model, provider)
 }
 
-/// Load the config for catalog derivation, from `path` or the default
-/// location.
 /// Read one image file into a wire `UserImage`: mime sniffed from the
 /// extension, size capped like the provider validators (5 MB decoded is
 /// what they enforce; here we cap the raw file at the same bound).
@@ -1486,6 +1484,19 @@ fn load_image(path: &std::path::Path) -> anyhow::Result<wavecode_wire::UserImage
             ));
         }
     };
+    // Reject oversized files before reading: the cap exists to bound
+    // memory, so a multi-gigabyte file must fail on its metadata instead
+    // of being fully loaded first. The post-read check stays as a
+    // backstop for a file that grows between the two calls.
+    let size = std::fs::metadata(path)?.len();
+    if size > IMAGE_MAX_BYTES as u64 {
+        return Err(anyhow::anyhow!(
+            "image {} is {} bytes; the limit is {} bytes",
+            path.display(),
+            size,
+            IMAGE_MAX_BYTES
+        ));
+    }
     let bytes = std::fs::read(path)?;
     if bytes.len() > IMAGE_MAX_BYTES {
         return Err(anyhow::anyhow!(
@@ -1508,6 +1519,8 @@ fn load_images(paths: &[std::path::PathBuf]) -> anyhow::Result<Vec<wavecode_wire
     paths.iter().map(|p| load_image(p)).collect()
 }
 
+/// Load the config for catalog derivation, from `path` or the default
+/// location.
 fn load_config_opt(
     path: Option<&std::path::Path>,
 ) -> Result<wavecode_config::Config, wavecode_config::ConfigError> {
@@ -1707,10 +1720,6 @@ fn fail(line: impl Into<String>) -> DoctorCheck {
     }
 }
 
-/// `doctor`: validate every local file a session depends on — config,
-/// provider credentials, UI settings, custom themes, and session
-/// records — without contacting any provider. Secrets are never
-/// printed, only where a key was found.
 /// The `wave` denylist stored in the console settings under `home`.
 ///
 /// Missing or unreadable settings yield no entries: the settings check in
@@ -1725,6 +1734,10 @@ fn settings_denylist(home: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// `doctor`: validate every local file a session depends on — config,
+/// provider credentials, UI settings, custom themes, and session
+/// records — without contacting any provider. Secrets are never
+/// printed, only where a key was found.
 fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     let Some(home) = home else {
@@ -2107,11 +2120,6 @@ fn next_mode(current: &str) -> &'static str {
     PERMISSION_CYCLE[(pos + 1) % PERMISSION_CYCLE.len()]
 }
 
-/// Drive one turn to completion, streaming answer text to stdout.
-///
-/// With `json`, stdout carries one JSON event per line while the human
-/// rendering falls back to stderr (legacy exec contract); otherwise
-/// stdout carries the answer text.
 /// Write everything appended to `buffered` since the last call, then
 /// flush. A broken pipe (e.g. `| head`) latches `broken` instead of
 /// erroring: the consumer took what it needed and further writes are
@@ -2206,7 +2214,10 @@ impl ExecSession {
 
 /// Parse the machine approval line: `<call_id> <allow|always|deny[:reason]>`.
 /// Returns `None` for unrecognized decision tokens so a malformed line can
-/// be re-sent instead of misread as a denial.
+/// be re-sent instead of misread as a denial. The verb matches
+/// case-insensitively; the deny reason is user content and keeps its
+/// original casing (ASCII lowercasing preserves byte offsets, so the
+/// reason is sliced from the untouched token).
 fn parse_approval_line(line: &str) -> Option<(String, WireDecision)> {
     let trimmed = line.trim();
     let (call_id, token) = trimmed.split_once(char::is_whitespace)?;
@@ -2215,17 +2226,18 @@ fn parse_approval_line(line: &str) -> Option<(String, WireDecision)> {
         return None;
     }
     let token = token.trim();
-    let decision = match token.to_ascii_lowercase().as_str() {
+    let lower = token.to_ascii_lowercase();
+    let decision = match lower.as_str() {
         "allow" => WireDecision::AllowOnce,
         "always" => WireDecision::AllowAlways,
         "deny" => WireDecision::Deny {
             reason: String::new(),
         },
         other => {
-            let reason = other
-                .strip_prefix("deny")
-                .and_then(|rest| rest.strip_prefix([':', ' ']))
-                .map(str::to_string)?;
+            let rest = other.strip_prefix("deny")?;
+            let reason = token[token.len() - rest.len()..]
+                .strip_prefix([':', ' '])?
+                .to_string();
             WireDecision::Deny { reason }
         }
     };
@@ -2239,6 +2251,13 @@ fn exec_stdin_lines() -> tokio::io::Lines<tokio::io::BufReader<tokio::io::Stdin>
     tokio::io::BufReader::new(tokio::io::stdin()).lines()
 }
 
+/// Drive the single exec turn to completion, streaming answer text to
+/// stdout.
+///
+/// With `json`, stdout carries one JSON event per line while the human
+/// rendering falls back to stderr (a leading `{"meta":"session",…}` control
+/// line carries the resume handle; see `ExecSession::meta_line`); otherwise
+/// stdout carries the answer text.
 async fn run_exec(
     client: &mut ActorClient,
     prompt: &str,
@@ -2786,6 +2805,20 @@ mod tests {
         assert!(load_image(&bad).is_err());
     }
 
+    /// The size cap fires on the file metadata before the bytes are
+    /// read, so an oversized image fails without loading into memory.
+    #[test]
+    fn load_image_rejects_oversized_file_by_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.png");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(5 * 1024 * 1024_u64 + 1)
+            .unwrap();
+        let error = load_image(&big).unwrap_err().to_string();
+        assert!(error.contains("the limit is"), "{error}");
+    }
+
     #[test]
     fn global_permission_mode_flag_parses() {
         let args =
@@ -3157,6 +3190,17 @@ model = "m2"
                 "c3".to_string(),
                 WireDecision::Deny {
                     reason: "tests are flaky".to_string()
+                }
+            ))
+        );
+        // The verb matches case-insensitively, but the reason is user
+        // content: its casing must survive the trip.
+        assert_eq!(
+            parse_approval_line("c4 DENY:Keep Original Case"),
+            Some((
+                "c4".to_string(),
+                WireDecision::Deny {
+                    reason: "Keep Original Case".to_string()
                 }
             ))
         );

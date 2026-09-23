@@ -19,6 +19,9 @@ desktop.ini
 *.profraw
 *.profdata
 
+# Local secret files (the eval fixtures' committed .env is tracked and unaffected)
+.env
+
 # Project-level wavecode config may contain API keys; use user-level ~/.wavecode/config.toml only
 .wavecode/
 

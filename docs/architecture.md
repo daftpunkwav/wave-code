@@ -86,7 +86,6 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | `runtime-scheduler` | Priority queues, delayed tasks, cron matching, limits |
 | `runtime-prompt` | System prompt assembly from named content slots |
 | `runtime-plugin` | Minimal plugin system: service injection, middleware hooks, in-session lifecycle |
-| `runtime-capability` | Capability inventory with pluggable discovery sources |
 
 ### `action/` — agent action surface
 
@@ -139,8 +138,8 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 
 Wired means reachable from the `wavecode` binary through normal
 dependencies. `cargo test --workspace` builds and tests every crate either
-way, so a green suite is not evidence of wiring. As of 2026-09-24, **9 of
-the 44 library crates are unwired** — they are not
+way, so a green suite is not evidence of wiring. As of 2026-09-24, **8 of
+the 43 library crates are unwired** — they are not
 reachable from the `wavecode` binary. Everything above describes what each
 crate *does*, not what the product *offers*; this table is the correction.
 Check a crate's dependents (`cargo tree -q -i <crate>`) before citing it as a
@@ -151,7 +150,6 @@ feature, and move it out of this table in the same change that wires it up.
 | `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
 | `operations-simulate` | Library-only: dry-run rendering of planned actions is not a product feature yet |
 | `action-browser`, `action-retrieval` | The browser seam and term-overlap retrieval have no implementer or consumer; `wavecode-tools` owns the live registry |
-| `runtime-capability` | A parallel, unconsumed model of the capability inventory; flagged as design debt (see below) |
 | `safety-guardrail`, `safety-audit` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice |
 | `state-artifact` | The product's durable data rides `state-persistence` / `state-store` |
 | `wavecode-auth` | Provider credentials resolve through `wavecode-config`'s `env_key` path |
@@ -179,10 +177,8 @@ their feature lands:
 - `state-artifact` — versioned registry of run-produced artifacts, for
   agent projects that need one.
 
-The `runtime-capability` crate is the remaining duplicate-model watch
-item: it re-models capability inventory that `runtime-plugin` and the
-assembly already own, and it stays unwired until that boundary is redrawn
-or it is removed deliberately.
+No duplicate-model watch items remain: every crate in the workspace is
+either wired, a documented reserved seed, or the composition root itself.
 
 ## Life of a turn
 

@@ -42,7 +42,7 @@ const TIER_MEMBERS: &[&str] = &[
     "4: state-store",
     "5: safety-audit safety-gate safety-guardrail safety-secrets",
     "6: action-browser action-jobs action-retrieval action-tasks action-workflow",
-    "7: runtime-capability runtime-plugin runtime-prompt",
+    "7: runtime-plugin runtime-prompt",
     "7: runtime-runner runtime-scheduler",
     "8: operations-actor operations-bootstrap operations-eval operations-gateway",
     "8: operations-observe operations-simulate",

@@ -3282,7 +3282,6 @@ model = "m2"
                 "operations-bootstrap",
                 "operations-eval",
                 "operations-observe",
-                "safety-secrets",
                 "state-persistence",
                 "wavecode-config",
                 "wavecode-wire",

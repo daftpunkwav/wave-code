@@ -9,5 +9,4 @@ infrastructure-base = { path = "../../infrastructure/base" }
 tokio.workspace = true
 futures.workspace = true
 
-[dev-dependencies]
-tokio.workspace = true
+# Test targets inherit tokio from [dependencies]; no extra dev deps.

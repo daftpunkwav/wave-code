@@ -87,7 +87,6 @@ impl PasteBurst {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keys::Mods;
     use std::time::Duration;
 
     fn at(ms: u64) -> Instant {

@@ -416,12 +416,22 @@ pub fn validate_snapshot_label(label: &str) -> std::result::Result<(), String> {
 /// Validate a manifest-relative path before writing during restore: no
 /// absolute paths, no `..`, no empty segments (defense in depth against
 /// hand-edited manifests).
+///
+/// Windows path semantics need two extra rejections there: a backslash is
+/// a path separator even inside a single `/`-segment (so `..\..\x` passes
+/// the split below as one benign-looking segment and the OS still resolves
+/// the `..`s on open), and a drive prefix (`C:/x`) makes `PathBuf::push`
+/// discard the base entirely. Both checks are scoped to Windows so legal
+/// `:` / `\` characters in Unix filenames keep restoring.
 fn validate_rel_path(raw: &str) -> bool {
-    !raw.is_empty()
-        && !raw.starts_with('/')
-        && raw
-            .split('/')
-            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+    if raw.is_empty() || raw.starts_with('/') {
+        return false;
+    }
+    if cfg!(windows) && (raw.contains('\\') || raw.contains(':')) {
+        return false;
+    }
+    raw.split('/')
+        .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 /// Join a validated `/`-separated relative path onto a base directory.
@@ -957,6 +967,35 @@ mod snapshot_tests {
             validate_snapshot_label(".staging-x").is_err(),
             "dots are rejected"
         );
+    }
+
+    /// Manifest paths cannot escape the restore root through Windows path
+    /// semantics: a backslash acts as a separator inside a `/`-segment (so
+    /// `..\..\x` hides a traversal from the forward-slash split) and a drive
+    /// prefix makes `PathBuf::push` discard the base. Both are rejected on
+    /// Windows; on other platforms `:` / `\` are legal filename characters,
+    /// so those exact strings stay accepted there. Forward-slash traversal
+    /// and absolute paths are rejected everywhere.
+    #[test]
+    fn manifest_paths_reject_windows_separator_tricks() {
+        for raw in ["..\\..\\evil.txt", "C:/evil.txt", "sub\\..\\..\\evil.txt"] {
+            assert_eq!(
+                validate_rel_path(raw),
+                !cfg!(windows),
+                "{raw}: must be rejected exactly where it is a path escape"
+            );
+        }
+        for raw in [
+            "../evil.txt",
+            "a/../../evil.txt",
+            "/abs/evil.txt",
+            "",
+            "a//b",
+            "./x",
+        ] {
+            assert!(!validate_rel_path(raw), "{raw}: must be rejected");
+        }
+        assert!(validate_rel_path("a/b.txt"));
     }
 
     /// Round trip: capture, modify, restore refuses without force and

@@ -82,9 +82,17 @@ impl HistoryJournal {
     /// otherwise, which means damage inside the history rather than at its
     /// end. A missing file reads as empty.
     pub fn read(&self) -> HistoryRead {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
+        // Decode lossily instead of failing the whole file: a torn write can
+        // cut a multi-byte UTF-8 character in half, and a strict decode would
+        // read the entire journal as empty (no records, no torn_tail flag) —
+        // silent total history loss on every future resume, since the file is
+        // append-only and never rewritten. The replacement-char bytes fail
+        // JSON parsing on that one line, which the loop below classifies as a
+        // torn tail (last line) or a mid gap.
+        let Ok(bytes) = std::fs::read(&self.path) else {
             return HistoryRead::default();
         };
+        let text = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = text
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -163,6 +171,37 @@ mod tests {
         let read = journal.read();
         assert_eq!(read.records.len(), 1);
         assert!(read.torn_tail);
+        assert!(!read.mid_gap);
+    }
+
+    /// A tear inside a multi-byte character leaves an invalid UTF-8 tail: the
+    /// journal must still yield its intact prefix with `torn_tail` set, never
+    /// read as wholesale-empty (a strict decode would silently drop the whole
+    /// history on every resume; CJK turn text makes this realistic).
+    #[test]
+    fn torn_multibyte_tail_keeps_the_prefix_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = HistoryJournal::new(path_in(dir.path()));
+        journal
+            .append(&serde_json::json!({"k": "append", "seq": 0, "entry": {"role": "user", "blocks": [{"text": "你好"}]}}))
+            .unwrap();
+        // Simulate a torn final write whose tail is a cut 3-byte CJK char.
+        let torn = "{\"k\":\"append\",\"seq\":1,\"entry\":{\"role\":\"user\",\"blocks\":[{\"text\":\"\u{4f60}".to_string();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(journal.path())
+            .and_then(|mut f| {
+                f.write_all(torn.as_bytes())
+                    .and_then(|()| f.write_all(&[0xe4, 0xb8]))
+            })
+            .unwrap();
+        // The file is not even decodable as UTF-8 before the read.
+        assert!(std::fs::read_to_string(journal.path()).is_err());
+
+        let read = journal.read();
+        assert_eq!(read.records.len(), 1, "the intact prefix survives");
+        assert_eq!(read.records[0]["seq"], 0);
+        assert!(read.torn_tail, "the torn line is reported, not hidden");
         assert!(!read.mid_gap);
     }
 

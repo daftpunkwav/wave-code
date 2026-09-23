@@ -140,8 +140,14 @@ enum Command {
         json: bool,
     },
     /// Compare the running version against the newest published GitHub
-    /// release.
-    Update,
+    /// release, or with `--install`, download and replace this binary
+    /// with it (checksum-verified, `.bak` kept for rollback; source
+    /// builds refuse).
+    Update {
+        /// Download the release and replace the running binary.
+        #[arg(long)]
+        install: bool,
+    },
     /// List and revoke the "always allow" grants sessions persisted
     /// (offline: reads `~/.wavecode/grants.jsonl` only).
     Grants {
@@ -590,11 +596,16 @@ async fn main() -> anyhow::Result<()> {
             Outcome::Failed.exit_code()
         })
     }
-    // Update check talks only to the GitHub releases API: no session
-    // assembly, no provider credentials. A failed probe exits 1 so
-    // scripts can tell "no update" from "could not tell".
-    if matches!(args.command, Some(Command::Update)) {
-        run_update_check().await;
+    // Update check and self-install talk only to the GitHub releases
+    // API: no session assembly, no provider credentials. A failed
+    // probe exits 1 so scripts can tell "no update" from "could not
+    // tell".
+    if let Some(Command::Update { install }) = args.command {
+        if install {
+            run_update_install().await;
+        } else {
+            run_update_check().await;
+        }
         std::process::exit(Outcome::Completed.exit_code())
     }
     // The app server assembles sessions lazily per POST /sessions, so it
@@ -706,7 +717,7 @@ async fn main() -> anyhow::Result<()> {
         | Some(Command::Metrics { .. })
         | Some(Command::Grants { .. })
         | Some(Command::Eval { .. })
-        | Some(Command::Update)
+        | Some(Command::Update { .. })
         | Some(Command::Serve { .. }) => {
             unreachable!("early-return surfaces never reach assembly")
         }
@@ -1696,6 +1707,118 @@ async fn run_update_check() {
         },
         Err(cause) => {
             eprintln!("[fail] update check failed: {cause:#}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    }
+}
+
+/// Download the newest release and replace this binary with it.
+///
+/// Refuses source builds (nothing installed to replace) and
+/// unpublished targets; verifies the download against the published
+/// sha256 before touching the running file, and keeps the replaced
+/// binary as `.bak` next to it for manual rollback.
+async fn run_update_install() {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build();
+    let client = match client {
+        Ok(client) => client,
+        Err(cause) => {
+            eprintln!("[fail] update failed: {cause}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(cause) => {
+            eprintln!("[fail] cannot locate the running binary: {cause}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    if update::running_from_source(&exe) {
+        eprintln!(
+            "[fail] this is a source build (target/); self-update replaces
+                      installed binaries only — use cargo build --release instead"
+        );
+        std::process::exit(Outcome::Failed.exit_code())
+    }
+    let Some(target) = update::current_target() else {
+        eprintln!(
+            "[fail] no prebuilt release for this platform ({}, {}); build
+                      from source instead",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        std::process::exit(Outcome::Failed.exit_code())
+    };
+
+    let release = match update::fetch_release(&client).await {
+        Ok(Some(release)) => release,
+        Ok(None) => {
+            eprintln!("[fail] no published release yet");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+        Err(cause) => {
+            eprintln!("[fail] update failed: {cause:#}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    let Some((bin, sha)) = update::pick_assets(&release.tag, &release.assets, target) else {
+        eprintln!(
+            "[fail] release {tag} carries no binary for {target}",
+            tag = release.tag
+        );
+        std::process::exit(Outcome::Failed.exit_code())
+    };
+
+    println!("downloading {} ...", release.tag);
+    let bytes = match client.get(&bin.url).send().await {
+        Ok(response) => match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(cause) => {
+                eprintln!("[fail] download failed: {cause}");
+                std::process::exit(Outcome::Failed.exit_code())
+            }
+        },
+        Err(cause) => {
+            eprintln!("[fail] download failed: {cause}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    let checksum = match client.get(&sha.url).send().await {
+        Ok(response) => match response.text().await {
+            Ok(text) => text,
+            Err(cause) => {
+                eprintln!("[fail] checksum download failed: {cause}");
+                std::process::exit(Outcome::Failed.exit_code())
+            }
+        },
+        Err(cause) => {
+            eprintln!("[fail] checksum download failed: {cause}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    if let Err(cause) = update::verify_sha256(&bytes, &checksum) {
+        eprintln!("[fail] {cause:#}");
+        std::process::exit(Outcome::Failed.exit_code())
+    }
+
+    match update::apply_swap(&exe, &bytes) {
+        Ok(()) => {
+            println!("installed {} -> {}", release.tag, exe.display());
+            #[cfg(windows)]
+            println!(
+                "the previous binary was kept as {}",
+                exe.with_file_name(format!(
+                    "{}.bak",
+                    exe.file_name().unwrap_or_default().to_string_lossy()
+                ))
+                .display()
+            );
+        }
+        Err(cause) => {
+            eprintln!("[fail] install failed: {cause:#}");
             std::process::exit(Outcome::Failed.exit_code())
         }
     }

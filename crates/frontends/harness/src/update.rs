@@ -1,15 +1,30 @@
-//! Update check: compare the running version against the newest
-//! published GitHub release on the binary-release repo.
+//! Update check and self-install: compare the running version against
+//! the newest published GitHub release on the binary-release repo,
+//! and optionally replace the running binary with it.
 //!
-//! Explicit surface only (`wavecode update`): no startup probing, no
-//! background download. A check failure is reported and exits non-zero
-//! instead of ever degrading into a false "up to date".
+//! Explicit surface only (`wavecode update`, `wavecode update
+//! --install`): no startup probing, no background download. A check
+//! failure is reported and exits non-zero instead of ever degrading
+//! into a false "up to date". The install path downloads the bare
+//! release asset, verifies it against the published sha256 checksum
+//! before touching anything, refuses to touch source builds, and
+//! keeps a `.bak` of the replaced binary as the rollback copy.
 
 use anyhow::{Context as _, Result};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 /// Repository whose GitHub Releases carry `wavecode` binaries.
 const RELEASES_REPO: &str = "daftpunkwav/wave-code";
+
+/// One downloadable file attached to a release.
+#[derive(Debug, Clone)]
+pub struct Asset {
+    /// File name as published (e.g. `wavecode-0.2.0-x86_64-...-bin.exe`).
+    pub name: String,
+    /// Browser download URL.
+    pub url: String,
+}
 
 /// Result of comparing the running version to the latest release.
 pub enum UpdateStatus {
@@ -47,6 +62,24 @@ pub fn version_is_newer(latest: &str, current: &str) -> bool {
 /// Fetch the newest published release as `(tag_name, html_url)`.
 /// `Ok(None)` means the repo has no published release yet (404).
 pub async fn fetch_latest(client: &reqwest::Client) -> Result<Option<(String, String)>> {
+    Ok(fetch_release(client)
+        .await?
+        .map(|release| (release.tag, release.page)))
+}
+
+/// The newest published release with its downloadable assets.
+pub struct Release {
+    /// Release tag (e.g. `v0.2.1`).
+    pub tag: String,
+    /// Release page URL.
+    pub page: String,
+    /// Attached files.
+    pub assets: Vec<Asset>,
+}
+
+/// Fetch the newest published release with its assets. `Ok(None)`
+/// means the repo has no published release yet (404).
+pub async fn fetch_release(client: &reqwest::Client) -> Result<Option<Release>> {
     let url = format!("https://api.github.com/repos/{RELEASES_REPO}/releases/latest");
     let response = client
         .get(url)
@@ -71,7 +104,20 @@ pub async fn fetch_latest(client: &reqwest::Client) -> Result<Option<(String, St
         .context("release payload missing tag_name")?
         .to_string();
     let page = payload["html_url"].as_str().unwrap_or_default().to_string();
-    Ok(Some((tag, page)))
+    let mut assets = Vec::new();
+    if let Some(list) = payload["assets"].as_array() {
+        for asset in list {
+            let name = asset["name"].as_str().unwrap_or_default();
+            let asset_url = asset["browser_download_url"].as_str().unwrap_or_default();
+            if !name.is_empty() && !asset_url.is_empty() {
+                assets.push(Asset {
+                    name: name.to_string(),
+                    url: asset_url.to_string(),
+                });
+            }
+        }
+    }
+    Ok(Some(Release { tag, page, assets }))
 }
 
 /// Classify the running version against the fetched release tag.
@@ -86,6 +132,152 @@ pub fn classify(latest: &str, url: &str) -> UpdateStatus {
             latest: latest.to_string(),
         }
     }
+}
+
+/// The release target this binary was built for, matching the
+/// release.yml matrix; `None` on targets the release pipeline does
+/// not publish (installers must fall back to "build from source").
+pub fn current_target() -> Option<&'static str> {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        Some("x86_64-unknown-linux-gnu")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        Some("aarch64-apple-darwin")
+    }
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    {
+        Some("x86_64-apple-darwin")
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        Some("x86_64-pc-windows-msvc")
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "x86_64")
+    )))]
+    {
+        None
+    }
+}
+
+/// True when the running binary came from a cargo build (`target/`
+/// in its path): such a binary has no installed copy to replace, so
+/// self-update must refuse instead of clobbering a build artifact.
+pub fn running_from_source(exe: &std::path::Path) -> bool {
+    let mut components = exe.components();
+    while let Some(part) = components.next() {
+        if part.as_os_str() == "target"
+            && let Some(next) = components.next()
+        {
+            let dir = next.as_os_str().to_string_lossy();
+            if dir == "debug" || dir == "release" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The bare-binary asset name for one release (`release.yml` publishes
+/// `wavecode-{version}-{target}-bin{exe}` plus its `.sha256`).
+pub fn asset_name(target: &str, version: &str) -> String {
+    let exe = if cfg!(windows) { ".exe" } else { "" };
+    format!("wavecode-{version}-{target}-bin{exe}")
+}
+
+/// Find the bare binary and its checksum file among a release's
+/// assets. The tag's `v` prefix is dropped for the asset version.
+pub fn pick_assets<'a>(
+    release_tag: &str,
+    assets: &'a [Asset],
+    target: &str,
+) -> Option<(&'a Asset, &'a Asset)> {
+    let version = release_tag.trim_start_matches('v');
+    let binary = asset_name(target, version);
+    let checksum = format!("{binary}.sha256");
+    let bin = assets.iter().find(|a| a.name == binary)?;
+    let sha = assets.iter().find(|a| a.name == checksum)?;
+    Some((bin, sha))
+}
+
+/// Check `bytes` against the contents of a published `.sha256` file
+/// (`"<hex>  <filename>"; only the hex token is compared).
+pub fn verify_sha256(bytes: &[u8], checksum_file: &str) -> Result<()> {
+    let expected = checksum_file
+        .split_whitespace()
+        .next()
+        .context("checksum file is empty")?
+        .to_lowercase();
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    if actual != expected {
+        anyhow::bail!("checksum mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+/// Replace the running binary with `bytes`, keeping the old file as
+/// `<name>.bak` for rollback. The download lands in a staging file
+/// next to the target (same filesystem, so the final step is a
+/// rename); verification happened before this is called.
+pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let file_name = target_exe
+        .file_name()
+        .context("binary path has no file name")?
+        .to_string_lossy()
+        .into_owned();
+    let dir = target_exe.parent().context("binary path has no parent")?;
+    let staging = dir.join(format!(".{file_name}.download-{}", std::process::id()));
+    {
+        let mut file = std::fs::File::create(&staging)
+            .with_context(|| format!("creating {}", staging.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
+    }
+    // Unix rename replaces atomically. Windows refuses to remove a
+    // running exe but allows renaming it, so the old binary steps
+    // aside as `.bak` first; a failed second step rolls the `.bak`
+    // back into place.
+    #[cfg(windows)]
+    let backup = dir.join(format!("{file_name}.bak"));
+    #[cfg(windows)]
+    {
+        std::fs::rename(target_exe, &backup)
+            .with_context(|| format!("moving the old binary to {}", backup.display()))?;
+        if let Err(error) = std::fs::rename(&staging, target_exe) {
+            let _ = std::fs::rename(&backup, target_exe);
+            let _ = std::fs::remove_file(&staging);
+            return Err(error).context("install failed; the old binary was restored");
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Err(error) = std::fs::rename(&staging, target_exe) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(error).context("install failed; the old binary was not touched");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = backup; // kept on purpose as the rollback copy
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,5 +318,76 @@ mod tests {
             classify("v9.9.9", "https://example.com/new"),
             UpdateStatus::Available { .. }
         ));
+    }
+
+    #[test]
+    fn source_builds_are_detected_by_their_path() {
+        let source = std::path::Path::new("/repo/target/debug/wavecode");
+        let source_release = std::path::Path::new(r"D:\repo\target\release\wavecode.exe");
+        let installed = std::path::Path::new("/home/u/.cargo/bin/wavecode");
+        assert!(running_from_source(source));
+        assert!(running_from_source(source_release));
+        assert!(!running_from_source(installed));
+        // A directory merely named "targetdir" must not match: the
+        // check looks for the exact `target/{debug,release}` pair.
+        let lookalike = std::path::Path::new("/repo/targetdir/debug/wavecode");
+        assert!(!running_from_source(lookalike));
+    }
+
+    #[test]
+    fn asset_names_follow_the_release_layout() {
+        let windows = if cfg!(windows) { ".exe" } else { "" };
+        assert_eq!(
+            asset_name("x86_64-pc-windows-msvc", "0.2.1"),
+            format!("wavecode-0.2.1-x86_64-pc-windows-msvc-bin{windows}")
+        );
+        let assets = vec![
+            Asset {
+                name: format!("wavecode-0.2.1-x86_64-pc-windows-msvc-bin{windows}"),
+                url: "https://example.com/bin".into(),
+            },
+            Asset {
+                name: format!("wavecode-0.2.1-x86_64-pc-windows-msvc-bin{windows}.sha256"),
+                url: "https://example.com/bin.sha256".into(),
+            },
+        ];
+        let (bin, sha) =
+            pick_assets("v0.2.1", &assets, "x86_64-pc-windows-msvc").expect("both present");
+        assert_eq!(bin.name, asset_name("x86_64-pc-windows-msvc", "0.2.1"));
+        assert_eq!(sha.name, format!("{}.sha256", bin.name));
+        // A tag whose asset set is missing the checksum file picks
+        // nothing rather than installing unverified bytes.
+        let only_binary = vec![assets[0].clone()];
+        assert!(pick_assets("v0.2.1", &only_binary, "x86_64-pc-windows-msvc").is_none());
+    }
+
+    #[test]
+    fn checksum_verification_accepts_exact_bytes_only() {
+        // sha256("abc") — the canonical test vector.
+        let checksum =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  wavecode-bin\n";
+        verify_sha256(b"abc", checksum).expect("matching bytes pass");
+        let error = verify_sha256(b"abd", checksum).unwrap_err().to_string();
+        assert!(error.contains("checksum mismatch"), "{error}");
+        assert!(verify_sha256(b"abc", "").is_err(), "empty checksum file");
+    }
+
+    #[test]
+    fn swap_replaces_the_binary_and_keeps_a_rollback_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
+        // The old bytes survive as `.bak` next to the target.
+        let backup = dir.path().join("wavecode.exe.bak");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old-binary-bytes");
+        // No staging leftovers: the download file was renamed away.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".download-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

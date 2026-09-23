@@ -11,6 +11,7 @@
 
 //! [`runtime_runner::ToolExecutor`] implemented over `wavecode-tools`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use runtime_runner::{ToolCall, ToolExecutor, ToolRef, ToolResult};
@@ -25,6 +26,25 @@ impl ToolAdapter {
     /// Wrap a shared registry with the execution context for all calls.
     pub fn new(registry: Arc<wavecode_tools::Registry>, ctx: wavecode_tools::ToolCtx) -> Self {
         Self { registry, ctx }
+    }
+
+    /// Build the credential-free `mcp serve` surface: the full builtin
+    /// registry (including `todowrite`) plus an executor over it with a
+    /// cwd-only execution context. Registry construction lives here, in
+    /// the composition root, so frontends keep depending on this crate
+    /// instead of naming the tools crate directly; the serving loop
+    /// itself lives in the gateway.
+    pub fn mcp_serve_tools(cwd: PathBuf) -> (Arc<wavecode_tools::Registry>, Self) {
+        let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
+        let registry = Arc::new(registry);
+        let executor = Self::new(
+            registry.clone(),
+            wavecode_tools::ToolCtx {
+                cwd,
+                deny_env: Vec::new(),
+            },
+        );
+        (registry, executor)
     }
 }
 

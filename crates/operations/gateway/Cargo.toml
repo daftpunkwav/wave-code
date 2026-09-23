@@ -8,6 +8,13 @@ license.workspace = true
 [dependencies]
 operations-actor = { path = "../actor" }
 wavecode-wire = { path = "../../foundation/wire" }
+runtime-runner = { path = "../../runtime/runner" }
+wavecode-tools = { path = "../../capabilities/tools" }
+safety-gate = { path = "../../safety/gate" }
+infrastructure-base = { path = "../../infrastructure/base" }
+async-stream.workspace = true
+axum.workspace = true
+futures.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 
@@ -16,7 +23,7 @@ serde_json.workspace = true
 # composition root's own tests.
 operations-bootstrap = { path = "../bootstrap" }
 async-trait.workspace = true
-futures.workspace = true
+reqwest.workspace = true
 tempfile.workspace = true
 wavecode-config = { path = "../../foundation/config" }
 wavecode-llm = { path = "../../foundation/llm" }

@@ -33,10 +33,9 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use operations_actor::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionSurface};
 use tokio::sync::{Notify, broadcast, mpsc};
 use wavecode_wire::{Event, EventMsg, Op, Submission};
-
-use crate::session::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionHandle};
 
 /// Server inputs; sessions inherit these at assembly.
 #[derive(Debug, Clone)]
@@ -79,8 +78,11 @@ struct AppSession {
 
 type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, AppSession>>>;
 
-/// The injection seam: builds one parking-enabled session handle.
-type Assemble = Arc<dyn Fn(AssembleOptions) -> Result<SessionHandle, SessionError> + Send + Sync>;
+/// The injection seam: builds one parking-enabled session. Sessions are
+/// held behind [`SessionSurface`] so the server never names the concrete
+/// handle; production passes the composition root's `assemble_session`.
+type Assemble =
+    Arc<dyn Fn(AssembleOptions) -> Result<Box<dyn SessionSurface>, SessionError> + Send + Sync>;
 
 /// Shared server state behind the router.
 #[derive(Clone)]
@@ -109,15 +111,18 @@ impl ServerHandle {
 
 /// Bind and run the server on a background task.
 ///
-/// `assemble` is the composition seam: production passes
-/// `assemble_session`; tests pass a scripted-model assembly. Sessions
-/// assemble with parking enabled so approvals and questions wait on the
-/// gates until the HTTP endpoints answer.
-pub async fn serve<F>(options: ServeOptions, assemble: F) -> std::io::Result<ServerHandle>
+/// `assemble` is the composition seam: production passes the composition
+/// root's `assemble_session`; tests pass a scripted-model assembly.
+/// Sessions assemble with parking enabled so approvals and questions
+/// wait on the gates until the HTTP endpoints answer.
+pub async fn serve<F, S>(options: ServeOptions, assemble: F) -> std::io::Result<ServerHandle>
 where
-    F: Fn(AssembleOptions) -> Result<SessionHandle, SessionError> + Send + Sync + Clone + 'static,
+    F: Fn(AssembleOptions) -> Result<S, SessionError> + Send + Sync + Clone + 'static,
+    S: SessionSurface + 'static,
 {
-    let assemble: Assemble = Arc::new(assemble);
+    // Box at the seam: the router and handlers stay non-generic.
+    let assemble: Assemble =
+        Arc::new(move |options| assemble(options).map(|session| Box::new(session) as _));
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], options.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let port = listener.local_addr()?.port();
@@ -263,12 +268,15 @@ async fn create_session(
         }
     };
 
-    let permission_mode = handle.permission_mode.clone();
-    // The pump owns the client exclusively: it fans events out to SSE
-    // subscribers and executes submissions from the command channel.
+    let permission_mode = handle.permission_mode().to_string();
+    // The gates are shared out before the pump takes the session: the
+    // pump owns it exclusively from there on.
+    let approvals = handle.approvals();
+    let questions = handle.questions();
+    let interrupt = handle.interrupt();
     let (events, _) = broadcast::channel(256);
     let (commands, command_rx) = mpsc::channel(32);
-    pump(handle.client, events.clone(), command_rx);
+    pump(handle, events.clone(), command_rx);
 
     state.sessions.lock().await.insert(
         session_id.clone(),
@@ -276,9 +284,9 @@ async fn create_session(
             commands,
             submissions: 0,
             events,
-            approvals: handle.approvals,
-            questions: handle.questions,
-            interrupt: handle.interrupt.clone(),
+            approvals,
+            questions,
+            interrupt,
         },
     );
     (
@@ -447,17 +455,17 @@ async fn stream_events(
 
 // ---- internals ----
 
-/// Spawn a session's pump task: exclusive client owner, forwarding
+/// Spawn a session's pump task: exclusive session owner, forwarding
 /// events to subscribers and executing submission commands.
 fn pump(
-    mut client: operations_actor::ActorClient,
+    mut session: Box<dyn SessionSurface>,
     events: broadcast::Sender<Event>,
     mut commands: mpsc::Receiver<SessionCommand>,
 ) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                event = client.next_event() => match event {
+                event = session.next_event() => match event {
                     Some(event) => {
                         let _ = events.send(event);
                     }
@@ -465,7 +473,7 @@ fn pump(
                 },
                 command = commands.recv() => match command {
                     Some(SessionCommand::Submit { submission_id, op, reply }) => {
-                        let result = client
+                        let result = session
                             .submit(Submission { id: submission_id, op })
                             .await
                             .map_err(|e| e.to_string());
@@ -474,7 +482,7 @@ fn pump(
                     None => {
                         // All handles dropped (session deleted): shut the
                         // actor down cleanly and end the pump.
-                        let _ = client
+                        let _ = session
                             .submit(Submission {
                                 id: "server-shutdown".to_string(),
                                 op: Op::Shutdown,
@@ -587,7 +595,10 @@ api_key = "k-inline"
     }
 
     impl TestAssemble {
-        fn assemble(&self, options: AssembleOptions) -> Result<SessionHandle, SessionError> {
+        fn assemble(
+            &self,
+            options: AssembleOptions,
+        ) -> Result<operations_bootstrap::SessionHandle, SessionError> {
             let path = options
                 .config_path
                 .clone()
@@ -606,8 +617,8 @@ api_key = "k-inline"
             let model: Arc<dyn wavecode_llm::ChatModel> = Arc::new(OneShotModel {
                 script: std::sync::Mutex::new(Some(script)),
             });
-            Ok(crate::session::assemble_session_with_model(
-                crate::session::WithModel {
+            Ok(operations_bootstrap::session::assemble_session_with_model(
+                operations_bootstrap::session::WithModel {
                     config,
                     model,
                     model_name,

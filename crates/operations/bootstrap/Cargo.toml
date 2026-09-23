@@ -36,15 +36,11 @@ wavecode-skills = { path = "../../capabilities/skills" }
 wavecode-mcp = { path = "../../capabilities/mcp" }
 wavecode-context = { path = "../../capabilities/context" }
 serde_json.workspace = true
-thiserror.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 futures.workspace = true
-axum.workspace = true
 tracing.workspace = true
-async-stream.workspace = true
 infrastructure-ratelimit = { path = "../../infrastructure/ratelimit" }
 
 [dev-dependencies]
-reqwest.workspace = true
 tempfile.workspace = true

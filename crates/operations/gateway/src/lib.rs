@@ -21,3 +21,5 @@
 //! servers stream wire events and route submissions without knowing how
 //! a session was assembled.
 pub mod acp;
+pub mod app_server;
+pub mod mcp_serve;

@@ -19,7 +19,6 @@
 //! here, so neither side names the other directly.
 
 pub mod agent_task_tool;
-pub mod app_server;
 pub mod ask_user_tool;
 pub mod child_service;
 pub mod compactor;
@@ -33,7 +32,6 @@ pub mod grants_sink;
 pub mod history_journal;
 pub mod hook_adapter;
 pub mod job_tools;
-pub mod mcp_serve;
 pub mod memory_finish;
 pub mod memory_tool;
 pub mod metrics_tap;

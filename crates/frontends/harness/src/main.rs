@@ -1582,7 +1582,8 @@ fn effective_model(model_override: &Option<String>, config: &wavecode_config::Co
 /// Needs no model credentials: it exposes local tools, so it returns
 /// before session assembly.
 async fn run_mcp_serve(cwd: PathBuf) -> anyhow::Result<()> {
-    operations_bootstrap::mcp_serve::run_builtin_stdio_server(cwd)
+    let (registry, executor) = operations_bootstrap::ToolAdapter::mcp_serve_tools(cwd);
+    operations_gateway::mcp_serve::run_stdio_server(registry, executor)
         .await
         .map_err(|e| anyhow::anyhow!("mcp server failed: {e}"))
 }
@@ -1644,17 +1645,18 @@ async fn run_serve(
     home: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let token = token.unwrap_or_else(|| Uuid::new_v4().to_string());
-    let options = operations_bootstrap::app_server::ServeOptions {
-        config_path: config,
-        model_override: None,
-        cwd,
-        home,
-        token: token.clone(),
-        port,
-    };
-    let handle =
-        operations_bootstrap::app_server::serve(options, operations_bootstrap::assemble_session)
-            .await?;
+    let handle = operations_gateway::app_server::serve(
+        operations_gateway::app_server::ServeOptions {
+            config_path: config,
+            model_override: None,
+            cwd,
+            home,
+            token: token.clone(),
+            port,
+        },
+        operations_bootstrap::assemble_session,
+    )
+    .await?;
     // stderr: unbuffered even when the process is piped (stdout would
     // block-buffer and a spawning parent would never see the token).
     eprintln!(

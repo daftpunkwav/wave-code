@@ -1,15 +1,16 @@
 /*!
  * @file McpServe
- * @description MCP server mode: expose the tool registry over stdio.
+ * @description MCP server mode: expose a tool executor over stdio.
  *
  * Responsibilities:
  * - Serve NDJSON JSON-RPC over stdin/stdout (initialize, tools/list,
  *   tools/call, ping, notifications).
- * - Execute tool calls through the shared ToolAdapter with a fixed ctx.
+ * - Execute tool calls through a caller-supplied `ToolExecutor`.
  * - Map protocol failures to JSON-RPC error codes; shut down on EOF.
  *
  * This module must not depend on: drivers, actors, or sessions. The
- * registry is caller-built; this is a thin serving skin over it.
+ * registry and its executor are caller-built (the composition root); this
+ * is a thin serving skin over them.
  */
 
 //! MCP server mode: WaveCode tools over stdio.
@@ -18,17 +19,22 @@
 //! JSON-RPC message each). The loop handles `initialize` (replying
 //! protocol version `2024-11-05` plus `wavecode` server info),
 //! `notifications/initialized` (no reply), `tools/list` (from the
-//! registry specs), `tools/call` (executed via [`ToolAdapter`]),
-//! `ping`, and unknown notifications (ignored). Shutdown happens on EOF
-//! (or stdio close); there is no sentinel method.
+//! registry specs), `tools/call` (dispatched through the caller's
+//! [`ToolExecutor`]), `ping`, and unknown notifications (ignored).
+//! Shutdown happens on EOF (or stdio close); there is no sentinel
+//! method.
 
 use std::sync::Arc;
 
-use runtime_runner::ToolCall;
-use runtime_runner::ToolExecutor;
+use runtime_runner::{ToolCall, ToolExecutor};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::tool_adapter::ToolAdapter;
+/// Adapter fault marker: the composition root's executor converts
+/// implementation faults into error results prefixed this way (so
+/// transcripts stay distinguishable from business failures); the serve
+/// loop maps that documented prefix back to a protocol-level internal
+/// error.
+const FAULT_PREFIX: &str = "tool fault:";
 
 /// Protocol version advertised (and expected) at `initialize`.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -42,50 +48,24 @@ const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 
-/// Adapter fault marker: [`ToolAdapter`] converts implementation faults
-/// into error results prefixed this way (so transcripts stay
-/// distinguishable from business failures); the serve loop maps that
-/// documented prefix back to a protocol-level internal error.
-const FAULT_PREFIX: &str = "tool fault:";
-
 /// Serve the registry over the process stdio streams until EOF.
 ///
-/// Builds one [`ToolAdapter`] over the registry and pumps
+/// Executes tool calls through the caller-supplied `executor` and pumps
 /// stdin-to-stdout; returns when stdin closes.
-pub async fn run_stdio_server(
+pub async fn run_stdio_server<E: ToolExecutor>(
     registry: Arc<wavecode_tools::Registry>,
-    ctx: wavecode_tools::ToolCtx,
+    executor: E,
 ) -> std::io::Result<()> {
-    let adapter = ToolAdapter::new(registry.clone(), ctx);
     let reader = tokio::io::BufReader::new(tokio::io::stdin());
     let writer = tokio::io::stdout();
-    serve_loop(&registry, &adapter, reader, writer).await
-}
-
-/// Serve the built-in tool registry over the process stdio streams until
-/// EOF.
-///
-/// The credential-free `mcp serve` surface: the full builtin registry
-/// (including `todowrite`) with a cwd-only execution context. Registry
-/// construction lives here, in the composition root, so frontends keep
-/// depending on this crate instead of naming the tools crate directly.
-pub async fn run_builtin_stdio_server(cwd: std::path::PathBuf) -> std::io::Result<()> {
-    let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
-    run_stdio_server(
-        Arc::new(registry),
-        wavecode_tools::ToolCtx {
-            cwd,
-            deny_env: Vec::new(),
-        },
-    )
-    .await
+    serve_loop(&registry, &executor, reader, writer).await
 }
 
 /// Serve loop over explicit streams (the duplex-testable core behind
 /// [`run_stdio_server`]).
-async fn serve_loop<R, W>(
+async fn serve_loop<R, W, E: ToolExecutor>(
     registry: &wavecode_tools::Registry,
-    adapter: &ToolAdapter,
+    executor: &E,
     reader: R,
     writer: W,
 ) -> std::io::Result<()>
@@ -106,7 +86,7 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(&line, registry, adapter).await {
+        if let Some(response) = handle_line(&line, registry, executor).await {
             writer.write_all(response.to_string().as_bytes()).await?;
             writer.write_all(b"\n").await?;
             writer.flush().await?;
@@ -115,10 +95,10 @@ where
 }
 
 /// Handle one NDJSON line; `None` means notification (no reply).
-async fn handle_line(
+async fn handle_line<E: ToolExecutor>(
     line: &str,
     registry: &wavecode_tools::Registry,
-    adapter: &ToolAdapter,
+    executor: &E,
 ) -> Option<serde_json::Value> {
     let message: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -173,7 +153,7 @@ async fn handle_line(
         "initialize" => Some(success_response(id, initialize_result())),
         "ping" => Some(success_response(id, serde_json::json!({}))),
         "tools/list" => Some(success_response(id, tools_list(registry))),
-        "tools/call" => Some(call_tool(id, &params, adapter).await),
+        "tools/call" => Some(call_tool(id, &params, executor).await),
         _ => Some(error_response(
             id,
             METHOD_NOT_FOUND,
@@ -226,12 +206,12 @@ fn tools_list(registry: &wavecode_tools::Registry) -> serde_json::Value {
     serde_json::json!({"tools": tools})
 }
 
-/// `tools/call`: validate params, dispatch through the adapter, and map
+/// `tools/call`: validate params, dispatch through the executor, and map
 /// the outcome onto an MCP result (or a protocol error for faults).
-async fn call_tool(
+async fn call_tool<E: ToolExecutor>(
     id: serde_json::Value,
     params: &serde_json::Value,
-    adapter: &ToolAdapter,
+    executor: &E,
 ) -> serde_json::Value {
     let object = match params.as_object() {
         Some(object) => object,
@@ -261,7 +241,7 @@ async fn call_tool(
             );
         }
     };
-    let outcome = adapter
+    let outcome = executor
         .execute(ToolCall {
             call_id: format!("mcp-{id}"),
             name: name.to_string(),
@@ -288,6 +268,7 @@ async fn call_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use operations_bootstrap::ToolAdapter;
     use wavecode_tools::{Result as ToolResultAlias, Tool, ToolCtx, ToolOutput};
 
     struct EchoTool;

@@ -1,8 +1,11 @@
 /**
  * End-to-end smoke tests against the real wavecode binary. Skipped when
- * no binary is found (`WAVECODE_BIN` or the repo's target/debug build);
- * these exercise the SDK surface and pin the wire shapes the types
- * mirror — a Rust wire change that breaks them is an SDK breaking change.
+ * no binary is found (`WAVECODE_BIN` or the repo's target/debug build)
+ * and when no live provider is opted in: both tests drive real agent
+ * turns, which need a configured model. Set WAVECODE_SDK_LIVE=1 to run
+ * them (the same opt-in convention as the benchmark LIVE=1 tier); they
+ * exercise the SDK surface and pin the wire shapes the types mirror —
+ * a Rust wire change that breaks them is an SDK breaking change.
  */
 
 import test from "node:test";
@@ -23,6 +26,10 @@ const bin = candidates.find((p) => existsSync(p));
 test("observer run streams meta, deltas, and a clean completion", { timeout: 120_000 }, async (t) => {
   if (!bin) {
     t.skip("no wavecode binary found");
+    return;
+  }
+  if (!process.env.WAVECODE_SDK_LIVE) {
+    t.skip("live provider turns are opt-in; set WAVECODE_SDK_LIVE=1");
     return;
   }
   const session = execSession({
@@ -60,6 +67,10 @@ test("observer run streams meta, deltas, and a clean completion", { timeout: 120
 test("approval flow answers a parked request through the SDK", { timeout: 180_000 }, async (t) => {
   if (!bin) {
     t.skip("no wavecode binary found");
+    return;
+  }
+  if (!process.env.WAVECODE_SDK_LIVE) {
+    t.skip("live provider turns are opt-in; set WAVECODE_SDK_LIVE=1");
     return;
   }
   const session = execSession({

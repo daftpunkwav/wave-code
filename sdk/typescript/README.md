@@ -64,4 +64,6 @@ WAVECODE_BIN=../../target/debug/wavecode pnpm --filter @wavecode/sdk test
 ```
 
 The smoke test skips when `WAVECODE_BIN` (or `../../target/debug/wavecode`)
-does not exist.
+does not exist, and when `WAVECODE_SDK_LIVE=1` is not set: both tests drive
+real agent turns through a configured provider, so they stay opt-in (the
+same convention as the benchmark `LIVE=1` tier) and never run on CI.

@@ -8,10 +8,6 @@ importers:
 
   .: {}
 
-  apps/desktop: {}
-
-  apps/web: {}
-
   sdk/typescript:
     devDependencies:
       '@types/node':

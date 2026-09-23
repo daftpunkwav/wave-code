@@ -1,7 +1,0 @@
-{
-  "name": "@wavecode/desktop",
-  "version": "0.1.0",
-  "private": true,
-  "license": "MIT",
-  "description": "WaveCode Desktop — Electron shell with embedded browser and CDP automation bridge"
-}

@@ -6,7 +6,19 @@ a shared agent core (multi-turn ReAct loop, tools, skills, memory, MCP).
 
 > 🚧 Under active development; no stable release yet.
 
-## Quick start
+## Install
+
+Prebuilt binaries (sha256-verified) ship with each `v*` release:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/daftpunkwav/wave-code/main/scripts/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/daftpunkwav/wave-code/main/scripts/install.ps1 | iex
+```
+
+Or build from source:
 
 ```bash
 cargo build --bin wavecode
@@ -23,6 +35,7 @@ wavecode grants list                   # what "always allow" has been approving 
 wavecode eval tasks                    # task-level suite: real turns, judged workspaces
 wavecode doctor                        # validate local setup, no provider contact
 wavecode update                        # check for a newer published release
+wavecode update --install              # download + verify + swap in the newer release
 ```
 
 On first run without configuration, WaveCode prints a creation guide with a

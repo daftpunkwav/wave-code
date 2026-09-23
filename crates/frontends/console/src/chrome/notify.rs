@@ -143,8 +143,10 @@ mod tests {
 
     #[test]
     fn settings_switch_wins_over_env() {
-        let mut view = UiSettings::default();
-        view.notifications_enabled = Some(true);
+        let mut view = UiSettings {
+            notifications_enabled: Some(true),
+            ..Default::default()
+        };
         assert!(
             enabled_with(&view),
             "settings on wins even under WAVECODE_NOTIFY=0"
@@ -161,8 +163,10 @@ mod tests {
 
     #[test]
     fn settings_style_wins_over_env() {
-        let mut view = UiSettings::default();
-        view.notification_style = Some("bell".to_string());
+        let mut view = UiSettings {
+            notification_style: Some("bell".to_string()),
+            ..Default::default()
+        };
         assert_eq!(style_with(&view), Style::Bell);
         assert_eq!(
             notification_for("done", &view),

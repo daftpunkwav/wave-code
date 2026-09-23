@@ -18,12 +18,24 @@
 //! blocks are business errors (fed back to the model) and keyed APIs can plug
 //! in later behind [`SearchBackend`] without touching the tool.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
+
+/// Shared HTTP client for search requests. The connection pool, DNS
+/// cache, and TLS session state would otherwise be discarded with every
+/// per-call client build. Redirects stay disabled (policy is per-call
+/// unchanged) and the timeout rides each request, since callers pass
+/// one per search.
+static SEARCH_CLIENT: LazyLock<std::result::Result<reqwest::Client, reqwest::Error>> =
+    LazyLock::new(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+    });
 
 /// Default result count.
 const DEFAULT_COUNT: usize = 5;
@@ -94,11 +106,10 @@ impl SearchBackend for DuckDuckGoBackend {
         count: usize,
         timeout: Duration,
     ) -> std::result::Result<Vec<SearchResult>, String> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(timeout)
-            .build()
-            .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+        let client = match SEARCH_CLIENT.as_ref() {
+            Ok(client) => client,
+            Err(e) => return Err(format!("failed to build HTTP client: {e}")),
+        };
         let url = format!(
             "{}/html/?q={}",
             self.base_url.trim_end_matches('/'),
@@ -106,6 +117,7 @@ impl SearchBackend for DuckDuckGoBackend {
         );
         let resp = client
             .get(&url)
+            .timeout(timeout)
             .header("User-Agent", "Mozilla/5.0 (compatible; WaveCode/1.0)")
             .send()
             .await
@@ -284,14 +296,6 @@ pub fn parse_ddg_html(html: &str, count: usize) -> Vec<SearchResult> {
             snippet: snippets.get(i).cloned().unwrap_or_default(),
         })
         .collect()
-}
-
-/// Build a business-failure output so the model can self-correct.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
 }
 
 /// Build a success output.

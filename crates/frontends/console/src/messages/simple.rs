@@ -157,6 +157,11 @@ impl AssistantMessage {
         self.live = false;
         self.lines = None;
     }
+
+    /// The message text this instance renders (streaming-sync checks).
+    pub fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 impl Component for AssistantMessage {

@@ -113,13 +113,23 @@ impl Screen {
     /// Write one truncated, reset-terminated line (cursor markers
     /// stripped: they drive `place_hardware_cursor`, not the terminal).
     fn write_line(&self, out: &mut impl std::io::Write, line: &str, columns: usize) {
-        let cleaned = if line.contains(CURSOR_MARKER) {
-            line.replace(CURSOR_MARKER, "")
+        // Copy only when the cursor marker is present: unmarked lines
+        // (the common case) go straight from the source instead of
+        // paying one string clone per line per frame.
+        let cleaned;
+        let line = if line.contains(CURSOR_MARKER) {
+            cleaned = line.replace(CURSOR_MARKER, "");
+            cleaned.as_str()
         } else {
-            line.to_string()
+            line
         };
-        let truncated = width::truncate_to_width(&cleaned, columns);
-        let _ = out.write_all(truncated.as_bytes());
+        // Lines that already fit stream without building a new string.
+        if width::width(line) <= columns {
+            let _ = out.write_all(line.as_bytes());
+        } else {
+            let truncated = width::truncate_to_width(line, columns);
+            let _ = out.write_all(truncated.as_bytes());
+        }
         // Styles and hyperlinks never leak across lines.
         let _ = out.write_all(b"\x1b[0m\x1b]8;;\x07");
     }

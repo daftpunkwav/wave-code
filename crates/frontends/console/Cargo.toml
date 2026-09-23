@@ -25,12 +25,11 @@ serde.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
 base64.workspace = true
-# Syntax highlighting for code blocks (pure-Rust fancy-regex backend,
-# no onig C dependency).
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
-# Extra syntax definitions (TypeScript, TOML, ...) on the same
-# fancy-regex backend.
-two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+# Syntax highlighting versions and features are unified at the workspace
+# root (syntect on the pure-Rust fancy-regex backend, no onig C
+# dependency; two-face adds extra syntax definitions on the same backend).
+syntect.workspace = true
+two-face.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

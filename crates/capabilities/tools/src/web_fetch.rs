@@ -19,11 +19,24 @@
 //! marker. Text decoding is UTF-8 with lossy fallback, except explicit
 //! latin-1 family charsets which decode byte-to-codepoint.
 
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
+
+/// Shared HTTP client for fetches: the connection pool and TLS session
+/// state would otherwise be discarded with every per-call build. The
+/// vetting resolver and the no-redirect policy are fixed here; the
+/// caller-supplied timeout rides each request instead.
+static FETCH_CLIENT: LazyLock<std::result::Result<reqwest::Client, reqwest::Error>> =
+    LazyLock::new(|| {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .dns_resolver(Arc::new(NonPrivateResolver))
+            .build()
+    });
 
 /// Default body cap: 256 KB.
 const DEFAULT_MAX_BYTES: usize = 256 * 1024;
@@ -35,14 +48,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Maximum redirect hops followed before giving up.
 const MAX_REDIRECTS: u32 = 5;
-
-/// Build a business-failure output so the model can self-correct.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
 
 /// Build a success output.
 fn ok_output(content: impl Into<String>) -> ToolOutput {
@@ -299,13 +304,8 @@ impl Tool for WebFetch {
             Ok(n) => n,
             Err(out) => return Ok(out),
         };
-        let client = match reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_millis(timeout_ms))
-            .dns_resolver(std::sync::Arc::new(NonPrivateResolver))
-            .build()
-        {
-            Ok(c) => c,
+        let client = match FETCH_CLIENT.as_ref() {
+            Ok(client) => client,
             Err(e) => return Ok(err_output(format!("failed to build HTTP client: {e}"))),
         };
 
@@ -313,7 +313,12 @@ impl Tool for WebFetch {
         let mut current = start;
         let mut hops: u32 = 0;
         let mut response = loop {
-            let resp = match client.get(current.clone()).send().await {
+            let resp = match client
+                .get(current.clone())
+                .timeout(Duration::from_millis(timeout_ms))
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => return Ok(err_output(format!("request to {current} failed: {e}"))),
             };

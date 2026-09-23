@@ -138,11 +138,20 @@ impl Component for Thinking {
                 theme.paint(Token::TextDim, frame),
                 theme.paint(Token::TextDim, "thinking…")
             ));
-            // Scrolling tail: the last wrapped lines only.
+            // Scrolling tail: the last wrapped lines only. Segments wrap
+            // independently, so collecting backwards from the final one
+            // and stopping once the preview is full yields the same tail
+            // without wrapping the whole (possibly large) stream text
+            // on every frame.
             let mut tail: Vec<String> = Vec::new();
-            for segment in self.text.split('\n') {
-                tail.extend(width::wrap_line(segment, body_width));
+            for segment in self.text.split('\n').rev() {
+                if tail.len() >= PREVIEW_LINES {
+                    break;
+                }
+                let wrapped = width::wrap_line(segment, body_width);
+                tail.extend(wrapped.into_iter().rev());
             }
+            tail.reverse();
             let start = tail.len().saturating_sub(PREVIEW_LINES);
             for line in &tail[start..] {
                 out.push(format!("  {}", italic_dim.paint(line)));
@@ -213,6 +222,34 @@ mod tests {
         assert!(strip_ansi(&lines[1]).contains("second line"));
         assert!(strip_ansi(&lines[2]).contains("third line"));
         assert!(!strip_ansi(&lines[1]).contains("first line"), "tail only");
+    }
+
+    #[test]
+    fn live_tail_matches_a_full_wrap_of_long_streams() {
+        // The tail is collected backwards over the final segments; it
+        // must stay identical to wrapping every segment in order.
+        theme::set(theme::Theme::dark());
+        let body = (0..500)
+            .map(|i| format!("segment {i} with some wrapping filler text"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut block = Thinking::live(ExpandedFlag::new());
+        block.push(&body);
+        let lines = block.render(60);
+        let body_width = 60usize.saturating_sub(4);
+        let full: Vec<String> = body
+            .split('\n')
+            .flat_map(|segment| width::wrap_line(segment, body_width))
+            .collect();
+        let expected = &full[full.len() - PREVIEW_LINES..];
+        for (line, want) in lines[1..1 + expected.len()].iter().zip(expected) {
+            assert_eq!(strip_ansi(line), format!("  {want}"), "{lines:?}");
+        }
+        assert_eq!(
+            lines.len(),
+            1 + expected.len() + 1,
+            "header + preview + spacer only"
+        );
     }
 
     #[test]

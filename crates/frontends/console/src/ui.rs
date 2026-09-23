@@ -245,6 +245,10 @@ pub struct ConsoleUi {
     btw_buffer: String,
     /// True while the btw side turn is running.
     btw_running: bool,
+    /// Persistent live assistant draft: rebuilt only when the streamed
+    /// text changed, so frames without deltas (ticks, keystrokes) reuse
+    /// the markdown render cache instead of re-parsing the whole buffer.
+    streaming_draft: Option<AssistantMessage>,
     /// Pending Ctrl+G request: the draft handed to the external editor,
     /// drained by the run loop (raw-mode suspend happens there).
     pending_external_edit: Option<String>,
@@ -331,6 +335,7 @@ impl ConsoleUi {
             btw_log: Vec::new(),
             btw_buffer: String::new(),
             btw_running: false,
+            streaming_draft: None,
             pending_external_edit: None,
             last_esc_at: None,
             version: version.into(),
@@ -444,6 +449,26 @@ impl ConsoleUi {
     /// animation ticks).
     fn compaction_running(&self) -> bool {
         self.compaction_card.is_some()
+    }
+
+    /// Settle a compaction card that never received `CompactCompleted`
+    /// (its compaction died): stop the pulse so animation ticks end.
+    fn fail_dangling_compaction(&mut self) {
+        if let Some(card) = self.compaction_card_mut() {
+            card.fail();
+        }
+        self.compaction_card = None;
+        self.compaction_before = None;
+    }
+
+    /// Drop a parked approval/question modal whose turn is gone: the
+    /// gates died with the turn, so a late answer would only produce a
+    /// "late approval" warning.
+    fn dismiss_dead_gates(&mut self, reason: &str) {
+        if matches!(self.dialog, Some(Dialog::Approval(_) | Dialog::Question(_))) {
+            self.dialog = None;
+            self.push_status(reason, false);
+        }
     }
 
     fn push_shell_output(&mut self, line: &str, stderr: bool) {
@@ -869,21 +894,14 @@ impl ConsoleUi {
                     self.state.phase = StreamingPhase::Idle;
                     // Same reasoning as TurnCompleted: the gates are
                     // gone, so a parked modal must not linger.
-                    if matches!(self.dialog, Some(Dialog::Approval(_) | Dialog::Question(_))) {
-                        self.dialog = None;
-                        self.push_status("request dismissed (turn failed)", false);
-                    }
+                    self.dismiss_dead_gates("request dismissed (turn failed)");
                 }
                 // An idle compaction failure surfaces as a recoverable
                 // error with no turn attached (manual `/compact`); with
                 // no turn to settle the card, the error is the signal
                 // the compaction died.
                 if self.compaction_card.is_some() && !self.state.busy() {
-                    if let Some(card) = self.compaction_card_mut() {
-                        card.fail();
-                    }
-                    self.compaction_card = None;
-                    self.compaction_before = None;
+                    self.fail_dangling_compaction();
                 }
                 true
             }
@@ -895,10 +913,7 @@ impl ConsoleUi {
                 // Parked gates died with the turn: a stale approval or
                 // question modal could only answer into "late approval"
                 // warnings, so it goes with the turn.
-                if matches!(self.dialog, Some(Dialog::Approval(_) | Dialog::Question(_))) {
-                    self.dialog = None;
-                    self.push_status("request dismissed (turn ended)", false);
-                }
+                self.dismiss_dead_gates("request dismissed (turn ended)");
                 if *interrupted {
                     self.push_status("interrupted", false);
                 }
@@ -907,11 +922,7 @@ impl ConsoleUi {
                 // (in-turn auto/reactive/blocking failures): settle it,
                 // or the pulse and the animation ticks would run forever.
                 if self.compaction_card.is_some() {
-                    if let Some(card) = self.compaction_card_mut() {
-                        card.fail();
-                    }
-                    self.compaction_card = None;
-                    self.compaction_before = None;
+                    self.fail_dangling_compaction();
                 }
                 // Journal the completed turn (text snapshot) so
                 // /sessions + resume can replay it later.
@@ -1245,10 +1256,10 @@ impl ConsoleUi {
                     } else if invocation.name == "model" {
                         // Non-empty args already dispatched to Op::SetModel.
                     } else if invocation.name == "memory" {
-                        let text = self
-                            .status
-                            .plan_status()
-                            .unwrap_or_else(|| "no memory index available".to_string());
+                        let text = self.status.plan_status().unwrap_or_else(|| {
+                            "no reviewed plan yet; ask the agent to propose one with the plan tool"
+                                .to_string()
+                        });
                         self.push_status(&text, false);
                     } else if invocation.name == "snapshots" {
                         let labels = self.status.snapshot_labels();
@@ -1909,6 +1920,8 @@ verify from the repository.";
         // Chrome built at construction carries colors by value: the
         // editor (and its popup) must be rebuilt for the new palette.
         self.editor.set_style(editor_style());
+        // The live draft bakes the old palette into its cached lines.
+        self.streaming_draft = None;
         self.screen.invalidate();
         self.push_status(&format!("theme switched ({name})"), false);
     }
@@ -2158,13 +2171,27 @@ verify from the repository.";
             block.push(&self.streaming.thinking.clone());
             lines.extend(Component::render(&mut block, inner));
         }
-        // Live assistant draft.
+        // Live assistant draft. The draft component persists across
+        // frames and is rebuilt only when its text no longer mirrors
+        // the streaming buffer (a new delta, the draft byte cap, or a
+        // theme switch): unchanged frames then reuse the cached
+        // markdown render instead of re-parsing the whole buffer.
         if !self.streaming.assistant.is_empty() {
-            let mut draft = AssistantMessage::streaming(
-                self.streaming.assistant.clone(),
-                crate::highlight::highlighter(),
-            );
-            lines.extend(Component::render(&mut draft, inner));
+            if self
+                .streaming_draft
+                .as_ref()
+                .is_none_or(|draft| draft.text() != self.streaming.assistant)
+            {
+                self.streaming_draft = Some(AssistantMessage::streaming(
+                    self.streaming.assistant.clone(),
+                    crate::highlight::highlighter(),
+                ));
+            }
+            if let Some(draft) = self.streaming_draft.as_mut() {
+                lines.extend(Component::render(draft, inner));
+            }
+        } else {
+            self.streaming_draft = None;
         }
         lines.extend(render_todos(
             &self.state.todos,
@@ -2530,12 +2557,12 @@ impl ConsoleUi {
 }
 
 /// Relative age label for a session's last activity.
-fn relative_age(updated_at: u64) -> String {
+fn relative_age(updated_at_secs: u64) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let seconds = now.saturating_sub(updated_at);
+    let seconds = now.saturating_sub(updated_at_secs);
     match seconds {
         0..=59 => "just now".to_string(),
         60..=3599 => format!("{}m ago", seconds / 60),
@@ -3166,6 +3193,66 @@ mod tests {
     }
 
     #[test]
+    fn streaming_draft_persists_until_the_text_changes() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "first".to_string(),
+        });
+        let frame = ui.frame(80, 24);
+        let draft = ui.streaming_draft.as_ref().expect("draft built");
+        assert_eq!(draft.text(), "first", "draft mirrors the buffer");
+        // An unchanged buffer keeps the same draft instance across
+        // frames: the markdown cache stays warm.
+        let before: *const AssistantMessage = ui.streaming_draft.as_ref().unwrap();
+        let _ = ui.frame(80, 24);
+        assert!(
+            std::ptr::eq(before, ui.streaming_draft.as_ref().unwrap()),
+            "unchanged frames reuse the draft"
+        );
+        // A delta lands in the buffer: the next frame rebuilds to match.
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: " second".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        let draft = ui.streaming_draft.as_ref().expect("draft still live");
+        assert_eq!(draft.text(), "first second", "rebuilt on the delta");
+        assert!(!frame.is_empty(), "frame rendered");
+        // Completion drains the buffer and retires the draft.
+        ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+            text: "first second".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        assert!(
+            ui.streaming_draft.is_none(),
+            "draft dropped once streaming ends"
+        );
+    }
+
+    #[test]
+    fn theme_switch_invalidates_the_cached_streaming_draft() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "draft".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        assert!(ui.streaming_draft.is_some(), "draft built while streaming");
+        // The cached lines bake in the old palette: a theme switch must
+        // drop the draft so the next frame re-renders under the new one
+        // instead of stitching old-palette lines into the frame.
+        ui.apply_theme("light");
+        assert!(
+            ui.streaming_draft.is_none(),
+            "theme switch drops the cached draft"
+        );
+        let _ = ui.frame(80, 24);
+        let draft = ui
+            .streaming_draft
+            .as_ref()
+            .expect("draft rebuilt after the switch");
+        assert_eq!(draft.text(), "draft", "rebuilt draft mirrors the buffer");
+    }
+
+    #[test]
     fn completion_without_deltas_still_renders() {
         let mut ui = ui();
         ui.handle_wire_event(&EventMsg::AgentMessageComplete {
@@ -3450,7 +3537,9 @@ mod tests {
 
     #[test]
     fn cwd_shortening_keeps_tail_segments() {
-        unsafe { std::env::set_var("HOME", "/home/user") };
+        // No HOME mutation here: shorten_cwd emits "~/{tail}" whenever it
+        // truncates, so these shapes assert the same under any home, and
+        // mutating the process-global env would race concurrent tests.
         assert_eq!(
             shorten_cwd(Path::new("/home/user/work/proj/sub"), 3),
             "~/work/proj/sub"
@@ -3460,7 +3549,6 @@ mod tests {
             "~/proj/sub"
         );
         assert_eq!(shorten_cwd(Path::new("/opt"), 3), "/opt");
-        unsafe { std::env::set_var("HOME", "") };
     }
 
     #[test]

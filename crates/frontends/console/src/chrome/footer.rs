@@ -117,14 +117,15 @@ mod tests {
     #[test]
     fn row1_carries_mode_model_cwd_and_tip() {
         theme::set(theme::Theme::dark());
-        unsafe { std::env::set_var("HOME", "/home/user") };
+        // No HOME mutation: the cwd assertion below holds under any home
+        // (shorten_cwd truncation always yields "~/{tail}"), and mutating
+        // the process-global env would race concurrent tests.
         let line = row1(&state(), Some("ctrl+o expand tool output"), 120);
         let plain = width::strip_ansi(&line);
         assert!(plain.contains("▍auto"), "{plain}");
         assert!(plain.contains("test-model"), "{plain}");
         assert!(plain.contains("proj"), "{plain}");
         assert!(plain.contains("ctrl+o expand tool output"), "{plain}");
-        unsafe { std::env::set_var("HOME", "") };
     }
 
     #[test]

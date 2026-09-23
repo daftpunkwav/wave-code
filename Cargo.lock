@@ -768,6 +768,7 @@ dependencies = [
  "operations-actor",
  "operations-bootstrap",
  "operations-eval",
+ "operations-gateway",
  "operations-observe",
  "reqwest",
  "rustyline",
@@ -1327,15 +1328,14 @@ name = "operations-gateway"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "infrastructure-base",
+ "futures",
  "operations-actor",
- "runtime-child",
- "runtime-runner",
- "safety-gate",
+ "operations-bootstrap",
  "serde_json",
- "state-store",
- "thiserror 2.0.19",
+ "tempfile",
  "tokio",
+ "wavecode-config",
+ "wavecode-llm",
  "wavecode-wire",
 ]
 

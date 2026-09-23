@@ -24,18 +24,19 @@
 //! Like `exec`, every session assembles from config, so this surface
 //! needs provider credentials; assembly failures fail `session/new`
 //! instead of the process. `mcpServers` in `session/new` is accepted
-//! and ignored: MCP servers come from the config file.
+//! and ignored: MCP servers come from the config file. Sessions are
+//! consumed through the [`SessionSurface`] contract, so the caller
+//! supplies the assembly seam (the composition root's
+//! `assemble_session` in production, a stub-model assembly in tests).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use operations_actor::ActorClient;
+use operations_actor::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionSurface};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use wavecode_wire::{EventMsg, Op, Submission};
-
-use crate::session::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionHandle};
 
 /// Protocol version advertised at `initialize` (subset pin, not negotiated).
 const ACP_PROTOCOL_VERSION: &str = "0.1.0";
@@ -64,12 +65,16 @@ pub struct AcpServerOptions {
 
 /// Serve ACP over the process stdio streams until EOF.
 ///
-/// Assembles one headless session per `session/new` from `options`;
-/// returns when stdin closes.
-pub async fn run_stdio_server(options: AcpServerOptions) -> std::io::Result<()> {
+/// Assembles one headless session per `session/new` from `options`
+/// through the caller's `assemble` seam; returns when stdin closes.
+pub async fn run_stdio_server<F, S>(options: AcpServerOptions, assemble: F) -> std::io::Result<()>
+where
+    F: Fn(AssembleOptions) -> Result<S, SessionError>,
+    S: SessionSurface + 'static,
+{
     let reader = tokio::io::BufReader::new(tokio::io::stdin());
     let writer = tokio::io::stdout();
-    serve_loop(reader, writer, options, crate::session::assemble_session).await
+    serve_loop(reader, writer, options, assemble).await
 }
 
 /// One live session behind the serve loop.
@@ -145,8 +150,8 @@ enum PromptOutcome {
 /// [`run_stdio_server`]).
 ///
 /// `assemble` builds one session per `session/new`; production passes
-/// [`crate::session::assemble_session`], tests pass a stub-model seam.
-async fn serve_loop<R, W, F>(
+/// the composition root's `assemble_session`, tests a stub-model seam.
+async fn serve_loop<R, W, F, S>(
     reader: R,
     writer: W,
     base: AcpServerOptions,
@@ -155,7 +160,8 @@ async fn serve_loop<R, W, F>(
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin + Send + 'static,
-    F: Fn(AssembleOptions) -> Result<SessionHandle, SessionError>,
+    F: Fn(AssembleOptions) -> Result<S, SessionError>,
+    S: SessionSurface + 'static,
 {
     let writer = Arc::new(Mutex::new(writer));
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TaskMsg>();
@@ -201,7 +207,7 @@ where
 
 /// Handle one NDJSON line; prompt replies arrive later via [`handle_task_msg`].
 #[allow(clippy::too_many_arguments)]
-async fn dispatch_line<W, F>(
+async fn dispatch_line<W, F, S>(
     line: &str,
     next_session: &mut u64,
     sessions: &mut HashMap<String, SessionEntry>,
@@ -211,7 +217,8 @@ async fn dispatch_line<W, F>(
     done_tx: &mpsc::UnboundedSender<TaskMsg>,
 ) where
     W: AsyncWrite + Unpin + Send + 'static,
-    F: Fn(AssembleOptions) -> Result<SessionHandle, SessionError>,
+    F: Fn(AssembleOptions) -> Result<S, SessionError>,
+    S: SessionSurface + 'static,
 {
     let message: serde_json::Value = match serde_json::from_str(line) {
         Ok(value) => value,
@@ -328,7 +335,7 @@ async fn dispatch_line<W, F>(
 /// (missing config, provider, credentials) fail this request, never
 /// the server: later requests with a fixed environment can retry.
 #[allow(clippy::too_many_arguments)]
-async fn new_session<W, F>(
+async fn new_session<W, F, S>(
     id: &serde_json::Value,
     params: &serde_json::Value,
     next_session: &mut u64,
@@ -339,7 +346,8 @@ async fn new_session<W, F>(
     done_tx: &mpsc::UnboundedSender<TaskMsg>,
 ) where
     W: AsyncWrite + Unpin + Send + 'static,
-    F: Fn(AssembleOptions) -> Result<SessionHandle, SessionError>,
+    F: Fn(AssembleOptions) -> Result<S, SessionError>,
+    S: SessionSurface + 'static,
 {
     let cwd = params
         .get("cwd")
@@ -380,11 +388,11 @@ async fn new_session<W, F>(
             return;
         }
     };
-    let mode = handle.permission_mode.clone();
+    let mode = handle.permission_mode().to_string();
     let (job_tx, job_rx) = mpsc::unbounded_channel();
     tokio::spawn(session_task(
         session_id.clone(),
-        handle.client,
+        handle,
         job_rx,
         writer.clone(),
         done_tx.clone(),
@@ -646,21 +654,22 @@ async fn handle_task_msg<W>(
     }
 }
 
-/// Own one session's actor client: run prompted turns serially and
-/// stream their events as `session/update` notifications.
+/// Own one session: run prompted turns serially and stream their events
+/// as `session/update` notifications.
 ///
 /// The JSON-RPC reply for a prompt leaves through the serve loop when
 /// this reports [`TaskMsg`]; cancels set a flag so the stop reason
 /// reads `cancelled` even when the actor already passed its last
 /// interrupt checkpoint (the `exec` Ctrl-C contract).
-async fn session_task<W>(
+async fn session_task<S, W>(
     session_id: String,
-    mut client: ActorClient,
+    mut session: S,
     mut jobs: mpsc::UnboundedReceiver<SessionJob>,
     writer: Arc<Mutex<W>>,
     done: mpsc::UnboundedSender<TaskMsg>,
 ) where
     W: AsyncWrite + Unpin + Send,
+    S: SessionSurface,
 {
     let mut submissions: u64 = 1;
     // Request id plus cancel flag of the running turn, if any.
@@ -672,13 +681,13 @@ async fn session_task<W>(
                     // All senders dropped (EOF shutdown): bounded drain so
                     // SessionEnd hooks speak instead of dying on drop.
                     None => {
-                        shutdown_session(&mut client).await;
+                        shutdown_session(&mut session).await;
                         return;
                     }
                     Some(SessionJob::Cancel) => {
                         if let Some((_, cancelled)) = in_flight.as_mut() {
                             *cancelled = true;
-                            let _ = client
+                            let _ = session
                                 .submit(Submission {
                                     id: format!("acp-{session_id}-cancel"),
                                     op: Op::Interrupt,
@@ -690,7 +699,7 @@ async fn session_task<W>(
                         // Pre-validated by set_mode; a rejection here can
                         // only mean a fixed gateway, which surfaces as a
                         // warning event instead of failing the protocol.
-                        let _ = client
+                        let _ = session
                             .submit(Submission {
                                 id: format!("acp-{session_id}-mode"),
                                 op: Op::SetPermissionMode { mode },
@@ -712,7 +721,7 @@ async fn session_task<W>(
                         }
                         let submission = format!("acp-{session_id}-{submissions}");
                         submissions += 1;
-                        if client
+                        if session
                             .submit(Submission {
                                 id: submission,
                                 op: Op::UserInput {
@@ -736,7 +745,7 @@ async fn session_task<W>(
                     }
                 }
             }
-            event = client.next_event(), if in_flight.is_some() => {
+            event = session.next_event(), if in_flight.is_some() => {
                 let Some(event) = event else {
                     // Actor exited mid-turn without TurnCompleted.
                     if let Some((req_id, _)) = in_flight.take() {
@@ -773,16 +782,17 @@ async fn session_task<W>(
 }
 
 /// Bounded shutdown drain after EOF: SessionEnd hooks speak instead of
-/// dying on client drop; a hung hook cannot hold exit past the deadline.
-async fn shutdown_session(client: &mut ActorClient) {
-    let _ = client
+/// dying on a dropped session; a hung hook cannot hold exit past the
+/// deadline.
+async fn shutdown_session<S: SessionSurface>(session: &mut S) {
+    let _ = session
         .submit(Submission {
             id: "acp-shutdown".to_string(),
             op: Op::Shutdown,
         })
         .await;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while tokio::time::timeout_at(deadline, client.next_event())
+    while tokio::time::timeout_at(deadline, session.next_event())
         .await
         .ok()
         .flatten()
@@ -977,7 +987,8 @@ mod tests {
     use tokio::io::DuplexStream;
     use wavecode_llm::{ChatModel, ChatRequest, EventStream, StreamEvent, Usage};
 
-    use crate::session::{WithModel, assemble_session_with_model};
+    use operations_bootstrap::SessionHandle;
+    use operations_bootstrap::session::{WithModel, assemble_session_with_model};
 
     const CONFIG: &str = r#"
 model = "m1"

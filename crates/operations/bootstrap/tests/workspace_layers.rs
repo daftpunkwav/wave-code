@@ -59,7 +59,7 @@ const FRONTEND_ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "harness-cli",
-        "console-ui operations-actor operations-bootstrap operations-eval operations-observe state-persistence wavecode-config wavecode-wire",
+        "console-ui operations-actor operations-bootstrap operations-eval operations-gateway operations-observe state-persistence wavecode-config wavecode-wire",
     ),
     ("tui-engine", ""),
 ];

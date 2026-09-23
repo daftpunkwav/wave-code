@@ -18,7 +18,6 @@
 //! concrete legacy crate. Policy stays in the legacy crates; mapping stays
 //! here, so neither side names the other directly.
 
-pub mod acp;
 pub mod agent_task_tool;
 pub mod app_server;
 pub mod ask_user_tool;

@@ -1599,13 +1599,16 @@ async fn run_acp(
     cwd: PathBuf,
     home: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    operations_bootstrap::acp::run_stdio_server(operations_bootstrap::acp::AcpServerOptions {
-        config_path: config,
-        model_override: model,
-        permission_override: permission_mode,
-        cwd,
-        home,
-    })
+    operations_gateway::acp::run_stdio_server(
+        operations_gateway::acp::AcpServerOptions {
+            config_path: config,
+            model_override: model,
+            permission_override: permission_mode,
+            cwd,
+            home,
+        },
+        operations_bootstrap::assemble_session,
+    )
     .await
     .map_err(|e| anyhow::anyhow!("acp server failed: {e}"))
 }
@@ -3255,10 +3258,10 @@ model = "m2"
     }
 
     /// Crate boundary: the binary's workspace edges stay exactly the
-    /// composition it was assembled against (actor, bootstrap, observe,
-    /// eval, wire, persistence, config, tui). Concrete capability crates
-    /// are reached only through bootstrap surfaces; new internal deps
-    /// need a deliberate matrix update, not a silent Cargo.toml line.
+    /// composition it was assembled against (actor, bootstrap, gateway,
+    /// observe, eval, wire, persistence, config, tui). Concrete capability
+    /// crates are reached only through bootstrap surfaces; new internal
+    /// deps need a deliberate matrix update, not a silent Cargo.toml line.
     #[test]
     fn dependency_matrix_locked() {
         let mut in_deps = false;
@@ -3281,6 +3284,7 @@ model = "m2"
                 "operations-actor",
                 "operations-bootstrap",
                 "operations-eval",
+                "operations-gateway",
                 "operations-observe",
                 "state-persistence",
                 "wavecode-config",

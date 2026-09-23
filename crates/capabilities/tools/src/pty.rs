@@ -33,12 +33,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use infrastructure_base::shell_invocation;
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::is_sensitive_env_name;
 
 use crate::shell_tool::truncate_output;
-use crate::{Result, Tool, ToolCtx, ToolOutput};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
 
 /// Local result with a plain string error (business failures surface as
 /// `ToolOutput`, never as `ToolsError`).
@@ -59,43 +60,6 @@ const DEFAULT_COLS: u16 = 80;
 const SENTINEL_PREFIX: &str = "__WAVECODE_PTY_";
 
 static SENTINEL_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
-
-/// Pick the shell program and its "run a command string" flag. Mirrors
-/// `shell_tool::shell_invocation` (kept local so the shell tool's spawn-site
-/// hook stays the only coupling point): `cmd /C` on Windows, `sh -c` on
-/// Unix, `WAVECODE_SHELL` override with a `cmd`-name heuristic for `/C`.
-fn shell_program() -> (String, &'static str) {
-    if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
-        if custom.to_lowercase().contains("cmd") {
-            return (custom, "/C");
-        }
-        return (custom, "-c");
-    }
-    if cfg!(windows) {
-        ("cmd".to_owned(), "/C")
-    } else {
-        ("sh".to_owned(), "-c")
-    }
-}
-
-/// Interactive shell program for persistent sessions (no `-c`).
-fn interactive_program() -> String {
-    if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
-        return custom;
-    }
-    if cfg!(windows) {
-        "cmd".to_owned()
-    } else {
-        "sh".to_owned()
-    }
-}
 
 /// Clamp an optional dimension to a valid PTY size: only values that fit
 /// the u16 the PTY layer takes are kept, so 0 and unrepresentable (huge)
@@ -179,49 +143,89 @@ struct Session {
     size: PtySize,
 }
 
+/// Shell-side pieces produced by [`Session::spawn_parts`].
+type SessionParts = (
+    Box<dyn portable_pty::Child + Send + Sync>,
+    Box<dyn Read + Send>,
+    Box<dyn Write + Send>,
+);
+
 impl Session {
     fn spawn(cwd: &std::path::Path, deny_env: &[String], size: PtySize) -> PtyResult<Self> {
         let system = native_pty_system();
         let pair = system
             .openpty(size)
             .map_err(|e| format!("pty unavailable: {e}"))?;
-        let mut cmd = CommandBuilder::new(interactive_program());
+        // Publish the console into the slot first: from here on the handle is
+        // reachable and its release has a single owner.
+        let master: MasterSlot = Arc::new(Mutex::new(Some(pair.master)));
+        match Self::spawn_parts(pair.slave, &master, cwd, deny_env) {
+            Ok((child, reader, writer)) => Ok(Self {
+                master,
+                child,
+                reader,
+                writer,
+                cwd: cwd.to_path_buf(),
+                deny_env: deny_env.to_vec(),
+                size,
+            }),
+            // Every failure after openpty releases the console off-thread like
+            // every other path: the master's drop blocks for minutes on a
+            // wedged console and must never run on the caller's thread.
+            Err(e) => {
+                release_master_detached(&master);
+                Err(e)
+            }
+        }
+    }
+
+    /// Spawn the shell and wire reader/writer up to the console held in
+    /// `master`. Fallible steps only — the console itself stays owned by the
+    /// caller's slot, whose release covers every error path here.
+    fn spawn_parts(
+        slave: Box<dyn portable_pty::SlavePty + Send>,
+        master: &MasterSlot,
+        cwd: &std::path::Path,
+        deny_env: &[String],
+    ) -> PtyResult<SessionParts> {
+        // Persistent session: program only, no command-string flag.
+        let mut cmd = CommandBuilder::new(shell_invocation().0);
         cmd.cwd(cwd.as_os_str());
         let scrub_ctx = ToolCtx {
             cwd: cwd.to_path_buf(),
             deny_env: deny_env.to_vec(),
         };
         scrub_command(&mut cmd, &scrub_ctx);
-        let child = pair
-            .slave
+        let mut child = slave
             .spawn_command(cmd)
             .map_err(|e| format!("pty spawn failed: {e}"))?;
-        // Publish the console into the slot first: from here on the handle is
-        // reachable even if a later step wedges.
-        let master: MasterSlot = Arc::new(Mutex::new(Some(pair.master)));
-        let (reader, writer) = {
+        // The shell is live from here on: an io-setup failure must kill it
+        // before returning, or the process leaks (dropping a Child never
+        // reaps it — see `get_or_create`).
+        let acquired = {
             let guard = master.lock().unwrap_or_else(|e| e.into_inner());
-            let master = guard
+            guard
                 .as_ref()
-                .ok_or_else(|| "pty master missing".to_string())?;
-            (
-                master
-                    .try_clone_reader()
-                    .map_err(|e| format!("pty reader failed: {e}"))?,
-                master
-                    .take_writer()
-                    .map_err(|e| format!("pty writer failed: {e}"))?,
-            )
+                .ok_or_else(|| "pty master missing".to_string())
+                .and_then(|master| {
+                    Ok((
+                        master
+                            .try_clone_reader()
+                            .map_err(|e| format!("pty reader failed: {e}"))?,
+                        master
+                            .take_writer()
+                            .map_err(|e| format!("pty writer failed: {e}"))?,
+                    ))
+                })
         };
-        Ok(Self {
-            master,
-            child,
-            reader,
-            writer,
-            cwd: cwd.to_path_buf(),
-            deny_env: deny_env.to_vec(),
-            size,
-        })
+        let (reader, writer) = match acquired {
+            Ok(pair) => pair,
+            Err(e) => {
+                let _ = child.kill();
+                return Err(e);
+            }
+        };
+        Ok((child, reader, writer))
     }
 
     /// Respawn after the shell exited (same cwd and scrub list).
@@ -405,6 +409,11 @@ fn interact(
     let mut guard = session.lock().unwrap_or_else(|e| e.into_inner());
     if guard.exited() {
         guard.respawn()?;
+        // Re-arm the entry's killer on the fresh child: the timeout arm can
+        // only reach this killer (this reader thread holds the session lock),
+        // and the stored one belongs to the shell that just exited.
+        let killer = guard.child.clone_killer();
+        *entry.killer.lock().unwrap_or_else(|e| e.into_inner()) = killer;
     }
     if let Some(size) = size {
         guard.size = size;
@@ -554,7 +563,7 @@ fn run_one_shot_inner(
     // a console that is never closed outlives the process as a spinning
     // conhost.
     *master_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(pair.master);
-    let (program, flag) = shell_program();
+    let (program, flag) = shell_invocation();
     let mut cmd = CommandBuilder::new(program);
     cmd.arg(flag);
     cmd.arg(command);
@@ -1251,6 +1260,50 @@ mod tests {
             .unwrap();
         assert!(!out.is_error, "respawned shell must work: {}", out.content);
         assert!(out.content.contains("back-again"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn session_timeout_after_respawn_forgets_entry() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let _cleanup = RegistryCleanup;
+        if !pty_live().await {
+            return;
+        }
+        let (_d, c) = ctx();
+        let name = unique_session("respawn-timeout");
+        // Exit the first shell so the next command runs on a respawned one;
+        // the timeout arm must reach the FRESH shell's killer (re-armed on
+        // respawn) and forget the session entry.
+        let _ = PtyShell
+            .execute(
+                serde_json::json!({"command": "exit", "session": name, "timeout_ms": 15000}),
+                &c,
+            )
+            .await
+            .unwrap();
+        let cmd = if cfg!(windows) {
+            "timeout /t 30 /nobreak"
+        } else {
+            "sleep 30"
+        };
+        let out = PtyShell
+            .execute(
+                serde_json::json!({"command": cmd, "session": name, "timeout_ms": 1500}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error, "expected a timeout error: {}", out.content);
+        assert!(
+            out.content.contains("timeout after 1500ms"),
+            "{}",
+            out.content
+        );
+        assert!(
+            !registry_contains_for_tests(&name),
+            "timed-out session must be forgotten"
+        );
     }
 
     #[tokio::test]

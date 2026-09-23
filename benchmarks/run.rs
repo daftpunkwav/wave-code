@@ -1,22 +1,21 @@
 /*!
  * @file BenchmarkHarness
- * @description Documented spec for offline benches, replay goldens, tasks.
+ * @description Documented spec for offline benches and tasks.
  *
  * Responsibilities:
  * - Document bench foci, bounds, reports, and baseline policy.
  * - Mirror the executable integration tests in readable form.
- * - Define fixture shapes and live-gate behavior for humans.
+ * - Define task shapes and live-gate behavior for humans.
  * - State the task-level suite's judging rules and offline gates.
  *
  * This module must not depend on: any workspace crate. It is a plain
  * documented harness, not a cargo target; the executable form lives in
- * crates/runtime/runner/tests/benchmarks.rs,
- * crates/operations/replay/tests/snapshot_replay.rs, and the `task_eval`
+ * crates/runtime/runner/tests/benchmarks.rs and the `task_eval`
  * module of crates/frontends/harness/src. Keep this file in sync with those
  * tests when changing rounds, bounds, or fixture shapes.
  */
 
-//! Benchmark + snapshot-replay harness spec.
+//! Benchmark harness spec.
 //!
 //! The functions below are the human-readable form of the integration
 //! tests. They are intentionally written against plain data (counts,
@@ -33,8 +32,6 @@ pub const SESSION_OPEN_TURNS: u32 = 5;
 pub const CONTINUATION_WALL_BOUND_MS: u128 = 10_000;
 /// Session-open covers assembly plus several turns, hence the wider bound.
 pub const SESSION_OPEN_WALL_BOUND_MS: u128 = 15_000;
-/// Replay goldens are pure CPU over tiny inputs; still generous.
-pub const REPLAY_GOLDEN_WALL_BOUND_MS: u128 = 5_000;
 
 /// Timing verdict. WARN still passes; only FAIL fails, and only beyond
 /// 10x median or on a correctness mismatch.
@@ -104,10 +101,6 @@ pub fn live_gate(live_var: Option<&str>, provider_key_present: bool) -> LiveDeci
         _ => LiveDecision::Skip,
     }
 }
-
-/// Committed transcript fixtures pinning user-visible replay behavior.
-/// Each file is a JSON array of wire events; see `fixtures/*.json`.
-pub const FIXTURES: &[&str] = &["basic", "approval", "interrupt", "truncation"];
 
 /// Task-level suite (`tasks/<id>/task.toml` + `workspace/`): the one tier
 /// that drives a real model. Lower bound on the committed task count, which

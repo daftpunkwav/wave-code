@@ -1,12 +1,12 @@
 # Subsystem: safety
 
-Safety is layered: vocabulary (`crates/foundation/protocol`), static policy and the approval gate (`crates/safety/{policy,gate}`), the permission sandbox (`crates/capabilities/sandbox`), and OS confinement backends in the same crate. The runner consumes all of it through the `PolicyDecider` / `ApprovalSource` seams.
+Safety is layered: vocabulary (`crates/foundation/protocol`), the approval gate (`crates/safety/gate`), the permission sandbox with rule evaluation (`crates/capabilities/sandbox`), and OS confinement backends in the same crate. The runner consumes all of it through the `PolicyDecider` / `ApprovalSource` seams.
 
 ## Permission modes and policy
 
 `crates/foundation/protocol/src/lib.rs` owns `PermissionMode` with locked wire strings: `plan` (read-only tools only; the rest deny straight back to the model; the system prompt nudges the model to propose via the plan tool), `auto` (command execution and destructive tools ask per call; file edits and other non-exec writes flow through), `wave` (approve everything — deny rules still apply). A unit test locks the serde tags; `parse` rejects case drift and maps legacy names (`guarded`/`default`/`acceptEdits` → `auto`, `bypassPermissions`/`yolo` → `wave`) onto their successors. Note the rename hazard: `auto` used to mean "approve everything" (what `wave` means now), so old config files land one notch more conservative, never less.
 
-`crates/safety/policy/src/lib.rs` is pure data: `Rule` (exact or `prefix*` wildcard), `ToolPolicy::evaluate` with **deny-wins merging** (Deny > Ask > Allow regardless of rule order) and an unmatched default of `Ask` — a missing rule can never silently permit execution. `explain` cites the winning rules for audit output. `ExecutionPolicy` carries ceilings (32 rounds, 120 s approval timeout, 5 consecutive errors) and rejects zero ceilings at startup.
+Permission rules are pure data in `crates/capabilities/sandbox/src/lib.rs`: `Rule` parses exact and `prefix*` wildcard entries (`Rule::parse`), and evaluation is deny-first — deny rules bind in every mode before allow rules or the mode's default are consulted, so an unmatched input can never permit more than its mode allows (the full decision order is in "The sandbox decision" below). `is_covered_by` conservatively detects allow rules a deny rule shadows, for `wavecode doctor`.
 
 ## Approval parking and timeout-deny
 

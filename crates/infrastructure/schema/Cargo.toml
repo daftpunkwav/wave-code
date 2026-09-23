@@ -1,9 +1,0 @@
-[package]
-name = "infrastructure-schema"
-edition.workspace = true
-rust-version.workspace = true
-version.workspace = true
-license.workspace = true
-
-[dependencies]
-serde_json.workspace = true

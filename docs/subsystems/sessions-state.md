@@ -1,6 +1,6 @@
 # Subsystem: sessions and durable state
 
-Durable state is deliberately dumb: append-only bytes plus versioned formats, with structure owned by the callers. Crates: `state/persistence`, `state/checkpoint`, `state/plan`, `state/goal`, plus the replay fold in `operations/replay` and the actor's durability helpers in `operations/actor/src/durable.rs`.
+Durable state is deliberately dumb: append-only bytes plus versioned formats, with structure owned by the callers. Crates: `state/persistence`, `state/checkpoint`, `state/plan`, `state/goal`, plus the actor's durability helpers in `operations/actor/src/durable.rs`.
 
 ## Turn journal (`crates/state/persistence/src/lib.rs`)
 
@@ -42,13 +42,4 @@ Honest status (updated 2026-09-18): the journal now has a production consumer (t
 - `crates/state/plan/src/lib.rs`: `PlanState` is a reviewed state machine — `propose` → `approve` → `begin` → `complete` / `abandon`, with `feedback` returning to review; `PlanStatus::is_terminal` gates transitions; plans live per session under a plans root (`plan_path_for_session`, `validate_session_id`).
 - `crates/state/goal/src/lib.rs`: one durable objective per session with **CAS versioning** — every mutation bumps `GoalState::version`, and the goal tool's `update` action requires the expected version; a mismatch names both versions and tells the model to reload with `status`. Statuses: Active / Blocked / Paused / Completed (terminal). An optional `sub_goals` list (text + in_progress/achieved) decomposes the objective; a fresh `set` clears it. The run loop reads this state (never writes it) to continue a turn the model ended while the objective stayed `Active` — see `operations-bootstrap/src/goal_adapter.rs` and the continuation ladder in `docs/subsystems/core-loop.md`.
 
-## Replay: the structural fold (`crates/operations/replay/src/lib.rs`)
-
-`replay_to_trajectory(events) -> Trajectory` folds recorded wire events into steps and observations. It is **structural, never re-executing**:
-
-- Text deltas are intentionally skipped (replay answers "what ran, in what order, with what outcome"; transcripts keep the words). `AgentMessageComplete` ⇒ a `sample` step.
-- `ToolCallBegin` opens a call; `ToolCallEnd` closes it with an `is_error` observation. Unpaired ends stay visible (marked `unpaired end`); begins that never closed get a non-error `truncated: no end event` mark, so truncated recordings are distinguishable from success.
-- `ApprovalRequested` becomes a visible note — safety-relevant pauses must not disappear.
-- `CompactCompleted` ⇒ a `compact` step; `Warning`/`Error` become observations; `TurnCompleted { interrupted: true }` is noted, clean completions add nothing.
-
-Snapshot tests pin this fold against committed fixtures — see `docs/subsystems/evals.md` and `docs/cookbook/recording-and-replaying.md`.
+Recording a session's wire stream and validating it after the fact is covered in `docs/subsystems/evals.md` (tier 2) and `docs/cookbook/recording-and-replaying.md`.

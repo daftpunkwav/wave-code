@@ -11,10 +11,6 @@
     "session_open": {
       "median_ms": 1200,
       "note": "Offline assembly (loop + conversation + system prompt) plus 5 scripted turns. No network, no credentials."
-    },
-    "replay_golden": {
-      "median_ms": 200,
-      "note": "replay_to_trajectory over each committed fixture plus timeline render. Pure CPU over tiny inputs."
     }
   }
 }

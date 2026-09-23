@@ -33,21 +33,19 @@ const TIERS: &[&str] = &[
 /// mechanism (child-task bookkeeping, stdio framing) consumed from
 /// several tiers, like the DTO crates.
 const TIER_MEMBERS: &[&str] = &[
-    "0: infrastructure-base infrastructure-cache infrastructure-config",
-    "0: infrastructure-coord infrastructure-ratelimit infrastructure-routing",
-    "0: infrastructure-schema",
-    "1: action-kit runtime-child transport-mcp wavecode-protocol wavecode-wire",
+    "0: infrastructure-base infrastructure-ratelimit",
+    "1: runtime-child transport-mcp wavecode-protocol wavecode-wire",
     "2: wavecode-auth wavecode-config wavecode-llm",
     "3: wavecode-context wavecode-hooks wavecode-mcp wavecode-memory",
     "3: wavecode-sandbox wavecode-skills wavecode-tools",
     "4: state-artifact state-checkpoint state-goal state-persistence state-plan",
-    "4: state-profile state-store state-trajectory state-workspace",
-    "5: safety-audit safety-gate safety-guardrail safety-policy safety-secrets",
+    "4: state-store",
+    "5: safety-audit safety-gate safety-guardrail safety-secrets",
     "6: action-browser action-jobs action-retrieval action-tasks action-workflow",
-    "7: runtime-capability runtime-identity runtime-plugin runtime-prompt",
-    "7: runtime-runner runtime-scheduler runtime-skills",
+    "7: runtime-capability runtime-plugin runtime-prompt",
+    "7: runtime-runner runtime-scheduler",
     "8: operations-actor operations-bootstrap operations-eval operations-gateway",
-    "8: operations-notify operations-observe operations-replay operations-simulate",
+    "8: operations-observe operations-simulate",
     "9: console-ui harness-cli tui-engine",
 ];
 

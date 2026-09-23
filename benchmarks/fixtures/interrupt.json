@@ -1,5 +1,0 @@
-[
-  { "id": "s1", "type": "turn_started" },
-  { "id": "s1", "type": "tool_call_begin", "call_id": "c3", "name": "shell", "input": { "command": "sleep 60" } },
-  { "id": "s1", "type": "turn_completed", "interrupted": true }
-]

@@ -1,7 +1,0 @@
-[
-  { "id": "s1", "type": "turn_started" },
-  { "id": "s1", "type": "tool_call_begin", "call_id": "c1", "name": "shell", "input": { "command": "ls" } },
-  { "id": "s1", "type": "tool_call_end", "call_id": "c1", "is_error": false },
-  { "id": "s1", "type": "agent_message_complete", "text": "done" },
-  { "id": "s1", "type": "turn_completed", "interrupted": false }
-]

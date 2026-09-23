@@ -19,7 +19,7 @@ frontends      wavecode binary (exec / repl / resume / TUI launch) and the TUI c
                  │
 operations     wire protocol, session actor, bootstrap composition root
                (which also hosts the live ACP / HTTP+SSE / MCP-serve RPC
-               surfaces), eval, observe, replay, notify, simulate
+               surfaces), eval, observe, simulate
                  │
 runtime        RunLoop, child turns, scheduler, prompt assembly, plugin seam,
                capability inventory, identity, skill routing
@@ -49,19 +49,13 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | Crate | Responsibility |
 | --- | --- |
 | `infrastructure-base` | OS runtime primitives: channel capacities, cooperative interrupt handle, truncation budgets, shared calendar-date rendering |
-| `infrastructure-cache` | Bounded TTL + LRU cache |
-| `infrastructure-config` | Layered key/value configuration with feature flags |
-| `infrastructure-coord` | Single-process leases with fencing tokens |
 | `infrastructure-ratelimit` | Token-bucket rate limiting with an explicit clock |
-| `infrastructure-routing` | Priority model routes with fallback chains and cost books |
-| `infrastructure-schema` | JSON subset-schema validation with error lists |
 
 ### Vocabulary and DTO layers
 
 | Crate | Responsibility |
 | --- | --- |
 | `wavecode-wire` | Frontend/backend wire types for submissions and events; the model-facing system-reminder marker |
-| `action-kit` | Tool registry, declarative tool attributes, execution context |
 | `wavecode-protocol` | Shared frontend-protocol vocabulary: permission modes, approval kinds |
 
 ### `state/` — durable data
@@ -70,19 +64,14 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | --- | --- |
 | `state-store` | Persisted conversation history and context budget checks |
 | `state-persistence` | Append-only JSONL turn journal backing `resume` |
-| `state-trajectory` | Ordered action/observation log with structural replay |
 | `state-checkpoint` | Labelled state snapshots with rollback |
 | `state-goal` | Durable per-session objective with CAS versioning |
 | `state-plan` | Reviewed plan-mode state machine |
-| `state-profile` | User identity and environment snapshots for prompts |
-| `state-workspace` | Project root discovery and bounded file inventory |
-| `state-artifact` | Versioned registry of run-produced artifacts |
 
 ### `safety/` — policy and isolation
 
 | Crate | Responsibility |
 | --- | --- |
-| `safety-policy` | Declarative per-tool policy with deny-wins merging |
 | `safety-gate` | Permission modes, policy verdicts, and the approval gate |
 | `safety-guardrail` | Heuristic prompt-injection screening and taint tracking |
 | `safety-audit` | Append-only audit trail of security-relevant decisions |
@@ -98,8 +87,6 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | `runtime-prompt` | System prompt assembly from named content slots |
 | `runtime-plugin` | Minimal plugin system: service injection, middleware hooks, in-session lifecycle |
 | `runtime-capability` | Capability inventory with pluggable discovery sources |
-| `runtime-identity` | Agent profile, role, and persona declarations |
-| `runtime-skills` | Skill execution modes with threshold routing |
 
 ### `action/` — agent action surface
 
@@ -137,8 +124,6 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | `operations-gateway` | NDJSON JSON-RPC 2.0 gateway over the session actor (unwired; the live RPC surfaces — `acp`, `app_server`, `mcp_serve` — are modules of `operations-bootstrap`) |
 | `operations-eval` | Behavioural benchmarks over any turn driver |
 | `operations-observe` | Folds turn wire events into cumulative operations metrics |
-| `operations-replay` | Structural replay of recorded wire events to trajectories |
-| `operations-notify` | In-process topic bus plus webhook payload formatting |
 | `operations-simulate` | Dry-run rendering of model-planned actions (plan preview) |
 
 ### `transport/` + `frontends/`
@@ -154,8 +139,8 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 
 Wired means reachable from the `wavecode` binary through normal
 dependencies. `cargo test --workspace` builds and tests every crate either
-way, so a green suite is not evidence of wiring. As of 2026-09-24, **23 of
-the 58 library crates are unwired** — they are not
+way, so a green suite is not evidence of wiring. As of 2026-09-24, **9 of
+the 44 library crates are unwired** — they are not
 reachable from the `wavecode` binary. Everything above describes what each
 crate *does*, not what the product *offers*; this table is the correction.
 Check a crate's dependents (`cargo tree -q -i <crate>`) before citing it as a
@@ -164,18 +149,40 @@ feature, and move it out of this table in the same change that wires it up.
 | Unwired crate | Why it is not reachable |
 | --- | --- |
 | `operations-gateway` | The shipped RPC surface is the REST+SSE app server in `operations-bootstrap` (`wavecode serve`); this NDJSON JSON-RPC gateway has no client |
-| `operations-replay`, `operations-simulate`, `operations-notify`, `state-trajectory` | Library-only: no binary or adapter consumes them, so structural replay and scenario simulation are not product features yet (`operations-eval` left this list when `wavecode eval tasks` started consuming it; `state-trajectory` is reachable only through `operations-replay`, so it rides along unwired) |
-| `action-kit`, `action-browser`, `action-retrieval` | The tool registry and the browser/retrieval seams have no implementer or consumer; `wavecode-tools` owns the live registry |
-| `infrastructure-cache`, `infrastructure-config`, `infrastructure-coord`, `infrastructure-routing`, `infrastructure-schema` | Unused primitives: config layering, leases, and the route/fallback chain are each still hand-rolled where they are needed; `infrastructure-schema` is consumed only by `action-kit`, which is itself unwired |
-| `runtime-capability`, `runtime-identity`, `runtime-skills` | The live skill path is `wavecode-skills` + `bootstrap`; these are parallel, unconsumed models of the same idea |
-| `safety-policy`, `safety-guardrail`, `safety-audit` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice (`safety-secrets` left this list when the composition root wired the secrets redaction store) |
-| `state-artifact`, `state-profile`, `state-workspace` | `state-persistence` / `state-store` carry the durable data the product uses |
+| `operations-simulate` | Library-only: dry-run rendering of planned actions is not a product feature yet |
+| `action-browser`, `action-retrieval` | The browser seam and term-overlap retrieval have no implementer or consumer; `wavecode-tools` owns the live registry |
+| `runtime-capability` | A parallel, unconsumed model of the capability inventory; flagged as design debt (see below) |
+| `safety-guardrail`, `safety-audit` | Live policy and approval flow is `safety-gate` + `wavecode-sandbox`; these overlap it and would need a boundary redraw before adoption, not a splice |
+| `state-artifact` | The product's durable data rides `state-persistence` / `state-store` |
 | `wavecode-auth` | Provider credentials resolve through `wavecode-config`'s `env_key` path |
 
-The `runtime-skills` / `action-kit` / `safety-policy` group is the one to watch
-for *design* debt, not just dead code: each duplicates a responsibility that
-another crate already owns, which the layering rules above are meant to
-prevent.
+### Reserved, unwired by intent
+
+These crates are deliberate seeds for future work, not dead weight. They
+compile and test in the workspace and stay out of the shipped binary until
+their feature lands:
+
+- `operations-gateway` — the RPC protocol surface; being wired now (the
+  live ACP / HTTP+SSE / MCP-serve servers are moving into it).
+- `action-browser` — browser automation behind an async tab seam, for
+  agent projects that need a browser.
+- `action-retrieval` — term-overlap retrieval over chunked documents, for
+  agent projects that need local corpus search.
+- `safety-guardrail` — prompt-injection screening and taint tracking,
+  reserved for a future trust-boundary redraw.
+- `safety-audit` — append-only audit trail of security-relevant decisions,
+  reserved for deployments that need one.
+- `wavecode-auth` — provider-scoped credential storage, reserved for
+  multi-provider setups beyond the `env_key` path.
+- `operations-simulate` — dry-run rendering of model-planned actions
+  (plan preview), for future frontends.
+- `state-artifact` — versioned registry of run-produced artifacts, for
+  agent projects that need one.
+
+The `runtime-capability` crate is the remaining duplicate-model watch
+item: it re-models capability inventory that `runtime-plugin` and the
+assembly already own, and it stays unwired until that boundary is redrawn
+or it is removed deliberately.
 
 ## Life of a turn
 
@@ -188,7 +195,7 @@ prevent.
 
 ## Benchmarks
 
-`benchmarks/` pins user-visible behavior and turn performance with offline, keyless fixtures; see [benchmarks/README.md](../benchmarks/README.md). Executable benches live in `crates/runtime/runner/tests/benchmarks.rs`.
+`benchmarks/` pins turn performance with offline, keyless benches; see [benchmarks/README.md](../benchmarks/README.md). Executable benches live in `crates/runtime/runner/tests/benchmarks.rs`.
 
 ## Subsystem pages
 

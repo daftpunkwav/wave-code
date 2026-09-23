@@ -1,10 +1,9 @@
-# Benchmarks and snapshot-replay quality machinery
+# Benchmarks and turn-performance quality machinery
 
 Why this exists: unit tests can stay green while the product visibly
-regresses (changed timeline text, dropped approval markers, slower turns).
-This directory pins user-visible behavior and turn performance with
-offline, keyless fixtures and benches — with one deliberate exception: the
-`tasks/` suite drives real model turns, so it costs quota and runs on
+regresses (slower turns, changed reports). This directory pins turn
+performance with offline, keyless benches — with one deliberate exception:
+the `tasks/` suite drives real model turns, so it costs quota and runs on
 purpose, not on every commit.
 
 ## Layout
@@ -12,13 +11,10 @@ purpose, not on every commit.
 - `README.md` — this file.
 - `run.rs` — plain documented harness (the human-readable spec, not a
   cargo test target). The executable form lives in integration tests
-  (see below); keep the two in sync when changing rounds, bounds, or
-  fixture shapes.
+  (see below); keep the two in sync when changing rounds or bounds.
 - `baseline.json` — committed medians plus `warn_beyond` / `fail_beyond`
   multipliers. Single source of truth for timing policy; tests read it
   with `include_str!` so updates never require test edits.
-- `fixtures/*.json` — committed transcript fixtures. Each file is a JSON
-  array of wire `Event` objects (`id` plus flattened `EventMsg`).
 - `tasks/<id>/` — task-level benchmark suite: `task.toml` (manifest) plus
   `workspace/` (the fixture an agent edits). Live tier; see below.
 
@@ -33,12 +29,6 @@ tokens/rounds as JSON. Executable:
 system prompt) plus 5 scripted turns, same wall-time/report discipline.
 No provider, no config file, no credentials. Executable:
 `crates/runtime/runner/tests/benchmarks.rs::session_open_bench`.
-
-(c) Replay goldens — each fixture replays through
-`replay_to_trajectory`; tests assert exact step/observation sequences and
-timeline text. Pins user-visible behavior without model quota.
-Executable: `crates/operations/replay/tests/snapshot_replay.rs`
-(fixtures: `basic`, `approval`, `interrupt`, `truncation`).
 
 ## Timing policy (never flaky-fail CI on noise)
 
@@ -71,7 +61,6 @@ LIVE=1 cargo.exe test -p runtime-runner --test benchmarks live_gate_smoke -- --n
 
 ```
 cargo.exe test -p runtime-runner --test benchmarks
-cargo.exe test -p operations-replay --test snapshot_replay
 ```
 
 Meta-test `baseline_meta_test` (in the runner benchmarks file) asserts
@@ -142,13 +131,6 @@ suite honest without spending a token, and run in ordinary `cargo test`:
 The suite is a nightly / before-release measurement: one real turn per task,
 plus a `cargo test` per Rust check. Track the pass rate and the rounds-per-task
 column over time; both are in `--json`.
-
-## Adding a fixture
-
-1. Append a JSON event array under `fixtures/<name>.json`.
-2. Add one test in `snapshot_replay.rs` asserting the exact steps,
-   observations, and `replay()` timeline lines.
-3. Run the two commands above; both must pass.
 
 ## Adding a task
 

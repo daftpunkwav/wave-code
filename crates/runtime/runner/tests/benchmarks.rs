@@ -414,7 +414,7 @@ fn baseline_meta_test() {
         .expect("fail_beyond is a number");
     assert!(warn >= 1.0, "warn band must cover the median");
     assert!(fail > warn, "fail band must sit above the warn band");
-    for bench in ["continuation_micro", "session_open", "replay_golden"] {
+    for bench in ["continuation_micro", "session_open"] {
         let median = baseline
             .pointer(&format!("/benches/{bench}/median_ms"))
             .and_then(|v| v.as_f64())

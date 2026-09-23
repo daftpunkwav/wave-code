@@ -23,15 +23,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "action-kit"
-version = "0.1.0"
-dependencies = [
- "infrastructure-schema",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "action-retrieval"
 version = "0.1.0"
 
@@ -1038,42 +1029,10 @@ name = "infrastructure-base"
 version = "0.1.0"
 
 [[package]]
-name = "infrastructure-cache"
-version = "0.1.0"
-
-[[package]]
-name = "infrastructure-config"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "infrastructure-coord"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "infrastructure-ratelimit"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "infrastructure-routing"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "infrastructure-schema"
-version = "0.1.0"
-dependencies = [
- "serde_json",
 ]
 
 [[package]]
@@ -1381,28 +1340,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "operations-notify"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "operations-observe"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "wavecode-wire",
-]
-
-[[package]]
-name = "operations-replay"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "state-trajectory",
  "wavecode-wire",
 ]
 
@@ -1752,13 +1695,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "runtime-identity"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "runtime-plugin"
 version = "0.1.0"
 dependencies = [
@@ -1796,10 +1732,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
 ]
-
-[[package]]
-name = "runtime-skills"
-version = "0.1.0"
 
 [[package]]
 name = "rustc-hash"
@@ -1917,13 +1849,6 @@ dependencies = [
 [[package]]
 name = "safety-guardrail"
 version = "0.1.0"
-
-[[package]]
-name = "safety-policy"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.19",
-]
 
 [[package]]
 name = "safety-secrets"
@@ -2198,26 +2123,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "state-profile"
-version = "0.1.0"
-
-[[package]]
 name = "state-store"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "state-trajectory"
-version = "0.1.0"
-
-[[package]]
-name = "state-workspace"
-version = "0.1.0"
-dependencies = [
- "tempfile",
 ]
 
 [[package]]

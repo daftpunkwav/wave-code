@@ -12,6 +12,7 @@ state-store = { path = "../../state/store" }
 state-checkpoint = { path = "../../state/checkpoint" }
 safety-gate = { path = "../../safety/gate" }
 wavecode-wire = { path = "../../foundation/wire" }
+wavecode-config = { path = "../../foundation/config" }
 infrastructure-base = { path = "../../infrastructure/base" }
 tokio.workspace = true
 tracing.workspace = true

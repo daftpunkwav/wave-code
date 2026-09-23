@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use operations_actor::{ActorClient, SessionActor};
+use operations_actor::{ActorClient, SessionActor, SessionSurface, SubmitError};
 use runtime_child::ChildRuntime;
 use runtime_prompt::{DEFAULT_CATALOG_BUDGET, PromptSlots, build_system};
 use runtime_runner::{RunConfig, RunInterrupts, RunLoop, ToolExecutor};
@@ -50,19 +50,12 @@ use crate::tool_adapter::ToolAdapter;
 
 /// Approval wait timeout applied to parked decisions.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Session contract types: defined beside the actor so the RPC gateway
+/// can name them without reaching into this composition root.
+pub use operations_actor::{AssembleOptions, DEFAULT_IDENTITY, SessionError};
 /// Tool dispatch rounds per turn; single-sourced from the runner so the
 /// loop's ceiling and the assembly default cannot drift apart.
 pub use runtime_runner::DEFAULT_MAX_TOOL_ROUNDS;
-/// Fallback identity block when the caller supplies no base prompt.
-pub const DEFAULT_IDENTITY: &str = "You are WaveCode, a precise coding agent.";
-
-/// Assembly failures: hard stops, never silent degradation.
-#[derive(Debug, thiserror::Error)]
-pub enum SessionError {
-    /// Configuration loading or provider resolution failed.
-    #[error(transparent)]
-    Config(#[from] wavecode_config::ConfigError),
-}
 
 /// Assembled live session.
 pub struct SessionHandle {
@@ -153,47 +146,35 @@ impl SessionHandle {
 /// without leaking the store behind it.
 pub type SecretRedactor = dyn Fn(&str) -> String + Send + Sync;
 
-/// Assembly inputs, all caller-owned.
-pub struct AssembleOptions {
-    /// Config file path; `None` loads the user-level config.
-    pub config_path: Option<PathBuf>,
-    /// `--model` override winning over the configured model.
-    pub model_override: Option<String>,
-    /// Provider id override winning over the configured `model_provider`
-    /// (e.g. a saved default model that lives on another provider).
-    /// Unknown names warn and fall back to the configured provider
-    /// instead of failing assembly.
-    pub provider_override: Option<String>,
-    /// `--permission-mode` override winning over the configured mode.
-    pub permission_override: Option<String>,
-    /// Reasoning-effort override (saved picker default) winning over the
-    /// provider's configured `reasoning_effort`; OpenAI-compatible
-    /// providers only.
-    pub thinking_override: Option<String>,
-    /// Working directory for tools and relative paths.
-    pub cwd: PathBuf,
-    /// Home directory; `None` degrades memory without failing.
-    pub home: Option<PathBuf>,
-    /// Identity block prepended to the system prompt.
-    pub identity: String,
-    /// True for non-interactive drivers: approvals deny openly instead
-    /// of parking on a gate nobody answers.
-    pub headless: bool,
-    /// Seed history as (from_model, text) pairs, e.g. from resume import.
-    /// Empty starts a fresh conversation.
-    pub initial_history: Vec<(bool, String)>,
-    /// `wave`-mode denylist entries (`Bash(pattern)` rule syntax): parsed
-    /// into sandbox deny rules so a banned command is refused in every
-    /// mode without a prompt. Malformed entries land in the startup
-    /// warnings instead of failing assembly.
-    pub wave_denylist: Vec<String>,
-    /// Session id whose turn journal this assembly will be recorded to, when
-    /// the caller already minted one. Compaction appends a pointer to that
-    /// journal so a post-compaction turn can look up exact earlier output
-    /// instead of guessing; `None` (unknown id, no home) keeps the pointer
-    /// out.
-    #[doc(hidden)]
-    pub session_id: Option<String>,
+/// The gateway-facing session surface, served by the assembled handle.
+///
+/// Delegates to the actor client and the shared gates; the servers never
+/// need more than this (see [`operations_actor::SessionSurface`]).
+#[async_trait::async_trait]
+impl SessionSurface for SessionHandle {
+    async fn submit(&mut self, submission: wavecode_wire::Submission) -> Result<(), SubmitError> {
+        self.client.submit(submission).await
+    }
+
+    async fn next_event(&mut self) -> Option<wavecode_wire::Event> {
+        self.client.next_event().await
+    }
+
+    fn permission_mode(&self) -> &str {
+        &self.permission_mode
+    }
+
+    fn approvals(&self) -> Arc<ApprovalGate> {
+        self.approvals.clone()
+    }
+
+    fn questions(&self) -> Arc<QuestionGate> {
+        self.questions.clone()
+    }
+
+    fn interrupt(&self) -> infrastructure_base::InterruptHandle {
+        self.interrupt.clone()
+    }
 }
 
 /// Resolve the effective permission mode: CLI override wins over config.
@@ -536,8 +517,9 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
 /// Production fills this from config plus the provider-built client in
 /// [`assemble_session`]; tests fill it directly around a stub model so
 /// prompt paths run hermetically. Changing these fields must not change
-/// what production assembles for the same inputs.
-pub(crate) struct WithModel {
+/// what production assembles for the same inputs. Public only so the
+/// gateway's server tests can assemble sessions the production way.
+pub struct WithModel {
     /// Full config for hooks, permission mode, and MCP descriptions.
     pub config: wavecode_config::Config,
     /// Chat model: the provider client in production, a stub in tests.
@@ -579,8 +561,9 @@ pub(crate) struct WithModel {
 ///
 /// Must be called inside a tokio runtime (the actor task spawns here).
 /// Shares its body with [`assemble_session`]; the split is purely a
-/// seam for hermetic tests, never a behavior fork.
-pub(crate) fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
+/// seam for hermetic tests, never a behavior fork. Public only so the
+/// gateway's server tests can assemble sessions the production way.
+pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     let WithModel {
         config,
         model,

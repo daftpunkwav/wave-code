@@ -20,11 +20,13 @@
 
 pub mod actor;
 pub mod client;
+pub mod contract;
 pub mod durable;
 pub mod status;
 
 pub use actor::SessionActor;
 pub use client::{ActorClient, EventTap, SubmitError};
+pub use contract::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionSurface};
 pub use durable::{
     CheckpointSink, DurabilityConfig, persist_checkpoint, persist_then_act, render_snapshot,
     resume_checkpoint, turn_label,

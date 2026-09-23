@@ -7,7 +7,7 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 ## Dependency rules
 
 1. **Everything may depend on `infrastructure/`.** These crates are leaf primitives with zero internal dependencies.
-2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `operations-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
+2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `wavecode-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
 3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to name concrete capability crates and adapt them to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends.
 4. **Policy never matches tool names.** Tools carry declarative attributes (`action-kit` `ToolAttrs`), and policy decisions consume those attributes, so adding a tool cannot silently drift the policy layer.
 5. **New behavior lands on extension points, not loop changes.** Changing `runtime/runner` requires updating this document.
@@ -59,7 +59,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 
 | Crate | Responsibility |
 | --- | --- |
-| `operations-wire` | Frontend/backend wire types for submissions and events; the model-facing system-reminder marker |
+| `wavecode-wire` | Frontend/backend wire types for submissions and events; the model-facing system-reminder marker |
 | `action-kit` | Tool registry, declarative tool attributes, execution context |
 | `wavecode-protocol` | Shared frontend-protocol vocabulary: permission modes, approval kinds |
 
@@ -123,7 +123,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | `wavecode-tools` | Tool trait, registry, built-in tools (fs, search, shell, todo), path guarding |
 | `wavecode-skills` | `SKILL.md` discovery, parsing, and catalog |
 | `wavecode-memory` | Instruction memory (`WAVECODE.md`) and per-turn transcript distillation |
-| `wavecode-mcp` | Model Context Protocol client over stdio and streamable HTTP |
+| `wavecode-mcp` | Model Context Protocol interface boundary: client/server traits, data types, server config, and the `mcp__` naming convention (the transports and registry bridges live in `bootstrap::mcp_bridge` over `transport-mcp`) |
 | `wavecode-sandbox` | Permission and execution-safety layer for tool runs |
 | `wavecode-hooks` | Lifecycle hooks (PreToolUse / PostToolUse / UserPromptSubmit / SessionStart) |
 | `wavecode-context` | Context-management pipeline: compression, spill, budget stages |
@@ -181,7 +181,7 @@ prevent.
 2. `operations-actor` serializes submissions per session and drives `runtime-runner`.
 3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
 4. Tool executions pass the `safety-gate` approval flow; verdicts come from `safety-policy` rules plus permission modes, with OS-level isolation from `safety-sandbox`.
-5. Every step emits `operations-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
+5. Every step emits `wavecode-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
 6. History mutations append to `state-persistence`'s block-level write-ahead journal (`<id>.history.jsonl`), which `resume` replays; completed turns additionally append a text snapshot to `<id>.jsonl` for the picker and for sessions written before the journal existed.
 
 ## Benchmarks

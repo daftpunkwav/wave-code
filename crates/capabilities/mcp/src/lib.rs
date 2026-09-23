@@ -1,18 +1,18 @@
-//! wavecode-mcp — two-way Model Context Protocol support (P9 interface boundary).
+//! wavecode-mcp — two-way Model Context Protocol support.
 //!
 //! - Client: stdio and streamable-http transports, with external tools
 //!   injected into the tool registry under the `mcp__{server}__{tool}`
-//!   namespace;
+//!   namespace (the client bridge lives in [`crate::bridge`]);
 //! - Server: exposes WaveCode's own capabilities as an MCP server for other
 //!   agents / IDEs to call.
 //!
-//! **Scope (honest disclosure)**: this crate defines the interface boundary —
-//! the [`McpClient`] / [`McpServerHandler`] traits, the data types, and the
-//! naming convention / [`McpServerConfig`] config type. The real transports
-//! (stdio child process, streamable-http with session handling) and the
-//! bridge that injects MCP tools into the registry live on the composition
-//! side (`bootstrap::mcp_bridge`; the core->mcp edge is allowed by the SPEC
-//! section 3 matrix; mcp itself has no workspace-internal dependencies).
+//! **Scope**: this crate owns the interface boundary — the [`McpClient`] /
+//! [`McpServerHandler`] traits, the data types, and the naming convention /
+//! [`McpServerConfig`] config type — plus the real client implementations
+//! over `transport-mcp` (stdio child process, streamable-http with session
+//! handling) and the bridge that injects MCP tools into the registry. The
+//! byte-level framing stays in `transport-mcp`; the serving side of MCP
+//! (exposing WaveCode's tools over stdio) stays in the composition root.
 //! The client trait surface covers `tools/list`, `tools/call`,
 //! `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`;
 //! interactive browser/PKCE OAuth stays out (static headers or the
@@ -375,6 +375,10 @@ pub trait McpServerHandler: Send + Sync {
         Ok(vec![])
     }
 }
+
+pub mod bridge;
+
+pub use bridge::{McpConnectReport, StdioMcpClient, connect_all};
 
 #[cfg(test)]
 mod tests {

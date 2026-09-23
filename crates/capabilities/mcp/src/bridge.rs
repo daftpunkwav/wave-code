@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use wavecode_mcp::{
+use crate::{
     McpClient, McpError, McpPromptDef, McpPromptMessage, McpResourceContent, McpResourceDef,
     McpToolDef, McpToolOutput, try_tool_name,
 };
@@ -362,7 +362,7 @@ fn parse_prompts_list(
                 args.iter()
                     .filter_map(|arg| {
                         let name = arg.get("name").and_then(|v| v.as_str())?;
-                        Some(wavecode_mcp::McpPromptArgument {
+                        Some(crate::McpPromptArgument {
                             name: name.to_string(),
                             description: arg
                                 .get("description")
@@ -1296,7 +1296,7 @@ async fn connect_one(
     raw: &wavecode_config::McpServerRaw,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> (String, Option<String>) {
-    if !wavecode_mcp::is_valid_server_name(name) {
+    if !crate::is_valid_server_name(name) {
         let reason = format!("invalid MCP server name {name:?}: must be non-empty without `__`");
         return (format!("{name} — skipped ({reason})"), Some(reason));
     }
@@ -1305,12 +1305,12 @@ async fn connect_one(
             let reason = format!("MCP server {name:?} sets both command and url; use one");
             return (format!("{name} — skipped ({reason})"), Some(reason));
         }
-        (Some(command), None) => wavecode_mcp::McpServerConfig::Stdio {
+        (Some(command), None) => crate::McpServerConfig::Stdio {
             command: command.clone(),
             args: raw.args.clone(),
             env: raw.env.clone(),
         },
-        (None, Some(url)) => wavecode_mcp::McpServerConfig::Http {
+        (None, Some(url)) => crate::McpServerConfig::Http {
             url: url.clone(),
             headers: raw.headers.clone(),
             oauth_token_url: raw.oauth_token_url.clone(),
@@ -1327,7 +1327,7 @@ async fn connect_one(
         return (format!("{name} — skipped ({reason})"), Some(reason));
     }
     match config {
-        wavecode_mcp::McpServerConfig::Http {
+        crate::McpServerConfig::Http {
             url,
             headers,
             oauth_token_url,
@@ -1378,8 +1378,8 @@ async fn connect_one(
                 }
             }
         }
-        wavecode_mcp::McpServerConfig::Stdio { command, args, env } => {
-            let summary = wavecode_mcp::McpServerConfig::Stdio {
+        crate::McpServerConfig::Stdio { command, args, env } => {
+            let summary = crate::McpServerConfig::Stdio {
                 command: command.clone(),
                 args: args.clone(),
                 env: HashMap::new(),
@@ -1964,7 +1964,7 @@ mod tests {
         let prompts = vec![McpPromptDef {
             name: "review".to_string(),
             description: Some("code review".to_string()),
-            arguments: vec![wavecode_mcp::McpPromptArgument {
+            arguments: vec![crate::McpPromptArgument {
                 name: "path".to_string(),
                 description: None,
                 required: true,

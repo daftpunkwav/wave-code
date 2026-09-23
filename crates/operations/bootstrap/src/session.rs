@@ -127,7 +127,7 @@ impl SessionHandle {
             return;
         }
         let pending = std::mem::take(&mut self.mcp_pending);
-        let report = crate::mcp_bridge::connect_all(&pending, &self.tools_registry).await;
+        let report = wavecode_mcp::connect_all(&pending, &self.tools_registry).await;
         self.mcp_servers = report.lines;
         self.warnings.extend(report.warnings);
     }

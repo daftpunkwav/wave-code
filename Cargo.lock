@@ -1293,7 +1293,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
- "transport-mcp",
  "wavecode-config",
  "wavecode-context",
  "wavecode-hooks",
@@ -2853,8 +2852,13 @@ name = "wavecode-mcp"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "serde_json",
  "thiserror 2.0.19",
+ "tokio",
+ "transport-mcp",
+ "wavecode-config",
+ "wavecode-tools",
 ]
 
 [[package]]

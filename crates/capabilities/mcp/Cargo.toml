@@ -6,9 +6,14 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-# P9 interface boundary: no workspace-internal dependencies (the SPEC section 3
-# matrix leaves the mcp row empty); real stdio/http transports (rmcp) arrive in
-# a later iteration.
+# The interface boundary (traits, types, naming, config) is self-contained;
+# the client bridge additionally leans on the transports, the tool trait,
+# and the config vocabulary.
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+futures.workspace = true
+transport-mcp = { path = "../../transport/mcp" }
+wavecode-config = { path = "../../foundation/config" }
+wavecode-tools = { path = "../tools" }

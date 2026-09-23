@@ -25,6 +25,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 tempfile = "3"
 bytes = "1"
 base64 = "0.22"
@@ -49,3 +50,12 @@ crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 # definitions (TypeScript, TOML, ...) on the same backend.
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
+# Release profile for the shipped binary: thin LTO + one codegen unit
+# for size/speed, symbols stripped from the distributed artifact.
+# `panic` stays `unwind` on purpose — the child runtime isolates tool
+# panics through catch_unwind, which abort would disable.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

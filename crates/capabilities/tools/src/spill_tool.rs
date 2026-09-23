@@ -20,15 +20,7 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use wavecode_context::SpillStore;
 
-use crate::{Result, Tool, ToolCtx, ToolOutput};
-
-/// Build a business-failure output so the model can self-correct.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
 
 /// Read one spilled output by `spill://` URI (read-only).
 pub struct SpillRead {

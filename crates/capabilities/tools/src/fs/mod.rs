@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
 
 /// read output cap: 2000 lines / 50 KB.
 const MAX_LINES: usize = 2000;
@@ -25,23 +25,6 @@ fn ok_output(content: impl Into<String>) -> ToolOutput {
         content: content.into(),
         is_error: false,
     }
-}
-
-/// Build a business-failure output: the reason is fed back to the model for self-correction.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
-
-/// Extract a required string parameter; missing or mistyped params yield a business-failure output.
-fn req_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, ToolOutput> {
-    input.get(key).and_then(Value::as_str).ok_or_else(|| {
-        err_output(format!(
-            "missing or invalid parameter '{key}' (string required)"
-        ))
-    })
 }
 
 /// Parse an optional non-negative integer parameter; present-but-negative/float/non-numeric values yield a business-failure output.

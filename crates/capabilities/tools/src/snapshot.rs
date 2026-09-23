@@ -26,7 +26,7 @@ pub use state_checkpoint::{
     snapshot_store_root_for_session, validate_snapshot_label,
 };
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
 
 /// Map a store error onto the tools error surface: business failures
 /// (bad label, unknown snapshot, corrupt manifest) feed back to the
@@ -36,23 +36,6 @@ fn map_store_error(e: state_checkpoint::SnapshotError) -> Result<ToolOutput> {
         state_checkpoint::SnapshotError::InvalidInput { message } => Ok(err_output(message)),
         state_checkpoint::SnapshotError::Io(e) => Err(ToolsError::Io(e)),
     }
-}
-
-/// Build a business-failure output (reason is fed back to the model).
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
-
-/// Extract a required string parameter.
-fn req_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, ToolOutput> {
-    input.get(key).and_then(Value::as_str).ok_or_else(|| {
-        err_output(format!(
-            "missing or invalid parameter '{key}' (string required)"
-        ))
-    })
 }
 
 /// Capture a recoverable file-content snapshot of the working directory.

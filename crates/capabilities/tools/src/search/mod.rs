@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
 
 /// grep match-line cap: stop scanning past it and mark truncation.
 const MAX_MATCHES: usize = 500;
@@ -31,23 +31,6 @@ fn ok_output(content: impl Into<String>) -> ToolOutput {
         content: content.into(),
         is_error: false,
     }
-}
-
-/// Build a business-failure output: the reason is fed back to the model for self-correction.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
-
-/// Extract a required string parameter; missing or mistyped params yield a business-failure output.
-fn req_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, ToolOutput> {
-    input.get(key).and_then(Value::as_str).ok_or_else(|| {
-        err_output(format!(
-            "missing or invalid parameter '{key}' (string required)"
-        ))
-    })
 }
 
 /// Parse and validate a path: escapes/invalid input become business-failure output for the model, while io failures still propagate as `Err`.

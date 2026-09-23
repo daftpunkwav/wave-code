@@ -1,7 +1,7 @@
 /*!
  * @file RuntimeBase
  * @description OS runtime primitives: channels, interruption, limits, and
- *   the shared calendar-date rendering.
+ *   the shared calendar-date and command-shell resolution.
  *
  * Responsibilities:
  * - Centralize channel capacities and timeout constants.
@@ -9,6 +9,8 @@
  * - Document truncation budgets for event payloads.
  * - Render the calendar date once for every layer that needs it (prompt
  *   assembly and the loop's midnight-rollover notice).
+ * - Resolve the platform command-string shell once for every layer that
+ *   spawns one (shell tool, PTY shell, hooks, jobs).
  *
  * This module must not depend on: any other workspace crate.
  */
@@ -87,6 +89,33 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
     format!("{kept}...")
 }
 
+/// Pick the shell program and its "run a command string" flag.
+///
+/// One resolution for every layer that spawns a command string (the shell
+/// tool, the PTY shell, lifecycle hooks, background jobs), so the
+/// `WAVECODE_SHELL` override can never be honored by one spawn path and
+/// silently ignored by another.
+///
+/// Platform default: `cmd /C` on Windows, `sh -c` elsewhere. Setting
+/// `WAVECODE_SHELL` overrides the program (the value is the program path);
+/// the flag style is then a heuristic — values containing `cmd` use `/C`,
+/// everything else uses `-c`. That covers common names (cmd, powershell,
+/// bash, zsh) but may guess wrong for unusual ones; keep it simple and
+/// switch to explicit configuration only when a real shell demands it.
+pub fn shell_invocation() -> (String, &'static str) {
+    if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
+        if custom.to_lowercase().contains("cmd") {
+            return (custom, "/C");
+        }
+        return (custom, "-c");
+    }
+    if cfg!(windows) {
+        ("cmd".to_owned(), "/C")
+    } else {
+        ("sh".to_owned(), "-c")
+    }
+}
+
 /// Weekday names indexed by `days_since_epoch % 7` with 1970-01-01 =
 /// Thursday (index 4).
 const WEEKDAYS: [&str; 7] = [
@@ -141,6 +170,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn interrupt_handle_triggers_and_resets() {
@@ -174,6 +204,56 @@ mod tests {
             "\u{65e5}\u{672c}..."
         );
         assert_eq!(truncate("a\u{1f642}b", 2), "a\u{1f642}...");
+    }
+
+    /// Serializes tests that mutate the process-global `WAVECODE_SHELL`
+    /// variable; parallel env mutation would race between threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn shell_invocation_defaults_to_the_platform_shell() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("WAVECODE_SHELL").ok();
+        unsafe {
+            std::env::remove_var("WAVECODE_SHELL");
+        }
+        let (program, flag) = shell_invocation();
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("WAVECODE_SHELL", v);
+            }
+        }
+        if cfg!(windows) {
+            assert_eq!((program.as_str(), flag), ("cmd", "/C"));
+        } else {
+            assert_eq!((program.as_str(), flag), ("sh", "-c"));
+        }
+    }
+
+    #[test]
+    fn shell_invocation_override_picks_flag_style_by_name() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("WAVECODE_SHELL").ok();
+        // A cmd-like name keeps the Windows command-string flag.
+        unsafe {
+            std::env::set_var("WAVECODE_SHELL", r"C:\tools\my-cmd.exe");
+        }
+        let (program, flag) = shell_invocation();
+        assert_eq!(program, r"C:\tools\my-cmd.exe");
+        assert_eq!(flag, "/C");
+        // Any other name gets the Unix command-string flag.
+        unsafe {
+            std::env::set_var("WAVECODE_SHELL", "/usr/bin/zsh");
+        }
+        let (program, flag) = shell_invocation();
+        assert_eq!(program, "/usr/bin/zsh");
+        assert_eq!(flag, "-c");
+        unsafe {
+            std::env::remove_var("WAVECODE_SHELL");
+            if let Some(v) = prior {
+                std::env::set_var("WAVECODE_SHELL", v);
+            }
+        }
     }
 
     #[test]

@@ -11,11 +11,12 @@
 
 use std::time::Duration;
 
+use infrastructure_base::shell_invocation;
 use serde_json::{Value, json};
 
 use crate::is_sensitive_env_name;
 
-use crate::{Result, Tool, ToolCtx, ToolOutput};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
 
 /// Default timeout: 60 s.
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
@@ -23,34 +24,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Per-stream stdout / stderr output cap: 30 KB.
 const MAX_OUTPUT_BYTES: usize = 30 * 1024;
-
-/// Build a business-failure output: the reason is fed back to the model for self-correction.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
-
-/// Pick the shell program and its "run a command string" flag.
-///
-/// Platform default: `cmd /C` on Windows, `sh -c` on Unix. When `WAVECODE_SHELL` is set it overrides the shell
-/// with a custom one (the value is the program path). The flag style is heuristic: values containing `cmd` use
-/// `/C`, everything else uses Unix-style `-c` -- this covers common names like cmd / powershell / bash / zsh, but may
-/// guess wrong for unusual names; keep it simple and switch to explicit configuration when needed.
-fn shell_invocation() -> (String, &'static str) {
-    if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
-        if custom.to_lowercase().contains("cmd") {
-            return (custom, "/C");
-        }
-        return (custom, "-c");
-    }
-    if cfg!(windows) {
-        ("cmd".to_owned(), "/C")
-    } else {
-        ("sh".to_owned(), "-c")
-    }
-}
 
 /// Whether OS-level confinement applies to shell spawns.
 ///

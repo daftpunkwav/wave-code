@@ -36,7 +36,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, lock};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, lock, req_str};
 
 /// Default per-read timeout: 30 s.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -50,14 +50,6 @@ const MAX_DIAGNOSTICS_PER_FILE: usize = 200;
 /// Cap on tracked files: the oldest-inserted file is evicted FIFO when a new
 /// file would push the count past the cap.
 const MAX_DIAGNOSTIC_FILES: usize = 32;
-
-/// Build a business-failure output so the model can self-correct.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
-}
 
 /// Build a success output.
 fn ok_output(content: impl Into<String>) -> ToolOutput {
@@ -771,15 +763,6 @@ fn resolve_timeout(input: &Value) -> std::result::Result<Duration, ToolOutput> {
         },
     };
     Ok(Duration::from_millis(ms))
-}
-
-/// Extract a required string parameter.
-fn req_str<'a>(input: &'a Value, key: &str) -> std::result::Result<&'a str, ToolOutput> {
-    input.get(key).and_then(Value::as_str).ok_or_else(|| {
-        err_output(format!(
-            "missing or invalid parameter '{key}' (string required)"
-        ))
-    })
 }
 
 /// Extract a required 0-based line/character offset (clamped to u32).

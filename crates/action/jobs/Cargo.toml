@@ -5,6 +5,8 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Shared platform-shell resolution (shell_invocation) for job commands.
+infrastructure-base = { path = "../../infrastructure/base" }
 runtime-child = { path = "../../runtime/child" }
 thiserror.workspace = true
 tokio.workspace = true

@@ -28,6 +28,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use infrastructure_base::shell_invocation;
 use runtime_child::ChildRuntime;
 use tokio::io::AsyncReadExt;
 
@@ -287,28 +288,14 @@ impl JobService {
     }
 }
 
-/// Platform shell for one command string, mirroring the `shell` tool:
-/// `cmd /C` on Windows, `sh -c` on Unix, `WAVECODE_SHELL` override.
+/// Platform shell for one command string (the shared `shell_invocation`
+/// resolution in infrastructure-base): `cmd /C` on Windows, `sh -c` on Unix,
+/// `WAVECODE_SHELL` override.
 fn shell_command(command: &str) -> tokio::process::Command {
     let (program, flag) = shell_invocation();
     let mut cmd = tokio::process::Command::new(program);
     cmd.arg(flag).arg(command);
     cmd
-}
-
-/// Pick the shell program and its "run a command string" flag.
-fn shell_invocation() -> (String, &'static str) {
-    if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
-        if custom.to_lowercase().contains("cmd") {
-            return (custom, "/C");
-        }
-        return (custom, "-c");
-    }
-    if cfg!(windows) {
-        ("cmd".to_owned(), "/C")
-    } else {
-        ("sh".to_owned(), "-c")
-    }
 }
 
 /// Kill a job's whole process tree by leader pid.

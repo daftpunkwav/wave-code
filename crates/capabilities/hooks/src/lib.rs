@@ -8,8 +8,9 @@
 //! - `command` (implemented in this version): a `[hooks.<EventPoint>]` table
 //!   (or table array) config with matcher / command / timeout_ms / once
 //!   fields, executed via the platform shell (Windows `cmd /C`, Unix `sh -c`,
-//!   overridable with `WAVECODE_SHELL` — the same heuristic as the shell
-//!   tool), with the event payload written to stdin as JSON;
+//!   overridable with `WAVECODE_SHELL` — the shared `shell_invocation`
+//!   resolution in infrastructure-base), with the event payload written to
+//!   stdin as JSON;
 //! - `prompt` (this version, registered programmatically via
 //!   [`HookEngine::register_prompt_hook`]): the same execution shape as
 //!   `command` (matcher / shell / stdin payload / timeout), but exit code 0
@@ -40,6 +41,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
+
+use infrastructure_base::shell_invocation;
 
 /// Unified lock-poisoning recovery policy (single decision point for this
 /// crate): the once-fired set's critical section is a single insert, so a
@@ -484,24 +487,6 @@ enum ExecOutcome {
     Timeout,
     /// Spawn failed (missing command, …).
     SpawnFailed(String),
-}
-
-/// Pick the shell program and its "run this command string" flag (the same
-/// heuristic as the tools shell tool): Windows `cmd /C`, Unix `sh -c`;
-/// `WAVECODE_SHELL` overrides (a value containing `cmd` uses `/C`, otherwise
-/// `-c`).
-fn shell_invocation() -> (String, &'static str) {
-    if let Ok(custom) = std::env::var("WAVECODE_SHELL") {
-        if custom.to_lowercase().contains("cmd") {
-            return (custom, "/C");
-        }
-        return (custom, "-c");
-    }
-    if cfg!(windows) {
-        ("cmd".to_owned(), "/C")
-    } else {
-        ("sh".to_owned(), "-c")
-    }
 }
 
 /// Run one command hook: platform shell + stdin payload JSON + timeout kill.

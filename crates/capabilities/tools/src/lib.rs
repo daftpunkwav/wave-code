@@ -1,13 +1,16 @@
 //! wavecode-tools: tool framework and built-in tool set.
 //!
 //! Shape: the [`Tool`] trait, the [`Registry`] registry, built-in file tools
-//! (`read` / `write` / `edit` / `ls`), search tools
-//! (`grep` / `glob`), the `shell` tool, and the session task-list tool (`todowrite`,
-//! deepagents-style planning). File and search tools confine all paths
-//! under [`ToolCtx::cwd`] via `path_guard`, guarding against `..` escapes and absolute-path breakouts.
+//! (`read` / `write` / `edit` / `ls` / `view` / `present`), search tools
+//! (`grep` / `glob`), command tools (`shell` / `pty_shell` / `python` / `node`),
+//! LSP tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`),
+//! web tools (`web_fetch` / `web_search`), the spill reader (`spill`), and the
+//! session task-list tool (`todowrite`, deepagents-style planning). File and
+//! search tools confine all paths under [`ToolCtx::cwd`] via `path_guard`,
+//! guarding against `..` escapes and absolute-path breakouts.
 //! Every built-in tool's execute is truly async (`tokio::fs` / `tokio::process`;
-//! grep/glob directory traversal is a sync API wrapped in `spawn_blocking` internally). Later milestones
-//! add web / browser tools; the execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
+//! grep/glob directory traversal is a sync API wrapped in `spawn_blocking` internally).
+//! The execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
 
 mod fs;
 mod html;
@@ -93,6 +96,32 @@ pub fn is_sensitive_env_name(name: &str) -> bool {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+}
+
+/// Build a business-failure output: the reason is fed back to the model for self-correction.
+///
+/// Canonical crate-wide copy (like [`is_sensitive_env_name`]): the failure-semantics contract,
+/// message wording included, is maintained in one place instead of a per-module private copy.
+pub(crate) fn err_output(reason: impl Into<String>) -> ToolOutput {
+    ToolOutput {
+        content: reason.into(),
+        is_error: true,
+    }
+}
+
+/// Extract a required string parameter; missing or mistyped params yield a business-failure output.
+pub(crate) fn req_str<'a>(
+    input: &'a serde_json::Value,
+    key: &str,
+) -> std::result::Result<&'a str, ToolOutput> {
+    input
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            err_output(format!(
+                "missing or invalid parameter '{key}' (string required)"
+            ))
+        })
 }
 
 /// Tool abstraction.
@@ -182,7 +211,8 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Register the built-in tools (file / search / shell), **excluding** `todowrite`.
+    /// Register the built-in tools (file / search / command / LSP / web /
+    /// spill), **excluding** `todowrite`.
     ///
     /// `todowrite` must be injected by the caller via [`Registry::with_todo_write`], sharing the same handle
     /// as the [`TodoStore`] in the session config.

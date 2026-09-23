@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
 
 /// Default timeout: 60 s.
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
@@ -36,14 +36,6 @@ fn python_candidates() -> &'static [&'static str] {
 /// Node has a single conventional binary name on every platform.
 fn node_candidates() -> &'static [&'static str] {
     &["node"]
-}
-
-/// Build a business-failure output so the model can self-correct.
-fn err_output(reason: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: reason.into(),
-        is_error: true,
-    }
 }
 
 /// Look up the first candidate present on `PATH` (existence probe only;

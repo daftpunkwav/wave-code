@@ -15,8 +15,6 @@ operations-bootstrap = { path = "../../operations/bootstrap" }
 operations-eval = { path = "../../operations/eval" }
 operations-observe = { path = "../../operations/observe" }
 wavecode-wire = { path = "../../foundation/wire" }
-wavecode-tools = { path = "../../capabilities/tools" }
-wavecode-skills = { path = "../../capabilities/skills" }
 state-persistence = { path = "../../state/persistence" }
 wavecode-config = { path = "../../foundation/config" }
 console-ui = { path = "../console" }

@@ -792,8 +792,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wavecode-config",
- "wavecode-skills",
- "wavecode-tools",
  "wavecode-wire",
 ]
 

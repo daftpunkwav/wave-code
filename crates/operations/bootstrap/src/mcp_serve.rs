@@ -62,6 +62,25 @@ pub async fn run_stdio_server(
     serve_loop(&registry, &adapter, reader, writer).await
 }
 
+/// Serve the built-in tool registry over the process stdio streams until
+/// EOF.
+///
+/// The credential-free `mcp serve` surface: the full builtin registry
+/// (including `todowrite`) with a cwd-only execution context. Registry
+/// construction lives here, in the composition root, so frontends keep
+/// depending on this crate instead of naming the tools crate directly.
+pub async fn run_builtin_stdio_server(cwd: std::path::PathBuf) -> std::io::Result<()> {
+    let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
+    run_stdio_server(
+        Arc::new(registry),
+        wavecode_tools::ToolCtx {
+            cwd,
+            deny_env: Vec::new(),
+        },
+    )
+    .await
+}
+
 /// Serve loop over explicit streams (the duplex-testable core behind
 /// [`run_stdio_server`]).
 async fn serve_loop<R, W>(

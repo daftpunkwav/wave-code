@@ -1582,16 +1582,9 @@ fn effective_model(model_override: &Option<String>, config: &wavecode_config::Co
 /// Needs no model credentials: it exposes local tools, so it returns
 /// before session assembly.
 async fn run_mcp_serve(cwd: PathBuf) -> anyhow::Result<()> {
-    let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
-    operations_bootstrap::mcp_serve::run_stdio_server(
-        std::sync::Arc::new(registry),
-        wavecode_tools::ToolCtx {
-            cwd,
-            deny_env: Vec::new(),
-        },
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("mcp server failed: {e}"))
+    operations_bootstrap::mcp_serve::run_builtin_stdio_server(cwd)
+        .await
+        .map_err(|e| anyhow::anyhow!("mcp server failed: {e}"))
 }
 
 /// Drive ACP sessions over stdio until EOF.
@@ -1619,22 +1612,19 @@ async fn run_acp(
 
 /// List installed plugin packs with skill/MCP/hook counts.
 fn run_plugin_list(home: Option<PathBuf>) {
-    let loader = wavecode_skills::plugin::PluginLoader::load(home.as_deref());
-    for warning in loader.warnings() {
+    let (plugins, warnings) =
+        operations_bootstrap::plugin_inventory::discover_plugin_summaries(home.as_deref());
+    for warning in &warnings {
         eprintln!("[warn] {warning}");
     }
-    if loader.plugins().is_empty() {
+    if plugins.is_empty() {
         println!("(no plugins installed)");
         return;
     }
-    for plugin in loader.plugins() {
+    for plugin in &plugins {
         println!(
             "{} {} (skills: {}, mcp servers: {}, hooks: {})",
-            plugin.name,
-            plugin.version,
-            plugin.skill_count(),
-            plugin.mcp_count(),
-            plugin.hook_count()
+            plugin.name, plugin.version, plugin.skills, plugin.mcp_servers, plugin.hooks
         );
     }
 }
@@ -3266,8 +3256,9 @@ model = "m2"
 
     /// Crate boundary: the binary's workspace edges stay exactly the
     /// composition it was assembled against (actor, bootstrap, observe,
-    /// eval, wire, persistence, config, tui). New internal deps need a
-    /// deliberate matrix update, not a silent Cargo.toml line.
+    /// eval, wire, persistence, config, tui). Concrete capability crates
+    /// are reached only through bootstrap surfaces; new internal deps
+    /// need a deliberate matrix update, not a silent Cargo.toml line.
     #[test]
     fn dependency_matrix_locked() {
         let mut in_deps = false;
@@ -3294,8 +3285,6 @@ model = "m2"
                 "safety-secrets",
                 "state-persistence",
                 "wavecode-config",
-                "wavecode-skills",
-                "wavecode-tools",
                 "wavecode-wire",
             ],
             "harness internal deps changed; update the matrix deliberately",

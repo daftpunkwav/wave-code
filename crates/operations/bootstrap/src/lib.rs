@@ -43,6 +43,7 @@ pub mod model_adapter;
 pub mod native;
 pub mod plan_adapter;
 pub mod plan_tools;
+pub mod plugin_inventory;
 pub mod policy_adapter;
 pub mod prune_adapter;
 pub mod rate_limit;

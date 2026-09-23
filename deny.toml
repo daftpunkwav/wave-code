@@ -1,0 +1,47 @@
+# cargo-deny: supply-chain gate for the workspace. CI runs
+# `cargo deny check` on every push/PR; keep this file the single
+# source of truth for what dependencies are acceptable.
+
+[advisories]
+version = 2
+yanked = "deny"
+# No safe upgrades exist; both are tracked leftovers, not forgotten:
+# - yaml-rust (RUSTSEC-2024-0320) rides syntect's parser; serde_yaml's
+#   archive is the same family. Move when a syntect release drops it.
+# - bincode (RUSTSEC-2025-0141) is a transitive guest, not our format.
+ignore = [
+  "RUSTSEC-2024-0320",
+  "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CDLA-Permissive-2.0",
+  # error-code (windows-rs sibling crates) ships under the Boost
+  # Software License — permissive, OSI-recognised.
+  "BSL-1.0",
+]
+
+[bans]
+# Multiple versions of the same crate are a smell but common with
+# deep trees (base64/bitflags pairs); warn until a release actually
+# ships, then consider tightening.
+multiple-versions = "warn"
+# Workspace-internal path dependencies carry no version field by
+# design (single monorepo, one version), which this check reads as a
+# wildcard; warn keeps that visible without failing the gate.
+wildcards = "warn"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

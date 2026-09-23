@@ -5,7 +5,25 @@ on:
     branches: [main]
   pull_request:
 
-jobs:
+  # Real MSRV (verified: locked tree-sitter 0.27 needs 1.90); a check
+  # rather than the full test suite keeps this leg fast — the stable
+  # legs carry the tests.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo check --workspace --locked
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
   # The PR title becomes the squash-merge commit message, so it must
   # already satisfy the repo's Conventional Commits rule.
   title:

@@ -16,3 +16,7 @@ bytes.workspace = true
 base64.workspace = true
 # tokio::time is a production dependency for stream stall detection (stall_guard), not test-only.
 tokio.workspace = true
+
+[dev-dependencies]
+# test-util: paused-clock tests for the bounded request-establishment timeout.
+tokio = { workspace = true, features = ["test-util"] }

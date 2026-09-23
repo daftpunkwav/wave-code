@@ -376,6 +376,15 @@ impl ModelGateway for ModelAdapter {
                 }
             }
         }
+        // A clean stream end while a tool call was still open (no BlockEnd,
+        // no MessageComplete) is a torn response, not a completed one:
+        // silently dropping the pending call would surface as an empty
+        // "completed" turn, so fail the sample into the existing error path.
+        if pending.is_some() {
+            return Err(SampleError::Transport(
+                "stream ended mid-tool-call without a completion event".to_string(),
+            ));
+        }
         Ok(SampleResponse {
             blocks,
             input_tokens,
@@ -580,6 +589,23 @@ mod tests {
                 name: "write".to_string(),
                 input: serde_json::json!({"_raw": "just a string"}),
             }]
+        );
+    }
+
+    /// A stream that ends cleanly mid-tool-call (no BlockEnd, no
+    /// MessageComplete) must fail the sample instead of silently returning
+    /// an empty "completed" response with the model's tool call dropped.
+    #[tokio::test]
+    async fn stream_ending_mid_tool_call_is_an_error() {
+        let outcome = adapter(vec![StreamEvent::ToolUseBegin {
+            id: "c1".to_string(),
+            name: "shell".to_string(),
+        }])
+        .sample(request())
+        .await;
+        assert!(
+            matches!(outcome, Err(SampleError::Transport(ref message)) if message.contains("mid-tool-call")),
+            "{outcome:?}"
         );
     }
 

@@ -119,19 +119,22 @@ impl ChatModel for OpenAIClient {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .header("content-type", "application/json")
-            .json(&build_request_body(
-                &req,
-                model,
-                reasoning_effort.as_deref(),
-            ))
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        // Bounded establishment: a server that accepts the connection but
+        // never answers would otherwise hang `.send()` forever (see
+        // [`sse::send_with_idle_bound`]).
+        let response = crate::sse::send_with_idle_bound(
+            self.http
+                .post(url)
+                .bearer_auth(&self.api_key)
+                .header("content-type", "application/json")
+                .json(&build_request_body(
+                    &req,
+                    model,
+                    reasoning_effort.as_deref(),
+                ))
+                .send(),
+        )
+        .await?;
 
         let status = response.status();
         if !status.is_success() {

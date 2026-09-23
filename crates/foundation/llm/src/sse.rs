@@ -281,6 +281,25 @@ pub(crate) const MAX_SSE_BUF: usize = 8 * 1024 * 1024;
 /// zero bytes basically leaves a dead connection as the only explanation.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Await a request-establishment future (POST issued, awaiting response
+/// headers) under the same idle bound as the stream: `connect_timeout` only
+/// covers the TCP/TLS connect and [`stall_guard`] only starts once headers
+/// are back, so a server that accepts the connection and never answers would
+/// otherwise hang `.send()` - and with it the whole sampling turn - forever.
+/// Timing out maps to [`LlmError::Timeout`], which the retry policy treats as
+/// transient (bounded attempts and deadline), so a blackholed endpoint
+/// recovers through the existing retry path.
+pub(crate) async fn send_with_idle_bound(
+    fut: impl std::future::Future<Output = std::result::Result<reqwest::Response, reqwest::Error>>,
+) -> Result<reqwest::Response> {
+    match tokio::time::timeout(STREAM_IDLE_TIMEOUT, fut).await {
+        Ok(result) => result.map_err(|e| LlmError::Http(e.to_string())),
+        Err(_) => Err(LlmError::Timeout(format!(
+            "request establishment timed out: no response headers within {STREAM_IDLE_TIMEOUT:?}"
+        ))),
+    }
+}
+
 /// Byte-stream stall guard: wraps each `next()` with an idle timeout; a timeout ends the stream with
 /// [`LlmError::Timeout`]. It sits upstream of [`decode_sse_frames`] rather than inside it,
 /// keeping frame-parsing logic orthogonal to the timeout policy (tests can drive each independently).
@@ -676,5 +695,45 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// An establishment that never completes must surface as
+    /// [`LlmError::Timeout`] (the retry policy's transient class) instead of
+    /// hanging the sampling turn forever. Paused time fires the 120s idle
+    /// bound instantly, so the test needs no real waiting.
+    #[tokio::test(start_paused = true)]
+    async fn request_establishment_hang_maps_to_timeout() {
+        let outcome = send_with_idle_bound(std::future::pending()).await;
+        assert!(
+            matches!(outcome, Err(LlmError::Timeout(ref message)) if message.contains("request establishment timed out")),
+            "{outcome:?}"
+        );
+    }
+
+    /// A response that does arrive is handed back untouched: the bound must
+    /// not turn healthy establishments into errors.
+    #[tokio::test]
+    async fn request_establishment_passes_successful_responses_through() {
+        // Minimal HTTP/1.1 server on a loopback port; no client behavior
+        // beyond "headers came back" is under test here.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let response = send_with_idle_bound(client.get(format!("http://{addr}/")).send())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        server.await.unwrap();
     }
 }

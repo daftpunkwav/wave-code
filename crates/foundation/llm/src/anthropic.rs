@@ -98,20 +98,23 @@ fn build_http_client() -> Result<reqwest::Client> {
 impl ChatModel for AnthropicClient {
     async fn stream(&self, req: ChatRequest) -> Result<EventStream> {
         let url = messages_url(&self.base_url);
-        let response = self
-            .http
-            .post(url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&build_request_body(
-                &req,
-                self.prompt_caching,
-                self.thinking_budget,
-            ))
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
+        // Bounded establishment: a server that accepts the connection but
+        // never answers would otherwise hang `.send()` forever (see
+        // [`sse::send_with_idle_bound`]).
+        let response = crate::sse::send_with_idle_bound(
+            self.http
+                .post(url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&build_request_body(
+                    &req,
+                    self.prompt_caching,
+                    self.thinking_budget,
+                ))
+                .send(),
+        )
+        .await?;
 
         let status = response.status();
         if !status.is_success() {

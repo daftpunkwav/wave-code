@@ -190,6 +190,11 @@ impl ChildTransport {
     }
 
     /// Send one request, returning its correlation id.
+    ///
+    /// The write is bounded by the same timeout as the response read: a
+    /// server that wedged without reading stdin fills the pipe buffer, and
+    /// an unbounded `write_all` would hang the caller (and with it the whole
+    /// turn) forever instead of surfacing a timeout the bridge can heal from.
     pub async fn send_request(
         &mut self,
         method: impl Into<String>,
@@ -202,16 +207,29 @@ impl ChildTransport {
             method: method.into(),
             params,
         };
-        self.stdin.write_all(request.encode().as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        let line = request.encode();
+        self.bounded_write(line.as_bytes()).await?;
+        self.bounded_write(b"\n").await?;
         Ok(id)
+    }
+
+    /// One timeout-bounded write plus flush of `payload`.
+    async fn bounded_write(&mut self, payload: &[u8]) -> Result<(), TransportError> {
+        let write = async {
+            self.stdin.write_all(payload).await?;
+            self.stdin.flush().await?;
+            Ok(())
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(self.timeout_secs), write)
+            .await
+            .map_err(|_| TransportError::Timeout(self.timeout_secs))?
     }
 
     /// Send a JSON-RPC notification (no id, no response expected).
     ///
     /// Used for `notifications/initialized`, which the protocol requires
-    /// after `initialize` and which must not carry a request id.
+    /// after `initialize` and which must not carry a request id. Timeout
+    /// semantics match [`ChildTransport::send_request`].
     pub async fn send_notification(
         &mut self,
         method: impl Into<String>,
@@ -223,9 +241,8 @@ impl ChildTransport {
             "params": params,
         })
         .to_string();
-        self.stdin.write_all(line.as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        self.bounded_write(line.as_bytes()).await?;
+        self.bounded_write(b"\n").await?;
         Ok(())
     }
 
@@ -369,5 +386,70 @@ mod tests {
             .await
             .unwrap();
         drop(server_write);
+    }
+
+    /// Spawn a live child that never reads stdin and never writes stdout
+    /// (`waitfor` on Windows, `sleep` elsewhere): it stays alive for the
+    /// whole test without touching either pipe. `signal` must be unique per
+    /// test — same-name waiters on one machine disturb each other. Dropped
+    /// transports kill the child via `kill_on_drop`, so nothing leaks past
+    /// the test.
+    async fn spawn_wedged_server(signal: &str, timeout_secs: u64) -> ChildTransport {
+        let (command, args): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "waitfor",
+                vec!["/t".into(), "30".into(), signal.to_string()],
+            )
+        } else {
+            ("sleep", vec!["30".into()])
+        };
+        ChildTransport::spawn(command, args, timeout_secs)
+            .await
+            .expect("wedge child spawns")
+    }
+
+    /// A server that stopped reading stdin wedges `write_all` once the pipe
+    /// buffer fills: `send_request` must surface the bounded-write timeout
+    /// instead of hanging the caller (and with it the whole turn) forever.
+    #[tokio::test]
+    async fn write_times_out_when_the_server_stops_reading_stdin() {
+        let mut transport = spawn_wedged_server("WaveCodeNeverWrite", 1).await;
+        // Far larger than any OS pipe buffer, so the unbounded write pends.
+        let params = serde_json::json!({"pad": "x".repeat(4 * 1024 * 1024)});
+        let started = std::time::Instant::now();
+        let outcome = transport.send_request("tools/call", params).await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, Err(TransportError::Timeout(1))),
+            "expected the bounded write to time out: {outcome:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(900),
+            "timeout fired before its bound: {elapsed:?}"
+        );
+    }
+
+    /// A server that never answers wedges the response read: `recv_response`
+    /// must surface its timeout instead of blocking the caller forever.
+    #[tokio::test]
+    async fn read_times_out_when_the_server_never_answers() {
+        let mut transport = spawn_wedged_server("WaveCodeNeverRead", 1).await;
+        // A small request fits every pipe buffer, so the write succeeds and
+        // the timeout can only come from the read side.
+        transport
+            .send_request("ping", serde_json::Value::Null)
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let outcome = transport.recv_response().await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(outcome, Err(TransportError::Timeout(1))),
+            "expected the response read to time out: {outcome:?}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_millis(900),
+            "timeout fired before its bound: {elapsed:?}"
+        );
     }
 }

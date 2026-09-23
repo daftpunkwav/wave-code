@@ -1,8 +1,0 @@
-blank_issues_enabled: false
-contact_links:
-  - name: Security vulnerabilities
-    url: https://github.com/daftpunkwav/wave-code/security/advisories/new
-    about: Please report anything exploit-looking privately, not as an issue.
-  - name: Documentation
-    url: https://github.com/daftpunkwav/wave-code/tree/main/docs
-    about: Architecture notes and subsystem guides.

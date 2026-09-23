@@ -200,7 +200,12 @@ pub fn resolve_permission_mode(
     config_value
         .and_then(|raw| {
             let parsed = wavecode_protocol::PermissionMode::parse(raw);
-            if parsed.is_some() && matches!(raw, "default" | "acceptEdits" | "bypassPermissions") {
+            if parsed.is_some()
+                && matches!(
+                    raw,
+                    "guarded" | "default" | "acceptEdits" | "bypassPermissions" | "yolo"
+                )
+            {
                 warnings.push(format!(
                     "permission_mode {raw:?} is a legacy name; use plan, auto, or wave"
                 ));
@@ -1752,9 +1757,9 @@ api_key = "k-inline"
     #[test]
     fn config_permission_used_without_override() {
         let mut warnings = Vec::new();
-        let mode = resolve_permission_mode(Some("guarded"), None, &mut warnings);
+        let mode = resolve_permission_mode(Some("auto"), None, &mut warnings);
         assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
-        assert!(warnings.is_empty());
+        assert!(warnings.is_empty(), "canonical names never warn");
         let mode = resolve_permission_mode(None, None, &mut warnings);
         assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
         assert!(warnings.is_empty());
@@ -1762,14 +1767,23 @@ api_key = "k-inline"
 
     #[test]
     fn legacy_mode_names_migrate_with_a_visible_warning() {
-        let mut warnings = Vec::new();
-        let mode = resolve_permission_mode(Some("acceptEdits"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Auto);
-        assert!(warnings.iter().any(|w| w.contains("legacy name")));
-        warnings.clear();
-        let mode = resolve_permission_mode(Some("bypassPermissions"), None, &mut warnings);
-        assert_eq!(mode, wavecode_protocol::PermissionMode::Wave);
-        assert!(warnings.iter().any(|w| w.contains("legacy name")));
+        // Every legacy alias `PermissionMode::parse` accepts warns, so an
+        // old config's mode drift is always visible in the startup output.
+        for (raw, expected) in [
+            ("guarded", wavecode_protocol::PermissionMode::Auto),
+            ("default", wavecode_protocol::PermissionMode::Auto),
+            ("acceptEdits", wavecode_protocol::PermissionMode::Auto),
+            ("bypassPermissions", wavecode_protocol::PermissionMode::Wave),
+            ("yolo", wavecode_protocol::PermissionMode::Wave),
+        ] {
+            let mut warnings = Vec::new();
+            let mode = resolve_permission_mode(Some(raw), None, &mut warnings);
+            assert_eq!(mode, expected, "{raw}");
+            assert!(
+                warnings.iter().any(|w| w.contains("legacy name")),
+                "{raw} must warn"
+            );
+        }
     }
 
     #[test]

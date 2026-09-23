@@ -90,7 +90,9 @@ pub enum Op {
     },
     /// Switch the session permission mode by wire name.
     SetPermissionMode {
-        /// Mode wire name, e.g. `plan` or `acceptEdits`.
+        /// Mode wire name, e.g. `plan` or `wave` (the canonical names of
+        /// `wavecode_protocol::PermissionMode`; legacy aliases such as
+        /// `acceptEdits` also parse, with a warning downstream).
         mode: String,
     },
     /// Switch the sampling model by wire name (same provider only;
@@ -226,7 +228,10 @@ impl ToolCallPreview {
 /// One outbound event, correlated with a submission by `id`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
-    /// Correlation id of the originating submission.
+    /// Correlation id of the originating submission. Events raised outside
+    /// any submission (session lifecycle: startup hints, teardown notices)
+    /// carry a harness-reserved synthetic id instead of a caller id, so
+    /// consumers must not treat "no matching submission" as corruption.
     pub id: String,
     /// The event payload.
     #[serde(flatten)]

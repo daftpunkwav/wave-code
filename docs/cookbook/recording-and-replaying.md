@@ -2,6 +2,8 @@
 
 A "recording" is the session's wire event stream serialized as JSONL. Every `Event` (`crates/foundation/wire/src/lib.rs`) derives `Serialize`/`Deserialize` with a flattened `EventMsg` (`#[serde(tag = "type", rename_all = "snake_case")]`), so one event is exactly one JSON object with an `id` field and a `type` discriminator — the same shape committed under `benchmarks/fixtures/*.json`.
 
+One exception: a live `wavecode exec --json` recording opens with a single control line, `{"meta":"session",…}`, carrying the session id and its resume command (no `id`/`type`). It is session bookkeeping, not an event; `read_events_jsonl` skips it, and hand-rolled loaders should too. Committed fixtures contain events only.
+
 ## 1. Record
 
 The headless exec path already emits this format:

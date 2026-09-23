@@ -198,9 +198,17 @@ pub fn evaluate_recorded(cases: &[RecordedCase]) -> ReplayReport {
     ReplayReport { results }
 }
 
+/// True when a JSONL line is a harness control line rather than a wire
+/// event: it carries a `meta` key and no event `type`. Exec recordings
+/// open with one such line (`{"meta":"session",…}`, the resume handle).
+fn is_meta_control_line(value: &serde_json::Value) -> bool {
+    value.get("meta").is_some() && value.get("type").is_none()
+}
+
 /// Load a recording from JSONL (one serialized [`Event`] per line; blank
-/// lines skipped; malformed lines fail loudly — a recording is a test
-/// fixture, not untrusted user data).
+/// lines skipped; the leading `{"meta":"session",…}` control line
+/// `wavecode exec --json` emits is recognized and skipped; malformed lines
+/// fail loudly — a recording is a test fixture, not untrusted user data).
 pub fn read_events_jsonl(path: &std::path::Path) -> std::io::Result<Vec<Event>> {
     let text = std::fs::read_to_string(path)?;
     let mut events = Vec::new();
@@ -208,7 +216,16 @@ pub fn read_events_jsonl(path: &std::path::Path) -> std::io::Result<Vec<Event>> 
         if line.trim().is_empty() {
             continue;
         }
-        events.push(serde_json::from_str(line).map_err(|e| {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{} line {}: {e}", path.display(), index + 1),
+            )
+        })?;
+        if is_meta_control_line(&value) {
+            continue;
+        }
+        events.push(serde_json::from_value(value).map_err(|e| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("{} line {}: {e}", path.display(), index + 1),
@@ -464,6 +481,56 @@ mod tests {
             "{\"id\":\"s1\",\"type\":\"turn_started\"}\nnot json\n",
         )
         .unwrap();
+        let err = read_events_jsonl(&path).unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
+    }
+
+    /// `wavecode exec --json` opens its recording with the
+    /// `{"meta":"session",…}` resume-handle control line (no `id`/`type`).
+    /// The loader must skip it — otherwise no real exec recording could be
+    /// reloaded — while malformed event lines still fail with locations.
+    #[test]
+    fn exec_session_meta_line_is_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exec.jsonl");
+        let events = vec![
+            event("s1", EventMsg::TurnStarted { model: "m".into() }),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        let mut text = serde_json::json!({
+            "meta": "session",
+            "session_id": "abc",
+            "version": "0.0.0",
+            "resume": "wavecode --session abc",
+        })
+        .to_string();
+        text.push('\n');
+        text.push_str(
+            &events
+                .iter()
+                .map(|e| serde_json::to_string(e).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        std::fs::write(&path, text).unwrap();
+        assert_eq!(read_events_jsonl(&path).unwrap(), events);
+
+        // A meta key on an actual event line never hides the event: the
+        // `type` field wins.
+        let mixed =
+            "{\"id\":\"s1\",\"type\":\"turn_started\",\"model\":\"m\"}\n{\"meta\":\"session\"}\n"
+                .to_string();
+        let path = dir.path().join("mixed.jsonl");
+        std::fs::write(&path, mixed).unwrap();
+        let loaded = read_events_jsonl(&path).unwrap();
+        assert_eq!(loaded.len(), 1, "only the event line loads");
+        assert!(matches!(loaded[0].msg, EventMsg::TurnStarted { .. }));
+
+        // A line that is neither a control line nor a valid event still
+        // fails loudly with its location (meta lines only excuse
+        // themselves, never later damage).
+        let path = dir.path().join("torn.jsonl");
+        std::fs::write(&path, "{\"meta\":\"session\"}\n{\"id\":\"s1\"}\n").unwrap();
         let err = read_events_jsonl(&path).unwrap_err();
         assert!(err.to_string().contains("line 2"), "{err}");
     }

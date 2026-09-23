@@ -39,7 +39,9 @@ use crate::durable::{
 };
 
 /// Synthetic correlation id for session lifecycle warnings, which belong
-/// to no submission.
+/// to no submission. Reserved across the wire (see `wavecode_wire::Event`):
+/// frontends match it by value, so changing the spelling is a breaking
+/// protocol change.
 const LIFECYCLE_ID: &str = "session-lifecycle";
 
 /// Serial session driver, generic over the turn-driving seam.

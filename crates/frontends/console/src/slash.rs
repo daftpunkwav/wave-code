@@ -175,12 +175,18 @@ pub fn cycle_mode(current: &str) -> String {
 }
 
 /// Normalize a user-supplied mode onto the canonical wire names
-/// (legacy aliases included; see `PermissionMode::parse`).
+/// (legacy aliases included; mirrors `PermissionMode::parse`).
+///
+/// Unknown inputs pass through unchanged instead of silently widening to
+/// `auto`: the actor rejects unparseable names with a visible warning and
+/// the mode stays put, so a typo in `/permissions <name>` can never flip a
+/// plan session into auto.
 pub fn normalize_mode(input: &str) -> String {
     match input.to_lowercase().as_str() {
         "plan" => "plan".to_string(),
+        "auto" | "guarded" | "default" | "acceptedits" => "auto".to_string(),
         "wave" | "yolo" | "bypasspermissions" => "wave".to_string(),
-        _ => "auto".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -363,6 +369,11 @@ mod tests {
         assert_eq!(normalize_mode("YOLO"), "wave");
         assert_eq!(normalize_mode("plan"), "plan");
         assert_eq!(normalize_mode("guarded"), "auto");
-        assert_eq!(normalize_mode("nonsense"), "auto");
+        // The remaining legacy aliases map like PermissionMode::parse.
+        assert_eq!(normalize_mode("acceptEdits"), "auto");
+        assert_eq!(normalize_mode("bypassPermissions"), "wave");
+        // Unknown names pass through so the actor's rejection warning
+        // fires and the mode stays, instead of silently widening to auto.
+        assert_eq!(normalize_mode("nonsense"), "nonsense");
     }
 }

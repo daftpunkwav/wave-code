@@ -37,6 +37,13 @@ const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
 /// Fallback token lifetime when the token endpoint omits `expires_in`.
 const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 3600;
 
+/// Cap on one response body read into memory. A hostile or wedged MCP
+/// server can otherwise stream for the whole request timeout at link rate
+/// and balloon the process (gigabytes over a localhost pipe). Above the
+/// cap the response is a protocol error, never a truncated parse — a cut
+/// JSON-RPC message cannot be trusted. Aligned with the LSP frame cap.
+const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+
 /// OAuth 2.0 client-credentials grant configuration.
 ///
 /// Only the machine-to-machine grant is supported. Interactive grants
@@ -252,10 +259,9 @@ impl HttpMcp {
                 "MCP HTTP request failed with status {status}"
             )));
         }
-        let bytes = tokio::time::timeout(recall, response.bytes())
+        let bytes = tokio::time::timeout(recall, read_capped(response, MAX_BODY_BYTES))
             .await
-            .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))?
-            .map_err(|e| TransportError::Http(format!("MCP HTTP response read failed: {e}")))?;
+            .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
         parse_response_body(&bytes)
     }
 
@@ -366,10 +372,9 @@ async fn fetch_client_credentials(
     .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))?
     .map_err(|e| TransportError::Http(format!("OAuth token request failed: {e}")))?;
     let status = response.status();
-    let bytes = tokio::time::timeout(recall, response.bytes())
+    let bytes = tokio::time::timeout(recall, read_capped(response, MAX_BODY_BYTES))
         .await
-        .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))?
-        .map_err(|e| TransportError::Http(format!("OAuth token response read failed: {e}")))?;
+        .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
     if !status.is_success() {
         return Err(TransportError::Http(format!(
             "OAuth token request failed with status {status}: {}",
@@ -413,6 +418,35 @@ fn form_encode(input: &str) -> String {
 fn preview(bytes: &[u8]) -> String {
     const MAX: usize = 200;
     String::from_utf8_lossy(&bytes[..bytes.len().min(MAX)]).into_owned()
+}
+
+/// Read one response body into memory with a hard byte cap.
+///
+/// Streams chunk by chunk so the process never holds more than `cap`
+/// bytes plus one chunk, whatever the server sends; a body past the cap
+/// is a protocol error rather than a truncation (a cut JSON-RPC message
+/// must never parse "successfully").
+async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>, TransportError> {
+    let mut body: Vec<u8> = Vec::new();
+    let mut response = response;
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len() + chunk.len() > cap {
+                    return Err(TransportError::Protocol(format!(
+                        "MCP response body exceeds the {cap}-byte cap"
+                    )));
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => return Ok(body),
+            Err(e) => {
+                return Err(TransportError::Http(format!(
+                    "MCP HTTP response read failed: {e}"
+                )));
+            }
+        }
+    }
 }
 
 /// Parse one response body: empty means "no content" (e.g. 202 for a
@@ -1151,6 +1185,26 @@ mod tests {
             matches!(error, TransportError::Http(_)) && error.to_string().contains("404"),
             "got: {error}"
         );
+    }
+
+    /// A body past the in-memory cap is a protocol error, never a truncated
+    /// parse or an unbounded read (small cap so the test stays hermetic;
+    /// the shipped cap is 32 MiB).
+    #[tokio::test]
+    async fn response_body_past_the_cap_is_a_protocol_error() {
+        let handler: Handler =
+            Arc::new(|_: &RecordedRequest| (200, json_headers(), vec![b'x'; 1024]));
+        let server = StubServer::spawn(handler).await;
+        let response = reqwest::get(server.url("/mcp")).await.unwrap();
+        let error = read_capped(response, 16).await.unwrap_err();
+        assert!(
+            matches!(error, TransportError::Protocol(_)) && error.to_string().contains("cap"),
+            "{error}"
+        );
+        // Under the cap the same body reads whole.
+        let response = reqwest::get(server.url("/mcp")).await.unwrap();
+        let body = read_capped(response, 2048).await.unwrap();
+        assert_eq!(body.len(), 1024);
     }
 
     /// SSE edge cases: comments and control lines are ignored, broken `data:`

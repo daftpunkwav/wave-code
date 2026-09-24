@@ -1024,8 +1024,10 @@ where
     /// What is left of the budgets only the loop can see, phrased for the
     /// model. A continuation without these numbers invites the model to open
     /// new work it has no room to finish; with them it can choose to wrap up,
-    /// compact, or report the blocker instead.
-    fn budget_line(&self, used: u64, state: &TurnState, continuations: u8) -> String {
+    /// compact, or report the blocker instead. `window` is the live context
+    /// window for this iteration (see [`Self::effective_window`]), so the
+    /// line stays truthful after a `/model` switch.
+    fn budget_line(&self, used: u64, window: u64, state: &TurnState, continuations: u8) -> String {
         let ceiling = self
             .cfg
             .max_tool_rounds
@@ -1033,8 +1035,8 @@ where
         let round = state.tool_rounds;
         let rearms = state.round_rearms;
         format!(
-            "Budget: {used} of {} context tokens used; tool round {round} of {ceiling} (ceiling re-armed {rearms} of {}); goal continuation {continuations} of {}.",
-            self.cfg.context_window, self.cfg.max_goal_rearms, self.cfg.max_goal_continuations
+            "Budget: {used} of {window} context tokens used; tool round {round} of {ceiling} (ceiling re-armed {rearms} of {}); goal continuation {continuations} of {}.",
+            self.cfg.max_goal_rearms, self.cfg.max_goal_continuations
         )
     }
 
@@ -1262,7 +1264,7 @@ where
                             state.round_rearms, self.cfg.max_goal_rearms
                         ),
                     });
-                    let budget = self.budget_line(used, &state, 0);
+                    let budget = self.budget_line(used, window, &state, 0);
                     conv.push(Role::User, self.goals.reminder(&budget));
                     continue;
                 }
@@ -1513,7 +1515,7 @@ where
                             goal_continuations, self.cfg.max_goal_continuations
                         ),
                     });
-                    let budget = self.budget_line(used, &state, goal_continuations);
+                    let budget = self.budget_line(used, window, &state, goal_continuations);
                     conv.push(Role::User, self.goals.reminder(&budget));
                     continue;
                 }

@@ -256,9 +256,14 @@ fn watcher_tick(registry: &'static std::sync::Mutex<Registry>) {
     for pid in candidates {
         let job = {
             let mut guard = crate::lock(registry);
-            let Some(pending) = guard.pending.pop() else {
+            // FIFO: take the oldest pending (pop from the front) so an
+            // armed spawn pairs with its own job under concurrent arms.
+            // Every pending job is created identically, so a swap would be
+            // harmless — the order only keeps the pairing predictable.
+            if guard.pending.is_empty() {
                 break;
-            };
+            }
+            let pending = guard.pending.remove(0);
             // Mark handled before any fallible step so a pid is never
             // processed twice even if assignment panics mid-flight.
             guard.handled.insert(pid);

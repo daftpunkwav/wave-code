@@ -99,6 +99,11 @@ impl Screen {
     }
 
     fn synchronized_start(&self, out: &mut impl std::io::Write) {
+        // The hardware cursor stays hidden for the whole frame: it is
+        // shown again only at the editor caret (place_hardware_cursor),
+        // so a frame that ends below the editor (transcript, footer,
+        // streaming rows) can never park a blinking cursor there.
+        let _ = out.write_all(b"\x1b[?25l");
         if self.options.synchronized {
             let _ = out.write_all(b"\x1b[?2026h");
         }
@@ -256,8 +261,10 @@ impl Screen {
         self.place_hardware_cursor(out, lines, columns, height);
     }
 
-    /// Position the hardware cursor at an embedded [`CURSOR_MARKER`] so
-    /// IME popups land in the right cell.
+    /// Position the hardware cursor at an embedded [`CURSOR_MARKER`] and
+    /// show it there — the input editor's caret is the only cell where
+    /// the cursor is ever visible. Frames without a marker (dialog
+    /// chrome, scroll labels) leave the cursor hidden.
     fn place_hardware_cursor(
         &mut self,
         out: &mut impl std::io::Write,
@@ -270,7 +277,7 @@ impl Screen {
                 let cleaned = line.replace(CURSOR_MARKER, "");
                 let col = width::width(&cleaned[..byte]);
                 let row = (index - self.base).min(height.saturating_sub(1));
-                let _ = write!(out, "\x1b[{};{}H", row + 1, col + 1);
+                let _ = write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1);
                 self.cursor_row = row;
                 return;
             }
@@ -306,11 +313,15 @@ mod tests {
         let mut out = Vec::new();
         draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
         let text = String::from_utf8(out).unwrap();
+        // The frame opens by hiding the hardware cursor: rows below the
+        // editor (transcript, footer) must never carry a blinking caret.
+        assert!(text.starts_with("\x1b[?25lalpha"), "hide first: {text:?}");
         assert!(text.contains("alpha\x1b[0m"), "reset appended: {text:?}");
         assert!(text.contains("beta"));
+        // No caret row in the frame: the cursor stays hidden.
         assert!(
-            text.starts_with("alpha"),
-            "no clear on first draw: {text:?}"
+            !text.contains("\x1b[?25h"),
+            "no show without caret: {text:?}"
         );
     }
 
@@ -347,7 +358,10 @@ mod tests {
         assert!(text.contains("BETA"), "{text:?}");
         assert!(!text.contains("alpha\x1b[0m"), "line 0 untouched: {text:?}");
         assert!(!text.contains("gamma\x1b[0m"), "line 2 untouched: {text:?}");
-        assert!(text.starts_with("\r\x1b[1A"), "cursor moved up: {text:?}");
+        assert!(
+            text.starts_with("\x1b[?25l\r\x1b[1A"),
+            "hide then cursor moved up: {text:?}"
+        );
     }
 
     #[test]
@@ -374,7 +388,10 @@ mod tests {
         out.clear();
         draw(&mut screen, &mut out, &["alpha"], 60, 10);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("\x1b[2J\x1b[H"), "clear + home: {text:?}");
+        assert!(
+            text.starts_with("\x1b[?25l\x1b[2J\x1b[H"),
+            "hide, erase + home: {text:?}"
+        );
         assert!(text.contains("alpha"));
     }
 
@@ -393,7 +410,10 @@ mod tests {
         out.clear();
         draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("\x1b[2J\x1b[H"), "erase + home: {text:?}");
+        assert!(
+            text.starts_with("\x1b[?25l\x1b[2J\x1b[H"),
+            "erase + home after hide: {text:?}"
+        );
         assert_eq!(text.matches("alpha").count(), 1, "single copy: {text:?}");
     }
 
@@ -406,8 +426,35 @@ mod tests {
         let mut out = Vec::new();
         draw(&mut screen, &mut out, &["alpha"], 40, 10);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("\x1b[?2026h"));
+        // Hide precedes the synchronized window; the frame ends with the
+        // sync-end marker (the caret Show, when any, lands after it).
+        assert!(text.starts_with("\x1b[?25l\x1b[?2026h"), "{text:?}");
         assert!(text.ends_with("\x1b[?2026l"));
+    }
+
+    #[test]
+    fn cursor_is_shown_only_at_the_caret_marker() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        // With a caret row: positioned and shown.
+        let mut out = Vec::new();
+        draw(
+            &mut screen,
+            &mut out,
+            &[format!("he{CURSOR_MARKER}llo").as_str()],
+            40,
+            10,
+        );
+        let text = String::from_utf8(out).unwrap();
+        let caret = text.find("\x1b[1;3H").expect("caret positioned");
+        assert!(
+            text[caret..].starts_with("\x1b[1;3H\x1b[?25h"),
+            "shown right after positioning: {text:?}"
+        );
+        // Exactly one show per frame, at the caret.
+        assert_eq!(text.matches("\x1b[?25h").count(), 1, "{text:?}");
     }
 
     #[test]
@@ -495,7 +542,7 @@ mod tests {
             "no downward travel expected: {text:?}"
         );
         assert!(
-            text.starts_with("\r\x1b[1A\x1b[Kx"),
+            text.starts_with("\x1b[?25l\r\x1b[1A\x1b[Kx"),
             "one row up, rewrite in the erased row: {text:?}"
         );
         assert!(text.contains("x\x1b[0m"), "{text:?}");
@@ -510,6 +557,9 @@ mod tests {
         let mut out = Vec::new();
         draw(&mut screen, &mut out, &["0123456789"], 5, 10);
         let text = String::from_utf8(out).unwrap();
-        assert!(text.starts_with("01234"), "truncated: {text:?}");
+        assert!(
+            text.starts_with("\x1b[?25l01234"),
+            "hide, then truncated: {text:?}"
+        );
     }
 }

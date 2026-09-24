@@ -2876,7 +2876,11 @@ dependencies = [
 name = "wavecode-memory"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "serde_json",
  "tempfile",
+ "tokio",
+ "wavecode-tools",
 ]
 
 [[package]]

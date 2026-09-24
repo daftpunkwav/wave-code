@@ -26,6 +26,7 @@ pub mod consolidate;
 pub mod extract;
 pub mod instructions;
 pub mod store;
+pub mod tool;
 
 pub use consolidate::{MERGE_SIMILARITY, plan_merges};
 pub use extract::parse_extracted_entries;

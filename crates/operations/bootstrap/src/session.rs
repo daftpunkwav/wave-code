@@ -38,13 +38,13 @@ use crate::composite::CompositeExecutor;
 use crate::gate_adapter::GateApprovalSource;
 use crate::hook_adapter::HookAdapter;
 use crate::memory_finish::{MemoryFinisher, SessionMemory};
-use crate::memory_tool::MemoryWrite;
 use crate::model_adapter::ModelAdapter;
 use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
 use crate::prune_adapter::PruningExecutor;
 use crate::tool_adapter::ToolAdapter;
+use wavecode_memory::tool::MemoryWrite;
 use wavecode_skills::tool::SkillTool;
 use wavecode_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 

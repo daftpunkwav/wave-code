@@ -14,7 +14,7 @@
 
 //! Memory writes: explicit persistence behind the tool seam.
 
-use wavecode_memory::{MemoryCategory, MemoryStore};
+use crate::{MemoryCategory, MemoryStore};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// `memory_write`: persist one durable memory entry.

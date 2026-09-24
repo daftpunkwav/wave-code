@@ -400,14 +400,22 @@ fn break_before_bold_lines(text: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out: Vec<&str> = Vec::new();
-    let mut in_fence = false;
+    // Track fenced code by marker character: inside a fence only a run
+    // of the same marker closes it, so `~~~` blocks (and backtick runs
+    // inside them) never let a bold-led code line gain a phantom break.
+    let mut fence: Option<char> = None;
     for line in text.split('\n') {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            out.push(line);
-            continue;
+        let trimmed = line.trim_start();
+        match fence {
+            Some(open) if trimmed.starts_with(open) => fence = None,
+            Some(_) => {}
+            None if trimmed.starts_with("```") => fence = Some('`'),
+            None if trimmed.starts_with("~~~") => fence = Some('~'),
+            None => {}
         }
-        if !in_fence && is_bold_led(line) && out.last().is_some_and(|prev| !prev.trim().is_empty())
+        if fence.is_none()
+            && is_bold_led(line)
+            && out.last().is_some_and(|prev| !prev.trim().is_empty())
         {
             out.push("");
         }
@@ -968,6 +976,33 @@ mod tests {
         let mut md = renderer();
         let lines = md.render("```\n**not a heading**\n```", 40);
         assert_eq!(strip_ansi(&lines[1]), "│ **not a heading**");
+    }
+
+    /// Tilde fences are fenced code too: a bold-led line inside a `~~~`
+    /// block must keep its exact content (no phantom blank line), and a
+    /// backtick run inside it must not close the tilde fence early.
+    #[test]
+    fn bold_lines_inside_a_tilde_fence_are_left_alone() {
+        let mut md = renderer();
+        let text = "intro\n~~~\n**not a heading**\n```\n**still code**\n```\n~~~";
+        let lines = md.render(text, 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(
+            plain.iter().any(|l| l == "│ **not a heading**"),
+            "tilde-fenced bold line intact: {plain:?}"
+        );
+        assert!(
+            plain.iter().any(|l| l == "│ **still code**"),
+            "inner backtick run does not close the tilde fence: {plain:?}"
+        );
+        // The break-before pass must not inject a blank code line: every
+        // bar line carries content.
+        for line in &plain {
+            assert!(
+                !line.starts_with("│") || line.trim_start_matches('│').trim() != "",
+                "no phantom blank inside the fence: {plain:?}"
+            );
+        }
     }
 
     // --- Vertical rhythm between blocks ---

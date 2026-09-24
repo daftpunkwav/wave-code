@@ -14,9 +14,10 @@
 //!   the caller (core) as a character quota, with downgraded truncation past
 //!   the limit (drop when_to_use first, then truncate descriptions);
 //! - Execution expansion: [`Skill::expand`] substitutes the `$ARGUMENTS`
-//!   placeholder and the `${WAVECODE_SKILL_DIR}` variable; inline / fork
-//!   execution orchestration lives in core (this crate has no
-//!   workspace-internal dependencies, SPEC section 3 matrix).
+//!   placeholder and the `${WAVECODE_SKILL_DIR}` variable; the `tool`
+//!   module hosts the model-invokable `skill` tool (inline bodies expand
+//!   in place, forks spawn through the `action-tasks` seam, the
+//!   vocabulary-tier crate below this one).
 //!
 //! **Frontmatter parsing tradeoff**: `serde_yaml` instead of a hand-rolled
 //! minimal parser — frontmatter is YAML (field values may hold colons, lists,
@@ -32,6 +33,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub mod plugin;
+pub mod tool;
 
 /// The `$ARGUMENTS` placeholder (replaced with the call arguments on inline
 /// expansion).

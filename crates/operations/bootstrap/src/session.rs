@@ -44,8 +44,8 @@ use crate::native::{NativeExecutor, NativeTool};
 use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
 use crate::prune_adapter::PruningExecutor;
-use crate::skill_tool::SkillTool;
 use crate::tool_adapter::ToolAdapter;
+use wavecode_skills::tool::SkillTool;
 use wavecode_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 
 /// Approval wait timeout applied to parked decisions.

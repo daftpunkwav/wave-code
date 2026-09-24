@@ -2907,11 +2907,16 @@ dependencies = [
 name = "wavecode-skills"
 version = "0.1.0"
 dependencies = [
+ "action-tasks",
+ "async-trait",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "toml",
+ "wavecode-tools",
 ]
 
 [[package]]

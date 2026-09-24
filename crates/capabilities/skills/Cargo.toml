@@ -6,7 +6,11 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# The `tool` module is the model entry point to discovered skills; it
+# expands inline bodies and spawns forks through the task seam.
+action-tasks = { path = "../../action/tasks" }
 serde.workspace = true
+serde_json.workspace = true
 # Frontmatter is YAML (SPEC section 8.1), so use serde_yaml instead of a
 # hand-rolled parser; the version is unified at the workspace root
 # (SPEC section 3 discipline).
@@ -14,6 +18,11 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 # plugin.toml manifests (plugin packs); version unified at the workspace root.
 toml.workspace = true
+# Tool-trait rendering for the `skill` tool (same-tier edge, like
+# wavecode-mcp -> wavecode-tools).
+async-trait.workspace = true
+wavecode-tools = { path = "../tools" }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true

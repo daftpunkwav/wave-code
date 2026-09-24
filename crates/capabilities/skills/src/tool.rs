@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
+use crate::{SkillContext, SkillSet};
 use action_tasks::{TaskKind, TaskRequest, TaskService};
-use wavecode_skills::{SkillContext, SkillSet};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// `skill`: invoke one discovered skill by name.
@@ -131,7 +131,7 @@ impl Tool for SkillTool {
 mod tests {
     use super::*;
     use action_tasks::TaskInfo;
-    use wavecode_skills::{Skill, SkillContext, SkillMeta, SkillSource};
+    use crate::{Skill, SkillContext, SkillMeta, SkillSource};
 
     struct FakeTasks {
         spawned: std::sync::Mutex<Vec<TaskRequest>>,
@@ -182,7 +182,7 @@ mod tests {
     }
 
     fn tool() -> (SkillTool, Arc<FakeTasks>) {
-        let mut set = wavecode_skills::Discovery::default().set;
+        let mut set = crate::Discovery::default().set;
         set.add(skill(
             "review",
             SkillContext::Inline,

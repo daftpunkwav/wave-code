@@ -40,7 +40,6 @@ pub mod policy_adapter;
 pub mod prune_adapter;
 pub mod rate_limit;
 pub mod session;
-pub mod skill_tool;
 pub mod snapshot_tools;
 pub mod status_queries;
 pub mod tool_adapter;
@@ -62,6 +61,5 @@ pub use session::{
     APPROVAL_TIMEOUT, AssembleOptions, DEFAULT_IDENTITY, DEFAULT_MAX_TOOL_ROUNDS, Permissions,
     SessionError, SessionHandle, assemble_session, confinement_status, load_permissions,
 };
-pub use skill_tool::SkillTool;
 pub use status_queries::SessionStatus;
 pub use tool_adapter::ToolAdapter;

@@ -111,6 +111,10 @@ fn from_content_block(block: &ContentBlock) -> Block {
             call_id: tool_use_id.clone(),
             content: content.clone(),
             is_error: *is_error,
+            // The provider block shape carries no wall-clock stamp, and
+            // this rebuild feeds a request snapshot only: the stored
+            // history keeps its original stamped result.
+            produced_at: None,
         },
         ContentBlock::Thinking { text, signature } => Block::Thinking {
             text: text.clone(),
@@ -208,6 +212,7 @@ mod tests {
                     call_id: call_id.to_string(),
                     content: payload.to_string(),
                     is_error: false,
+                    produced_at: None,
                 }],
             },
         )

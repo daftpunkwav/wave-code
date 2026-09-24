@@ -1550,7 +1550,10 @@ where
             // synthesized results instead of executing anything.
             if interrupt.is_triggered() {
                 let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
-                conv.push_blocks(Role::User, result_blocks(&results));
+                conv.push_blocks(
+                    Role::User,
+                    result_blocks(&results, std::time::SystemTime::now()),
+                );
                 settle(
                     conv,
                     &last_input,
@@ -1584,7 +1587,10 @@ where
                             is_error: true,
                         })
                         .collect();
-                    conv.push_blocks(Role::User, result_blocks(&results));
+                    conv.push_blocks(
+                        Role::User,
+                        result_blocks(&results, std::time::SystemTime::now()),
+                    );
                     settle(
                         conv,
                         &last_input,
@@ -1608,7 +1614,10 @@ where
             let (results, hook_contexts) = self
                 .execute_calls(&ctx.run_id, &calls, &interrupt, &emit_msg)
                 .await;
-            conv.push_blocks(Role::User, result_blocks(&results));
+            conv.push_blocks(
+                Role::User,
+                result_blocks(&results, std::time::SystemTime::now()),
+            );
             // Prompt-type hook contexts ride normal history as guidance,
             // kept separate from tool outputs by construction.
             if !hook_contexts.is_empty() {
@@ -2329,13 +2338,23 @@ fn interrupted_result(call: &ToolCall) -> ToolResult {
 }
 
 /// Render tool results as history blocks, keeping ids for pairing.
-fn result_blocks(results: &[ToolResult]) -> Vec<SampleBlock> {
+///
+/// `now` stamps every result with the wall-clock time it landed, so a
+/// resumed agent can reason about recency from the persisted history; the
+/// clock is read once by the caller per push and passed in, never held
+/// here.
+fn result_blocks(results: &[ToolResult], now: std::time::SystemTime) -> Vec<SampleBlock> {
+    let produced_at = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     results
         .iter()
         .map(|r| SampleBlock::ToolResult {
             call_id: r.call_id.clone(),
             content: r.content.clone(),
             is_error: r.is_error,
+            produced_at: Some(produced_at),
         })
         .collect()
 }

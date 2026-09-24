@@ -162,6 +162,7 @@ mod tests {
             call_id: call_id.to_string(),
             content: "written".to_string(),
             is_error: false,
+            produced_at: None,
         }
     }
 
@@ -219,6 +220,7 @@ mod tests {
                 call_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(call_id, "c1");
                 assert!(is_error, "a lost outcome is never reported as success");
@@ -274,6 +276,50 @@ mod tests {
         let replayed = replay_history(&journal);
         assert!(replayed.gapped);
         assert_eq!(replayed.next_seq, 3, "numbering still continues");
+    }
+
+    /// A journal written before tool results carried wall-clock stamps has
+    /// records without the optional `produced_at` key; those must replay
+    /// unchanged instead of failing the whole history.
+    #[test]
+    fn pre_stamp_records_replay_with_unstamped_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = journal_in(dir.path());
+        journal
+            .append(&serde_json::json!({
+                "k": "append",
+                "seq": 0,
+                "entry": {
+                    "role": "assistant",
+                    "blocks": [{"tool_use": {"call_id": "c1", "name": "write", "input": {}}}]
+                }
+            }))
+            .unwrap();
+        journal
+            .append(&serde_json::json!({
+                "k": "append",
+                "seq": 1,
+                "entry": {
+                    "role": "user",
+                    "blocks": [{"tool_result": {"call_id": "c1", "content": "written", "is_error": false}}]
+                }
+            }))
+            .unwrap();
+        let replayed = replay_history(&journal);
+        assert_eq!(replayed.entries.len(), 2);
+        assert!(replayed.lost_calls.is_empty());
+        assert!(!replayed.gapped);
+        match &replayed.entries[1].blocks[0] {
+            Block::ToolResult {
+                call_id,
+                produced_at,
+                ..
+            } => {
+                assert_eq!(call_id, "c1");
+                assert_eq!(*produced_at, None, "absent key loads as unstamped");
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
     }
 
     #[test]

@@ -110,6 +110,7 @@ pub(crate) fn to_content_block(block: &Block) -> ContentBlock {
             call_id,
             content,
             is_error,
+            ..
         } => ContentBlock::ToolResult {
             tool_use_id: call_id.clone(),
             content: content.clone(),
@@ -697,6 +698,7 @@ mod tests {
                         call_id: "c1".to_string(),
                         content: "a.rs".to_string(),
                         is_error: false,
+                        produced_at: None,
                     }],
                 },
             ],

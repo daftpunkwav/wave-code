@@ -64,6 +64,14 @@ pub enum Block {
         content: String,
         /// True when the call failed.
         is_error: bool,
+        /// Wall-clock time the result was produced, as seconds since the
+        /// Unix epoch. Absent for results produced before the field
+        /// existed (old journals keep loading) and for synthetic closing
+        /// results whose real production time is unknowable. The serde
+        /// attributes keep un-stamped results byte-identical to the old
+        /// record shape on disk.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        produced_at: Option<u64>,
     },
     /// Inline image attachment (base64; providers validate mime and size
     /// at the translation layer).
@@ -127,10 +135,20 @@ impl HistoryEntry {
                     call_id,
                     content,
                     is_error,
-                } => Some(format!(
-                    "[{call_id}] {}: {content}",
-                    if *is_error { "error" } else { "ok" }
-                )),
+                    produced_at,
+                } => {
+                    // A stamped result opens with a compact wall-clock
+                    // header so a resumed agent can reason about recency
+                    // ("passed 3 minutes ago") straight from the text view;
+                    // unstamped results keep the exact legacy shape.
+                    let stamp = produced_at
+                        .map(|secs| format!("[{}] ", infrastructure_base::format_timestamp(secs)))
+                        .unwrap_or_default();
+                    Some(format!(
+                        "{stamp}[{call_id}] {}: {content}",
+                        if *is_error { "error" } else { "ok" }
+                    ))
+                }
                 Block::Image { id, mime, .. } => Some(match id {
                     Some(label) => format!("[image {mime}: {label}]"),
                     None => format!("[image {mime}]"),
@@ -410,6 +428,9 @@ pub fn close_open_calls(entries: &[HistoryEntry], note: &str) -> (Vec<HistoryEnt
                 call_id: call_id.clone(),
                 content: note.to_string(),
                 is_error: true,
+                // The real production time went down with the lost record;
+                // an honest header cannot exist for this result.
+                produced_at: None,
             })
             .collect(),
     });
@@ -504,6 +525,7 @@ mod tests {
                     call_id: "c1".to_string(),
                     content: "ok".to_string(),
                     is_error: false,
+                    produced_at: None,
                 }],
             },
         ];
@@ -519,6 +541,7 @@ mod tests {
                 call_id,
                 content,
                 is_error,
+                ..
             } => {
                 assert_eq!(call_id, "c2");
                 assert_eq!(content, "outcome lost");
@@ -568,6 +591,7 @@ mod tests {
                         call_id: "c1".to_string(),
                         content: "file body".to_string(),
                         is_error: true,
+                        produced_at: Some(1_789_000_000),
                     },
                 ],
             },
@@ -619,11 +643,13 @@ mod tests {
                     call_id: "c1".to_string(),
                     content: "ls out".to_string(),
                     is_error: false,
+                    produced_at: None,
                 },
                 Block::ToolResult {
                     call_id: "c2".to_string(),
                     content: "boom".to_string(),
                     is_error: true,
+                    produced_at: None,
                 },
                 Block::ToolUse {
                     call_id: "c3".to_string(),
@@ -637,6 +663,41 @@ mod tests {
             "before\n[c1] ok: ls out\n[c2] error: boom\n[c3] call shell {\"command\":\"ls\"}"
         );
         assert_eq!(entry.prose(), "before");
+    }
+
+    /// A stamped tool result renders a compact wall-clock header in text
+    /// views (recency reasoning for resumed agents) but never leaks into
+    /// the prose view.
+    #[test]
+    fn stamped_tool_results_render_a_wall_clock_header() {
+        let entry = HistoryEntry {
+            role: Role::User,
+            blocks: vec![Block::ToolResult {
+                call_id: "c1".to_string(),
+                content: "ls out".to_string(),
+                is_error: false,
+                produced_at: Some(20_715 * 86_400 + 18 * 3_600 + 3 * 60),
+            }],
+        };
+        assert_eq!(entry.text(), "[2026-09-19 18:03 UTC] [c1] ok: ls out");
+        assert_eq!(entry.prose(), "");
+    }
+
+    /// A tool result persisted before the timestamp existed (no
+    /// `produced_at` key on disk) must still load, landing as unstamped.
+    #[test]
+    fn tool_results_without_a_stamp_still_load() {
+        let legacy = r#"{"role":"user","blocks":[{"tool_result":{"call_id":"c1","content":"old","is_error":false}}]}"#;
+        let entry: HistoryEntry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            entry.text(),
+            "[c1] ok: old",
+            "unstamped rendering matches the legacy shape"
+        );
+        match &entry.blocks[0] {
+            Block::ToolResult { produced_at, .. } => assert_eq!(*produced_at, None),
+            other => panic!("expected a tool result, got {other:?}"),
+        }
     }
 
     /// Reasoning blocks stay in the block list (the Anthropic wire needs them
@@ -676,6 +737,7 @@ mod tests {
                 call_id: "c1".to_string(),
                 content: "a.rs".to_string(),
                 is_error: false,
+                produced_at: None,
             }],
         );
         let snap = conv.snapshot();

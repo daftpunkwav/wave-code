@@ -46,6 +46,7 @@ fn turn_entries(round: usize) -> Vec<HistoryEntry> {
                     "matched line with some contextual text here\n".repeat(90)
                 ),
                 is_error: false,
+                produced_at: None,
             }],
         },
     ]
@@ -76,6 +77,7 @@ fn to_message(entry: &HistoryEntry) -> Message {
                     call_id,
                     content,
                     is_error,
+                    ..
                 } => ContentBlock::ToolResult {
                     tool_use_id: call_id.clone(),
                     content: content.clone(),

@@ -151,6 +151,23 @@ pub fn format_date(now: std::time::SystemTime) -> String {
     format!("{year:04}-{month:02}-{day:02} ({weekday})")
 }
 
+/// Render epoch seconds as `YYYY-MM-DD HH:MM UTC`.
+///
+/// One rendering for every layer that shows a wall-clock instant (persisted
+/// tool-result headers), sharing the civil-date math with [`format_date`].
+/// UTC-only matches [`format_date`]: local-offset rendering would need a
+/// timezone database, which the dependency-free date formatting here
+/// deliberately avoids.
+pub fn format_timestamp(secs: u64) -> String {
+    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
+    let tod = secs % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        tod / 3_600,
+        (tod % 3_600) / 60
+    )
+}
+
 /// Convert days since 1970-01-01 to a proleptic Gregorian (year, month,
 /// day); Howard Hinnant's civil-from-days algorithm, valid for negative
 /// day counts too.
@@ -280,5 +297,22 @@ mod tests {
         assert_eq!(format_date(just_before), "1969-12-31 (Wednesday)");
         // Exactly the epoch boundary.
         assert_eq!(format_date(std::time::UNIX_EPOCH), "1970-01-01 (Thursday)");
+    }
+
+    #[test]
+    fn timestamp_renders_known_instants() {
+        // 1970-01-01T00:00:00Z.
+        assert_eq!(format_timestamp(0), "1970-01-01 00:00 UTC");
+        // 2026-09-19T18:03:00Z: minutes and hours render padded.
+        assert_eq!(
+            format_timestamp(20_715 * 86_400 + 18 * 3_600 + 3 * 60),
+            "2026-09-19 18:03 UTC"
+        );
+        // End of day rolls into the next day's date.
+        assert_eq!(
+            format_timestamp(20_715 * 86_400 + 86_399),
+            "2026-09-19 23:59 UTC"
+        );
+        assert_eq!(format_timestamp(20_716 * 86_400), "2026-09-20 00:00 UTC");
     }
 }

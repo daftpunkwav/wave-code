@@ -2136,6 +2136,7 @@ dependencies = [
 name = "state-store"
 version = "0.1.0"
 dependencies = [
+ "infrastructure-base",
  "serde",
  "serde_json",
 ]

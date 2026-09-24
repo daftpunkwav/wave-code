@@ -50,7 +50,7 @@ impl UserMessage {
             Markdown::new(
                 MarkdownStyle {
                     heading: theme::current().style(Token::RoleUser),
-                    code: theme::current().style(Token::RoleUser),
+                    code: theme::current().style(Token::CodeSpan),
                     link: theme::current().style(Token::RoleUser).underline(),
                     fence: theme::current().style(Token::TextMuted),
                     quote: theme::current().style(Token::RoleUser).italic(),
@@ -141,8 +141,11 @@ impl AssistantMessage {
     fn markdown(highlighter: Box<dyn SyntaxHighlighter>) -> Markdown {
         Markdown::new(
             MarkdownStyle {
-                heading: theme::current().style(Token::Text),
-                code: theme::current().style(Token::Primary),
+                // Pseudo-headings ride the primary teal (the wave
+                // identity); code spans take the warm sand so code
+                // reads against the teal chrome.
+                heading: theme::current().style(Token::Primary),
+                code: theme::current().style(Token::CodeSpan),
                 link: theme::current().style(Token::Primary).underline(),
                 fence: theme::current().style(Token::TextMuted),
                 quote: theme::current().style(Token::TextDim).italic(),
@@ -306,6 +309,42 @@ mod tests {
         theme::set(theme::Theme::dark());
         let mut line = StatusLine::error("boom");
         let lines = line.render(60);
-        assert!(lines[0].contains("\x1b[38;2;232;84;84m"), "{:?}", lines[0]);
+        assert!(
+            lines[0].contains("\x1b[38;2;224;108;117m"),
+            "{:?}",
+            lines[0]
+        );
+    }
+
+    /// Deepwave: inline code spans read as code (sand), not chrome teal.
+    #[test]
+    fn assistant_inline_code_uses_the_sand_code_span() {
+        theme::set(theme::Theme::dark());
+        let mut message = AssistantMessage::new(
+            "run `cargo test` now",
+            Box::new(tui_engine::markdown::PlainHighlighter),
+        );
+        let lines = message.render(60);
+        assert!(
+            lines[0].contains("\x1b[38;2;216;184;113m"),
+            "code span in sand: {:?}",
+            lines[0]
+        );
+    }
+
+    /// Deepwave: assistant pseudo-headings ride the primary teal.
+    #[test]
+    fn assistant_headings_ride_the_primary_teal() {
+        theme::set(theme::Theme::dark());
+        let mut message = AssistantMessage::new(
+            "## 执行环境",
+            Box::new(tui_engine::markdown::PlainHighlighter),
+        );
+        let lines = message.render(60);
+        assert!(
+            lines[0].contains("\x1b[38;2;45;212;191m"),
+            "heading in teal: {:?}",
+            lines[0]
+        );
     }
 }

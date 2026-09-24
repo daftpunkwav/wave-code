@@ -2613,6 +2613,9 @@ pub async fn run_with_factory(
     let mut guard =
         TerminalGuard::enter().map_err(|e| anyhow::anyhow!("terminal init failed: {e}"))?;
     let _ = guard.keyboard_enhanced();
+    // Color depth is a terminal property: resolve it once, before the
+    // first paint (theme switches never change it).
+    tui_engine::color::set_color_depth(theme::detect::color_depth());
     theme::set(theme::detect::resolve(None));
 
     let (mut columns, mut rows) = terminal::size().unwrap_or((80, 24));

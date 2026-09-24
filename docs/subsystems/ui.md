@@ -272,16 +272,23 @@ is the established seam (the actor already wraps the runner).
 
 ## Theming
 
-19 semantic tokens, dark/light palettes (hex values locked by test),
+The dark palette is the deepwave / sonar identity: teal as the primary
+accent, the four waveform categories spread across an ocean spectrum
+(cyan user, teal assistant, slate thinking, sea-green results; see
+`theme/colors.rs`). 20 semantic tokens, dark/light palettes (hex values
+locked by test),
 `light|dark|auto` resolution (OSC 11 probe on Unix — a bounded `poll`,
 never a blocking reader thread, since byte-reads on the console input
 would race crossterm's event reader and steal keystrokes; Windows skips
 the probe entirely → `COLORFGBG` → dark), and a global theme installed
 once at startup. Components request tokens, never
-raw colors; the engine works on `Color`/`Style` values.
+raw colors; the engine works on `Color`/`Style` values. Color depth is
+also resolved once at startup (`COLORTERM` truecolor, `TERM`
+256-color, otherwise the 16 classic ANSI colors) and every paint
+degrades through the same role mapping.
 
 Custom themes live in `~/.wavecode/themes/<name>.json`: a `base`
-(`dark`/`light`) plus any subset of the 19 tokens as `#rrggbb`
+(`dark`/`light`) plus any subset of the 20 tokens as `#rrggbb`
 overrides. Unknown token names and malformed colors are rejected (a
 typo must not silently render as the base), path escapes never reach
 the filesystem, and `/theme <name>` applies one live — the editor and

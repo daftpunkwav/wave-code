@@ -44,6 +44,7 @@ pub struct ThemeColors {
     pub text_strong: Option<String>,
     pub text_dim: Option<String>,
     pub text_muted: Option<String>,
+    pub code_span: Option<String>,
     pub border: Option<String>,
     pub border_focus: Option<String>,
     pub success: Option<String>,
@@ -125,6 +126,7 @@ impl CustomTheme {
             "text_muted",
             &self.colors.text_muted,
         )?;
+        apply(&mut palette.code_span, "code_span", &self.colors.code_span)?;
         apply(&mut palette.border, "border", &self.colors.border)?;
         apply(
             &mut palette.border_focus,

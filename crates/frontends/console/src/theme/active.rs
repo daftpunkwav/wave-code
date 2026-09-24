@@ -88,6 +88,7 @@ static ACTIVE: RwLock<Theme> = RwLock::new(Theme {
         text_strong: Color { r: 0, g: 0, b: 0 },
         text_dim: Color { r: 0, g: 0, b: 0 },
         text_muted: Color { r: 0, g: 0, b: 0 },
+        code_span: Color { r: 0, g: 0, b: 0 },
         border: Color { r: 0, g: 0, b: 0 },
         border_focus: Color { r: 0, g: 0, b: 0 },
         success: Color { r: 0, g: 0, b: 0 },
@@ -126,7 +127,7 @@ mod tests {
         assert!(current().is_dark());
         assert_eq!(
             current().color(Token::Primary),
-            Color::rgb(0x4F, 0xA8, 0xFF)
+            Color::rgb(0x2D, 0xD4, 0xBF)
         );
     }
 
@@ -135,7 +136,7 @@ mod tests {
         set(Theme::dark());
         assert_eq!(
             current().paint(Token::Primary, "x"),
-            "\x1b[38;2;79;168;255mx\x1b[0m"
+            "\x1b[38;2;45;212;191mx\x1b[0m"
         );
     }
 }

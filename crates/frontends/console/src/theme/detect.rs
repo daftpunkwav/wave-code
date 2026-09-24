@@ -2,6 +2,7 @@
 
 use std::io::IsTerminal as _;
 
+use tui_engine::color::ColorDepth;
 use tui_engine::terminal::{self, Background};
 
 use super::active::Theme;
@@ -40,6 +41,34 @@ pub fn resolve(choice: Option<&str>) -> Theme {
     Theme::dark()
 }
 
+/// Resolve the terminal color depth from the environment: `COLORTERM`
+/// advertises truecolor, `TERM` advertises 256-color or direct color,
+/// and anything else degrades to the 16 classic ANSI colors (conservative
+/// but always readable). Call once at startup.
+pub fn color_depth() -> ColorDepth {
+    color_depth_from(
+        std::env::var("COLORTERM").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`color_depth`], taking the environment values.
+fn color_depth_from(colorterm: Option<&str>, term: Option<&str>) -> ColorDepth {
+    if colorterm.is_some_and(|v| v.contains("truecolor") || v.contains("24bit")) {
+        return ColorDepth::TrueColor;
+    }
+    let Some(term) = term else {
+        return ColorDepth::Ansi16;
+    };
+    if term.contains("256color") {
+        ColorDepth::Color256
+    } else if term.contains("truecolor") || term.contains("direct") {
+        ColorDepth::TrueColor
+    } else {
+        ColorDepth::Ansi16
+    }
+}
+
 fn background_theme(background: Background) -> Theme {
     match background {
         Background::Dark => Theme::dark(),
@@ -57,5 +86,19 @@ mod tests {
         // in every environment (CI, NO_COLOR, non-TTY).
         assert!(!resolve(Some("light")).is_dark());
         assert!(resolve(Some("dark")).is_dark());
+    }
+
+    #[test]
+    fn color_depth_follows_terminal_advertisement() {
+        use ColorDepth::{Ansi16, Color256, TrueColor};
+        let f = super::color_depth_from;
+        assert_eq!(f(Some("truecolor"), None), TrueColor);
+        assert_eq!(f(Some("24bit"), Some("xterm")), TrueColor);
+        assert_eq!(f(None, Some("xterm-256color")), Color256);
+        assert_eq!(f(None, Some("xterm-direct")), TrueColor);
+        assert_eq!(f(None, Some("xterm")), Ansi16);
+        assert_eq!(f(None, None), Ansi16);
+        // 256color in TERM does not beat an explicit COLORTERM.
+        assert_eq!(f(Some("truecolor"), Some("xterm-256color")), TrueColor);
     }
 }

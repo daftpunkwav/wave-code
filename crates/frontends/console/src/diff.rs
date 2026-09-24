@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn simple_replacement_diff() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let rows = compute_rows("a\nb\nc", "a\nX\nc", false);
         assert_eq!(
             rows,
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn render_header_shows_counts_and_path() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let lines = render(
             "a\nb\nc",
             "a\nX\nc",
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn render_elides_unchanged_spans() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let old = format!(
             "{}\nOLD\n{}",
             "ctx\n".repeat(10).trim(),
@@ -399,7 +399,7 @@ mod tests {
 
     #[test]
     fn render_caps_body_rows() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let old = "a\nb\nc";
         let new = "1\n2\n3";
         let lines = render(

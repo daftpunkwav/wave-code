@@ -141,9 +141,9 @@ impl AssistantMessage {
     fn markdown(highlighter: Box<dyn SyntaxHighlighter>) -> Markdown {
         Markdown::new(
             MarkdownStyle {
-                // Pseudo-headings ride the primary teal (the wave
-                // identity); code spans take the warm sand so code
-                // reads against the teal chrome.
+                // Pseudo-headings ride the primary color (the theme
+                // identity); code spans take the theme's code color so
+                // code reads against the chrome.
                 heading: theme::current().style(Token::Primary),
                 code: theme::current().style(Token::CodeSpan),
                 link: theme::current().style(Token::Primary).underline(),
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn user_message_has_bullet_and_wraps() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut message = UserMessage::new("hello world", false);
         let lines = message.render(20);
         assert!(strip_ansi(&lines[0]).starts_with("⊓⊔ hello"));
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn status_line_uses_bullet() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut line = StatusLine::new("compacting");
         let lines = line.render(60);
         assert_eq!(strip_ansi(&lines[0]), "  ● compacting");
@@ -306,38 +306,50 @@ mod tests {
 
     #[test]
     fn error_status_colors_text() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut line = StatusLine::error("boom");
         let lines = line.render(60);
-        assert!(
-            lines[0].contains("\x1b[38;2;224;108;117m"),
-            "{:?}",
-            lines[0]
-        );
+        assert!(lines[0].contains("\x1b[38;2;254;68;80m"), "{:?}", lines[0]);
     }
 
-    /// Deepwave: inline code spans read as code (sand), not chrome teal.
+    /// Synthwave: inline code spans read as code (neon cyan).
     #[test]
-    fn assistant_inline_code_uses_the_sand_code_span() {
-        theme::set(theme::Theme::dark());
+    fn assistant_inline_code_uses_the_neon_cyan_code_span() {
+        theme::set(theme::Theme::synthwave());
         let mut message = AssistantMessage::new(
             "run `cargo test` now",
             Box::new(tui_engine::markdown::PlainHighlighter),
         );
         let lines = message.render(60);
         assert!(
-            lines[0].contains("\x1b[38;2;216;184;113m"),
-            "code span in sand: {:?}",
+            lines[0].contains("\x1b[38;2;54;249;246m"),
+            "code span in cyan: {:?}",
             lines[0]
         );
     }
 
-    /// Deepwave: assistant pseudo-headings ride the primary teal.
+    /// Synthwave: assistant pseudo-headings ride the primary cyan.
     #[test]
-    fn assistant_headings_ride_the_primary_teal() {
-        theme::set(theme::Theme::dark());
+    fn assistant_headings_ride_the_primary_cyan() {
+        theme::set(theme::Theme::synthwave());
         let mut message = AssistantMessage::new(
             "## 执行环境",
+            Box::new(tui_engine::markdown::PlainHighlighter),
+        );
+        let lines = message.render(60);
+        assert!(
+            lines[0].contains("\x1b[38;2;54;249;246m"),
+            "heading in cyan: {:?}",
+            lines[0]
+        );
+    }
+
+    /// Deepwave keeps its teal/sand identity when selected.
+    #[test]
+    fn deepwave_keeps_teal_headings_and_sand_code_spans() {
+        theme::set(theme::Theme::deepwave());
+        let mut message = AssistantMessage::new(
+            "## 执行环境\nrun `cargo test`",
             Box::new(tui_engine::markdown::PlainHighlighter),
         );
         let lines = message.render(60);
@@ -345,6 +357,11 @@ mod tests {
             lines[0].contains("\x1b[38;2;45;212;191m"),
             "heading in teal: {:?}",
             lines[0]
+        );
+        assert!(
+            lines[2].contains("\x1b[38;2;216;184;113m"),
+            "code span in sand: {:?}",
+            lines[2]
         );
     }
 }

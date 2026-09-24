@@ -1895,15 +1895,18 @@ verify from the repository.";
         }
     }
 
-    /// Apply a `/theme light|dark|auto` switch locally.
+    /// Apply a `/theme light|dark|deepwave|auto` switch locally.
     fn apply_theme(&mut self, args: &str) {
         let name = args.trim();
         self.theme_name = name.to_string();
         match name {
             "light" => theme::set(theme::Theme::light()),
-            "dark" => theme::set(theme::Theme::dark()),
-            // Re-query the terminal background (OSC 11) and pick dark
-            // or light from the answer.
+            // "dark" tracks the default dark identity (synthwave);
+            // "deepwave" pins the previous ocean identity.
+            "dark" => theme::set(theme::Theme::synthwave()),
+            "deepwave" => theme::set(theme::Theme::deepwave()),
+            // Re-query the terminal background (OSC 11) and pick the
+            // default dark or the light theme from the answer.
             "auto" => theme::set(theme::detect::resolve(None)),
             "" => {
                 let custom = self
@@ -1914,12 +1917,15 @@ verify from the repository.";
                     .unwrap_or_default();
                 if custom.is_empty() {
                     self.push_status(
-                        "usage: /theme light|dark|auto (or a custom theme name)",
+                        "usage: /theme light|dark|deepwave|auto (or a custom theme name)",
                         false,
                     );
                 } else {
                     self.push_status(
-                        &format!("usage: /theme light|dark|auto|<{}>", custom.join("|")),
+                        &format!(
+                            "usage: /theme light|dark|deepwave|auto|<{}>",
+                            custom.join("|")
+                        ),
                         false,
                     );
                 }
@@ -2819,7 +2825,7 @@ mod tests {
     use tui_engine::width::strip_ansi;
 
     fn ui() -> ConsoleUi {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut ui = ConsoleUi::new(
             Box::new(TestLink::new()),
             &UiContext {

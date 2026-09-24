@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn grep_lines_light_up_path_and_number() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let styled = style_output_line("grep", "src/lib.rs:42:pub fn main() {}");
         let plain = strip_ansi(&styled);
         assert_eq!(plain, "  src/lib.rs:42:pub fn main() {}");
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn malformed_grep_lines_stay_dim() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         for line in [
             "no colons here",
             ":42:x",
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn card_states_and_output_body() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let flag = ExpandedFlag::new();
         let mut card = ToolCall::running(
             "shell",
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn edit_cards_render_clustered_diff() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let input = serde_json::json!({
             "path": "src/lib.rs",
             "old_string": "a\nb\nc",
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn oversized_edit_degrades_to_summary() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let big = "x\n".repeat(diff::MAX_DIFF_LINES + 1);
         let input = serde_json::json!({
             "path": "big.rs",
@@ -586,7 +586,7 @@ mod tests {
 
     #[test]
     fn failed_edit_shows_reason_under_diff() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let input = serde_json::json!({
             "path": "a.rs",
             "old_string": "a\nb",
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn arg_summary_strips_escapes() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let input = serde_json::json!({"path": "a\x1b[31mevil.rs"});
         let summary = args_summary("read", &input);
         assert!(!summary.contains('\x1b'), "{summary:?}");
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn failed_cards_show_error_dot() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = ToolCall::running(
             "shell",
             &serde_json::json!({"command": "nope"}),
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn system_reminder_output_suppressed() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = ToolCall::running(
             "read",
             &serde_json::json!({"path": "x"}),

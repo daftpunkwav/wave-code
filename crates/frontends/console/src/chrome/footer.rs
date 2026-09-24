@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn row1_carries_mode_model_cwd_and_tip() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         // No HOME mutation: the cwd assertion below holds under any home
         // (shorten_cwd truncation always yields "~/{tail}"), and mutating
         // the process-global env would race concurrent tests.
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn row1_drops_tip_when_narrow() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let line = row1(&state(), Some("ctrl+o expand tool output"), 40);
         let plain = width::strip_ansi(&line);
         assert!(!plain.contains("ctrl+o expand"), "tip dropped: {plain}");
@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn row1_shows_git_branch_when_known() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut with_branch = state();
         with_branch.git_branch = Some("feat/console-ui".to_string());
         let line = row1(&with_branch, None, 120);
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn row1_shows_goal_badge_while_active() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut with_goal = state();
         with_goal.goal = Some(crate::state::GoalBadge {
             since: std::time::Instant::now(),
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn row2_shows_context_and_exit_hint() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let line = row2(&state(), &TransientHint::None, 80);
         let plain = width::strip_ansi(&line);
         assert!(plain.ends_with("context: 42% (82.0k/195k)"), "{plain:?}");

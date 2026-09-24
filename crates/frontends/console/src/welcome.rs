@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn card_shows_wordmark_and_info_grid() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = Welcome::new(info());
         let lines = card.render(60);
         let text: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn banner_is_braille_oscilloscope_trace() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = Welcome::new(info());
         let lines = card.render(60);
         for row in [6usize, 7] {
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn wordmark_is_centered() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = Welcome::new(info());
         let lines = card.render(60);
         let plain = strip_ansi(&lines[1]);
@@ -392,7 +392,7 @@ mod tests {
 
     #[test]
     fn narrow_width_falls_back_to_spaced_wordmark() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = Welcome::new(info());
         let lines = card.render(40);
         let joined = lines
@@ -412,7 +412,7 @@ mod tests {
     #[test]
     #[ignore]
     fn welcome_snapshot() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = Welcome::new(info());
         for line in card.render(60) {
             println!("{line}");

@@ -7,28 +7,29 @@ use tui_engine::terminal::{self, Background};
 
 use super::active::Theme;
 
-/// Resolve the startup theme for a `light` / `dark` / `auto` config
-/// choice (any other value means auto).
+/// Resolve the theme for a `light` / `dark` / `deepwave` / `auto`
+/// config choice (any other value means auto).
 ///
 /// Auto detection: non-terminal or `NO_COLOR`/`FORCE_COLOR=0`/CI
-/// environments skip probing (dark); otherwise the OSC 11 background
-/// query runs under a short timeout, falling back to `COLORFGBG` and
-/// finally dark. Call after entering raw mode so the probe can read the
-/// reply.
+/// environments skip probing (the synthwave default); otherwise the
+/// OSC 11 background query runs under a short timeout, falling back to
+/// `COLORFGBG` and finally the default. Call after entering raw mode
+/// so the probe can read the reply.
 pub fn resolve(choice: Option<&str>) -> Theme {
     match choice {
         Some("light") => return Theme::light(),
-        Some("dark") => return Theme::dark(),
+        Some("dark") => return Theme::synthwave(),
+        Some("deepwave") => return Theme::deepwave(),
         _ => {}
     }
     if std::env::var_os("NO_COLOR").is_some()
         || std::env::var_os("CI").is_some()
         || std::env::var("FORCE_COLOR").is_ok_and(|v| v == "0")
     {
-        return Theme::dark();
+        return Theme::synthwave();
     }
     if !std::io::stdout().is_terminal() {
-        return Theme::dark();
+        return Theme::synthwave();
     }
     if let Some(background) = terminal::query_background(250) {
         return background_theme(background);
@@ -38,7 +39,7 @@ pub fn resolve(choice: Option<&str>) -> Theme {
     {
         return background_theme(background);
     }
-    Theme::dark()
+    Theme::synthwave()
 }
 
 /// Resolve the terminal color depth from the environment: `COLORTERM`
@@ -71,21 +72,35 @@ fn color_depth_from(colorterm: Option<&str>, term: Option<&str>) -> ColorDepth {
 
 fn background_theme(background: Background) -> Theme {
     match background {
-        Background::Dark => Theme::dark(),
+        Background::Dark => Theme::synthwave(),
         Background::Light => Theme::light(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::syntax::SyntaxTheme;
     use super::*;
 
     #[test]
     fn explicit_choice_wins_over_environment() {
-        // Explicit choices short-circuit before any probing, so they hold
-        // in every environment (CI, NO_COLOR, non-TTY).
+        // Explicit choices short-circuit before any probing, so they
+        // hold in every environment (CI, NO_COLOR, non-TTY).
         assert!(!resolve(Some("light")).is_dark());
         assert!(resolve(Some("dark")).is_dark());
+        assert!(resolve(Some("deepwave")).is_dark());
+    }
+
+    #[test]
+    fn dark_choice_selects_the_default_synthwave_identity() {
+        assert_eq!(
+            resolve(Some("dark")).syntax_theme(),
+            SyntaxTheme::Synthwave84
+        );
+        assert_eq!(
+            resolve(Some("deepwave")).syntax_theme(),
+            SyntaxTheme::OceanDark
+        );
     }
 
     #[test]

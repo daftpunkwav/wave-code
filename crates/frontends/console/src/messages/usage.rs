@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn panel_renders_rows_and_total() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut panel = UsagePanel::new(
             Some(84_000),
             Some(200_000),
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn panel_without_samples_says_so() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut panel = UsagePanel::new(None, None, TokenUsage::default());
         let lines: Vec<String> = panel
             .render(80)

@@ -349,6 +349,32 @@ mod tests {
         }
     }
 
+    /// The synthwave dark roles degrade to the expected ANSI-16
+    /// family: the neon hues must stay distinguishable without
+    /// truecolor.
+    #[test]
+    fn ansi16_mapping_keeps_synthwave_hue_families() {
+        let cases = [
+            ("#36F9F6", 14), // primary/code_span cyan -> bright cyan
+            ("#FF7EDB", 13), // role_user pink -> bright magenta
+            ("#B6B1FF", 12), // accent periwinkle -> bright blue
+            ("#B084EB", 13), // shell_mode purple -> bright magenta
+            ("#72F1B8", 10), // success green -> bright green
+            ("#97F1D8", 14), // diff_added_strong mint -> bright cyan
+            ("#F97E72", 9),  // warning salmon -> bright red
+            ("#FE4450", 9),  // error red-pink -> bright red
+            ("#FF5E5B", 9),  // diff_removed_strong -> bright red
+            ("#EDEAF0", 15), // text -> white
+            ("#8B85A8", 7),  // dim -> silver
+            ("#6C5F9C", 12), // muted -> bright blue
+            ("#4A4166", 4),  // border/gutter -> blue
+        ];
+        for (hex, expected) in cases {
+            let color = Color::from_hex(hex).unwrap();
+            assert_eq!(color.nearest_ansi16(), expected, "{hex}");
+        }
+    }
+
     #[test]
     fn ansi16_foreground_params_use_3n_and_9n() {
         assert_eq!(ansi16_fg_params(0), "30");

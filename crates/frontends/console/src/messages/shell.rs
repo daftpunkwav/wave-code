@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn running_card_shows_tail_and_cancel_hint() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = ShellCard::running("echo hi", ExpandedFlag::new());
         for i in 0..8 {
             card.push_output(&format!("line {i}"), false);
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn finished_card_collapses_with_exit_code() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = ShellCard::running("false", ExpandedFlag::new());
         for i in 0..30 {
             card.push_output(&format!("out {i}"), false);
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn success_keeps_success_bullet_and_no_exit_row() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = ShellCard::running("true", ExpandedFlag::new());
         card.push_output("done", false);
         card.finish(Some(0));
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn expansion_shows_whole_buffer() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let flag = ExpandedFlag::new();
         let mut card = ShellCard::running("boom", flag.clone());
         for i in 0..30 {
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn output_is_sanitized() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut card = ShellCard::running("evil", ExpandedFlag::new());
         card.push_output("a\x1b[2Jb", false);
         let lines = card.render(60);

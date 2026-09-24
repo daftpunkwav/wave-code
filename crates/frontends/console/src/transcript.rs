@@ -202,7 +202,7 @@ mod tests {
 
     #[test]
     fn render_concatenates_entries() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut transcript = Transcript::new();
         transcript.push_new_turn(status("alpha"));
         transcript.push(status("beta"));

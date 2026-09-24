@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn live_thinking_shows_tail_lines() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("first line\nsecond line\nthird line");
         let lines = block.render(60);
@@ -228,7 +228,7 @@ mod tests {
     fn live_tail_matches_a_full_wrap_of_long_streams() {
         // The tail is collected backwards over the final segments; it
         // must stay identical to wrapping every segment in order.
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let body = (0..500)
             .map(|i| format!("segment {i} with some wrapping filler text"))
             .collect::<Vec<_>>()
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn finalized_thinking_collapses_with_hint() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("one\ntwo\nthree");
         block.finalize();
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn expansion_shows_everything() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let flag = ExpandedFlag::new();
         let mut block = Thinking::live(flag.clone());
         block.push("one\ntwo\nthree");

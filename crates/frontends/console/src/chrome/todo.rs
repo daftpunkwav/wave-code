@@ -140,13 +140,13 @@ mod tests {
 
     #[test]
     fn empty_list_renders_nothing() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         assert!(render_todos(&[], false, 60).is_empty());
     }
 
     #[test]
     fn rows_carry_status_markers() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let lines: Vec<String> = render_todos(&sample(), false, 60)
             .into_iter()
             .map(|l| width::strip_ansi(&l))
@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn overflow_collapses_with_summary() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let todos: Vec<TodoEntry> = (0..8)
             .map(|i| entry(&format!("task {i}"), TodoStatus::Pending))
             .chain(std::iter::once(entry("active", TodoStatus::InProgress)))
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn expansion_shows_everything() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let todos: Vec<TodoEntry> = (0..8)
             .map(|i| entry(&format!("task {i}"), TodoStatus::Pending))
             .collect();

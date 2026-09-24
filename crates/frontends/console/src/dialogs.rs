@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn approval_quick_select_and_enter() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ApprovalDialog::new("c1".to_string(), ApprovalKind::Exec, "npm test");
         let answer = dialog.handle_key(KeyEvent::plain(Key::Char('1')));
         match answer {
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn approval_escape_denies() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ApprovalDialog::new("c2".to_string(), ApprovalKind::Write, "write x");
         match dialog.handle_key(KeyEvent::plain(Key::Esc)) {
             Some(Answer::Approval {
@@ -451,7 +451,7 @@ mod tests {
 
     #[test]
     fn approval_selection_moves_and_enters() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ApprovalDialog::new("c3".to_string(), ApprovalKind::Exec, "ls");
         // One Down lands on the middle "always allow" choice.
         dialog.handle_key(KeyEvent::plain(Key::Down));
@@ -479,7 +479,7 @@ mod tests {
 
     #[test]
     fn approval_quick_select_always() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ApprovalDialog::new("c5".to_string(), ApprovalKind::Exec, "npm test");
         let answer = dialog.handle_key(KeyEvent::plain(Key::Char('2')));
         match answer {
@@ -493,7 +493,7 @@ mod tests {
 
     #[test]
     fn question_options_and_free_text() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = QuestionDialog::new(
             "q1".to_string(),
             "Pick one",
@@ -518,7 +518,7 @@ mod tests {
 
     #[test]
     fn approval_renders_focus_frame() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ApprovalDialog::new("c4".to_string(), ApprovalKind::Exec, "echo hi");
         let lines = dialog.render(70);
         let joined: String = lines
@@ -534,7 +534,7 @@ mod tests {
 
     #[test]
     fn write_approval_colors_diff_lines() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let detail = "write: src/lib.rs\n+fn added() {}\n-fn gone() {}";
         let mut dialog = ApprovalDialog::new("c5".to_string(), ApprovalKind::Write, detail);
         let lines = dialog.render(70);
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn model_picker_search_filters_and_enter_resolves() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ModelPickerDialog::new(
             picker_entries(),
             "deepseek-chat".to_string(),
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn model_picker_alt_s_marks_session_only() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog =
             ModelPickerDialog::new(picker_entries(), "none".to_string(), None, Vec::new());
         // No thinking levels: effort stays None.
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn model_picker_thinking_row_switches_with_arrows() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = ModelPickerDialog::new(
             picker_entries(),
             "deepseek-chat".to_string(),
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn model_picker_tab_cycles_providers() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog =
             ModelPickerDialog::new(picker_entries(), "none".to_string(), None, Vec::new());
         // Tab once moves to the "deepseek" tab; only its entries show.
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn permission_picker_digits_apply() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let mut dialog = PermissionPickerDialog::new("auto");
         let answer = dialog.handle_key(KeyEvent::plain(Key::Char('3')));
         assert!(matches!(
@@ -736,7 +736,7 @@ mod tests {
 
     #[test]
     fn help_panel_scrolls_and_closes() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let lines = (0..40).map(|i| format!("line {i}")).collect();
         let mut panel = HelpPanel::new(lines);
         for _ in 0..3 {
@@ -757,7 +757,7 @@ mod tests {
 
     #[test]
     fn session_picker_searches_and_resumes() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let rows = vec![
             SessionRow {
                 id: "id-refactor".to_string(),

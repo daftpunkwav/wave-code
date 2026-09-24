@@ -49,6 +49,9 @@ impl UserMessage {
         let markdown = markdown.then(|| {
             Markdown::new(
                 MarkdownStyle {
+                    // User prose keeps the role color: input is the
+                    // pink identity of the theme.
+                    text: theme::current().style(Token::RoleUser),
                     heading: theme::current().style(Token::RoleUser),
                     code: theme::current().style(Token::CodeSpan),
                     link: theme::current().style(Token::RoleUser).underline(),
@@ -141,6 +144,9 @@ impl AssistantMessage {
     fn markdown(highlighter: Box<dyn SyntaxHighlighter>) -> Markdown {
         Markdown::new(
             MarkdownStyle {
+                // Body prose renders plain near-white: accent hues stay
+                // in the chrome (headings, glyphs, borders).
+                text: theme::current().style(Token::Text),
                 // Pseudo-headings ride the primary color (the theme
                 // identity); code spans take the theme's code color so
                 // code reads against the chrome.

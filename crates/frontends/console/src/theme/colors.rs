@@ -262,6 +262,46 @@ mod tests {
         assert!(palette.text.r > 200 && palette.text.g > 200);
     }
 
+    /// Palette restraint: plain body text never shares an accent hue
+    /// and stays high-contrast against the background — near-white on
+    /// dark themes, dark ink on the light one — so prose stays calm
+    /// while accent colors keep to the chrome (prompt, headings,
+    /// borders, diff, status).
+    #[test]
+    fn body_text_is_plain_and_never_an_accent_hue() {
+        for palette in [synthwave_palette(), deepwave_palette(), light_palette()] {
+            let text = palette.text;
+            for accent in [
+                palette.primary,
+                palette.accent,
+                palette.code_span,
+                palette.success,
+                palette.warning,
+                palette.error,
+                palette.role_user,
+                palette.shell_mode,
+                palette.diff_added,
+                palette.diff_removed,
+            ] {
+                assert_ne!(text, accent, "text must not borrow an accent hue");
+            }
+        }
+        // Dark themes: near-white body copy.
+        for palette in [synthwave_palette(), deepwave_palette()] {
+            let text = palette.text;
+            assert!(
+                text.r > 150 && text.g > 150 && text.b > 150,
+                "dark-theme text stays near-white: {text:?}"
+            );
+        }
+        // Light theme: dark ink.
+        let light = light_palette().text;
+        assert!(
+            light.r < 100 && light.g < 100 && light.b < 100,
+            "light-theme text stays dark: {light:?}"
+        );
+    }
+
     /// The deepwave hex values are part of the visual contract.
     #[test]
     fn deepwave_palette_values_are_locked() {

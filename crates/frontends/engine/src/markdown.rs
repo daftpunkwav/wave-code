@@ -40,6 +40,9 @@ impl SyntaxHighlighter for PlainHighlighter {
 /// Visual style knobs for markdown rendering.
 #[derive(Debug, Clone, Copy)]
 pub struct MarkdownStyle {
+    /// Plain body prose (paragraphs, list items, table body cells):
+    /// near-white in the console themes — never an accent hue.
+    pub text: Style,
     /// Headings (h1/h2 also render bold regardless of this style).
     pub heading: Style,
     /// Links and inline code (accent color).
@@ -57,6 +60,7 @@ pub struct MarkdownStyle {
 impl Default for MarkdownStyle {
     fn default() -> Self {
         Self {
+            text: Style::new(),
             heading: Style::new(),
             code: Style::new(),
             link: Style::new().underline(),
@@ -101,10 +105,9 @@ impl InlineState {
         if self.code {
             return base.code;
         }
-        let mut style = Style::new();
-        if self.link {
-            style = base.link;
-        }
+        // Plain prose rides the text style (near-white in the console
+        // themes); emphasis only adds flags on top.
+        let mut style = if self.link { base.link } else { base.text };
         if self.bold {
             style = style.bold();
         }
@@ -504,7 +507,7 @@ fn render_table(
             let styled = if header {
                 style.heading.bold().paint(&cut)
             } else {
-                cut
+                style.text.paint(&cut)
             };
             line.push_str(&format!(" {styled}{} │", " ".repeat(pad)));
         }
@@ -535,6 +538,7 @@ fn flat_cell(cell: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Color;
     use crate::width::strip_ansi;
 
     fn renderer() -> Markdown {
@@ -562,6 +566,37 @@ mod tests {
         let mut md = renderer();
         let lines = md.render("hello world", 40);
         assert_eq!(strip_ansi(&lines[0]), "hello world");
+    }
+
+    #[test]
+    fn plain_prose_rides_the_text_style() {
+        // Body prose takes the configured text style (near-white in the
+        // console themes), never an accent hue.
+        let style = MarkdownStyle {
+            text: Style::new().fg(Color::rgb(1, 2, 3)),
+            ..MarkdownStyle::default()
+        };
+        let mut md = Markdown::new(style, Box::new(PlainHighlighter));
+        let lines = md.render("plain text", 40);
+        assert!(
+            lines[0].contains("[38;2;1;2;3mplain text"),
+            "{:?}",
+            lines[0]
+        );
+        // List bullets are prose too.
+        let lines = md.render("- item", 40);
+        assert!(lines[0].contains("[38;2;1;2;3mitem"), "{:?}", lines[0]);
+        // Table body cells follow; header cells keep the heading style.
+        let lines = md.render(
+            "| h |
+|---|
+| c |",
+            40,
+        );
+        assert!(
+            lines[3].contains("[38;2;1;2;3m") && lines[1].contains("[1m"),
+            "{lines:?}"
+        );
     }
 
     #[test]

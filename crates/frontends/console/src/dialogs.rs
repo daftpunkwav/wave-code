@@ -877,7 +877,7 @@ impl SettingsDialog {
 
     /// Snapshot the rows in display order.
     fn rows(&self) -> Vec<SettingsRow> {
-        use crate::settings::{DiffStyle, EditDisplay, ToolDisplay};
+        use crate::settings::{EditDisplay, ToolDisplay};
         let view = self.settings.get();
         vec![
             SettingsRow {
@@ -907,14 +907,6 @@ impl SettingsDialog {
                 .to_string(),
             },
             SettingsRow {
-                label: "diff layout",
-                value: match view.diff_style {
-                    DiffStyle::Unified => "unified",
-                    DiffStyle::Split => "split",
-                }
-                .to_string(),
-            },
-            SettingsRow {
                 label: "wave denylist",
                 value: format!("{} entries (edit settings file)", view.wave_denylist.len()),
             },
@@ -923,7 +915,7 @@ impl SettingsDialog {
 
     /// Cycle the selected row's value one step (direction: +1 / -1).
     fn cycle(&self, direction: isize) {
-        use crate::settings::{DiffStyle, EditDisplay, ToolDisplay};
+        use crate::settings::{EditDisplay, ToolDisplay};
         let rows = self.rows();
         let label = rows.get(self.selected).map(|r| r.label);
         self.settings.update(|view| match label {
@@ -941,12 +933,6 @@ impl SettingsDialog {
                 view.edit_display = match view.edit_display {
                     EditDisplay::Tool => EditDisplay::Diff,
                     EditDisplay::Diff => EditDisplay::Tool,
-                };
-            }
-            Some("diff layout") => {
-                view.diff_style = match view.diff_style {
-                    DiffStyle::Unified => DiffStyle::Split,
-                    DiffStyle::Split => DiffStyle::Unified,
                 };
             }
             _ => {}

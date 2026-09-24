@@ -303,15 +303,7 @@ impl ToolCall {
             }
             let incomplete = self.state == ToolState::Running;
             let budget = if show_details { 200 } else { 10 };
-            let mut rows = diff::render(
-                old,
-                new,
-                path.as_deref(),
-                incomplete,
-                budget,
-                columns,
-                view.diff_style,
-            );
+            let mut rows = diff::render(old, new, path.as_deref(), incomplete, budget, columns);
             if rows.is_empty() {
                 // Oversized edit: summarize instead of computing a diff.
                 rows.push(theme.paint(Token::TextDim, "  (edit too large for an inline preview)"));

@@ -38,17 +38,6 @@ pub enum EditDisplay {
     Diff,
 }
 
-/// Diff layout style.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiffStyle {
-    /// Single column with paired old/new line numbers (default).
-    #[default]
-    Unified,
-    /// Two columns, old left and new right.
-    Split,
-}
-
 /// User-tunable console preferences.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -59,8 +48,6 @@ pub struct UiSettings {
     pub tool_display: ToolDisplay,
     /// Edit-style tool rendering.
     pub edit_display: EditDisplay,
-    /// Diff layout for edit-style tools.
-    pub diff_style: DiffStyle,
     /// `wave`-mode command denylist: any shell command whose text
     /// contains one of these substrings is denied outright (no prompt).
     pub wave_denylist: Vec<String>,
@@ -93,7 +80,6 @@ impl Default for UiSettings {
             render_user_markdown: true,
             tool_display: ToolDisplay::Summary,
             edit_display: EditDisplay::Diff,
-            diff_style: DiffStyle::Unified,
             wave_denylist: Vec::new(),
             default_model: None,
             default_provider: None,

@@ -295,7 +295,9 @@ impl Markdown {
                     }
                 }
                 Event::Code(code) => {
-                    inline.push_str(&self.style.code.paint(&format!("`{code}`")));
+                    // Color alone marks the span; visible quotes would leak
+                    // into the transcript as content the model never wrote.
+                    inline.push_str(&self.style.code.paint(code.as_ref()));
                 }
                 Event::SoftBreak => inline.push(' '),
                 Event::HardBreak => {
@@ -452,7 +454,11 @@ mod tests {
         let mut md = renderer();
         let lines = md.render("**hi** `code`", 40);
         assert!(lines[0].contains("\x1b[1mhi\x1b[0m"), "{:?}", lines[0]);
-        assert!(lines[0].contains("`code`"), "{:?}", lines[0]);
+        assert!(
+            !lines[0].contains('`'),
+            "code spans carry no visible quotes: {:?}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -631,7 +637,11 @@ mod tests {
             "strikethrough dims: {:?}",
             lines[2]
         );
-        assert!(lines[4].contains("`code`"), "{:?}", lines[4]);
+        assert!(
+            !lines[4].contains('`'),
+            "cjk-adjacent code spans carry no quotes: {:?}",
+            lines[4]
+        );
         assert_no_leaked_markers(&lines);
     }
 

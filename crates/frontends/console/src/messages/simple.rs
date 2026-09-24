@@ -223,11 +223,23 @@ impl Component for AssistantMessage {
     }
 }
 
-/// A dim status line: `● text` (errors color the bullet and text).
+/// Severity of a status line: picks the bullet and text color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// Neutral system note (dim).
+    Info,
+    /// Harness warning or loop notice (amber).
+    Warning,
+    /// Hard failure (red).
+    Error,
+}
+
+/// A status line: `● text` tinted by severity — dim for neutral notes,
+/// amber for warnings and loop notices, red for errors.
 #[derive(Debug, Clone)]
 pub struct StatusLine {
     text: String,
-    is_error: bool,
+    severity: Severity,
 }
 
 impl StatusLine {
@@ -235,7 +247,15 @@ impl StatusLine {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            is_error: false,
+            severity: Severity::Info,
+        }
+    }
+
+    /// A warning status note (harness warnings, loop notices).
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            severity: Severity::Warning,
         }
     }
 
@@ -243,7 +263,7 @@ impl StatusLine {
     pub fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            is_error: true,
+            severity: Severity::Error,
         }
     }
 }
@@ -251,10 +271,10 @@ impl StatusLine {
 impl Component for StatusLine {
     fn render(&mut self, columns: usize) -> Vec<String> {
         let theme = theme::current();
-        let token = if self.is_error {
-            Token::Error
-        } else {
-            Token::TextDim
+        let token = match self.severity {
+            Severity::Info => Token::TextDim,
+            Severity::Warning => Token::Warning,
+            Severity::Error => Token::Error,
         };
         let body_width =
             columns.saturating_sub(width::width(STATUS_BULLET) + width::width(MESSAGE_INDENT));
@@ -316,6 +336,28 @@ mod tests {
         let mut line = StatusLine::error("boom");
         let lines = line.render(60);
         assert!(lines[0].contains("\x1b[38;2;254;68;80m"), "{:?}", lines[0]);
+    }
+
+    /// Warnings and loop notices ride the amber Warning role, not the
+    /// dim body tone.
+    #[test]
+    fn warning_status_lines_render_amber() {
+        theme::set(theme::Theme::synthwave());
+        let mut line = StatusLine::warning("warning: tool round limit reached (256)");
+        let lines = line.render(60);
+        assert!(
+            lines[0].contains("\x1b[38;2;249;126;114m"),
+            "amber warning: {:?}",
+            lines[0]
+        );
+        // Neutral notes stay dim.
+        let mut line = StatusLine::new("compacting");
+        let lines = line.render(60);
+        assert!(
+            !lines[0].contains("\x1b[38;2;249;126;114m"),
+            "{:?}",
+            lines[0]
+        );
     }
 
     /// Synthwave: inline code spans read as code (neon cyan).

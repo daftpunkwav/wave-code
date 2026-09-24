@@ -1260,7 +1260,9 @@ where
                     continue;
                 }
                 emit_msg(EventMsg::Warning {
-                    message: format!("tool round limit reached ({ceiling}); stopping this turn",),
+                    message: format!(
+                        "tool round limit reached ({ceiling}); stopping this turn — set max_tool_rounds in ~/.wavecode/config.toml to run longer"
+                    ),
                 });
                 settle(conv, &last_input, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });

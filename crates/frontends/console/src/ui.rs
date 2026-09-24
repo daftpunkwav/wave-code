@@ -716,6 +716,14 @@ impl ConsoleUi {
         }
     }
 
+    /// Push one warning status line (amber: harness warnings and loop
+    /// notices ride the Warning role, not the dim body tone).
+    pub fn push_warning(&mut self, text: &str) {
+        let text = tui_engine::sanitize::sanitize_terminal(text);
+        self.transcript
+            .push(Box::new(StatusLine::warning(text.as_ref())));
+    }
+
     /// Fold the live thinking block into a finalized transcript entry.
     fn finalize_thinking(&mut self) {
         if !self.streaming.thinking.is_empty() {
@@ -892,7 +900,7 @@ impl ConsoleUi {
                 true
             }
             EventMsg::Warning { message } => {
-                self.push_status(&format!("warning: {message}"), false);
+                self.push_warning(&format!("warning: {message}"));
                 true
             }
             EventMsg::Error {
@@ -2836,6 +2844,37 @@ mod tests {
     use test_support::{NullStatus, TestLink};
     use tui_engine::keys::Mods;
     use tui_engine::width::strip_ansi;
+
+    /// Warning events route onto the amber Warning role, never the dim
+    /// body tone (loop notices: round limits, repeat breakers).
+    #[tokio::test]
+    async fn wire_warnings_render_with_the_warning_palette() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::Warning {
+            message: "tool round limit reached (256); stopping this turn".to_string(),
+        });
+        let index = ui.transcript.last_index().expect("status pushed");
+        let entry = ui.transcript.get_mut(index).expect("entry");
+        let rendered = entry.component.render(80);
+        let joined: String = rendered
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(
+            joined.contains("warning: tool round limit reached (256)"),
+            "{joined}"
+        );
+        // Synthwave Warning amber #F97E72, distinct from the dim body.
+        let raw = rendered.join(
+            "
+",
+        );
+        assert!(raw.contains("[38;2;249;126;114m"), "{raw:?}");
+    }
 
     fn ui() -> ConsoleUi {
         theme::set(theme::Theme::synthwave());

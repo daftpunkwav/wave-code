@@ -107,7 +107,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | `wavecode-config` | TOML config loading (`~/.wavecode/config.toml`) and provider resolution |
 | `wavecode-llm` | Multi-provider abstraction: Anthropic/OpenAI adapters, SSE streaming, retry |
 | `wavecode-auth` | Provider-scoped credentials for model access |
-| `wavecode-tools` | Tool trait, registry, built-in tools (fs, search, shell, todo, child-task delegation), path guarding |
+| `wavecode-tools` | Tool trait, registry, built-in tools (fs, search, shell, todo, child-task delegation, ask-user), path guarding |
 | `wavecode-skills` | `SKILL.md` discovery, parsing, and catalog, plus the model-invokable `skill` tool |
 | `wavecode-memory` | Instruction memory (`WAVECODE.md`) and per-turn transcript distillation, plus the model-invokable `memory_write` tool |
 | `wavecode-mcp` | Model Context Protocol client and interface boundary: client/server traits, data types, server config, the `mcp__` naming convention, and the stdio/streamable-HTTP client bridge that injects external tools into the registry (byte-level framing lives in `transport-mcp`) |

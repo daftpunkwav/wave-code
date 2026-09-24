@@ -8,7 +8,8 @@
 //! session task-list tool (`todowrite`, deepagents-style planning), the
 //! child-task delegation tools (`task`, `task_output`, `task_stop`,
 //! `task_continue`, fed by the `action-tasks` seam), and the `ask_user`
-//! question surface. File and
+//! question surface (the sandbox routes its valid calls to the question
+//! flow by tool name, so the tool body stays pure validation). File and
 //! search tools confine all paths under [`ToolCtx::cwd`] via `path_guard`,
 //! guarding against `..` escapes and absolute-path breakouts.
 //! Every built-in tool's execute is truly async (`tokio::fs` / `tokio::process`;
@@ -16,6 +17,7 @@
 //! The execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
 
 mod agent_task_tool;
+mod ask_user_tool;
 mod fs;
 mod html;
 mod lsp;
@@ -31,6 +33,7 @@ mod web_fetch;
 mod websearch;
 
 pub use agent_task_tool::{AgentDef, TaskTool, discover_agent_defs};
+pub use ask_user_tool::{AskUserTool, MAX_QUESTION_OPTIONS};
 pub use fs::{Present, PresentStore, ReadImage};
 pub use lsp::{
     DocumentSymbols, FindReferences, GotoDefinition, Hover, LspDiagnostics, LspProviders,

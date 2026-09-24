@@ -18,7 +18,6 @@
 //! concrete legacy crate. Policy stays in the legacy crates; mapping stays
 //! here, so neither side names the other directly.
 
-pub mod ask_user_tool;
 pub mod child_service;
 pub mod compactor;
 pub mod composite;
@@ -42,7 +41,6 @@ pub mod session;
 pub mod snapshot_tools;
 pub mod status_queries;
 pub mod tool_adapter;
-pub mod tool_util;
 
 pub use child_service::TurnChildService;
 pub use compactor::ContextCompactor;

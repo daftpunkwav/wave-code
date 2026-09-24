@@ -802,7 +802,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // `ask_user` parks on the shared question gate: the sandbox routes valid
     // payloads to the question flow before mode policy, so this tool's body
     // only runs for schema errors or bypassed gates.
-    registry.register(Arc::new(crate::ask_user_tool::AskUserTool));
+    registry.register(Arc::new(wavecode_tools::AskUserTool));
     // `task` is the free-form delegation surface (named agent definitions
     // resolve per call from the tool's cwd, so registration needs only the
     // shared child handle).

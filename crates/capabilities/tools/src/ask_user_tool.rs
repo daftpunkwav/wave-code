@@ -22,7 +22,7 @@
 
 use serde_json::Value;
 
-use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
+use crate::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Cap on answer options; more would defeat one-key selection.
 pub const MAX_QUESTION_OPTIONS: usize = 4;

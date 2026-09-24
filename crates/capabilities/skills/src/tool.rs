@@ -130,8 +130,8 @@ impl Tool for SkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use action_tasks::TaskInfo;
     use crate::{Skill, SkillContext, SkillMeta, SkillSource};
+    use action_tasks::TaskInfo;
 
     struct FakeTasks {
         spawned: std::sync::Mutex<Vec<TaskRequest>>,

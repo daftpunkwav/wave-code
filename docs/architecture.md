@@ -8,7 +8,7 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 
 1. **Everything may depend on `infrastructure/`.** These crates are leaf primitives with zero internal dependencies.
 2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `wavecode-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
-3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to name concrete capability crates and adapt them to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends (its tests excepted: the gateway's server tests use its hermetic assembly seam as a dev-dependency). The gateway's MCP-serve module is a serving skin that names `wavecode_tools` registry types only; executor construction stays in bootstrap.
+3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to adapt concrete capabilities to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends (its tests excepted: the gateway's server tests use its hermetic assembly seam as a dev-dependency). The gateway's MCP-serve module is a serving skin that names `wavecode_tools` registry types only; executor construction stays in bootstrap. The one recorded exception to bootstrap-only capability consumption: the model tools live with their engines — `state-goal`, `state-plan`, `action-jobs`, `action-workflow`, `wavecode-skills`, and `wavecode-memory` name `wavecode_tools` directly to host their tools over the shared `Tool` abstraction (bootstrap still registers every one of them), and `wavecode-tools` consumes the vocabulary-tier `action-tasks` seam for the delegation tools.
 4. **Policy never matches tool names.** Tools carry declarative attributes (`wavecode_tools::Tool::is_read_only` / `is_destructive`), and policy decisions consume those attributes (`operations_bootstrap::policy_adapter`), so adding a tool cannot silently drift the policy layer.
 5. **New behavior lands on extension points, not loop changes.** Changing `runtime/runner` requires updating this document.
 
@@ -100,7 +100,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 
 ### `foundation/` + `capabilities/` — the capability stack
 
-Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapters; new layers must not depend on them directly.
+Legacy-named `wavecode-*` crates. Bootstrap is their default consumer; the recorded exceptions are the tool-hosting engines named in dependency rule 3, which consume `wavecode-tools` (and, through it, the `action-tasks` seam) to host their own model tools.
 
 | Crate | Responsibility |
 | --- | --- |

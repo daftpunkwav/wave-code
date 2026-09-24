@@ -3694,6 +3694,7 @@ model = "m2"
             mcp_servers: std::collections::HashMap::new(),
             models,
             secondary_model: None,
+            max_tool_rounds: None,
         }
     }
 

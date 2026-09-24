@@ -492,18 +492,18 @@ fn render_table(
     };
     let render_row = |out: &mut Vec<String>, row: &[String], header: bool| {
         let mut line = String::from("│");
-        for index in 0..col_count {
+        for (index, w) in widths.iter().enumerate() {
             let cell = row.get(index).map(String::as_str).unwrap_or_default();
             // Shrunken tables truncate overflowing cells to the column.
-            let cut = width::truncate_to_width(cell, widths[index]);
+            let cut = width::truncate_to_width(cell, *w);
             let cut = if width::width(&cut) < width::width(cell) {
-                let mut trimmed = width::truncate_to_width(cell, widths[index].saturating_sub(1));
+                let mut trimmed = width::truncate_to_width(cell, w.saturating_sub(1));
                 trimmed.push('…');
                 trimmed
             } else {
                 cut
             };
-            let pad = widths[index].saturating_sub(width::width(&cut));
+            let pad = w.saturating_sub(width::width(&cut));
             let styled = if header {
                 style.heading.bold().paint(&cut)
             } else {

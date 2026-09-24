@@ -23,6 +23,15 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   title and tab progress, kill-ring/yank-pop, paste-burst protection,
   external status-line command (Claude Code contract), custom JSON
   themes, `/undo` rewind picker, `/editor` (Ctrl+G), `/reload`.
+- Theming: `/theme light|dark|deepwave|auto` plus custom theme files
+  with per-token color overrides and a `syntax_theme` alias; one
+  selection colors both the chrome and code blocks (the bundled
+  SynthWave '84 tmTheme, or base16-ocean dark/light), with
+  256-color / 16-color degradation for plainer terminals.
+- Long-horizon loop: `max_tool_rounds` config key; persisted tool
+  results carry a wall-clock stamp so resumed sessions can reason
+  about recency; a `/model` switch onto a smaller-window model
+  compacts before the next sample instead of failing hard.
 - Reliability: write-ahead history journal, checkpoint manifests,
   bounded LLM/MCP transports (no hang-forever paths), panic
   isolation for tool children, MCP reconnect/heal.
@@ -30,7 +39,28 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `eval` task harness, offline metrics reporting, binary release
   pipeline with sha256-verified archives.
 
+### Changed
+- The default dark theme is the synthwave identity (neon cyan
+  primary, pink user input, deep purple-dark ground); the previous
+  deepwave identity stays selectable via `/theme deepwave`.
+- `max_tool_rounds` default raised from 32 to 256, and goal
+  continuations per turn from 5 to 8, for super-long-horizon turns.
+- Warnings and loop notices render in the theme's warning color
+  instead of dim body text, and the round-limit warning names the
+  `max_tool_rounds` config key.
+- Edit tool cards and edit settings render as a single unified diff
+  column (the `diff layout` setting is gone).
+
 ### Fixed
+- Markdown rendering: exactly one blank line between blocks, fenced
+  code framed with dim rules instead of literal backtick markers
+  (language tags sanitized), inline code spans without visible
+  backticks, CJK-adjacent emphasis parses, and standalone `**bold**`
+  pseudo-heading lines start their own block.
+- Tables align borders on display width: ragged rows, CJK cells, and
+  wide glyphs can no longer pull the grid out of alignment.
+- The terminal cursor stays in the input editor only, and the input
+  region stays pinned to the screen bottom while output streams.
 - Journal tear recovery: torn writes and multi-byte UTF-8 cuts no
   longer read as an empty history.
 - Windows: snapshot manifests cannot escape the restore root through
@@ -39,3 +69,7 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
 - Correctness: permission-mode typos are rejected instead of
   silently widening to `auto`; oversized `--image` inputs are
   rejected before loading into memory.
+
+### Removed
+- The `ls` tool (redundant with `shell` / `glob` / `read`).
+- The `pty_shell` tool and the `portable-pty` dependency.

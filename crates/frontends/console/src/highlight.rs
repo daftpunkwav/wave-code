@@ -2,14 +2,14 @@
 //!
 //! Implements the engine's [`SyntaxHighlighter`] seam so the markdown
 //! renderer colors fenced code without gaining a highlighting
-//! dependency itself. The syntax set merges the two-face extras with a
-//! bundled SynthWave '84 tmTheme (`assets/synthwave-84.tmTheme`);
-//! which of the registered themes colors a block is decided by the
-//! active console theme's [`SyntaxTheme`], so selecting a chrome theme
-//! selects its code palette too. One `HighlightLines` state machine
-//! runs per code block. Oversized blocks and unknown languages fall
-//! back to plain lines — highlighting is an enhancement, never a
-//! rendering risk.
+//! dependency itself. The syntax set is the two-face extras; the theme
+//! set adds the bundled SynthWave '84 tmTheme
+//! (`assets/synthwave-84.tmTheme`) on top of the registered defaults,
+//! and which theme colors a block is decided by the active console
+//! theme's [`SyntaxTheme`], so selecting a chrome theme selects its
+//! code palette too. One `HighlightLines` state machine runs per code
+//! block. Oversized blocks and unknown languages fall back to plain
+//! lines — highlighting is an enhancement, never a rendering risk.
 //!
 //! Backgrounds never render: only each span's foreground and font
 //! style are read, so code always sits on the terminal's own

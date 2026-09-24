@@ -1614,8 +1614,8 @@ deny = ["Bash(git *)"]
     #[tokio::test]
     async fn advertised_tool_catalog_stays_within_its_budget() {
         /// Ceiling in tokens for the always-on catalog, measured with the
-        /// same CJK-aware estimator the context budget uses (38 tools,
-        /// ~6.4k tokens as of the `ls` removal).
+        /// same CJK-aware estimator the context budget uses (37 tools,
+        /// ~6.2k tokens as of the `pty_shell` removal).
         const CATALOG_TOKEN_BUDGET: u64 = 7_000;
 
         let dir = tempfile::tempdir().unwrap();

@@ -25,6 +25,8 @@ Consumers: the console UI journals on `TurnCompleted` and drives `/sessions` (pi
 
 A crash between a tool's side effect and its recorded result leaves an assistant `tool_use` with no matching `tool_result`; providers reject such a pairing, so replay closes every open call with an **`is_error` result that says the outcome is unknown** — the model is told to verify, never to assume the write happened or to repeat it. Assembly turns that into a startup warning naming the affected call ids.
 
+Tool results may carry a `produced_at` wall-clock stamp (epoch seconds): the loop stamps results as they land, so a resumed or long-horizon agent can reason about recency from the persisted history — the text views render it as a compact `[YYYY-MM-DD HH:MM UTC]` header (UTC-only; a timezone database is deliberately out of scope). The field is optional and absent on pre-stamp journal records (which replay unchanged) and on the synthetic closing results above, whose real production time went down with the lost record.
+
 Honest status (updated 2026-09-18): the journal now has a production consumer (the session registry). The legacy `resume` subcommand still reads the legacy import path — `state_persistence::legacy` (`crates/state/persistence/src/legacy.rs`) lists and loads `~/.wavecode/threads` (`THREADS_DIR`), newest first.
 
 ## Checkpoints, snapshots, and the actor's durability seam

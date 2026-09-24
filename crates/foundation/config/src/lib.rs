@@ -66,8 +66,8 @@ pub struct Config {
     /// Tool-round ceiling per turn (`max_tool_rounds`): a turn that
     /// reaches it stops with `MaxToolRounds`. Unset uses the runner
     /// default (256 — wavecode targets super-long-horizon work); an open
-    /// session goal re-arms the ceiling up to 8×. `0` stops every turn
-    /// before its first tool round.
+    /// session goal re-arms the ceiling up to 7 more times (8 ceilings
+    /// per turn). `0` stops every turn before its first tool round.
     #[serde(default)]
     pub max_tool_rounds: Option<u32>,
 }

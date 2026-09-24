@@ -44,6 +44,20 @@ Everything sits inside a one-column gutter so transcript and chrome share
 a left edge. As the transcript grows, older lines scroll into native
 scrollback and are never rewritten; the diff renderer tracks the
 rewrite-eligible base and clamps cursor movement at the bottom margin.
+Two screen-layer invariants keep the frame stable while it streams:
+
+- **Pinned tail**: the frame's trailing lines (editor box, autocomplete
+  popup, footer) are re-anchored to the physical bottom rows with
+  absolute positioning on every frame that wrote anything, so
+  streaming or scrollback churn above can never drag the input
+  off-screen. Frames that still fit the screen skip the pin (the
+  in-place diff already rewrites changed rows); identical frames write
+  nothing at all.
+- **Cursor discipline**: the hardware cursor is hidden for the whole
+  frame and shown again only at the input editor's caret (an embedded
+  marker the screen layer resolves to a cell), so no transcript, footer
+  or streaming row can ever park a blinking cursor. Terminal modes
+  restore on exit (and on panic), including the cursor.
 
 ## Wire extensions the UI consumes
 
@@ -173,12 +187,14 @@ receivers remain compatible.
   or Enter to cycle, changes persist to
   `~/.wavecode/console-settings.json` and apply to live components):
   user-input markdown rendering on/off, tool-call verbosity
-  (names/summary/full), edit rendering (tool only/diff), diff layout
-  (unified/split), and the wave-denylist entry count.
+  (names/summary/full), edit rendering (tool only/diff), and the
+  wave-denylist entry count.
 - Submitted user input renders as markdown in the transcript by
   default (the editor never renders); the setting turns it off.
 - Tables in assistant and user markdown render as box-drawing grids
-  with bold headers and even column shrink to fit the width.
+  with bold headers and even column shrink to fit the width; ragged
+  rows pad onto one shared display-width grid, so CJK cells and
+  checkmark glyphs cannot pull the borders out of alignment.
 - `@` file mentions with a bounded workspace inventory (2 000 entries,
   vendored/hidden directories skipped).
 - Ctrl+C cascade: interrupt when busy, otherwise arm the double-press
@@ -225,9 +241,10 @@ receivers remain compatible.
 - Fenced code blocks in assistant markdown are syntax highlighted
   (syntect with the two-face extra syntax set — TypeScript, TOML, ...
   — on the pure-Rust fancy-regex backend) behind the engine's
-  `SyntaxHighlighter` seam; the theme follows the active palette
-  (base16-ocean dark/light). Oversized blocks (>30 KB) and unknown
-  languages fall back to plain lines.
+  `SyntaxHighlighter` seam; the syntax theme follows the active chrome
+  theme's pairing (synthwave → the bundled synthwave-84 tmTheme,
+  deepwave → base16-ocean.dark, light → base16-ocean.light). Oversized
+  blocks (>30 KB) and unknown languages fall back to plain lines.
 - The footer shows the workspace git branch (⎇ badge), read directly
   from `.git/HEAD` (parent walk, worktree `gitdir:` file form, short
   sha when detached) at construction and on every turn start — no

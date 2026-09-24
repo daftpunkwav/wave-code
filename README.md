@@ -75,6 +75,12 @@ model = "your-model-fast"
 # to the primary with a warning (doctor reports it).
 # secondary_model = "fast"
 
+# Optional: tool-round ceiling per turn. Unset uses the runner default
+# (256 — wavecode targets super-long-horizon work); an open session goal
+# re-arms the ceiling up to 7 more times (8 ceilings per turn). `0`
+# stops every turn before its first tool round.
+# max_tool_rounds = 256
+
 # Optional: permission rules, `Scope(pattern)` syntax. Allow entries skip
 # approval; deny entries refuse in every mode (deny always wins). `*` matches
 # any run of characters, `?` one. Read from this home file only — never from a
@@ -230,14 +236,43 @@ lifetime and count — no filesystem or network boundary, so an approved command
 there runs with your own account's privileges. `wavecode doctor` prints which
 backend is live and how far it reaches.
 
+## Themes
+
+The default dark look is the **synthwave** identity (neon cyan primary, pink
+user input, deep purple-dark ground); the previous teal **deepwave** identity
+stays selectable. One selection colors both the interface chrome and code
+blocks: synthwave pairs with the bundled SynthWave '84 syntax theme, deepwave
+with `base16-ocean.dark`, light with `base16-ocean.light`. Color depth is
+probed once at startup — truecolor by default, nearest-256 or the 16 classic
+ANSI colors on plainer terminals.
+
+`/theme light|dark|deepwave|auto` switches live (`auto` re-probes the
+terminal background); `/theme <name>` loads a custom theme from
+`~/.wavecode/themes/<name>.json`:
+
+```json
+{
+  "base": "dark",
+  "syntax_theme": "ocean-dark",
+  "colors": { "primary": "#ff0000" }
+}
+```
+
+`base` is `dark`, `light` or `deepwave`; `colors` overrides any subset of the
+20 semantic tokens with `#rrggbb` values; `syntax_theme` is an optional alias
+(`synthwave-84`, `ocean-dark`, `ocean-light`). Unknown token names, malformed
+colors and unknown aliases are rejected at load — a typo never silently
+renders as the base.
+
 ## Long-running work
 
 - **Goals keep the turn going.** An objective recorded through the `goal` tool
   (`/goal` shows its status; per home, CAS-versioned) steers the loop twice
   over: when the model stops making tool calls while the goal is still
-  `Active`, the turn continues — up to 5 times — and when the turn hits its
-  32-round ceiling with the goal still open, the ceiling re-arms — 8 ceilings
-  per turn, 256 rounds, matching the cap the goal driver sets on itself. Every
+  `Active`, the turn continues — up to 8 times — and when the turn hits its
+  tool-round ceiling with the goal still open, the ceiling re-arms — 8
+  ceilings per turn (2048 rounds at the default), matching the cap the goal
+  driver sets on itself. Every
   one of those nudges states what is left of the context, round, re-arm and
   continuation budgets, so the model can wrap up instead of opening work it
   cannot finish. Marking the goal `completed`, `blocked` or `paused` stops all
@@ -259,11 +294,13 @@ backend is live and how far it reaches.
 - Memory: per-turn transcript distillation appends `[category]` entries to a
   home-scoped store; the next session reads them back as its index.
 - MCP: stdio servers configured under `[mcp_servers.<name>]` (`command` plus
-  optional `args`/`env`) connect at startup with `initialize` + `tools/list`
+  optional `args`/`env`) and streamable-HTTP servers (`url`, optional OAuth
+  client credentials) connect at startup with `initialize` + `tools/list`
   and bridge each tool as `mcp__<server>__<tool>` (honoring
-  `annotations.readOnlyHint`). Unreachable servers degrade to warnings, never
-  failed startups. HTTP servers report `unavailable (http transport not
-  implemented)`; prompts-to-skills conversion is future work.
+  `annotations.readOnlyHint`; capability-gated `read_resource` /
+  `get_prompt` discovery tools bridge too). Unreachable servers degrade to
+  warnings, never failed startups. Prompts-to-skills conversion is future
+  work.
 
 ## SDK
 

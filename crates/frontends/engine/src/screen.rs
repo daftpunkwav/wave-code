@@ -9,6 +9,12 @@
 //! in synchronized-output markers when enabled so partial frames never
 //! flicker, and every line is reset-terminated so styles never leak.
 //!
+//! Two frame-level invariants: the trailing [`Screen::set_pinned_tail`]
+//! lines (the input region) are re-anchored to the physical bottom rows
+//! on every frame that wrote anything, and the hardware cursor is shown
+//! only at the editor's caret marker — every other row renders with the
+//! cursor hidden.
+//!
 //! Contract: callers supply lines already wrapped to `width` (all
 //! engine components do); the renderer defensively truncates.
 

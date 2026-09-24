@@ -118,7 +118,10 @@ impl HistoryEntry {
     /// Text blocks join with newlines; tool payloads render in the
     /// bracketed convention the text-only history used before blocks
     /// existed, so text-based consumers (resume import, token estimates)
-    /// keep seeing the same shape. Thinking blocks render nothing: they are
+    /// keep seeing the same shape. A stamped tool result opens with a
+    /// compact wall-clock header (`[YYYY-MM-DD HH:MM UTC]`) ahead of the
+    /// legacy shape; unstamped results render byte-identical to before.
+    /// Thinking blocks render nothing: they are
     /// wire-round-trip state, not prose, and folding per-turn reasoning
     /// into estimates or resumed transcripts would inflate both.
     pub fn text(&self) -> String {

@@ -3,7 +3,10 @@
 //! A streaming-tolerant subset of the reference renderer: headings,
 //! emphasis, inline code, links (OSC 8 hyperlinks), fenced code blocks
 //! with pluggable syntax highlighting, lists with nesting, block
-//! quotes, tables (box-drawing), and horizontal rules. Output is one
+//! quotes, tables (box-drawing), and horizontal rules. One deliberate
+//! deviation: a standalone `**bold**` line always starts a new block
+//! (models emit these as pseudo-headings; CommonMark would fold them
+//! into the previous paragraph as a lazy continuation). Output is one
 //! ANSI string per terminal line; wrapping happens per block at the
 //! requested width.
 
@@ -127,9 +130,10 @@ impl Markdown {
     }
 
     fn render_uncached(&self, text: &str, columns: usize) -> Vec<String> {
+        let text = break_before_bold_lines(text);
         let options =
             Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-        let parser = Parser::new_ext(text, options);
+        let parser = Parser::new_ext(&text, options);
         let mut out: Vec<String> = Vec::new();
         let mut inline = String::new();
         let mut state = InlineState::default();
@@ -319,6 +323,42 @@ impl Markdown {
         }
         out
     }
+}
+
+/// Insert a paragraph break before bold-led lines: model output uses a
+/// standalone `**Heading**` line as a pseudo-heading, but CommonMark
+/// folds it into the previous bullet/paragraph as a lazy continuation
+/// line, gluing unrelated content onto one row. Each such line becomes
+/// its own block instead. Fenced code blocks pass through untouched,
+/// and a line that already follows a blank line is left alone.
+fn break_before_bold_lines(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.split('\n').any(is_bold_led) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out: Vec<&str> = Vec::new();
+    let mut in_fence = false;
+    for line in text.split('\n') {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push(line);
+            continue;
+        }
+        if !in_fence
+            && is_bold_led(line)
+            && out.last().is_some_and(|prev| !prev.trim().is_empty())
+        {
+            out.push("");
+        }
+        out.push(line);
+    }
+    std::borrow::Cow::Owned(out.join("\n"))
+}
+
+/// True when the line opens with a bold delimiter run: up to three
+/// leading spaces (the CommonMark paragraph indent) then `**`.
+fn is_bold_led(line: &str) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    indent <= 3 && line[indent..].starts_with("**")
 }
 
 /// Render collected table rows as a box-drawing table. Column widths
@@ -527,6 +567,162 @@ mod tests {
         assert!(
             lines.iter().all(|l| width::width(l) <= 40),
             "table fits: {lines:?}"
+        );
+    }
+
+    // --- CJK-adjacent emphasis (regression locks) ---
+    //
+    // CommonMark flanking treats CJK ideographs as word characters, so
+    // emphasis flanked by CJK text or full-width punctuation must still
+    // parse; the locks below keep the behavior from regressing.
+
+    /// Assert the plain text carries no literal asterisk/tilde markers
+    /// (the delimiter run was consumed as emphasis, not leaked).
+    fn assert_no_leaked_markers(lines: &[String]) {
+        for line in lines {
+            let plain = strip_ansi(line);
+            assert!(
+                !plain.contains("**") && !plain.contains("~~"),
+                "leaked emphasis markers: {plain:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_bold_flanked_by_cjk_characters() {
+        let mut md = renderer();
+        let lines = md.render("中文**加粗**中文", 40);
+        assert!(lines[0].contains("\x1b[1m加粗\x1b[0m"), "{:?}", lines[0]);
+        assert_no_leaked_markers(&lines);
+    }
+
+    #[test]
+    fn cjk_bold_with_fullwidth_punctuation_on_both_sides() {
+        let mut md = renderer();
+        let lines = md.render("前文：**执行环境**。后文", 40);
+        assert!(lines[0].contains("\x1b[1m执行环境\x1b[0m"), "{:?}", lines[0]);
+        assert_no_leaked_markers(&lines);
+    }
+
+    #[test]
+    fn cjk_bold_at_line_start_and_after_a_bullet_marker() {
+        let mut md = renderer();
+        let lines = md.render("**起点**: 蓝色发光方块\n\n- **终点**: 绿色方块", 40);
+        assert!(lines[0].contains("\x1b[1m起点\x1b[0m"), "{:?}", lines[0]);
+        assert!(
+            lines[2].contains("\x1b[1m终点\x1b[0m"),
+            "bold after bullet: {:?}",
+            lines[2]
+        );
+        assert_eq!(strip_ansi(&lines[2]), "• 终点: 绿色方块");
+        assert_no_leaked_markers(&lines);
+    }
+
+    #[test]
+    fn cjk_italic_strikethrough_and_code_adjacent_to_cjk() {
+        let mut md = renderer();
+        let lines = md.render("中文*斜体*中文\n\n中文~~删除~~中文\n\n中文`code`中文", 40);
+        assert!(lines[0].contains("\x1b[3m斜体\x1b[0m"), "{:?}", lines[0]);
+        assert!(lines[2].contains("删除"), "{:?}", lines[2]);
+        assert!(
+            lines[2].contains("\x1b[2m"),
+            "strikethrough dims: {:?}",
+            lines[2]
+        );
+        assert!(lines[4].contains("`code`"), "{:?}", lines[4]);
+        assert_no_leaked_markers(&lines);
+    }
+
+    // --- Block boundaries: standalone bold lines ---
+    //
+    // Models emit `**Heading**` on its own line as a pseudo-heading.
+    // CommonMark folds such a line into the previous bullet/paragraph
+    // as a lazy continuation; the renderer must break the block so the
+    // line lands on its own output line.
+
+    #[test]
+    fn bold_line_after_a_bullet_starts_a_new_block() {
+        let mut md = renderer();
+        let lines = md.render("- lsp_diagnostics - 查看代码诊断信息\n**执行环境**", 60);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0], "• lsp_diagnostics - 查看代码诊断信息");
+        assert!(
+            plain.iter().any(|l| l == "执行环境"),
+            "bold heading on its own line: {plain:?}"
+        );
+        assert!(
+            !plain.iter().any(|l| l.contains("诊断信息") && l.contains("执行环境")),
+            "blocks must not glue: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn bold_line_after_a_paragraph_starts_a_new_block() {
+        let mut md = renderer();
+        let lines = md.render("查看代码诊断信息\n**执行环境**", 60);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0], "查看代码诊断信息");
+        assert_eq!(plain[2], "执行环境", "own block: {plain:?}");
+    }
+
+    #[test]
+    fn bold_colon_lines_break_out_of_a_paragraph() {
+        let mut md = renderer();
+        let text = "先看环境。\n**迷宫场景**: 用 Three.js 拼出迷宫\n**起点**: 蓝色发光方块";
+        let lines = md.render(text, 60);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(plain.contains(&"迷宫场景: 用 Three.js 拼出迷宫".to_string()), "{plain:?}");
+        assert!(plain.contains(&"起点: 蓝色发光方块".to_string()), "{plain:?}");
+        assert!(
+            !plain.iter().any(|l| l.contains("先看环境。") && l.contains("迷宫场景")),
+            "blocks must not glue: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn bold_lines_inside_a_code_fence_are_left_alone() {
+        let mut md = renderer();
+        let lines = md.render("```\n**not a heading**\n```", 40);
+        assert_eq!(strip_ansi(&lines[1]), "  **not a heading**");
+    }
+
+    #[test]
+    fn streamed_bold_line_breaks_once_the_buffer_completes() {
+        let mut md = renderer();
+        // Live draft: only the bullet line has arrived so far.
+        let _ = md.render("- lsp_diagnostics - 查看代码诊断信息", 60);
+        // The bold heading arrives in a later delta; the accumulated
+        // buffer must re-render with the block break.
+        let lines = md.render("- lsp_diagnostics - 查看代码诊断信息\n**执行环境**", 60);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(
+            plain.iter().any(|l| l == "执行环境"),
+            "final buffer re-renders with the break: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn screenshot_session_lines_render_without_leaked_emphasis() {
+        let mut md = renderer();
+        let text = "\
+搭建说明如下。
+- lsp_diagnostics - 查看代码诊断信息
+**执行环境**
+
+**迷宫场景**: 用 Three.js 拼出迷宫
+**起点**: 蓝色发光方块
+
+- 中文`code`内联与**加粗**混排";
+        let lines = md.render(text, 60);
+        assert_no_leaked_markers(&lines);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(
+            plain.iter().any(|l| l == "执行环境"),
+            "standalone bold line owns a line: {plain:?}"
+        );
+        assert!(
+            !plain.iter().any(|l| l.contains("诊断信息") && l.contains("执行环境")),
+            "blocks must not glue: {plain:?}"
         );
     }
 }

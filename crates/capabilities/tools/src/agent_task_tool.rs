@@ -19,8 +19,8 @@
 
 use std::path::Path;
 
+use crate::{Result, Tool, ToolCtx, ToolOutput};
 use action_tasks::{TaskKind, TaskOutcome, TaskRequest, TaskService, TaskState};
-use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// How long the tool waits for the child to finish before giving up and
 /// reporting a still-running id. Generous by design: a delegation that

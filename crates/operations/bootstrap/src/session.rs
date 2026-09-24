@@ -45,8 +45,8 @@ use crate::plan_adapter::TodoPlanTracker;
 use crate::policy_adapter::PolicyAdapter;
 use crate::prune_adapter::PruningExecutor;
 use crate::skill_tool::SkillTool;
-use crate::task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 use crate::tool_adapter::ToolAdapter;
+use wavecode_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 
 /// Approval wait timeout applied to parked decisions.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -806,7 +806,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // `task` is the free-form delegation surface (named agent definitions
     // resolve per call from the tool's cwd, so registration needs only the
     // shared child handle).
-    registry.register(Arc::new(crate::agent_task_tool::TaskTool::new(
+    registry.register(Arc::new(wavecode_tools::TaskTool::new(
         task_service.clone(),
     )));
     // LSP tools get one shared, registry-backed providers handle: pooled

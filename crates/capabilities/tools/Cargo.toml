@@ -8,6 +8,9 @@ license.workspace = true
 [dependencies]
 # Shared platform-shell resolution (shell_invocation) for command strings.
 infrastructure-base = { path = "../../infrastructure/base" }
+# The delegation tools (`task*`) spawn children through this
+# capability-neutral seam (a zero-dependency vocabulary-tier crate).
+action-tasks = { path = "../../action/tasks" }
 wavecode-sandbox = { path = "../sandbox" }
 wavecode-llm = { path = "../../foundation/llm" }
 wavecode-config = { path = "../../foundation/config" }

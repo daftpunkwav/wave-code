@@ -18,7 +18,6 @@
 //! concrete legacy crate. Policy stays in the legacy crates; mapping stays
 //! here, so neither side names the other directly.
 
-pub mod agent_task_tool;
 pub mod ask_user_tool;
 pub mod child_service;
 pub mod compactor;
@@ -45,12 +44,10 @@ pub mod session;
 pub mod skill_tool;
 pub mod snapshot_tools;
 pub mod status_queries;
-pub mod task_tools;
 pub mod tool_adapter;
 pub mod tool_util;
 pub mod workflow_tools;
 
-pub use agent_task_tool::{AgentDef, TaskTool, discover_agent_defs};
 pub use child_service::TurnChildService;
 pub use compactor::ContextCompactor;
 pub use composite::CompositeExecutor;
@@ -69,5 +66,4 @@ pub use session::{
 };
 pub use skill_tool::SkillTool;
 pub use status_queries::SessionStatus;
-pub use task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 pub use tool_adapter::ToolAdapter;

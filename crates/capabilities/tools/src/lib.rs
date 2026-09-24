@@ -5,13 +5,17 @@
 //! (`grep` / `glob`), command tools (`shell` / `pty_shell` / `python` / `node`),
 //! LSP tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`),
 //! web tools (`web_fetch` / `web_search`), the spill reader (`spill`), and the
-//! session task-list tool (`todowrite`, deepagents-style planning). File and
+//! session task-list tool (`todowrite`, deepagents-style planning), the
+//! child-task delegation tools (`task`, `task_output`, `task_stop`,
+//! `task_continue`, fed by the `action-tasks` seam), and the `ask_user`
+//! question surface. File and
 //! search tools confine all paths under [`ToolCtx::cwd`] via `path_guard`,
 //! guarding against `..` escapes and absolute-path breakouts.
 //! Every built-in tool's execute is truly async (`tokio::fs` / `tokio::process`;
 //! grep/glob directory traversal is a sync API wrapped in `spawn_blocking` internally).
 //! The execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
 
+mod agent_task_tool;
 mod fs;
 mod html;
 mod lsp;
@@ -21,15 +25,18 @@ mod script;
 mod search;
 mod shell_tool;
 mod spill_tool;
+mod task_tools;
 mod todo_tool;
 mod web_fetch;
 mod websearch;
 
+pub use agent_task_tool::{AgentDef, TaskTool, discover_agent_defs};
 pub use fs::{Present, PresentStore, ReadImage};
 pub use lsp::{
     DocumentSymbols, FindReferences, GotoDefinition, Hover, LspDiagnostics, LspProviders,
 };
 pub use spill_tool::SpillRead;
+pub use task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 pub use websearch::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};
 
@@ -52,6 +59,23 @@ pub(crate) fn read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 /// Write-side RwLock counterpart of [`lock`].
 pub(crate) fn write<T>(l: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     l.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Required string field helper for tool inputs: missing or blank
+/// becomes a business error the model can self-correct from. Shared by
+/// the model tools that live next to their engines (job, workflow) so
+/// the error wording stays identical everywhere.
+pub fn required_str<'a>(
+    input: &'a serde_json::Value,
+    field: &str,
+) -> std::result::Result<&'a str, ToolOutput> {
+    match input.get(field).and_then(|value| value.as_str()) {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        _ => Err(ToolOutput {
+            content: format!("missing required field: {field}"),
+            is_error: true,
+        }),
+    }
 }
 
 /// Tool execution context.

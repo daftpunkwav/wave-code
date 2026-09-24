@@ -92,7 +92,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 
 | Crate | Responsibility |
 | --- | --- |
-| `action-tasks` | Child task lifecycle behind a capability-neutral seam |
+| `action-tasks` | Child task lifecycle behind a capability-neutral seam (tier-wise a vocabulary-tier passive mechanism, like `runtime-child`) |
 | `action-workflow` | Validated DAG execution and Ralph loops over `action-tasks` |
 | `action-jobs` | Background shell jobs with wait/cancel/notice semantics |
 | `action-browser` | Browser automation behind an async tab seam |
@@ -107,7 +107,7 @@ Legacy-named `wavecode-*` crates. They are consumed only through bootstrap adapt
 | `wavecode-config` | TOML config loading (`~/.wavecode/config.toml`) and provider resolution |
 | `wavecode-llm` | Multi-provider abstraction: Anthropic/OpenAI adapters, SSE streaming, retry |
 | `wavecode-auth` | Provider-scoped credentials for model access |
-| `wavecode-tools` | Tool trait, registry, built-in tools (fs, search, shell, todo), path guarding |
+| `wavecode-tools` | Tool trait, registry, built-in tools (fs, search, shell, todo, child-task delegation), path guarding |
 | `wavecode-skills` | `SKILL.md` discovery, parsing, and catalog |
 | `wavecode-memory` | Instruction memory (`WAVECODE.md`) and per-turn transcript distillation |
 | `wavecode-mcp` | Model Context Protocol client and interface boundary: client/server traits, data types, server config, the `mcp__` naming convention, and the stdio/streamable-HTTP client bridge that injects external tools into the registry (byte-level framing lives in `transport-mcp`) |

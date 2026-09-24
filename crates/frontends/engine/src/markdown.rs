@@ -2,13 +2,17 @@
 //!
 //! A streaming-tolerant subset of the reference renderer: headings,
 //! emphasis, inline code, links (OSC 8 hyperlinks), fenced code blocks
-//! with pluggable syntax highlighting, lists with nesting, block
-//! quotes, tables (box-drawing), and horizontal rules. One deliberate
-//! deviation: a standalone `**bold**` line always starts a new block
-//! (models emit these as pseudo-headings; CommonMark would fold them
-//! into the previous paragraph as a lazy continuation). Output is one
-//! ANSI string per terminal line; wrapping happens per block at the
-//! requested width.
+//! with pluggable syntax highlighting and framed rendering, lists with
+//! nesting, block quotes, tables (box-drawing), and horizontal rules.
+//! One deliberate deviation: a standalone `**bold**` line always starts
+//! a new block (models emit these as pseudo-headings; CommonMark would
+//! fold them into the previous paragraph as a lazy continuation).
+//! Output is one ANSI string per terminal line; wrapping happens per
+//! block at the requested width.
+//!
+//! Vertical rhythm: every block ensures exactly one blank line between
+//! itself and the previous block (none at the top of the document), so
+//! blocks never cram together and two blank lines never appear.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
@@ -77,6 +81,21 @@ struct InlineState {
     link_url: Option<String>,
 }
 
+/// Ensure one blank line of separation before a block: pushes a blank
+/// only when the output has content and does not already end blank, so
+/// blocks never cram together and two blank lines never appear.
+fn ensure_blank(out: &mut Vec<String>) {
+    if out.last().is_some_and(|line| !line.is_empty()) {
+        out.push(String::new());
+    }
+}
+
+/// The render width of code block frame rules: full width on narrow
+/// terminals, capped so wide terminals get modest frames.
+fn frame_width(columns: usize) -> usize {
+    columns.clamp(6, 80)
+}
+
 impl InlineState {
     fn compose(&self, base: MarkdownStyle) -> Style {
         if self.code {
@@ -114,6 +133,30 @@ impl Markdown {
             highlighter,
             cache: None,
         }
+    }
+
+    /// The dim rule opening a code block, with a language tag when one
+    /// is known: `╭─ python ─────`. Raw fence info never reaches the
+    /// output — the tag keeps only a safe character whitelist.
+    fn frame_top(&self, lang: Option<&str>, columns: usize) -> String {
+        let total = frame_width(columns);
+        let tag = lang.and_then(lang_tag);
+        let head = match tag {
+            Some(tag) => format!("╭─ {tag} "),
+            None => "╭─".to_string(),
+        };
+        let fill = total.saturating_sub(width::width(&head));
+        self.style
+            .fence
+            .paint(&format!("{head}{}", "─".repeat(fill)))
+    }
+
+    /// The dim rule closing a code block: `╰──────`.
+    fn frame_bottom(&self, columns: usize) -> String {
+        let total = frame_width(columns);
+        self.style
+            .fence
+            .paint(&format!("╰{}", "─".repeat(total - 1)))
     }
 
     /// Render markdown `text` to ANSI lines at `width`.
@@ -169,7 +212,7 @@ impl Markdown {
                         flush_inline!();
                         heading_level = Some(level);
                     }
-                    Tag::Paragraph => {}
+                    Tag::Paragraph => ensure_blank(&mut out),
                     Tag::Emphasis => state.italic = true,
                     Tag::Strong => state.bold = true,
                     Tag::Strikethrough => state.strike = true,
@@ -181,7 +224,15 @@ impl Markdown {
                         state.link = true;
                         state.link_url = Some(dest_url.to_string());
                     }
-                    Tag::List(start) => list_stack.push(start),
+                    Tag::List(start) => {
+                        let top_level = list_stack.is_empty();
+                        list_stack.push(start);
+                        // Separation belongs around whole lists; items
+                        // inside stay tight.
+                        if top_level {
+                            ensure_blank(&mut out);
+                        }
+                    }
                     Tag::Item => {
                         flush_inline!();
                         let depth = list_stack.len().saturating_sub(1);
@@ -198,17 +249,21 @@ impl Markdown {
                     }
                     Tag::BlockQuote(_) => {
                         flush_inline!();
+                        ensure_blank(&mut out);
                         in_quote = true;
                     }
                     Tag::CodeBlock(kind) => {
                         flush_inline!();
+                        ensure_blank(&mut out);
                         if let CodeBlockKind::Fenced(info) = kind {
                             code_lang = info.split(' ').next().map(|s| s.to_string());
                         }
-                        out.push(self.style.fence.paint("```"));
+                        let lang = code_lang.as_deref();
+                        out.push(self.frame_top(lang, columns));
                     }
                     Tag::Table(_) => {
                         flush_inline!();
+                        ensure_blank(&mut out);
                         table_rows = Vec::new();
                     }
                     Tag::TableHead | Tag::TableRow => table_row = Vec::new(),
@@ -218,6 +273,7 @@ impl Markdown {
                 Event::End(tag_end) => match tag_end {
                     TagEnd::Heading(_) => {
                         if !inline.is_empty() {
+                            ensure_blank(&mut out);
                             let level = heading_level;
                             let text = std::mem::take(&mut inline);
                             let style = self.style.heading.bold();
@@ -231,13 +287,11 @@ impl Markdown {
                             } else {
                                 out.push(style.paint(&text));
                             }
-                            out.push(String::new());
                             heading_level = None;
                         }
                     }
                     TagEnd::Paragraph => {
                         flush_inline!();
-                        out.push(String::new());
                     }
                     TagEnd::Emphasis => state.italic = false,
                     TagEnd::Strong => state.bold = false,
@@ -260,11 +314,15 @@ impl Markdown {
                     TagEnd::CodeBlock => {
                         let lang = code_lang.take();
                         let code = std::mem::take(&mut inline);
+                        // The bar carries the dim fence style; the line
+                        // itself is already ANSI-painted by the
+                        // highlighter and must not be re-wrapped (the
+                        // inner resets would cancel the wrapper).
+                        let bar = self.style.fence.paint("│ ");
                         for line in self.highlighter.highlight(&code, lang.as_deref()) {
-                            out.push(format!("  {}", self.style.fence.paint(&line)));
+                            out.push(format!("{bar}{line}"));
                         }
-                        out.push(self.style.fence.paint("```"));
-                        out.push(String::new());
+                        out.push(self.frame_bottom(columns));
                     }
                     TagEnd::Table => {
                         flush_inline!();
@@ -305,6 +363,7 @@ impl Markdown {
                 }
                 Event::Rule => {
                     flush_inline!();
+                    ensure_blank(&mut out);
                     out.push(self.style.rule.paint("─".repeat(columns.min(80)).as_str()));
                 }
                 Event::Html(html) | Event::InlineHtml(html) => inline.push_str(html.as_ref()),
@@ -359,6 +418,19 @@ fn break_before_bold_lines(text: &str) -> std::borrow::Cow<'_, str> {
 fn is_bold_led(line: &str) -> bool {
     let indent = line.len() - line.trim_start_matches(' ').len();
     indent <= 3 && line[indent..].starts_with("**")
+}
+
+/// The display tag for a fenced block info string: the first word with
+/// every character outside the language-name whitelist dropped. Fence
+/// info is model-sourced text, so control characters and escapes must
+/// never reach the frame. `None` when nothing readable remains.
+fn lang_tag(info: &str) -> Option<String> {
+    let word = info.split_whitespace().next()?;
+    let clean: String = word
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '#' | '_'))
+        .collect();
+    if clean.is_empty() { None } else { Some(clean) }
 }
 
 /// Render collected table rows as a box-drawing table. Column widths
@@ -430,7 +502,6 @@ fn render_table(
         render_row(out, row, false);
     }
     rule(out, "└", "┴", "┘");
-    out.push(String::new());
 }
 
 #[cfg(test)]
@@ -471,20 +542,60 @@ mod tests {
     }
 
     #[test]
-    fn code_blocks_render_fenced() {
+    fn code_blocks_render_framed_without_fence_markers() {
         let mut md = renderer();
         let lines = md.render("```rust\nfn a() {}\n```", 40);
-        assert_eq!(strip_ansi(&lines[0]), "```");
-        assert_eq!(strip_ansi(&lines[1]), "  fn a() {}");
-        assert_eq!(strip_ansi(&lines[2]), "```");
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(plain[0].starts_with("╭─ rust "), "top frame: {plain:?}");
+        assert_eq!(plain[1], "│ fn a() {}", "bar + code: {plain:?}");
+        assert!(plain[2].starts_with("╰─"), "bottom frame: {plain:?}");
+        assert!(
+            !plain.iter().any(|l| l.contains("```")),
+            "no literal fence markers: {plain:?}"
+        );
+        // The frame rules share one width so top and bottom align.
+        assert_eq!(plain[0].chars().count(), plain[2].chars().count());
+    }
+
+    #[test]
+    fn code_frame_carries_language_tag_only_when_known() {
+        let mut md = renderer();
+        let tagged = md.render("```python\nx = 1\n```", 40);
+        assert!(
+            strip_ansi(&tagged[0]).starts_with("╭─ python "),
+            "tagged frame: {:?}",
+            strip_ansi(&tagged[0])
+        );
+        let untagged = md.render("```\nx = 1\n```", 40);
+        assert!(
+            strip_ansi(&untagged[0]).starts_with("╭──"),
+            "plain frame: {:?}",
+            strip_ansi(&untagged[0])
+        );
+        assert!(!strip_ansi(&untagged[0]).contains("python"));
+    }
+
+    #[test]
+    fn language_tag_drops_unsafe_characters() {
+        let mut md = renderer();
+        // Control characters and punctuation in the info string must
+        // never reach the rendered frame.
+        let lines = md.render("```py\x1b[31m!@\n x = 1\n```", 40);
+        let plain = strip_ansi(&lines[0]);
+        assert!(
+            !plain.contains('\x1b') && !plain.contains('!') && !plain.contains('@'),
+            "sanitized tag: {plain:?}"
+        );
+        assert!(plain.contains("py31m"), "whitelisted chars stay: {plain:?}");
     }
 
     #[test]
     fn unclosed_code_block_still_renders_streaming() {
         let mut md = renderer();
         let lines = md.render("```rust\nfn a() {}", 40);
-        assert_eq!(strip_ansi(&lines[0]), "```");
-        assert_eq!(strip_ansi(&lines[1]), "  fn a() {}");
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(plain[0].starts_with("╭─ rust "), "{plain:?}");
+        assert_eq!(plain[1], "│ fn a() {}");
     }
 
     #[test]
@@ -705,7 +816,142 @@ mod tests {
     fn bold_lines_inside_a_code_fence_are_left_alone() {
         let mut md = renderer();
         let lines = md.render("```\n**not a heading**\n```", 40);
-        assert_eq!(strip_ansi(&lines[1]), "  **not a heading**");
+        assert_eq!(strip_ansi(&lines[1]), "│ **not a heading**");
+    }
+
+    // --- Vertical rhythm between blocks ---
+    //
+    // The screenshot complaint: a list followed by a section heading
+    // rendered with zero blank line. Every block must separate from
+    // the previous one with exactly one blank line (none at the top).
+
+    /// Assert exactly one blank line separates blocks: no two
+    /// consecutive blanks anywhere, and no leading blank.
+    fn assert_clean_rhythm(lines: &[String]) {
+        assert!(
+            lines.first().is_some_and(|l| !l.is_empty()),
+            "document must not start blank: {lines:?}"
+        );
+        for pair in lines.windows(2) {
+            assert!(
+                !(pair[0].is_empty() && pair[1].is_empty()),
+                "double blank line: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn screenshot_corpus_list_heading_list_fence_has_rhythm() {
+        let mut md = renderer();
+        let text = "\
+- ls - 列出目录内容
+## Shell 与代码执行
+
+- grep - 搜索文本
+```bash
+ls -la
+```
+";
+        let lines = md.render(text, 60);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_clean_rhythm(&plain);
+        assert_eq!(plain[0], "• ls - 列出目录内容");
+        assert_eq!(plain[1], "", "blank before heading after list");
+        assert_eq!(plain[2], "Shell 与代码执行");
+        assert_eq!(plain[3], "", "blank after heading before list");
+        assert_eq!(plain[4], "• grep - 搜索文本");
+        assert_eq!(plain[5], "", "blank between list and fence");
+        assert!(
+            plain[6].starts_with("╭─ bash "),
+            "frame after the blank: {plain:?}"
+        );
+        assert_eq!(plain[7], "│ ls -la");
+        assert!(plain[8].starts_with("╰"));
+    }
+
+    #[test]
+    fn list_then_paragraph_gets_a_blank_line() {
+        let mut md = renderer();
+        // Without the blank line the paragraph would be a lazy
+        // continuation of the last list item (correct CommonMark).
+        let lines = md.render("- a\n- b\n\nparagraph", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain, vec!["• a", "• b", "", "paragraph"]);
+    }
+
+    #[test]
+    fn paragraph_then_heading_has_exactly_one_blank() {
+        let mut md = renderer();
+        let lines = md.render("hello\n## Title", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain, vec!["hello", "", "Title"]);
+    }
+
+    #[test]
+    fn heading_then_paragraph_has_exactly_one_blank() {
+        let mut md = renderer();
+        let lines = md.render("## Title\nhello", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain, vec!["Title", "", "hello"]);
+    }
+
+    #[test]
+    fn paragraphs_and_code_blocks_stay_separated() {
+        let mut md = renderer();
+        let lines = md.render("first\n```py\nx = 1\n```\nlast", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain[0], "first");
+        assert_eq!(plain[1], "", "blank before fence");
+        assert!(plain[4].starts_with("╰"), "bottom frame: {plain:?}");
+        assert_eq!(plain[5], "", "blank after fence");
+        assert_eq!(plain[6], "last");
+        assert_clean_rhythm(&plain);
+    }
+
+    #[test]
+    fn table_then_paragraph_gets_a_blank_line() {
+        let mut md = renderer();
+        // The blank line ends the table; a bare following line parses
+        // as another table row.
+        let lines = md.render("| a |\n|---|\n| 1 |\n\nafter", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let last = plain.len() - 1;
+        assert_eq!(plain[last], "after");
+        assert_eq!(plain[last - 1], "", "blank between table and text");
+        assert_eq!(plain[last - 2], "└───┘");
+        assert_clean_rhythm(&plain);
+    }
+
+    #[test]
+    fn rule_separates_from_surrounding_blocks() {
+        let mut md = renderer();
+        let lines = md.render("- a\n---\n- b", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_clean_rhythm(&plain);
+        assert_eq!(plain[1], "", "blank before rule");
+        assert!(plain[2].starts_with("─"));
+        assert_eq!(plain[3], "", "blank after rule");
+        assert_eq!(plain[4], "• b");
+    }
+
+    #[test]
+    fn nested_list_items_do_not_open_separation() {
+        let mut md = renderer();
+        let lines = md.render("- a\n  - b\n- c", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert_eq!(plain, vec!["• a", "  • b", "• c"]);
+    }
+
+    #[test]
+    fn streamed_full_buffer_rerender_is_stable() {
+        let mut md = renderer();
+        let full = "- ls - 列出目录内容\n## Shell\n```bash\nls\n```\n";
+        // Live drafts arrive prefix by prefix; results are discarded.
+        let _ = md.render("- ls - 列出目录内容", 60);
+        let _ = md.render("- ls - 列出目录内容\n## Shell", 60);
+        let streamed = md.render(full, 60);
+        let mut fresh = renderer();
+        assert_eq!(streamed, fresh.render(full, 60));
     }
 
     #[test]

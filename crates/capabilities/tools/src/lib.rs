@@ -123,6 +123,17 @@ pub struct ToolOutput {
     pub is_error: bool,
 }
 
+/// Content prefix marking a `ToolOutput` whose failure is an *implementation
+/// fault* (io error, spawn failure, ...) rather than a business failure.
+///
+/// Executor adapters ride faults as error results so the model can see the
+/// reason; this marker keeps them distinguishable from business failures in
+/// transcripts and lets the MCP serve surface map them back to a
+/// protocol-level internal error. Canonical single definition: the producer
+/// (composition-root executor adapters) and the consumer (`operations-
+/// gateway`'s MCP serve) must agree on the exact bytes.
+pub const TOOL_FAULT_PREFIX: &str = "tool fault:";
+
 /// Build a business-failure output: the reason is fed back to the model for self-correction.
 ///
 /// Canonical crate-wide copy (like [`is_sensitive_env_name`]): the failure-semantics contract,

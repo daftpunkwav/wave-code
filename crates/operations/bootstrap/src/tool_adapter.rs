@@ -67,9 +67,10 @@ impl ToolExecutor for ToolAdapter {
             Err(fault) => ToolResult {
                 call_id: call.call_id,
                 // Implementation faults also ride as error results so the
-                // model can self-correct; the `fault` prefix keeps them
-                // distinguishable from business failures in transcripts.
-                content: format!("tool fault: {fault}"),
+                // model can self-correct; the shared fault prefix keeps them
+                // distinguishable from business failures in transcripts and
+                // lets the MCP serve surface map them back to internal errors.
+                content: format!("{} {fault}", wavecode_tools::TOOL_FAULT_PREFIX),
                 is_error: true,
             },
         }
@@ -204,6 +205,6 @@ mod tests {
     async fn implementation_faults_stay_distinguishable() {
         let out = adapter().execute(call("faulty_tool")).await;
         assert!(out.is_error);
-        assert!(out.content.starts_with("tool fault:"));
+        assert!(out.content.starts_with(wavecode_tools::TOOL_FAULT_PREFIX));
     }
 }

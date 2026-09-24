@@ -29,14 +29,18 @@ use std::sync::Arc;
 use runtime_runner::{ToolCall, ToolExecutor};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Adapter fault marker: the composition root's executor converts
-/// implementation faults into error results prefixed this way (so
-/// transcripts stay distinguishable from business failures); the serve
-/// loop maps that documented prefix back to a protocol-level internal
-/// error.
-const FAULT_PREFIX: &str = "tool fault:";
+// The composition root's executor converts implementation faults into
+// error results prefixed with `wavecode_tools::TOOL_FAULT_PREFIX` (so
+// transcripts stay distinguishable from business failures); the serve
+// loop maps that documented prefix back to a protocol-level internal
+// error.
 
 /// Protocol version advertised (and expected) at `initialize`.
+///
+/// Keep in sync with the client side's `wavecode_mcp::bridge::
+/// MCP_PROTOCOL_VERSION`: the two directions of one product must speak
+/// the same MCP dialect. Duplicated on purpose — this serving skin
+/// names no client-crate types.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Server name reported in `serverInfo`.
 pub const SERVER_NAME: &str = "wavecode";
@@ -248,9 +252,14 @@ async fn call_tool<E: ToolExecutor>(
             input: arguments,
         })
         .await;
-    if let Some(detail) = outcome.content.strip_prefix(FAULT_PREFIX) {
+    if let Some(detail) = outcome
+        .content
+        .strip_prefix(wavecode_tools::TOOL_FAULT_PREFIX)
+    {
         // Implementation faults are server-side failures, not tool
-        // results: surface them as internal errors (see FAULT_PREFIX).
+        // results: surface them as internal errors (see
+        // TOOL_FAULT_PREFIX). `detail` keeps the separating space, so
+        // the reply reconstructs the adapter's original wording.
         return error_response(id, INTERNAL_ERROR, format!("tool fault:{detail}"));
     }
     // Unknown tools and business failures ride as results with

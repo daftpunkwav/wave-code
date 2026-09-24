@@ -20,11 +20,12 @@
 //! Workflow engine: fan-out DAG runs plus Ralph improvement loops.
 //!
 //! A [`WorkflowSpec`] is a set of steps with `depends_on` edges. The
-//! executor validates the DAG, then runs dependency waves: every ready
-//! wave spawns before collection so independent steps overlap, while each
-//! `fanout` step expands its input list in chunks of `max_parallel`. Step
-//! summaries merge into one JSON object keyed by step id. Any step failure
-//! fails the whole run naming the step id; v1 performs no partial retry.
+//! executor validates the DAG, then runs dependency waves in id order:
+//! steps within a wave execute one after another, while each `fanout`
+//! step expands its input list in chunks of `max_parallel` whose children
+//! run concurrently. Step summaries merge into one JSON object keyed by
+//! step id. Any step failure fails the whole run naming the step id;
+//! v1 performs no partial retry.
 //!
 //! A Ralph loop respawns a fresh child per round with the SAME immutable
 //! objective plus the prior round summary, stopping when a child reports
@@ -46,7 +47,7 @@ pub const DEFAULT_RALPH_ROUNDS: u32 = 5;
 pub const DEFAULT_FANOUT_PARALLEL: usize = 4;
 /// Upper clamp for a step `max_parallel` (zero or less means default).
 pub const MAX_FANOUT_PARALLEL: usize = 16;
-/// Cap on ready steps spawned per wave before collection.
+/// Ready steps taken per wave walk (see [`run_workflow`]).
 pub const MAX_WAVE_PARALLEL: usize = 8;
 /// Poll interval while waiting on a spawned child task.
 const POLL_INTERVAL_MS: u64 = 10;
@@ -351,10 +352,11 @@ async fn run_step(
 
 /// Run a validated spec; returns one JSON object keyed by step id.
 ///
-/// Ready waves spawn in id order in chunks of [`MAX_WAVE_PARALLEL`]
-/// before collection, so independent steps overlap without unbounded
-/// fan-out. The first failing step aborts the run with its id named;
-/// v1 performs no partial retry.
+/// Ready steps run in id order, a wave at a time: each wave walks its
+/// (at most [`MAX_WAVE_PARALLEL`]) ready steps sequentially, while each
+/// step's own fan-out children run concurrently in bounded chunks. The
+/// first failing step aborts the run with its id named; v1 performs no
+/// partial retry.
 pub async fn run_workflow(
     spec: &WorkflowSpec,
     tasks: &dyn TaskService,

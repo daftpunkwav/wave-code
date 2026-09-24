@@ -272,27 +272,92 @@ is the established seam (the actor already wraps the runner).
 
 ## Theming
 
-The dark palette is the deepwave / sonar identity: teal as the primary
-accent, the four waveform categories spread across an ocean spectrum
-(cyan user, teal assistant, slate thinking, sea-green results; see
+The default dark palette is the **synthwave** identity: neon cyan as
+the primary accent, pink for user input, green success, salmon
+warning, red-pink error, on a deep purple-dark ground (see
 `theme/colors.rs`). 20 semantic tokens, dark/light palettes (hex values
 locked by test),
-`light|dark|auto` resolution (OSC 11 probe on Unix — a bounded `poll`,
+`light|dark|deepwave|auto` resolution (OSC 11 probe on Unix — a bounded `poll`,
 never a blocking reader thread, since byte-reads on the console input
 would race crossterm's event reader and steal keystrokes; Windows skips
-the probe entirely → `COLORFGBG` → dark), and a global theme installed
+the probe entirely → `COLORFGBG` → the default), and a global theme installed
 once at startup. Components request tokens, never
 raw colors; the engine works on `Color`/`Style` values. Color depth is
 also resolved once at startup (`COLORTERM` truecolor, `TERM`
 256-color, otherwise the 16 classic ANSI colors) and every paint
 degrades through the same role mapping.
 
+The previous **deepwave / sonar** identity stays selectable
+(`/theme deepwave` or `"base": "deepwave"` in a custom theme): teal
+primary, the four waveform categories across an ocean spectrum.
+
+One theme selection drives both the chrome roles and the syntax
+highlighting: each built-in theme pairs with a syntect theme
+(synthwave → the bundled `synthwave-84` tmTheme, deepwave →
+`base16-ocean.dark`, light → `base16-ocean.light`; see
+`theme/syntax.rs`). The highlighter (`console/src/highlight.rs`) reads
+only foreground colors and font styles from the syntect theme —
+backgrounds never render, so code blocks always sit on the terminal's
+own background.
+
 Custom themes live in `~/.wavecode/themes/<name>.json`: a `base`
-(`dark`/`light`) plus any subset of the 20 tokens as `#rrggbb`
-overrides. Unknown token names and malformed colors are rejected (a
+(`dark`/`light`/`deepwave`) plus any subset of the 20 tokens as `#rrggbb`
+overrides, and an optional `syntax_theme` alias (`synthwave-84`,
+`ocean-dark`, `ocean-light`) overriding the base's syntax pairing.
+Unknown token names, malformed colors, and unknown aliases are rejected (a
 typo must not silently render as the base), path escapes never reach
 the filesystem, and `/theme <name>` applies one live — the editor and
 popup styles are rebuilt from the new palette, as for the built-ins.
+
+## Markdown rendering conventions
+
+The renderer (`tui-engine/src/markdown.rs`) keeps one blank line
+between blocks and never two: every block (heading, paragraph, list,
+fence, quote, table, rule) ensures separation from whatever came
+before, instead of pushing trailing blanks — so a list followed by a
+heading can no longer cram together, and a mid-document heading that
+is still empty during streaming never leaves a phantom blank line.
+Tight list items stay tight; loose-list (blank-separated) items render
+with their source separation.
+
+Fenced code blocks render as a dim rounded frame — `╭─ lang ───` on
+top (language tag only when the fence carries one, whitelisted to
+language-name characters so fence info can never inject escape
+sequences), a dim `│ ` bar before each highlighted line, `╰────` at
+the bottom. The literal ``` markers never render. The frame width
+follows the terminal (capped at 80 columns); the highlighted text
+itself is not re-wrapped in the fence style, since the inner ANSI
+resets would cancel it.
+
+### Reference study (codex, opencode, claude-code, kimi-code)
+
+What was adopted, and what was rejected:
+
+- **codex (ratatui)** — closest analog. Adopted: syntax themes as a
+  registry of names resolved against the two-face bundle with
+  runtime-swappable selection (codex keeps a `THEME` global plus a
+  revision counter; wave pairs the syntax theme with the chrome theme
+  instead, which satisfies the same goal with less machinery). Adopted:
+  the terminal background decides the default look. Rejected: no
+  framing at all around code blocks — with sparse highlights a block
+  has no visible extent; wave draws the dim frame.
+- **opencode (charmbracelet)** — the reference for
+  palette-drives-syntax: its `generateSyntax(theme)` derives every
+  syntax scope color from the theme's own `syntax*` values, exactly
+  the pairing wave implements with `SyntaxTheme`. Adopted its
+  synthwave84 color values as the on-disk reference for the neon
+  palette. Rejected: one-line `marginTop` between message parts —
+  wave needs in-message rhythm too, so separation lives in the
+  renderer.
+- **kimi-code (pi-tui)** — a streaming markdown lexer like wave's.
+  Adopted: "add spacing unless a space token follows" is the same
+  invariant wave's ensure-one-blank implements without lookahead.
+  Rejected: rendering the raw ``` fence line as a dim border row — the
+  fence markers themselves were the complaint; wave frames with rules
+  instead.
+- **claude-code (Ink)** — desktop/web surface, not a terminal
+  markdown renderer; nothing applicable beyond confirming the common
+  convention of blank-line-separated blocks.
 
 ## Deliberate non-goals this generation
 

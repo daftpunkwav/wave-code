@@ -436,6 +436,12 @@ fn lang_tag(info: &str) -> Option<String> {
 /// Render collected table rows as a box-drawing table. Column widths
 /// come from the widest visible cell; when the table exceeds `columns`
 /// the columns shrink evenly (cells truncate). Row 0 is the header.
+///
+/// Every row renders on one shared column grid: ragged rows (fewer or
+/// more cells than the widest row) pad and clip to the grid instead of
+/// pulling the borders out of alignment, and control whitespace inside
+/// a cell flattens to spaces so a row can never shatter across
+/// multiple terminal lines.
 fn render_table(
     rows: &[Vec<String>],
     columns: usize,
@@ -445,11 +451,21 @@ fn render_table(
     if rows.is_empty() || rows[0].is_empty() {
         return;
     }
-    let col_count = rows[0].len();
+    // The grid spans the widest row, so no cell is ever dropped; short
+    // rows gain empty cells.
+    let col_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            (0..col_count)
+                .map(|index| flat_cell(row.get(index).map(String::as_str).unwrap_or_default()))
+                .collect()
+        })
+        .collect();
     let border = style.fence;
     // Natural widths per column, then an even shrink to fit the line.
     let mut widths: Vec<usize> = vec![1; col_count];
-    for row in rows {
+    for row in &rows {
         for (index, cell) in row.iter().enumerate().take(col_count) {
             widths[index] = widths[index].max(width::width(cell));
         }
@@ -473,7 +489,8 @@ fn render_table(
     };
     let render_row = |out: &mut Vec<String>, row: &[String], header: bool| {
         let mut line = String::from("│");
-        for (index, cell) in row.iter().enumerate().take(col_count) {
+        for index in 0..col_count {
+            let cell = row.get(index).map(String::as_str).unwrap_or_default();
             // Shrunken tables truncate overflowing cells to the column.
             let cut = width::truncate_to_width(cell, widths[index]);
             let cut = if width::width(&cut) < width::width(cell) {
@@ -504,6 +521,17 @@ fn render_table(
     rule(out, "└", "┴", "┘");
 }
 
+/// Flatten a table cell onto one line: newlines, carriage returns, and
+/// tabs become spaces. A raw control character inside a cell would
+/// embed a line break mid-row and shatter the box-drawing grid.
+fn flat_cell(cell: &str) -> String {
+    if cell.chars().any(|c| matches!(c, '\n' | '\r' | '\t')) {
+        cell.split(['\n', '\r', '\t']).collect::<Vec<_>>().join(" ")
+    } else {
+        cell.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +539,22 @@ mod tests {
 
     fn renderer() -> Markdown {
         Markdown::new(MarkdownStyle::default(), Box::new(PlainHighlighter))
+    }
+
+    /// One entry per display column: wide glyphs repeat into both of
+    /// their cells, so plain indexing matches what a terminal shows.
+    fn display_columns(line: &str) -> Vec<char> {
+        let mut cols = Vec::new();
+        for ch in line.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1);
+            cols.push(ch);
+            for _ in 1..w {
+                cols.push(ch);
+            }
+        }
+        cols
     }
 
     #[test]
@@ -683,6 +727,78 @@ mod tests {
             lines.iter().all(|l| width::width(l) <= 40),
             "table fits: {lines:?}"
         );
+    }
+
+    /// The screenshot regression: a two-column CJK table with checkmark
+    /// glyphs must land on one shared grid — every line the same display
+    /// width, one line per row, no row merged into a neighbor.
+    #[test]
+    fn cjk_checkmark_table_renders_one_grid() {
+        let mut md = renderer();
+        let text = "\
+| 检查项 | 结果 |
+|---|---|
+| 编译通过 | ✅ |
+| 测试全绿 | ✔ |
+| 文档同步 | ❌ |
+| 依赖锁定 | ✅ |
+| lint 干净 | ✅ |
+| 格式化 | ✅ |";
+        let lines = md.render(text, 60);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        // Top rule, header, mid rule, six body rows, bottom rule.
+        assert_eq!(plain.len(), 10, "one line per row: {plain:?}");
+        let grid = width::width(&plain[0]);
+        assert!(
+            plain.iter().all(|l| width::width(l) == grid),
+            "every line shares the grid width {grid}: {plain:?}"
+        );
+        // Every line's border glyphs sit at the same display columns:
+        // the ┬ seam of the top rule lines up with the │ of every row.
+        let seam = display_columns(&plain[0])
+            .into_iter()
+            .position(|c| c == '┬')
+            .expect("seam in the top rule");
+        for line in &plain {
+            let cols = display_columns(line);
+            if line.starts_with('│') {
+                assert_eq!(cols[seam], '│', "seam aligned: {line:?}");
+            } else {
+                assert!(
+                    matches!(cols[seam], '┬' | '┼' | '┴'),
+                    "rule crossing aligned: {line:?}"
+                );
+            }
+        }
+        // Body rows stay separate.
+        assert!(plain[3].contains("编译通过"), "{plain:?}");
+        assert!(plain[4].contains("测试全绿"), "{plain:?}");
+        assert!(plain[8].contains("格式化"), "{plain:?}");
+    }
+
+    /// Ragged rows (fewer cells than the widest row) pad with empty
+    /// cells instead of pulling the closing border out of alignment.
+    #[test]
+    fn ragged_rows_pad_onto_the_shared_grid() {
+        let mut md = renderer();
+        let lines = md.render("| a | b |\n|---|---|\n| only |", 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let grid = width::width(&plain[0]);
+        assert!(
+            plain.iter().all(|l| width::width(l) == grid),
+            "one grid: {plain:?}"
+        );
+        assert_eq!(plain[3], "│ only │   │", "{plain:?}");
+    }
+
+    /// Control whitespace inside a cell flattens to spaces; a raw
+    /// newline must never shatter a row across terminal lines.
+    #[test]
+    fn cell_control_whitespace_flattens() {
+        assert_eq!(flat_cell("a\nb"), "a b");
+        assert_eq!(flat_cell("a\r\rb"), "a  b");
+        assert_eq!(flat_cell("a\tb"), "a b");
+        assert_eq!(flat_cell("clean"), "clean");
     }
 
     // --- CJK-adjacent emphasis (regression locks) ---

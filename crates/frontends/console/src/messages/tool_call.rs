@@ -36,7 +36,7 @@ pub enum ToolState {
 }
 
 /// Extract a human summary of the key argument for a tool input.
-/// Names follow the real registry (`read`/`edit`/`ls`/`web_fetch`/...,
+/// Names follow the real registry (`read`/`edit`/`web_fetch`/...,
 /// see `capabilities/tools`); unknown tools fall through to a generic
 /// key scan.
 pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
@@ -49,7 +49,7 @@ pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
         None
     };
     let raw = match name {
-        "read" | "write" | "edit" | "ls" | "view" | "present" => pick(&["path"]),
+        "read" | "write" | "edit" | "view" | "present" => pick(&["path"]),
         "shell" | "pty_shell" => pick(&["command", "cmd"]),
         "grep" => pick(&["pattern"]).map(|p| format!("“{p}”")),
         "glob" => pick(&["pattern"]),
@@ -100,7 +100,6 @@ pub fn verb(name: &str, state: ToolState) -> String {
         "read" | "view" => "Reading",
         "write" => "Writing",
         "edit" => "Editing",
-        "ls" => "Listing",
         "grep" | "glob" | "web_search" => "Searching",
         "shell" | "pty_shell" | "python" | "node" => "Running",
         "web_fetch" => "Fetching",
@@ -111,7 +110,6 @@ pub fn verb(name: &str, state: ToolState) -> String {
         "read" | "view" => "Read",
         "write" => "Wrote",
         "edit" => "Edited",
-        "ls" => "Listed",
         "grep" | "glob" | "web_search" => "Searched",
         "shell" | "pty_shell" | "python" | "node" => "Ran",
         "web_fetch" => "Fetched",

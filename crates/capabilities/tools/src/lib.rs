@@ -1,7 +1,7 @@
 //! wavecode-tools: tool framework and built-in tool set.
 //!
 //! Shape: the [`Tool`] trait, the [`Registry`] registry, built-in file tools
-//! (`read` / `write` / `edit` / `ls` / `view` / `present`), search tools
+//! (`read` / `write` / `edit` / `view` / `present`), search tools
 //! (`grep` / `glob`), command tools (`shell` / `pty_shell` / `python` / `node`),
 //! LSP tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`),
 //! web tools (`web_fetch` / `web_search`), the spill reader (`spill`), and the
@@ -249,7 +249,6 @@ impl Registry {
         reg.register(Arc::new(fs::ReadFile));
         reg.register(Arc::new(fs::WriteFile));
         reg.register(Arc::new(fs::EditFile));
-        reg.register(Arc::new(fs::ListDir));
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));

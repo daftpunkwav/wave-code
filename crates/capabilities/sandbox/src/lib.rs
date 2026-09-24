@@ -826,11 +826,10 @@ mod tests {
     fn builtin_tool_names_match_classification_table() {
         let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
         // (tool name, is_file_edit, is_session_state, approval_kind)
-        let expected: [(&str, bool, bool, ApprovalKind); 20] = [
+        let expected: [(&str, bool, bool, ApprovalKind); 19] = [
             ("read", false, false, ApprovalKind::Write),
             ("write", true, false, ApprovalKind::Write),
             ("edit", true, false, ApprovalKind::Write),
-            ("ls", false, false, ApprovalKind::Write),
             ("grep", false, false, ApprovalKind::Write),
             ("glob", false, false, ApprovalKind::Write),
             ("shell", false, false, ApprovalKind::Exec),

@@ -1,4 +1,4 @@
-//! Built-in file tools: `read` / `write` / `edit` / `ls` (+ `view` / `present`).
+//! Built-in file tools: `read` / `write` / `edit` (+ `view` / `present`).
 //! All paths are confined under `ToolCtx::cwd` via [`crate::path_guard::resolve`].
 //! Failure semantics: business failures (missing file, non-unique match, missing/mistyped params, path escape)
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level io failures.
@@ -16,8 +16,6 @@ const MAX_BYTES: usize = 50 * 1024;
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
 /// write content cap: content over 10 MB is rejected outright.
 const MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
-/// ls per-directory entry cap.
-const MAX_ENTRIES: usize = 1000;
 
 /// Build a success output.
 fn ok_output(content: impl Into<String>) -> ToolOutput {
@@ -85,14 +83,12 @@ pub(super) async fn atomic_write(path: &std::path::Path, content: &str) -> std::
 /// Read a text file (read-only).
 mod edit;
 mod image;
-mod list;
 mod present;
 mod read;
 mod write;
 
 pub use edit::EditFile;
 pub use image::ReadImage;
-pub use list::ListDir;
 pub use present::{Present, PresentStore};
 pub use read::ReadFile;
 pub use write::WriteFile;
@@ -213,19 +209,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ls_marks_dirs() {
-        let (_d, c) = ctx();
-        std::fs::create_dir(c.cwd.join("d1")).unwrap();
-        std::fs::write(c.cwd.join("f1.txt"), "x").unwrap();
-        let out = ListDir
-            .execute(serde_json::json!({"path":"."}), &c)
-            .await
-            .unwrap();
-        assert!(out.content.contains("d1/"));
-        assert!(out.content.contains("f1.txt"));
-    }
-
-    #[tokio::test]
     async fn registry_specs_sorted_and_have_schema() {
         let reg = crate::Registry::builtin();
         let specs = reg.specs();
@@ -304,17 +287,6 @@ mod tests {
         std::fs::create_dir(c.cwd.join("sub")).unwrap();
         let out = ReadFile
             .execute(serde_json::json!({"path":"sub"}), &c)
-            .await
-            .unwrap();
-        assert!(out.is_error);
-    }
-
-    #[tokio::test]
-    async fn list_file_path_is_error() {
-        let (_d, c) = ctx();
-        std::fs::write(c.cwd.join("f.txt"), "x").unwrap();
-        let out = ListDir
-            .execute(serde_json::json!({"path":"f.txt"}), &c)
             .await
             .unwrap();
         assert!(out.is_error);
@@ -421,25 +393,5 @@ mod tests {
             out.content,
             "line10\nline11\nline12\nline13\nline14\n[truncated]"
         );
-    }
-
-    #[tokio::test]
-    async fn ls_truncates_over_entry_cap() {
-        // 1005 entries: truncate to 1000 with a [truncated: N more entries] marker.
-        let (_d, c) = ctx();
-        for i in 0..MAX_ENTRIES + 5 {
-            std::fs::write(c.cwd.join(format!("f{i:04}.txt")), "x").unwrap();
-        }
-        let out = ListDir
-            .execute(serde_json::json!({"path":"."}), &c)
-            .await
-            .unwrap();
-        assert!(!out.is_error);
-        assert!(out.content.ends_with("[truncated: 5 more entries]"));
-        let body = out
-            .content
-            .strip_suffix("\n[truncated: 5 more entries]")
-            .unwrap();
-        assert_eq!(body.lines().count(), MAX_ENTRIES);
     }
 }

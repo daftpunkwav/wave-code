@@ -48,7 +48,7 @@ Note on `validate()`: the trait carries it as a pre-execution semantic check bey
 
 `Registry::builtin()` registers (name — source):
 
-- `read`, `write`, `edit`, `ls` — `src/fs/mod.rs` (+ `fs/read.rs`, `fs/write.rs`, `fs/edit.rs`, `fs/list.rs`); writes are atomic (temp+rename) with size caps and exact-match uniqueness checks for edits.
+- `read`, `write`, `edit` — `src/fs/mod.rs` (+ `fs/read.rs`, `fs/write.rs`, `fs/edit.rs`); writes are atomic (temp+rename) with size caps and exact-match uniqueness checks for edits.
 - `grep`, `glob` — `src/search/`; sync traversal wrapped in `spawn_blocking`.
 - `shell` — `src/shell_tool.rs`; spawns through `sanitize_env` (strips `deny_env` names plus sensitive-shape variables like `*_KEY`, `*_PAT`, `AWS_SECRET_ACCESS_KEY`) and the OS sandbox backend.
 - `pty_shell` — `src/pty.rs`.

@@ -18,7 +18,9 @@
 //! `session/new` (assembling one headless session per id),
 //! `session/prompt` (one turn, streaming `session/update`
 //! notifications), and `session/cancel` (interrupting the in-flight
-//! turn). Unknown methods fail with `-32601`; notifications (no id)
+//! turn; the spec delivers it as an id-less notification, and an
+//! id-bearing request form is answered for scripted controllers).
+//! Unknown methods fail with `-32601`; other notifications (no id)
 //! are ignored; stdin EOF ends the server cleanly.
 //!
 //! Like `exec`, every session assembles from config, so this surface
@@ -269,16 +271,23 @@ async fn dispatch_line<W, F, S>(
             return;
         }
     };
-    // Notifications never reply; the subset defines no client-to-server
-    // notifications, so every id-less frame is ignored just as quietly.
-    let id = match object.get("id") {
-        None | Some(serde_json::Value::Null) => return,
-        Some(id) => id.clone(),
-    };
     let params = object
         .get("params")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
+    // Notifications never reply. The subset observes exactly one: the
+    // spec sends `session/cancel` id-less (Session Cancel), so it takes
+    // the same cancel path silently; any other id-less frame is ignored
+    // just as quietly.
+    let id = match object.get("id") {
+        None | Some(serde_json::Value::Null) => {
+            if method == "session/cancel" {
+                queue_cancel(&params, sessions);
+            }
+            return;
+        }
+        Some(id) => id.clone(),
+    };
     match method {
         "initialize" => {
             write_success(
@@ -509,11 +518,26 @@ fn join_prompt_text(prompt: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+/// Queue the interrupt for the session `params` names; a silent no-op
+/// when the params carry no string sessionId or name an unknown session
+/// (the notification form has no reply channel to report either case).
+fn queue_cancel(params: &serde_json::Value, sessions: &mut HashMap<String, SessionEntry>) {
+    let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if let Some(entry) = sessions.get(session_id) {
+        let _ = entry.jobs.send(SessionJob::Cancel);
+    }
+}
+
 /// Interrupt the in-flight turn; always succeeds for known sessions.
 ///
 /// Cancelling an idle session is a no-op success: controllers cannot
 /// know exactly when a turn ended, so strict errors would race every
-/// legitimate cancel against completion.
+/// legitimate cancel against completion. The spec delivers cancel as an
+/// id-less notification (handled in [`dispatch_line`] via
+/// [`queue_cancel`]); the id-bearing request form below keeps a reply
+/// so a scripted controller still learns the outcome.
 async fn cancel_prompt<W>(
     id: &serde_json::Value,
     params: &serde_json::Value,
@@ -1548,6 +1572,72 @@ api_key = "k-inline"
             reply.pointer("/result/stopReason").and_then(|v| v.as_str()),
             Some("cancelled")
         );
+    }
+
+    /// The spec delivers `session/cancel` as an id-less notification:
+    /// it must interrupt the in-flight turn and produce no reply line.
+    #[tokio::test]
+    async fn cancel_notification_interrupts_without_replying() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (mut h, _server) = spawn_full(vec![], Some(gate.clone()), None).await;
+        let session = h.new_session(serde_json::json!({})).await;
+        let id = h.next_id;
+        h.next_id += 1;
+        h.send(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "take your time" }],
+            },
+        }))
+        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The spec shape: no id, no response expected.
+        h.send(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": session },
+        }))
+        .await;
+        gate.notify_one();
+        let reply = loop {
+            let line = h.next_line().await;
+            if line.get("id") == Some(&serde_json::json!(id)) {
+                break line;
+            }
+        };
+        assert_eq!(
+            reply.pointer("/result/stopReason").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
+        // Nothing further was emitted: the notification itself drew no
+        // reply, and the ended turn left the stream quiet.
+        let idle = tokio::time::timeout(std::time::Duration::from_millis(50), h.next_line()).await;
+        assert!(idle.is_err(), "cancel notification produced a reply");
+    }
+
+    /// An id-less cancel naming an unknown session stays silent instead
+    /// of erroring: the notification form has no reply channel.
+    #[tokio::test]
+    async fn cancel_notification_for_unknown_session_stays_silent() {
+        let (mut h, _server) = spawn_server(vec![]).await;
+        h.send(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": { "sessionId": "sess-999" },
+        }))
+        .await;
+        // The next request still gets the next line, proving nothing was
+        // emitted in between.
+        let reply = h
+            .request(
+                "initialize",
+                serde_json::json!({ "protocolVersion": ACP_PROTOCOL_VERSION }),
+            )
+            .await;
+        assert!(reply.get("result").is_some());
     }
 
     #[tokio::test]

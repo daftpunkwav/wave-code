@@ -715,10 +715,7 @@ fn question_verdict(input: &serde_json::Value) -> Option<Verdict> {
 /// script runtimes, background job spawns) are Exec; everything else
 /// (file writes / edits, …) is Write.
 fn approval_kind(tool: &str) -> ApprovalKind {
-    if matches!(
-        tool,
-        "shell" | "pty_shell" | "python" | "node" | "job_spawn"
-    ) {
+    if matches!(tool, "shell" | "python" | "node" | "job_spawn") {
         ApprovalKind::Exec
     } else {
         ApprovalKind::Write
@@ -826,14 +823,13 @@ mod tests {
     fn builtin_tool_names_match_classification_table() {
         let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
         // (tool name, is_file_edit, is_session_state, approval_kind)
-        let expected: [(&str, bool, bool, ApprovalKind); 19] = [
+        let expected: [(&str, bool, bool, ApprovalKind); 18] = [
             ("read", false, false, ApprovalKind::Write),
             ("write", true, false, ApprovalKind::Write),
             ("edit", true, false, ApprovalKind::Write),
             ("grep", false, false, ApprovalKind::Write),
             ("glob", false, false, ApprovalKind::Write),
             ("shell", false, false, ApprovalKind::Exec),
-            ("pty_shell", false, false, ApprovalKind::Exec),
             ("python", false, false, ApprovalKind::Exec),
             ("node", false, false, ApprovalKind::Exec),
             ("lsp_symbols", false, false, ApprovalKind::Write),

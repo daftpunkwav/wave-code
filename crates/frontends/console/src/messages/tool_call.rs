@@ -50,7 +50,7 @@ pub fn args_summary(name: &str, input: &serde_json::Value) -> String {
     };
     let raw = match name {
         "read" | "write" | "edit" | "view" | "present" => pick(&["path"]),
-        "shell" | "pty_shell" => pick(&["command", "cmd"]),
+        "shell" => pick(&["command", "cmd"]),
         "grep" => pick(&["pattern"]).map(|p| format!("“{p}”")),
         "glob" => pick(&["pattern"]),
         "web_fetch" => pick(&["url"]),
@@ -101,7 +101,7 @@ pub fn verb(name: &str, state: ToolState) -> String {
         "write" => "Writing",
         "edit" => "Editing",
         "grep" | "glob" | "web_search" => "Searching",
-        "shell" | "pty_shell" | "python" | "node" => "Running",
+        "shell" | "python" | "node" => "Running",
         "web_fetch" => "Fetching",
         "present" => "Presenting",
         _ => "Using",
@@ -111,7 +111,7 @@ pub fn verb(name: &str, state: ToolState) -> String {
         "write" => "Wrote",
         "edit" => "Edited",
         "grep" | "glob" | "web_search" => "Searched",
-        "shell" | "pty_shell" | "python" | "node" => "Ran",
+        "shell" | "python" | "node" => "Ran",
         "web_fetch" => "Fetched",
         "present" => "Presented",
         _ => "Used",

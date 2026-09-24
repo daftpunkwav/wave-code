@@ -301,12 +301,6 @@ Documentation: [architecture overview](docs/architecture.md),
 [contributing guide](CONTRIBUTING.md), and [AGENTS.md](AGENTS.md) for coding
 agents.
 
-On Windows the live PTY tests are opt-in: creating a ConPTY console on a host
-where console children cannot start leaves a spinning `conhost.exe` behind,
-so a plain `cargo test` skips them (with a printed reason) and never opens a
-console. Run them deliberately with `WAVECODE_PTY_TESTS=1 cargo test -p
-wavecode-tools pty::`; Unix PTY tests always run.
-
 Commits follow Conventional Commits (`feat:`/`fix:`/`docs:`/`refactor:`/...,
 imperative subject, one change per commit).
 

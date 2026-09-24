@@ -43,7 +43,6 @@ unicode-width = "0.2"
 unicode-segmentation = "1"
 libc = "0.2"
 landlock = "0.4"
-portable-pty = "0.9"
 windows-sys = "0.59"
 # TUI rendering is the in-house tui-engine over crossterm (no ratatui);
 # crossterm's event-stream + bracketed-paste features are both in use.

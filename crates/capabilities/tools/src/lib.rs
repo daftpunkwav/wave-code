@@ -2,7 +2,7 @@
 //!
 //! Shape: the [`Tool`] trait, the [`Registry`] registry, built-in file tools
 //! (`read` / `write` / `edit` / `view` / `present`), search tools
-//! (`grep` / `glob`), command tools (`shell` / `pty_shell` / `python` / `node`),
+//! (`grep` / `glob`), command tools (`shell` / `python` / `node`),
 //! LSP tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`),
 //! web tools (`web_fetch` / `web_search`), the spill reader (`spill`), and the
 //! session task-list tool (`todowrite`, deepagents-style planning), the
@@ -22,7 +22,6 @@ mod fs;
 mod html;
 mod lsp;
 mod path_guard;
-mod pty;
 mod script;
 mod search;
 mod shell_tool;
@@ -252,7 +251,6 @@ impl Registry {
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));
-        reg.register(Arc::new(pty::PtyShell));
         reg.register(Arc::new(script::PythonTool));
         reg.register(Arc::new(script::NodeTool));
         reg.register(Arc::new(lsp::DocumentSymbols::new()));

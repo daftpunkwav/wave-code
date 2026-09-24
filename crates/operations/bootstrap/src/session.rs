@@ -920,7 +920,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             "\nYou are in plan mode: only read-only tools are available. \
              Explore first, then propose your approach with the plan tool \
              so the user can approve it; when the request only needs an \
-             answer, simply answer. Do not attempt to modify anything.",
+             answer, simply answer.",
         );
     }
     let system = build_system(&PromptSlots {

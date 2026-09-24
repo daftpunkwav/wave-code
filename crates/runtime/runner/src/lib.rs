@@ -400,6 +400,16 @@ pub trait ModelGateway: Send + Sync {
         false
     }
 
+    /// Context window the gateway currently samples into, when that can
+    /// change at runtime through [`ModelGateway::set_model`]; `None` leaves
+    /// the loop on its configured window. Adapters whose window is a pure
+    /// function of the swappable name report the live value, so the loop's
+    /// budget gate re-evaluates against the real window after a switch and
+    /// pre-shrinks the history instead of waiting for a hard overflow.
+    fn context_window(&self) -> Option<u64> {
+        None
+    }
+
     /// Switch the reasoning-effort level for subsequent samples; false
     /// rejects the level. Adapters over gateways with a mutable effort
     /// override this; fixed gateways keep the default (rejecting).
@@ -1082,6 +1092,18 @@ where
         )))
     }
 
+    /// Context window the budget gates reason with this iteration.
+    ///
+    /// A `/model` switch can move the real window under the loop's feet
+    /// (the configured one is frozen at assembly); when the gateway knows
+    /// the live value the loop follows it, so a downgrade compacts at the
+    /// next loop head instead of surfacing as a failed request.
+    fn effective_window(&self) -> u64 {
+        self.model
+            .context_window()
+            .unwrap_or(self.cfg.context_window)
+    }
+
     /// Run one turn to a terminal [`StopReason`].
     ///
     /// Event order is fixed: TurnStarted once, AgentMessageComplete per
@@ -1165,17 +1187,18 @@ where
         let mut state = TurnState::new();
         let mut last_input: Option<u64> = None;
         let mut estimate_cache = EstimateCache::default();
+        // Live context window for the budget gates below, re-read at each
+        // loop head: a `/model` switch between turns can move it under the
+        // configured one, and the gates must reason with the real value so
+        // a downgrade compacts at the next loop head instead of the next
+        // sample failing hard on overflow.
+        let mut window;
 
         loop {
+            window = self.effective_window();
             // Checkpoint 1: loop head interrupt returns without sampling.
             if interrupt.is_triggered() {
-                settle(
-                    conv,
-                    &last_input,
-                    &state,
-                    self.cfg.context_window,
-                    &emit_msg,
-                );
+                settle(conv, &last_input, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -1239,13 +1262,7 @@ where
                 emit_msg(EventMsg::Warning {
                     message: format!("tool round limit reached ({ceiling}); stopping this turn",),
                 });
-                settle(
-                    conv,
-                    &last_input,
-                    &state,
-                    self.cfg.context_window,
-                    &emit_msg,
-                );
+                settle(conv, &last_input, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });
                 return StopReason::MaxToolRounds;
             }
@@ -1253,17 +1270,14 @@ where
             // Pre-turn budget check with per-turn once-only warning and
             // auto-compaction flags (the flags are locals, never carried
             // across turns; `used` was computed above for the round ceiling).
-            let remaining = self.cfg.context_window.saturating_sub(used);
+            let remaining = window.saturating_sub(used);
             match check_budget(remaining) {
                 BudgetLevel::Ok => {}
                 BudgetLevel::Warn => {
                     if !warned {
                         warned = true;
                         emit_msg(EventMsg::Warning {
-                            message: format!(
-                                "context near limit: {used}/{} tokens used",
-                                self.cfg.context_window
-                            ),
+                            message: format!("context near limit: {used}/{} tokens used", window),
                         });
                     }
                 }
@@ -1274,7 +1288,7 @@ where
                             emit_msg(EventMsg::Warning {
                                 message: format!(
                                     "context still near limit after compaction: {used}/{} tokens",
-                                    self.cfg.context_window
+                                    window
                                 ),
                             });
                         }
@@ -1292,13 +1306,7 @@ where
                                 // Blocking failures abort; automatic
                                 // failures downgrade to a warning.
                                 if blocking {
-                                    settle(
-                                        conv,
-                                        &last_input,
-                                        &state,
-                                        self.cfg.context_window,
-                                        &emit_msg,
-                                    );
+                                    settle(conv, &last_input, &state, window, &emit_msg);
                                     emit_msg(EventMsg::Error {
                                         message: cause,
                                         recoverable: false,
@@ -1366,13 +1374,7 @@ where
                 Err(SampleError::PromptTooLong) => {
                     reactive_compacts += 1;
                     if reactive_compacts >= self.cfg.max_reactive_compacts {
-                        settle(
-                            conv,
-                            &last_input,
-                            &state,
-                            self.cfg.context_window,
-                            &emit_msg,
-                        );
+                        settle(conv, &last_input, &state, window, &emit_msg);
                         emit_msg(EventMsg::Error {
                             message: format!(
                                 "prompt exceeds context window after {} compactions",
@@ -1388,13 +1390,7 @@ where
                         .do_compact(conv, CompactTrigger::Reactive, &emit_msg)
                         .await
                     {
-                        settle(
-                            conv,
-                            &last_input,
-                            &state,
-                            self.cfg.context_window,
-                            &emit_msg,
-                        );
+                        settle(conv, &last_input, &state, window, &emit_msg);
                         emit_msg(EventMsg::Error {
                             message: cause,
                             recoverable: false,
@@ -1406,13 +1402,7 @@ where
                     continue;
                 }
                 Err(other) => {
-                    settle(
-                        conv,
-                        &last_input,
-                        &state,
-                        self.cfg.context_window,
-                        &emit_msg,
-                    );
+                    settle(conv, &last_input, &state, window, &emit_msg);
                     let code = match &other {
                         SampleError::Timeout => "provider.timeout",
                         SampleError::PromptTooLong => "context.overflow",
@@ -1554,13 +1544,7 @@ where
                     Role::User,
                     result_blocks(&results, std::time::SystemTime::now()),
                 );
-                settle(
-                    conv,
-                    &last_input,
-                    &state,
-                    self.cfg.context_window,
-                    &emit_msg,
-                );
+                settle(conv, &last_input, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -1591,13 +1575,7 @@ where
                         Role::User,
                         result_blocks(&results, std::time::SystemTime::now()),
                     );
-                    settle(
-                        conv,
-                        &last_input,
-                        &state,
-                        self.cfg.context_window,
-                        &emit_msg,
-                    );
+                    settle(conv, &last_input, &state, window, &emit_msg);
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::RepeatBreaker;
                 }
@@ -1626,13 +1604,7 @@ where
             state.bump_tool_round();
         }
 
-        settle(
-            conv,
-            &last_input,
-            &state,
-            self.cfg.context_window,
-            &emit_msg,
-        );
+        settle(conv, &last_input, &state, window, &emit_msg);
         emit_msg(EventMsg::TurnCompleted { interrupted: false });
         StopReason::Completed
     }
@@ -3776,6 +3748,235 @@ mod run_loop_tests {
             })
             .count();
         assert_eq!(warnings, 1);
+    }
+
+    /// Scripted model whose context window moves with `/model`: the loop's
+    /// budget gates must follow the live window, not the configured one.
+    struct SwitchableModel {
+        name: Mutex<String>,
+        samples: std::sync::Arc<Mutex<usize>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelGateway for SwitchableModel {
+        async fn sample(&self, _request: SampleRequest) -> Result<SampleResponse, SampleError> {
+            *self.samples.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            Ok(SampleResponse {
+                blocks: Vec::new(),
+                input_tokens: Some(5),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            })
+        }
+
+        fn set_model(&self, name: &str) -> bool {
+            *self.name.lock().unwrap_or_else(|e| e.into_inner()) = name.to_string();
+            true
+        }
+
+        fn context_window(&self) -> Option<u64> {
+            match self.name.lock().unwrap_or_else(|e| e.into_inner()).as_str() {
+                "small-model" => Some(25_100),
+                "big-model" => Some(1_000_000),
+                _ => None,
+            }
+        }
+    }
+
+    fn switchable_model() -> (SwitchableModel, std::sync::Arc<Mutex<usize>>) {
+        let samples = std::sync::Arc::new(Mutex::new(0));
+        (
+            SwitchableModel {
+                name: Mutex::new("original".to_string()),
+                samples: samples.clone(),
+            },
+            samples,
+        )
+    }
+
+    /// Switching to a smaller-window model pre-shrinks the history at the
+    /// next loop head: the gate sees the live window, compacts (auto band),
+    /// and the turn's first sample rides the compacted history instead of
+    /// failing hard on overflow.
+    #[tokio::test]
+    async fn a_model_downgrade_preshrinks_history_before_the_next_sample() {
+        let fx = Fixture::new();
+        let trigger_log: std::sync::Arc<Mutex<Vec<CompactTrigger>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (exec, policy, hooks, _unused, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: trigger_log.clone(),
+        };
+        let (model, samples) = switchable_model();
+        let conv = &mut Conversation::new();
+        // Carry well past the small window's auto-compact band, yet far
+        // under the configured window: only the live window can trigger.
+        conv.settle(Usage {
+            input_tokens: 20_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let driver = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "original".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+                session_date: None,
+            },
+            fx.interrupt.clone(),
+        );
+        assert!(TurnDriver::set_model(&driver, "small-model"));
+        let outcome = driver
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                fx.events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            *trigger_log.lock().unwrap_or_else(|e| e.into_inner()),
+            vec![CompactTrigger::Auto],
+            "history shrank before any sample was attempted"
+        );
+        assert_eq!(*samples.lock().unwrap_or_else(|e| e.into_inner()), 1);
+    }
+
+    /// A downgrade whose usage already exceeds the new window lands in the
+    /// blocking band; the pre-shrink still runs before the sample instead
+    /// of waiting for the provider's overflow error.
+    #[tokio::test]
+    async fn a_downgrade_past_the_new_window_compacts_as_blocking() {
+        let fx = Fixture::new();
+        let trigger_log: std::sync::Arc<Mutex<Vec<CompactTrigger>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (exec, policy, hooks, _unused, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: trigger_log.clone(),
+        };
+        let (model, samples) = switchable_model();
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 24_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let driver = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "original".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+                session_date: None,
+            },
+            fx.interrupt.clone(),
+        );
+        assert!(TurnDriver::set_model(&driver, "small-model"));
+        let outcome = driver
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                fx.events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            *trigger_log.lock().unwrap_or_else(|e| e.into_inner()),
+            vec![CompactTrigger::Blocking]
+        );
+        assert_eq!(*samples.lock().unwrap_or_else(|e| e.into_inner()), 1);
+    }
+
+    /// Switching to a larger window is a no-op for the gates: nothing
+    /// compacts, and the turn samples normally.
+    #[tokio::test]
+    async fn a_model_upgrade_compacts_nothing() {
+        let fx = Fixture::new();
+        let trigger_log: std::sync::Arc<Mutex<Vec<CompactTrigger>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (exec, policy, hooks, _unused, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: trigger_log.clone(),
+        };
+        let (model, samples) = switchable_model();
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 20_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let driver = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "original".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+                session_date: None,
+            },
+            fx.interrupt.clone(),
+        );
+        assert!(TurnDriver::set_model(&driver, "big-model"));
+        let outcome = driver
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                fx.events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert!(
+            trigger_log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "an upgrade must not compact"
+        );
+        assert_eq!(*samples.lock().unwrap_or_else(|e| e.into_inner()), 1);
     }
 
     /// Request-recording scripted model for inbox tests.

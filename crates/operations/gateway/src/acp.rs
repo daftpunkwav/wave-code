@@ -1120,6 +1120,7 @@ api_key = "k-inline"
                 deny_env: Vec::new(),
                 context_window: 200_000,
                 max_output_tokens: 64,
+                per_model_window: None,
                 wave_denylist: Vec::new(),
                 session_id: None,
                 // Bypass approvals: scripted tools must execute instead of

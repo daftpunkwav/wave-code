@@ -33,11 +33,18 @@ pub struct ModelAdapter {
     model_name: std::sync::RwLock<String>,
     max_tokens: u32,
     registry: Arc<wavecode_tools::Registry>,
+    /// Fallback window for per-name resolution through the capability
+    /// table, when the provider leaves limits to the table (the assembly
+    /// condition mirrors this). `None` when the window is fixed by
+    /// explicit provider config: a name switch cannot move it.
+    per_model_window: Option<u64>,
 }
 
 impl ModelAdapter {
     /// Wrap a shared model; tool schemas come from the registry so the
-    /// model always sees the same tools the executor can run.
+    /// model always sees the same tools the executor can run. The context
+    /// window is fixed (`None` as `per_model_window`); per-name windows
+    /// ride [`ModelAdapter::with_per_model_window`].
     pub fn new(
         model: Arc<dyn ChatModel>,
         model_name: String,
@@ -49,7 +56,17 @@ impl ModelAdapter {
             model_name: std::sync::RwLock::new(model_name),
             max_tokens,
             registry,
+            per_model_window: None,
         }
+    }
+
+    /// Declare that the context window resolves per model name through the
+    /// capability table, falling back to `fallback` for unknown names.
+    /// This is what lets the loop's budget gate follow a `/model` switch
+    /// onto a smaller-window model instead of gating with a stale window.
+    pub fn with_per_model_window(mut self, fallback: u64) -> Self {
+        self.per_model_window = Some(fallback);
+        self
     }
 
     /// Convert seam messages block by block; assistant entries with no
@@ -403,6 +420,19 @@ impl ModelGateway for ModelAdapter {
         }
         *self.model_name.write().unwrap_or_else(|e| e.into_inner()) = name.to_string();
         true
+    }
+
+    fn context_window(&self) -> Option<u64> {
+        let fallback = self.per_model_window?;
+        let name = self
+            .model_name
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Some(
+            wavecode_llm::ModelCapabilities::resolve_or(&name, fallback, self.max_tokens)
+                .context_window,
+        )
     }
 
     fn set_thinking(&self, effort: &str) -> bool {

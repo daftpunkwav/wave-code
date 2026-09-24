@@ -155,6 +155,10 @@ impl<G: ModelGateway + Send + Sync> ModelGateway for EvictingGateway<G> {
         self.inner.set_model(name)
     }
 
+    fn context_window(&self) -> Option<u64> {
+        self.inner.context_window()
+    }
+
     fn set_thinking(&self, effort: &str) -> bool {
         self.inner.set_thinking(effort)
     }

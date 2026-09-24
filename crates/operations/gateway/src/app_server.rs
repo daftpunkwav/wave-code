@@ -627,6 +627,7 @@ api_key = "k-inline"
                     deny_env: Vec::new(),
                     context_window: 200_000,
                     max_output_tokens: 64,
+                    per_model_window: None,
                     headless: options.headless,
                     session_id: options.session_id,
                     permission_override: options.permission_override,

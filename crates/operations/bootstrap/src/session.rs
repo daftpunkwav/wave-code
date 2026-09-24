@@ -491,6 +491,17 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     } else {
         (provider.context_window(), provider.max_output_tokens())
     };
+    // Whether the window resolves per model name (same condition as the
+    // resolution above): when it does, the loop's budget gate follows a
+    // `/model` switch onto the new model's window.
+    let per_model_window = if provider.kind.carries_reasoning_effort()
+        && provider.context_window.is_none()
+        && provider.max_output_tokens.is_none()
+    {
+        Some(provider.context_window())
+    } else {
+        None
+    };
     Ok(assemble_session_with_model(WithModel {
         session_id: session_id.clone(),
         config,
@@ -501,6 +512,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         deny_env,
         context_window,
         max_output_tokens,
+        per_model_window,
         permission_override,
         cwd,
         home,
@@ -536,6 +548,11 @@ pub struct WithModel {
     pub context_window: u64,
     /// Effective output cap, resolved from the provider.
     pub max_output_tokens: u32,
+    /// Capability-table fallback for per-name window resolution; `Some`
+    /// when the provider leaves limits to the table, so a `/model`
+    /// switch moves the loop's budget gate onto the new window. `None`
+    /// when the window is fixed by explicit provider config.
+    pub per_model_window: Option<u64>,
     /// `--permission-mode` override winning over the configured mode.
     pub permission_override: Option<String>,
     /// Working directory for tools and relative paths.
@@ -573,6 +590,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         deny_env,
         context_window,
         max_output_tokens,
+        per_model_window,
         permission_override,
         cwd,
         home,
@@ -633,13 +651,22 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         _ => PolicyAdapter::new(sandbox, registry.clone()),
     };
     // Tool-result eviction rides the gateway seam: every sample crosses
-    // the pass, stored history keeps original payloads.
-    let model_adapter = crate::evicting_gateway::EvictingGateway::new(ModelAdapter::new(
-        model.clone(),
-        model_name.clone(),
-        max_output_tokens,
-        registry.clone(),
-    ));
+    // the pass, stored history keeps original payloads. When the window
+    // resolves per model name (`per_model_window` carries the fallback),
+    // the adapter resolves it live so a `/model` switch moves the loop's
+    // budget gate onto the new window.
+    let model_adapter = crate::evicting_gateway::EvictingGateway::new({
+        let adapter = ModelAdapter::new(
+            model.clone(),
+            model_name.clone(),
+            max_output_tokens,
+            registry.clone(),
+        );
+        match per_model_window {
+            Some(fallback) => adapter.with_per_model_window(fallback),
+            None => adapter,
+        }
+    });
     let approvals = Arc::new(ApprovalGate::new());
     let questions = Arc::new(QuestionGate::new());
     // The session interrupt feeds the approval/question gates too: a

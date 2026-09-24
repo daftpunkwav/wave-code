@@ -2830,7 +2830,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "wavecode-config",
  "wavecode-context",
  "wavecode-llm",
  "wavecode-sandbox",

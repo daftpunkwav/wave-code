@@ -13,7 +13,6 @@ infrastructure-base = { path = "../../infrastructure/base" }
 action-tasks = { path = "../../action/tasks" }
 wavecode-sandbox = { path = "../sandbox" }
 wavecode-llm = { path = "../../foundation/llm" }
-wavecode-config = { path = "../../foundation/config" }
 wavecode-context = { path = "../context" }
 base64.workspace = true
 serde_json.workspace = true

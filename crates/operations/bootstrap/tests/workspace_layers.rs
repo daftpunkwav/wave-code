@@ -28,15 +28,16 @@ const TIERS: &[&str] = &[
 
 /// Tier membership as `"<tier index>: <crate> <crate> ..."` lines.
 ///
-/// `runtime-child`, `transport-mcp`, and `action-tasks` sit in the
-/// vocabulary tier on purpose: each depends on nothing above
-/// infrastructure (action-tasks on nothing internal at all) and is a
-/// passive mechanism (child-task bookkeeping, stdio framing, the
-/// capability-neutral task seam) consumed from several tiers, like the
-/// DTO crates.
+/// `runtime-child`, `transport-mcp`, `action-tasks`, and
+/// `runtime-scheduler` sit in the vocabulary tier on purpose: each
+/// depends on nothing above infrastructure (action-tasks and
+/// runtime-scheduler on nothing internal at all) and is a passive
+/// mechanism (child-task bookkeeping, stdio framing, the
+/// capability-neutral task seam, durable cron persistence) consumed
+/// from several tiers, like the DTO crates.
 const TIER_MEMBERS: &[&str] = &[
     "0: infrastructure-base infrastructure-ratelimit",
-    "1: action-tasks runtime-child transport-mcp wavecode-protocol wavecode-wire",
+    "1: action-tasks runtime-child runtime-scheduler transport-mcp wavecode-protocol wavecode-wire",
     "2: wavecode-auth wavecode-config wavecode-llm",
     "3: wavecode-context wavecode-hooks wavecode-mcp wavecode-memory",
     "3: wavecode-sandbox wavecode-skills wavecode-tools",
@@ -45,7 +46,7 @@ const TIER_MEMBERS: &[&str] = &[
     "5: safety-audit safety-gate safety-guardrail safety-secrets",
     "6: action-browser action-jobs action-retrieval action-workflow",
     "7: runtime-plugin runtime-prompt",
-    "7: runtime-runner runtime-scheduler",
+    "7: runtime-runner",
     "8: operations-actor operations-bootstrap operations-eval operations-gateway",
     "8: operations-observe operations-simulate",
     "9: console-ui harness-cli tui-engine",

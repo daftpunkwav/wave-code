@@ -845,13 +845,13 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         ));
     }
     let scheduler = Arc::new(Mutex::new(scheduler_state));
-    registry.register(Arc::new(crate::workflow_tools::WorkflowRunTool::new(
+    registry.register(Arc::new(action_workflow::tools::WorkflowRunTool::new(
         task_service.clone(),
     )));
-    registry.register(Arc::new(crate::workflow_tools::RalphRunTool::new(
+    registry.register(Arc::new(action_workflow::tools::RalphRunTool::new(
         task_service.clone(),
     )));
-    registry.register(Arc::new(crate::workflow_tools::ScheduleTool::new(
+    registry.register(Arc::new(action_workflow::tools::ScheduleTool::new(
         scheduler,
     )));
     // Background shell jobs for long work that must not block the turn.

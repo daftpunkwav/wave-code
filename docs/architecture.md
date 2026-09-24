@@ -93,7 +93,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | Crate | Responsibility |
 | --- | --- |
 | `action-tasks` | Child task lifecycle behind a capability-neutral seam (tier-wise a vocabulary-tier passive mechanism, like `runtime-child`) |
-| `action-workflow` | Validated DAG execution and Ralph loops over `action-tasks` |
+| `action-workflow` | Validated DAG execution and Ralph loops over `action-tasks`, plus the model-invokable `workflow_run` / `ralph_run` / `schedule` tools |
 | `action-jobs` | Background shell jobs with wait/cancel/notice semantics, plus the model-invokable `job_*` tools over them |
 | `action-browser` | Browser automation behind an async tab seam |
 | `action-retrieval` | Term-overlap retrieval over chunked documents |

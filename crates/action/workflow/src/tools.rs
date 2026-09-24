@@ -22,10 +22,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::tool_util::required_str;
+use crate::{DEFAULT_RALPH_ROUNDS, MAX_RALPH_ROUNDS};
 use action_tasks::TaskService;
-use action_workflow::{DEFAULT_RALPH_ROUNDS, MAX_RALPH_ROUNDS};
 use runtime_scheduler::Scheduler;
+use wavecode_tools::required_str;
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Lock helper matching the tools-crate poison convention: a panic while
@@ -89,7 +89,7 @@ impl Tool for WorkflowRunTool {
             Ok(text) => text,
             Err(output) => return Ok(output),
         };
-        let spec: action_workflow::WorkflowSpec = match serde_json::from_str(spec_json) {
+        let spec: crate::WorkflowSpec = match serde_json::from_str(spec_json) {
             Ok(spec) => spec,
             Err(e) => {
                 return Ok(ToolOutput {
@@ -98,7 +98,7 @@ impl Tool for WorkflowRunTool {
                 });
             }
         };
-        match action_workflow::run_workflow(&spec, self.tasks.as_ref()).await {
+        match crate::run_workflow(&spec, self.tasks.as_ref()).await {
             Ok(merged) => Ok(ToolOutput {
                 content: serde_json::to_string_pretty(&merged).unwrap_or_else(|e| e.to_string()),
                 is_error: false,
@@ -187,7 +187,7 @@ impl Tool for RalphRunTool {
                 is_error: true,
             });
         }
-        match action_workflow::ralph_run(&objective, max_rounds, self.tasks.as_ref()).await {
+        match crate::ralph_run(&objective, max_rounds, self.tasks.as_ref()).await {
             Ok(report) => Ok(ToolOutput {
                 content: serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string()),
                 is_error: false,

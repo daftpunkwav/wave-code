@@ -39,10 +39,14 @@ name = "action-workflow"
 version = "0.1.0"
 dependencies = [
  "action-tasks",
+ "async-trait",
+ "runtime-scheduler",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "wavecode-tools",
 ]
 
 [[package]]

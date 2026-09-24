@@ -6,8 +6,18 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Durable cron persistence for the `schedule` tool: a vocabulary-tier
+# passive mechanism consumed from above.
+runtime-scheduler = { path = "../../runtime/scheduler" }
 action-tasks = { path = "../tasks" }
+# The `tools` module renders the engine model-invokable via the shared
+# Tool trait.
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+wavecode-tools = { path = "../../capabilities/tools" }
+
+[dev-dependencies]
+tempfile.workspace = true

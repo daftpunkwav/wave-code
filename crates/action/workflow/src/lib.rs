@@ -7,8 +7,14 @@
  * - Run ready steps through the injected TaskService with bounded fan-out.
  * - Drive Ralph loops with an immutable objective until the done marker.
  *
- * This module must not depend on: runtime, state, operations, transport,
- * frontends, or any execution layer. It only names the action-tasks seam.
+ * - Host the model-invokable workflow / ralph / schedule tools
+ *   (`tools` module).
+ *
+ * The engine must not depend on: state, operations, transport,
+ * frontends, or any execution layer. It names the action-tasks seam
+ * plus the vocabulary-tier scheduler; the `tools` module adds the
+ * single capability edge (wavecode-tools) that renders it
+ * model-invokable.
  */
 
 //! Workflow engine: fan-out DAG runs plus Ralph improvement loops.
@@ -23,6 +29,8 @@
 //! A Ralph loop respawns a fresh child per round with the SAME immutable
 //! objective plus the prior round summary, stopping when a child reports
 //! a line containing only `RALPH_DONE` or when rounds exhaust.
+
+pub mod tools;
 
 use std::collections::{BTreeMap, HashMap};
 

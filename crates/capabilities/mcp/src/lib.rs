@@ -12,8 +12,9 @@
 //! over `transport-mcp` (stdio child process, streamable-http with session
 //! handling) and the bridge that injects MCP tools into the registry. The
 //! byte-level framing stays in `transport-mcp`; the serving side of MCP
-//! (exposing WaveCode's tools over stdio) stays in the composition root.
-//! The client trait surface covers `tools/list`, `tools/call`,
+//! (exposing WaveCode's tools over stdio) is the serving skin in
+//! `operations-gateway`, with executor construction in the composition
+//! root. The client trait surface covers `tools/list`, `tools/call`,
 //! `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`;
 //! interactive browser/PKCE OAuth stays out (static headers or the
 //! client-credentials grant only).
@@ -204,10 +205,10 @@ pub enum McpError {
 /// held by the bridge layer as `Arc<dyn McpClient>`.
 ///
 /// **Implementation status**: real stdio and streamable-http implementations
-/// live at the composition side (`bootstrap::mcp_bridge`, `StdioMcpClient` /
+/// live in this crate's [`bridge`] module (`StdioMcpClient` /
 /// `HttpMcpClient`); streamable-http re-initializes once when the server
 /// expires a session (404). Demand-driven reconnection on dropped
-/// connections lives in `bootstrap::mcp_bridge::ResilientMcpClient`, which
+/// connections lives in the bridge's private `ResilientMcpClient`, which
 /// wraps either client without changing this trait surface.
 #[async_trait::async_trait]
 pub trait McpClient: Send + Sync {
@@ -249,9 +250,11 @@ pub trait McpClient: Send + Sync {
 /// MCP server config (the two shapes of the SPEC section 13
 /// `[mcp_servers.<name>]` section).
 ///
-/// Conversion from the config crate's raw tables happens on the core side (the
+/// Conversion from the config crate's raw tables happens on the connect
+/// path ([`bridge::connect_all`] and its per-server `connect_one`), which
+/// also enforces the either-or rule (stdio `command` vs http `url`); the
 /// config crate has no workspace-internal dependencies and only does raw
-/// parsing; either-or validation lives in core's `servers_from_config`).
+/// parsing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum McpServerConfig {
     /// stdio transport: spawn a child process, exchanging JSON-RPC over
@@ -359,12 +362,14 @@ impl McpServerConfig {
 /// serve` exposes WaveCode's tool set and session capabilities over stdio for
 /// IDEs / other agents to call).
 ///
-/// **Implementation status**: lands after P10 — the Registry's tool surface is
-/// then adapted into an impl of this trait and exposed via rmcp's server side;
-/// auth (localhost-only by default, client allowlist) is completed at the
-/// serve assembly layer and stays out of the trait surface. The mirrored
-/// method surface with [`McpClient`] is deliberate: two directions of one
-/// protocol.
+/// **Implementation status**: the shipped serve surface is
+/// `operations-gateway`'s `mcp_serve` loop, which serves a `wavecode_tools`
+/// registry directly through a `runtime_runner::ToolExecutor` and does not
+/// implement this trait. The trait stays as the interface-boundary
+/// placeholder for a richer server (resources / prompts capability reuse of
+/// the client types); adopt it or remove it when that server evolves.
+/// The mirrored method surface with [`McpClient`] is deliberate: two
+/// directions of one protocol.
 #[async_trait::async_trait]
 pub trait McpServerHandler: Send + Sync {
     /// Answer `tools/list`.

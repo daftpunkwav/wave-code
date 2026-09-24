@@ -37,6 +37,11 @@ use crate::{
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Protocol version offered at `initialize`.
+///
+/// Keep in sync with the serve side's `operations_gateway::mcp_serve::
+/// MCP_PROTOCOL_VERSION`: the two directions of one product must speak
+/// the same MCP dialect. Duplicated on purpose — the client bridge
+/// names no gateway types.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Whole-connect budget per server: spawn, handshake, and tool listing.
 pub const MCP_CONNECT_TIMEOUT_SECS: u64 = 60;

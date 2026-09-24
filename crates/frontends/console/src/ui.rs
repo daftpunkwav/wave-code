@@ -2189,6 +2189,14 @@ verify from the repository.";
 
     /// Assemble the full frame at (columns, rows).
     pub fn frame(&mut self, columns: usize, rows: usize) -> Vec<String> {
+        self.frame_with_tail(columns, rows).0
+    }
+
+    /// Assemble the full frame plus the size of its pinned tail (the
+    /// editor box, autocomplete popup, and footer rows), which the
+    /// screen renderer re-anchors to the physical bottom rows on every
+    /// writing frame.
+    fn frame_with_tail(&mut self, columns: usize, rows: usize) -> (Vec<String>, usize) {
         let inner = columns.saturating_sub(GUTTER * 2);
         self.update_chrome();
         self.animate_editor_prompt();
@@ -2241,13 +2249,17 @@ verify from the repository.";
         if self.btw_open() {
             lines.extend(self.render_btw_panel(inner));
         }
+        // Everything from here on is the bottom-anchored input region.
+        let tail_start = lines.len();
         lines.extend(self.editor.render_box(inner, rows));
         lines.extend(self.footer(inner));
+        let tail = lines.len() - tail_start;
         let pad = " ".repeat(GUTTER);
-        lines
+        let lines = lines
             .into_iter()
             .map(|line| format!("{pad}{line}"))
-            .collect()
+            .collect();
+        (lines, tail)
     }
 
     /// Sync the window title and tab progress with state; queues raw
@@ -2369,7 +2381,8 @@ verify from the repository.";
         columns: usize,
         rows: usize,
     ) -> std::io::Result<()> {
-        let frame = self.frame(columns, rows);
+        let (frame, tail) = self.frame_with_tail(columns, rows);
+        self.screen.set_pinned_tail(tail);
         let mut buffer: Vec<u8> = Vec::with_capacity(16 * 1024);
         self.screen.draw(&mut buffer, &frame, columns, rows);
         out.write_all(&buffer)?;

@@ -50,6 +50,10 @@ pub struct Screen {
     /// anywhere (invalidate/resize paths), and writing from there would
     /// duplicate the frame below the old one.
     needs_clear: bool,
+    /// Trailing frame lines (input editor + footer) re-pinned to the
+    /// physical bottom rows on every writing frame. `0` disables the
+    /// pin.
+    pinned_tail: usize,
 }
 
 impl Screen {
@@ -68,7 +72,17 @@ impl Screen {
             options,
             started: false,
             needs_clear: false,
+            pinned_tail: 0,
         }
+    }
+
+    /// Pin the frame's last `rows` lines to the physical bottom rows of
+    /// the screen (the input editor, popup, and footer). Every frame
+    /// that writes anything then re-anchors that region with absolute
+    /// positioning, so streaming or scrollback churn above can never
+    /// drag the input off-screen. `0` disables the pin.
+    pub fn set_pinned_tail(&mut self, rows: usize) {
+        self.pinned_tail = rows;
     }
 
     /// Draw one frame: `lines` is the full logical content, `size` the
@@ -82,10 +96,51 @@ impl Screen {
     ) {
         let size_changed = self.size != (columns, height);
         if !self.started || size_changed || lines.len() < self.base || height == 0 || columns == 0 {
+            self.synchronized_start(out);
             self.full_redraw(out, lines, columns, height);
+            self.pin_tail(out, lines, columns, height);
+            self.synchronized_end(out);
+            self.place_hardware_cursor(out, lines, columns, height);
             return;
         }
-        self.diff_draw(out, lines, columns, height);
+        if !self.diff_draw(out, lines, columns, height) {
+            return; // identical region: nothing to paint
+        }
+        self.pin_tail(out, lines, columns, height);
+        self.synchronized_end(out);
+        self.place_hardware_cursor(out, lines, columns, height);
+    }
+
+    /// Rewrite the last [`Screen::pinned_tail`] frame lines at the
+    /// physical bottom rows of the screen via absolute positioning.
+    /// Runs after every frame that wrote anything: whatever happened
+    /// above (streaming, scrollback churn, accounting drift), the input
+    /// region stays anchored to the bottom. Skipped while the frame
+    /// fits the screen (nothing has scrolled yet; the diff already
+    /// rewrites changed tail rows in place).
+    fn pin_tail(
+        &mut self,
+        out: &mut impl std::io::Write,
+        lines: &[String],
+        columns: usize,
+        height: usize,
+    ) {
+        let tail = self.pinned_tail.min(lines.len()).min(height);
+        if tail == 0 || lines.len() <= height {
+            return;
+        }
+        let first_row = height - tail; // 0-based
+        let _ = write!(out, "\x1b[{};1H", first_row + 1);
+        for (offset, line) in lines[lines.len() - tail..].iter().enumerate() {
+            if offset > 0 {
+                // The whole region sits inside the screen: plain cursor
+                // moves, never scrolls.
+                let _ = out.write_all(b"\r\x1b[1B");
+            }
+            let _ = out.write_all(b"\x1b[K");
+            self.write_line(out, line, columns);
+        }
+        self.cursor_row = height - 1;
     }
 
     /// Forget all state; the next draw repaints from scratch, erasing
@@ -146,7 +201,6 @@ impl Screen {
         columns: usize,
         height: usize,
     ) {
-        self.synchronized_start(out);
         // The very first draw appends below the shell prompt; every
         // other full repaint (resize, invalidate) starts from wherever
         // the last frame left the cursor and must erase + home first,
@@ -166,22 +220,22 @@ impl Screen {
             }
             self.write_line(out, line, columns);
         }
-        self.synchronized_end(out);
         self.prev = lines.to_vec();
         self.size = (columns, height);
         self.base = lines.len().saturating_sub(height);
         self.cursor_row = lines.len().min(height).saturating_sub(1);
         self.started = true;
-        self.place_hardware_cursor(out, lines, columns, height);
     }
 
+    /// Rewrite the changed viewport range; returns false when the region
+    /// is identical and nothing was written.
     fn diff_draw(
         &mut self,
         out: &mut impl std::io::Write,
         lines: &[String],
         columns: usize,
         height: usize,
-    ) {
+    ) -> bool {
         // Compare the rewrite-eligible region (viewport rows).
         let base_at_entry = self.base;
         let prev_region = &self.prev[base_at_entry..];
@@ -198,7 +252,7 @@ impl Screen {
             }
         }
         let Some(first) = first_changed else {
-            return; // identical region: nothing to paint
+            return false; // identical region: nothing to paint
         };
 
         self.synchronized_start(out);
@@ -253,12 +307,11 @@ impl Screen {
             row += 1;
         }
 
-        self.synchronized_end(out);
         self.prev = lines.to_vec();
         self.size = (columns, height);
         self.base = base_at_entry + scrolled;
         self.cursor_row = row;
-        self.place_hardware_cursor(out, lines, columns, height);
+        true
     }
 
     /// Position the hardware cursor at an embedded [`CURSOR_MARKER`] and
@@ -561,5 +614,94 @@ mod tests {
             text.starts_with("\x1b[?25l01234"),
             "hide, then truncated: {text:?}"
         );
+    }
+
+    #[test]
+    fn pinned_tail_repaints_at_the_screen_bottom() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        screen.set_pinned_tail(1);
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["a", "b", "c", "footer"], 40, 3);
+        out.clear();
+        // Only a viewport row above the tail changed; the pin must still
+        // re-anchor the footer to the physical bottom row.
+        draw(&mut screen, &mut out, &["a", "B", "c", "footer"], 40, 3);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("B"), "{text:?}");
+        assert!(
+            text.contains("\x1b[3;1H"),
+            "absolute move to the last row: {text:?}"
+        );
+        // The diff never touched the footer; only the pin rewrote it.
+        assert_eq!(text.matches("footer").count(), 1, "{text:?}");
+    }
+
+    #[test]
+    fn pin_stays_off_for_short_frames_and_identical_ones() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        screen.set_pinned_tail(1);
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["a", "footer"], 40, 10);
+        out.clear();
+        // The frame fits the screen: the diff already rewrites changed
+        // rows in place; no bottom pin.
+        draw(&mut screen, &mut out, &["A", "footer"], 40, 10);
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(
+            !text.contains("\x1b[10;1H"),
+            "no bottom pin for short frames: {text:?}"
+        );
+        assert!(
+            !text.contains("footer"),
+            "unchanged tail untouched: {text:?}"
+        );
+        out.clear();
+        // Identical scrolled frames write nothing at all.
+        draw(
+            &mut screen,
+            &mut out,
+            &["a", "b", "c", "d", "e", "footer"],
+            40,
+            3,
+        );
+        out.clear();
+        draw(
+            &mut screen,
+            &mut out,
+            &["a", "b", "c", "d", "e", "footer"],
+            40,
+            3,
+        );
+        assert!(out.is_empty(), "identical frame: {out:?}");
+    }
+
+    #[test]
+    fn pinned_tail_is_bounded_by_the_screen() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        screen.set_pinned_tail(50);
+        let mut out = Vec::new();
+        // Tail larger than the screen clamps to the whole screen.
+        draw(
+            &mut screen,
+            &mut out,
+            &["a", "b", "c", "d", "footer"],
+            40,
+            3,
+        );
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("\x1b[1;1H"),
+            "clamped to the top row: {text:?}"
+        );
+        assert!(text.contains("footer"), "{text:?}");
     }
 }

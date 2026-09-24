@@ -63,6 +63,13 @@ pub struct Config {
     /// finding; unset means side sessions inherit the primary model.
     #[serde(default)]
     pub secondary_model: Option<String>,
+    /// Tool-round ceiling per turn (`max_tool_rounds`): a turn that
+    /// reaches it stops with `MaxToolRounds`. Unset uses the runner
+    /// default (256 — wavecode targets super-long-horizon work); an open
+    /// session goal re-arms the ceiling up to 8×. `0` stops every turn
+    /// before its first tool round.
+    #[serde(default)]
+    pub max_tool_rounds: Option<u32>,
 }
 
 /// One selectable model entry from the `[models]` config table.
@@ -186,6 +193,18 @@ env_key = "TEST_KEY"
         assert_eq!(prov.max_output_tokens(), 8192);
         // The models catalog is optional and empty by default.
         assert!(cfg.models.is_empty());
+        // The round ceiling is optional; unset defers to the runner
+        // default.
+        assert_eq!(cfg.max_tool_rounds, None);
+    }
+
+    /// `max_tool_rounds` lowers (or raises) the per-turn tool-round
+    /// ceiling from the config file. The key must sit before the first
+    /// TOML table header to land on the top-level config.
+    #[test]
+    fn max_tool_rounds_key_parses() {
+        let cfg: Config = toml::from_str(&format!("max_tool_rounds = 64\n{TOML_OK}")).unwrap();
+        assert_eq!(cfg.max_tool_rounds, Some(64));
     }
 
     /// All three wire dialects parse from `type`, including the aliases for

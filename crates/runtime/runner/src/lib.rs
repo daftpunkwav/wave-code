@@ -35,10 +35,13 @@ use wavecode_wire::{
 
 /// Default ceiling for tool rounds inside one run.
 ///
-/// Rationale: every tool round consumes model context and wall-clock time.
-/// The composition root may override this per session; the loop itself must
-/// always terminate, so the ceiling is a hard stop, not a hint.
-pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 32;
+/// Wavecode's pitch is super-long-horizon agent work, so the default
+/// ceiling is generous (256 rounds) and the composition root may
+/// override it per session via the `max_tool_rounds` config key. The
+/// loop itself must always terminate, so the ceiling is a hard stop,
+/// not a hint — and an open session goal re-arms it (see
+/// [`MAX_GOAL_REARMS`]) instead of cutting the objective off.
+pub const DEFAULT_MAX_TOOL_ROUNDS: u32 = 256;
 
 /// Identifies one agent run end to end.
 ///
@@ -648,17 +651,21 @@ pub const MAX_PLAN_NUDGES: u8 = 3;
 ///
 /// The cap is the cost guard, not a politeness limit: every continuation
 /// samples a history that only grows, so an open goal nudges a bounded number
-/// of times per turn instead of driving an unbounded loop.
-pub const MAX_GOAL_CONTINUATIONS: u8 = 5;
+/// of times per turn instead of driving an unbounded loop. Eight matches the
+/// long-horizon turn budget: the re-arm path above already tolerates 8
+/// ceilings, so a model that legitimately pauses mid-objective is not cut
+/// off earlier on this path.
+pub const MAX_GOAL_CONTINUATIONS: u8 = 8;
 /// Times one turn may re-arm the tool-round ceiling while the session goal is
 /// still open (default for [`RunConfig::max_goal_rearms`]).
 ///
 /// Reaching `max_tool_rounds` with an open goal is the long-horizon case, not
 /// an error: the model was mid-objective when the ceiling cut it off. The
-/// default gives a turn 8 ceilings in total (the re-arm plus seven more),
-/// which at the shipped `DEFAULT_MAX_TOOL_ROUNDS = 32` is 256 rounds — the
-/// same cap `state-goal` puts on its own round driver, so the two notions of
-/// "how long is too long" cannot disagree. A closed goal never re-arms.
+/// default gives a turn 8 ceilings in total (the re-arm plus seven more).
+/// With the shipped `DEFAULT_MAX_TOOL_ROUNDS = 256` that is an effective
+/// bound of 2048 rounds per turn — long enough that only a genuinely stuck
+/// loop reaches it, and each re-arm injects the goal reminder so the model
+/// is steered, not just restarted. A closed goal never re-arms.
 pub const MAX_GOAL_REARMS: u8 = 7;
 /// Maximum Stop-hook blocks per turn before the loop proceeds anyway
 /// (default for [`RunConfig::max_stop_blocks`]).

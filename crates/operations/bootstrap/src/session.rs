@@ -745,7 +745,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
                 model_name: model_name.clone(),
                 context_window,
                 max_output_tokens,
-                max_tool_rounds: DEFAULT_MAX_TOOL_ROUNDS,
+                max_tool_rounds: config.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
                 max_continuations: runtime_runner::MAX_CONTINUATIONS,
                 max_plan_nudges: runtime_runner::MAX_PLAN_NUDGES,
                 max_goal_continuations: runtime_runner::MAX_GOAL_CONTINUATIONS,

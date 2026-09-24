@@ -340,12 +340,18 @@ pub fn set_title(home: &Path, id: &str, title: &str) -> Result<Option<SessionMet
 /// Fork a session: seed a fresh journal with the caller's snapshot and
 /// register it under a new id. The caller stays responsible for the fork
 /// id (typically a fresh uuid); history may be empty for a pristine fork.
+///
+/// Every persisted text rides `redact` first — same contract as
+/// [`record_turn`] / [`record_child_turn`]: the journal is a readable
+/// resume surface, so the fork must never preserve what the turn journal
+/// would have masked.
 pub fn fork_session(
     home: &Path,
     id: &str,
     title: &str,
     cwd: &str,
     history: &[(bool, String)],
+    redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
     let path = journal_path(home, id)?;
     std::fs::create_dir_all(sessions_dir(home))?;
@@ -353,8 +359,11 @@ pub fn fork_session(
     journal.append_turn(&crate::TurnRecord {
         run_id: id.to_string(),
         input: String::new(),
-        history: history.to_vec(),
-        outcome: "Forked".to_string(),
+        history: history
+            .iter()
+            .map(|(from_model, text)| (*from_model, redact(text)))
+            .collect(),
+        outcome: redact("Forked"),
     })?;
     let now = now_secs();
     let meta = SessionMeta {
@@ -497,8 +506,15 @@ mod tests {
         // Empty titles are rejected, not silently applied.
         assert!(set_title(home, "src", "  ").unwrap().is_none());
 
-        let fork =
-            fork_session(home, "fork-1", "Fork: renamed session", "/tmp", &history()).unwrap();
+        let fork = fork_session(
+            home,
+            "fork-1",
+            "Fork: renamed session",
+            "/tmp",
+            &history(),
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
         assert_eq!(fork.title, "Fork: renamed session");
         assert_eq!(load_session_history(home, "fork-1").unwrap(), history());
         let listed = list_sessions(home);
@@ -529,6 +545,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list_sessions(home).len(), 1);
+    }
+
+    /// The fork's seeded snapshot rides the redaction gate like every other
+    /// journal write: a secret visible in the source dialogue must not
+    /// survive into the fork's readable history.
+    #[test]
+    fn forked_history_rides_the_redaction_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let source = vec![
+            (false, "my key is sk-secret-1".to_string()),
+            (true, "noted".to_string()),
+        ];
+        let mask = |text: &str| text.replace("sk-secret-1", "***");
+        fork_session(home, "fork-redact", "Fork", "/tmp", &source, &mask).unwrap();
+        let history = load_session_history(home, "fork-redact").unwrap();
+        let joined = history
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !joined.contains("sk-secret-1"),
+            "the raw value must not survive the fork: {joined}"
+        );
+        assert_eq!(history[0].1, "my key is ***");
     }
 
     #[test]

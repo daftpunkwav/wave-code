@@ -1457,12 +1457,20 @@ impl ConsoleUi {
             .unwrap_or_else(|| self.state.session_id.clone());
         let fork_id = Uuid::new_v4().to_string();
         let cwd = self.state.cwd.to_string_lossy().to_string();
+        // The fork journal rides the same credential mask as the turn
+        // journal (see the record_turn call site).
+        let fallback = |text: &str| text.to_string();
+        let redact: &dyn Fn(&str) -> String = match &self.redactor {
+            Some(gate) => gate.as_ref(),
+            None => &fallback,
+        };
         match state_persistence::sessions::fork_session(
             &home,
             &fork_id,
             &format!("Fork: {source_title}"),
             &cwd,
             &history,
+            redact,
         ) {
             Ok(meta) => {
                 self.push_status(

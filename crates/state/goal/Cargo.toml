@@ -6,9 +6,14 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# The `tool` module renders the machine model-invokable via the shared
+# Tool trait; the async runtime bridges persistence off the executor.
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+wavecode-tools = { path = "../../capabilities/tools" }
 
 [dev-dependencies]
 tempfile.workspace = true

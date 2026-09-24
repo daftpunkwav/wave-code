@@ -6,9 +6,12 @@
  * - Own the Active/Blocked/Paused/Completed transitions with CAS guards.
  * - Enforce the round cap through round_tick().
  * - Persist one goal file per session under `<home>/.wavecode/goals/`.
+ * - Host the model-invokable `goal` tool over the machine (`tool` module).
  *
- * This module must not depend on: runtime, action, safety, operations,
- * transport, capabilities, or any orchestration layer. It is pure data.
+ * The crate root is pure data; the `tool` module adds the single
+ * capability edge (wavecode-tools) that renders the machine
+ * model-invokable. Nothing here depends on: runtime, action, safety,
+ * operations, transport, or any orchestration layer.
  */
 
 //! Durable goal service: one persisted objective per session.
@@ -22,6 +25,8 @@
 //! `operations-bootstrap::goal_adapter`); it never writes it, so the tool
 //! stays the single writer. State survives resume because the file path
 //! derives from the home directory.
+
+pub mod tool;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

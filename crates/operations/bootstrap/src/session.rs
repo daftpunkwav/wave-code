@@ -690,19 +690,19 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // open objective keeps a long task running after the model stops, which
     // is what removes the human "continue" from the loop. The round counter
     // stays model-driven (`tick`); only continuation is loop-driven.
-    let (goal_state, goal_warning) = crate::goal_tools::load_for_session(
+    let (goal_state, goal_warning) = state_goal::tool::load_for_session(
         home.as_deref(),
-        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
+        state_goal::tool::DEFAULT_GOAL_SESSION_ID,
     );
     if let Some(warning) = goal_warning {
         warnings.push(warning);
     }
-    let goal_store = Arc::new(crate::goal_tools::GoalStore::new(
+    let goal_store = Arc::new(state_goal::tool::GoalStore::new(
         goal_state,
         home.as_deref(),
-        crate::goal_tools::DEFAULT_GOAL_SESSION_ID,
+        state_goal::tool::DEFAULT_GOAL_SESSION_ID,
     ));
-    registry.register(Arc::new(crate::goal_tools::GoalTool::new(
+    registry.register(Arc::new(state_goal::tool::GoalTool::new(
         goal_store.clone(),
     )));
     let worker = Arc::new(
@@ -731,7 +731,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             },
             interrupt.clone(),
         )
-        .with_goals(goal_store),
+        .with_goals(crate::goal_adapter::GoalTrackerAdapter::new(goal_store).shared()),
     );
     // Per-run tool allowlist for fork-scoped skill surfaces; the handle
     // is Arc-backed, so grabbing it before `worker` moves is enough.

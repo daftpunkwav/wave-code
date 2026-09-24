@@ -12,8 +12,8 @@
  * owns the store handle; the tool only mutates through it.
  */
 
-//! Durable goal tool: a thin [`Tool`] adapter over the `state-goal`
-//! machine; the transition rules and file layout live in `state-goal`,
+//! Durable goal tool: a thin [`Tool`] adapter over this crate's goal
+//! machine; the transition rules and file layout live in the crate root,
 //! this module only maps tool input/output and persistence.
 //!
 //! Actions:
@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use state_goal::{GoalState, SubGoal};
+use crate::{GoalState, SubGoal};
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Session id used when assembly has no finer identity: the path stays
@@ -41,7 +41,7 @@ pub const DEFAULT_GOAL_SESSION_ID: &str = "default";
 ///
 /// Returns the state plus an optional startup warning for assembly.
 pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (GoalState, Option<String>) {
-    match state_goal::load_for_session(home, session_id) {
+    match crate::load_for_session(home, session_id) {
         Ok(state) => (state, None),
         Err(e) => (
             GoalState::default(),
@@ -64,8 +64,8 @@ impl GoalStore {
     /// means memory-only (same gate as the memory assembly path).
     pub fn new(state: GoalState, home: Option<&Path>, session_id: &str) -> Self {
         let file = home
-            .map(state_goal::goals_root_for_home)
-            .and_then(|root| state_goal::goal_path_for_session(&root, session_id).ok());
+            .map(crate::goals_root_for_home)
+            .and_then(|root| crate::goal_path_for_session(&root, session_id).ok());
         Self {
             state: Mutex::new(state),
             file,
@@ -95,7 +95,7 @@ impl GoalStore {
         let Some(path) = file else {
             return Ok(());
         };
-        tokio::task::spawn_blocking(move || state_goal::save_to_path(&snapshot, &path))
+        tokio::task::spawn_blocking(move || crate::save_to_path(&snapshot, &path))
             .await
             .map_err(|e| format!("goal persist task failed: {e}"))?
             .map_err(|e| e.to_string())
@@ -127,7 +127,7 @@ pub fn render_status(state: &GoalState) -> String {
     let achieved = state
         .sub_goals
         .iter()
-        .filter(|s| s.status == state_goal::SubGoalStatus::Achieved)
+        .filter(|s| s.status == crate::SubGoalStatus::Achieved)
         .count();
     out.push_str(&format!(
         "\nsub-goals ({achieved}/{} achieved):",
@@ -142,7 +142,7 @@ pub fn render_status(state: &GoalState) -> String {
 /// Parse the optional `sub_goals` input array: each item needs a
 /// non-empty `text` and an optional `status` (`in_progress`, the
 /// default, or `achieved`); unknown names are business errors. The list
-/// cap mirrors [`state_goal::MAX_SUB_GOALS`] here so an oversized list
+/// cap mirrors [`crate::MAX_SUB_GOALS`] here so an oversized list
 /// fails in parsing — before the composite set/update transition touches
 /// any state — instead of failing halfway through one.
 fn parse_sub_goals(input: &serde_json::Value) -> std::result::Result<Option<Vec<SubGoal>>, String> {
@@ -152,11 +152,11 @@ fn parse_sub_goals(input: &serde_json::Value) -> std::result::Result<Option<Vec<
     let serde_json::Value::Array(items) = raw else {
         return Err("invalid parameter 'sub_goals' (array of {text, status?} required)".into());
     };
-    if items.len() > state_goal::MAX_SUB_GOALS {
+    if items.len() > crate::MAX_SUB_GOALS {
         return Err(format!(
             "too many sub-goals ({}): the cap is {}",
             items.len(),
-            state_goal::MAX_SUB_GOALS
+            crate::MAX_SUB_GOALS
         ));
     }
     let mut sub_goals = Vec::with_capacity(items.len());
@@ -171,8 +171,8 @@ fn parse_sub_goals(input: &serde_json::Value) -> std::result::Result<Option<Vec<
             return Err("invalid sub-goal: 'text' must be a non-empty string".into());
         }
         let status = match item.get("status").and_then(|v| v.as_str()) {
-            None => state_goal::SubGoalStatus::default(),
-            Some(raw) => state_goal::parse_sub_goal_status(raw).map_err(|e| e.to_string())?,
+            None => crate::SubGoalStatus::default(),
+            Some(raw) => crate::parse_sub_goal_status(raw).map_err(|e| e.to_string())?,
         };
         sub_goals.push(SubGoal { text, status });
     }
@@ -322,7 +322,7 @@ impl GoalTool {
             .map(|s| s.to_string());
         let status = match input.get("status").and_then(|v| v.as_str()) {
             None => None,
-            Some(raw) => match state_goal::parse_status(raw) {
+            Some(raw) => match crate::parse_status(raw) {
                 Ok(status) => Some(status),
                 Err(e) => return Ok(err_output(e.to_string())),
             },
@@ -363,7 +363,7 @@ impl GoalTool {
                     render_status(&guard),
                     false,
                 ),
-                Err(state_goal::GoalError::RoundCapped { .. }) => (
+                Err(crate::GoalError::RoundCapped { .. }) => (
                     guard.clone(),
                     self.store.file.clone(),
                     render_status(&guard),
@@ -379,8 +379,8 @@ impl GoalTool {
             }),
             Ok(()) => Ok(err_output(format!(
                 "goal round cap reached: round {} at cap {}; goal is now blocked\n{rendered}",
-                state_goal::MAX_ROUND,
-                state_goal::MAX_ROUND,
+                crate::MAX_ROUND,
+                crate::MAX_ROUND,
             ))),
             Err(reason) => Ok(err_output(format!(
                 "goal tick applied but persistence failed: {reason}"
@@ -395,7 +395,7 @@ impl GoalTool {
 async fn apply_transition(
     store: &GoalStore,
     action: &'static str,
-    transition: impl FnOnce(&mut GoalState) -> std::result::Result<(), state_goal::GoalError>,
+    transition: impl FnOnce(&mut GoalState) -> std::result::Result<(), crate::GoalError>,
 ) -> ToolOutput {
     let (snapshot, file, rendered) = {
         let mut guard = store.lock();
@@ -419,7 +419,7 @@ async fn apply_transition(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use state_goal::SubGoalStatus;
+    use crate::SubGoalStatus;
 
     fn ctx(dir: &tempfile::TempDir) -> ToolCtx {
         ToolCtx {
@@ -640,9 +640,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let capped = GoalState {
             objective: "bounded".to_string(),
-            status: state_goal::GoalStatus::Active,
+            status: crate::GoalStatus::Active,
             version: 7,
-            round: state_goal::MAX_ROUND,
+            round: crate::MAX_ROUND,
             updated_at: 0,
             sub_goals: Vec::new(),
         };
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn corrupt_goal_degrades_with_a_warning() {
         let home = tempfile::tempdir().unwrap();
-        let root = state_goal::goals_root_for_home(home.path());
+        let root = crate::goals_root_for_home(home.path());
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("bad.json"), "{not json").unwrap();
         let (state, warning) = load_for_session(Some(home.path()), "bad");

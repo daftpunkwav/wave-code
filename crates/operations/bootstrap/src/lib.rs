@@ -27,7 +27,6 @@ pub mod environment;
 pub mod evicting_gateway;
 pub mod gate_adapter;
 pub mod goal_adapter;
-pub mod goal_tools;
 pub mod grants_sink;
 pub mod history_journal;
 pub mod hook_adapter;

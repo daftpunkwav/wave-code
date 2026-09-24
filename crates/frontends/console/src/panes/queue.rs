@@ -43,13 +43,13 @@ mod tests {
 
     #[test]
     fn empty_queue_renders_nothing() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         assert!(render(&[], 80, Instant::now()).is_empty());
     }
 
     #[test]
     fn queued_items_render_with_pointer_and_hint() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let lines = render(
             &["first".to_string(), "second".to_string()],
             80,
@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn long_items_truncate() {
-        theme::set(theme::Theme::dark());
+        theme::set(theme::Theme::synthwave());
         let lines = render(&["x".repeat(200)], 40, Instant::now());
         assert!(width::width(&lines[1]) <= 40);
     }

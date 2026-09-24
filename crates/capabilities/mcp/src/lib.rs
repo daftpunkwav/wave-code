@@ -328,7 +328,8 @@ impl McpServerConfig {
                     oauth_client_secret.is_some(),
                 ];
                 if triple.iter().any(|set| *set) && triple.iter().any(|set| !set) {
-                    return Err("OAuth client-credentials needs all of `oauth_token_url`,                         `oauth_client_id`, `oauth_client_secret` (or none)"
+                    return Err("OAuth client-credentials needs all of `oauth_token_url`, \
+                         `oauth_client_id`, `oauth_client_secret` (or none)"
                         .to_owned());
                 }
                 Ok(())

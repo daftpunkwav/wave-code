@@ -29,7 +29,6 @@ pub mod goal_adapter;
 pub mod grants_sink;
 pub mod history_journal;
 pub mod hook_adapter;
-pub mod job_tools;
 pub mod memory_finish;
 pub mod memory_tool;
 pub mod metrics_tap;

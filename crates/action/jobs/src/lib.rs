@@ -7,9 +7,12 @@
  * - Wait with a timeout that snapshots without killing the job.
  * - Cancel by killing the whole process group, never just the shell.
  * - File completion notices on the shared child-runtime channel.
+ * - Host the model-invokable `job_*` tools over the service (`tools` module).
  *
- * This module must not depend on: tools, policy, drivers, actors, sessions,
- * or any execution layer above the child runtime notification queue.
+ * The service itself must not depend on: policy, drivers, actors,
+ * sessions, or any execution layer above the child runtime notification
+ * queue; the `tools` module adds the single capability edge
+ * (wavecode-tools) that renders it model-invokable.
  */
 
 //! Background jobs: long shell work that stops blocking the turn.
@@ -19,6 +22,8 @@
 //! per-owner cap; `wait` snapshots without killing; `cancel` kills the
 //! whole process tree; every terminal path files one notice on the
 //! [`ChildRuntime`] queue the parent loop already drains for child tasks.
+
+pub mod tools;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

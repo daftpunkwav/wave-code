@@ -21,8 +21,8 @@
 
 use std::sync::Arc;
 
-use crate::tool_util::required_str;
-use action_jobs::{JobRequest, JobService};
+use crate::{JobRequest, JobService};
+use wavecode_tools::required_str;
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Owner charged against the per-owner cap: one session, one owner.
@@ -31,10 +31,7 @@ const JOB_OWNER: &str = "session";
 const DEFAULT_WAIT_MS: u64 = 30_000;
 
 /// Shared lookup helper: unknown ids become business errors.
-fn lookup(
-    jobs: &Arc<JobService>,
-    id: &str,
-) -> std::result::Result<action_jobs::JobSnapshot, ToolOutput> {
+fn lookup(jobs: &Arc<JobService>, id: &str) -> std::result::Result<crate::JobSnapshot, ToolOutput> {
     match jobs.read(id) {
         Some(snapshot) => Ok(snapshot),
         None => Err(ToolOutput {
@@ -68,7 +65,7 @@ fn parse_timeout(
 /// Terminal failures (nonzero exit, run deadline) surface as tool errors
 /// so the model retries or explains; cancellation is the model acting on
 /// purpose, so it stays non-error like `task_stop` outcomes.
-fn render(snapshot: &action_jobs::JobSnapshot) -> ToolOutput {
+fn render(snapshot: &crate::JobSnapshot) -> ToolOutput {
     let mut content = snapshot.status_line();
     if !snapshot.log_tail.is_empty() {
         content.push_str("\n--- log tail ---\n");
@@ -180,10 +177,10 @@ impl Tool for JobSpawnTool {
                 ),
                 is_error: false,
             }),
-            Err(action_jobs::JobError::AtCapacity) => Ok(ToolOutput {
+            Err(crate::JobError::AtCapacity) => Ok(ToolOutput {
                 content: format!(
                     "job capacity reached ({} per owner); cancel or await a job, then retry",
-                    action_jobs::MAX_JOBS_PER_OWNER
+                    crate::MAX_JOBS_PER_OWNER
                 ),
                 is_error: true,
             }),

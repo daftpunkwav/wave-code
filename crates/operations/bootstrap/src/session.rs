@@ -860,10 +860,14 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // `job_spawn` writes, `job_wait`/`job_output` only observe, and
     // `job_cancel` is destructive (approval-gated).
     let jobs = Arc::new(action_jobs::JobService::new(children.clone()));
-    registry.register(Arc::new(crate::job_tools::JobSpawnTool::new(jobs.clone())));
-    registry.register(Arc::new(crate::job_tools::JobWaitTool::new(jobs.clone())));
-    registry.register(Arc::new(crate::job_tools::JobCancelTool::new(jobs.clone())));
-    registry.register(Arc::new(crate::job_tools::JobOutputTool::new(jobs)));
+    registry.register(Arc::new(action_jobs::tools::JobSpawnTool::new(
+        jobs.clone(),
+    )));
+    registry.register(Arc::new(action_jobs::tools::JobWaitTool::new(jobs.clone())));
+    registry.register(Arc::new(action_jobs::tools::JobCancelTool::new(
+        jobs.clone(),
+    )));
+    registry.register(Arc::new(action_jobs::tools::JobOutputTool::new(jobs)));
     // File-content snapshots ride the same late handle: the store root
     // derives from the session memory root (`<home>/.wavecode/memories`
     // -> `<home>/.wavecode/snapshots`) so injected roots stay hermetic.

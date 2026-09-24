@@ -19,7 +19,7 @@
 //! This is the single home of what the frontends previously duplicated
 //! by reading `<home>/.wavecode/...` files by hand. Rendering here is the
 //! bounded display view (body heads); the model-facing full-fidelity
-//! renderers are [`crate::plan_tools::render_status`] and
+//! renderers are [`state_plan::tool::render_status`] and
 //! [`state_goal::tool::render_status`].
 
 use std::path::Path;
@@ -30,8 +30,8 @@ use state_checkpoint::SnapshotStore;
 use state_goal::GoalState;
 use state_plan::PlanState;
 
-use crate::plan_tools::DEFAULT_PLAN_SESSION_ID;
 use state_goal::tool::DEFAULT_GOAL_SESSION_ID;
+use state_plan::tool::DEFAULT_PLAN_SESSION_ID;
 
 /// Body head cap for plan / goal text in status displays; the full text
 /// stays available through the model-facing status tools.

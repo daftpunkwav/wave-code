@@ -13,14 +13,14 @@
  * owns the store handle; the tool only mutates through it.
  */
 
-//! Reviewed plan tool: a thin [`Tool`] adapter over the `state-plan`
-//! machine; the transition rules and file layout live in `state-plan`,
+//! Reviewed plan tool: a thin [`Tool`] adapter over this crate's plan
+//! machine; the transition rules and file layout live in the crate root,
 //! this module only maps tool input/output and persistence.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use state_plan::PlanState;
+use crate::PlanState;
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
 /// Session id used when assembly has no finer identity: the path stays
@@ -32,7 +32,7 @@ pub const DEFAULT_PLAN_SESSION_ID: &str = "default";
 ///
 /// Returns the state plus an optional startup warning for assembly.
 pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (PlanState, Option<String>) {
-    match state_plan::load_for_session(home, session_id) {
+    match crate::load_for_session(home, session_id) {
         Ok(state) => (state, None),
         Err(e) => (
             PlanState::default(),
@@ -55,8 +55,8 @@ impl PlanStore {
     /// means memory-only (same gate as the memory assembly path).
     pub fn new(state: PlanState, home: Option<&Path>, session_id: &str) -> Self {
         let file = home
-            .map(state_plan::plans_root_for_home)
-            .and_then(|root| state_plan::plan_path_for_session(&root, session_id).ok());
+            .map(crate::plans_root_for_home)
+            .and_then(|root| crate::plan_path_for_session(&root, session_id).ok());
         Self {
             state: Mutex::new(state),
             file,
@@ -80,7 +80,7 @@ impl PlanStore {
         let Some(path) = file else {
             return Ok(());
         };
-        tokio::task::spawn_blocking(move || state_plan::save_to_path(&snapshot, &path))
+        tokio::task::spawn_blocking(move || crate::save_to_path(&snapshot, &path))
             .await
             .map_err(|e| format!("plan persist task failed: {e}"))?
             .map_err(|e| e.to_string())
@@ -124,7 +124,7 @@ pub fn render_status(state: &PlanState) -> String {
 async fn apply_transition(
     store: &PlanStore,
     action: &'static str,
-    transition: impl FnOnce(&mut PlanState) -> std::result::Result<(), state_plan::PlanError>,
+    transition: impl FnOnce(&mut PlanState) -> std::result::Result<(), crate::PlanError>,
 ) -> ToolOutput {
     let (snapshot, file, rendered) = {
         let mut guard = store.lock();
@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn corrupt_plan_degrades_with_a_warning() {
         let home = tempfile::tempdir().unwrap();
-        let root = state_plan::plans_root_for_home(home.path());
+        let root = crate::plans_root_for_home(home.path());
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("bad.json"), "{not json").unwrap();
         let (state, warning) = load_for_session(Some(home.path()), "bad");

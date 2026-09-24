@@ -888,19 +888,19 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // reopens the same plan. Corrupt content warns and starts empty, never
     // a hard stop. The tool mutates plan state, not the repo, and assembly
     // classifies it as in-session state (no approval gate in any mode).
-    let (plan_state, plan_warning) = crate::plan_tools::load_for_session(
+    let (plan_state, plan_warning) = state_plan::tool::load_for_session(
         home.as_deref(),
-        crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
+        state_plan::tool::DEFAULT_PLAN_SESSION_ID,
     );
     if let Some(warning) = plan_warning {
         warnings.push(warning);
     }
-    let plan_store = Arc::new(crate::plan_tools::PlanStore::new(
+    let plan_store = Arc::new(state_plan::tool::PlanStore::new(
         plan_state,
         home.as_deref(),
-        crate::plan_tools::DEFAULT_PLAN_SESSION_ID,
+        state_plan::tool::DEFAULT_PLAN_SESSION_ID,
     ));
-    registry.register(Arc::new(crate::plan_tools::PlanTool::new(plan_store)));
+    registry.register(Arc::new(state_plan::tool::PlanTool::new(plan_store)));
 
     // 8. System prompt from assembled slots plus the live tool catalog.
     // Plan mode adds a soft guidance paragraph: read-only exploration,

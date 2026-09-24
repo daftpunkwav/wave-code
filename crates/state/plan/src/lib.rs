@@ -6,9 +6,12 @@
  * - Own the Draft -> Proposed -> Approved -> Executing -> Done/Abandoned transitions.
  * - Reject out-of-order transitions as explicit business errors.
  * - Persist one plan file per session under `<home>/.wavecode/plans/`.
+ * - Host the model-invokable `plan` tool over the machine (`tool` module).
  *
- * This module must not depend on: runtime, action, safety, operations,
- * transport, capabilities, or any orchestration layer. It is pure data.
+ * The crate root is pure data; the `tool` module adds the single
+ * capability edge (wavecode-tools) that renders the machine
+ * model-invokable. Nothing here depends on: runtime, action, safety,
+ * operations, transport, or any orchestration layer.
  */
 
 //! Reviewed plan mode: explore -> present -> approve -> execute.
@@ -17,6 +20,8 @@
 //! it back with feedback (`Draft`), approved plans run (`Executing`) to a
 //! terminal state (`Done` or `Abandoned`). State survives resume because
 //! the file path derives from the home directory.
+
+pub mod tool;
 
 use std::path::{Path, PathBuf};
 

@@ -67,7 +67,7 @@ Package names sometimes differ from directory names (the `wavecode-*` capability
 | `state-persistence` | Append-only JSONL turn journal backing `resume` |
 | `state-checkpoint` | Labelled state snapshots with rollback |
 | `state-goal` | Durable per-session objective with CAS versioning, plus the model-invokable `goal` tool over it |
-| `state-plan` | Reviewed plan-mode state machine |
+| `state-plan` | Reviewed plan-mode state machine, plus the model-invokable `plan` tool over it |
 
 ### `safety/` — policy and isolation
 

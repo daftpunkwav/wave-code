@@ -1,0 +1,332 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  SynthWave '84 for WaveCode.
+
+  Derived from the robb0wen/synthwave-vscode theme (MIT), converted to
+  a tmTheme plist for syntect. Core TextMate scopes only, so every
+  grammar syntect ships (rust, python, ts/js, go, c, ...) resolves
+  into the neon family: keywords yellow, strings orange, comments
+  muted periwinkle italic, functions cyan, types red-pink, variables
+  pink, numbers/constants salmon.
+
+  Background values are kept for theme validity but are never emitted:
+  the highlighter reads foreground and font style only, so code blocks
+  always render on the terminal's own background.
+-->
+<dict>
+    <key>name</key>
+    <string>SynthWave 84</string>
+    <key>settings</key>
+    <array>
+        <dict>
+            <key>settings</key>
+            <dict>
+                <key>background</key>
+                <string>#262335</string>
+                <key>foreground</key>
+                <string>#FFFFFF</string>
+                <key>caret</key>
+                <string>#F97E72</string>
+                <key>lineHighlight</key>
+                <string>#1A1625</string>
+                <key>selection</key>
+                <string>#7C7FDB55</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Comment</string>
+            <key>scope</key>
+            <string>comment</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#848BBD</string>
+                <key>fontStyle</key>
+                <string>italic</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>String</string>
+            <key>scope</key>
+            <string>string</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FF8B39</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>String escape</string>
+            <key>scope</key>
+            <string>constant.character.escape</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#36F9F6</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Regexp</string>
+            <key>scope</key>
+            <string>string.regexp</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#F97E72</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Number</string>
+            <key>scope</key>
+            <string>constant.numeric</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#F97E72</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Language constant (true/false/null)</string>
+            <key>scope</key>
+            <string>constant.language</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#F97E72</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Other constant</string>
+            <key>scope</key>
+            <string>constant</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#F97E72</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Keyword</string>
+            <key>scope</key>
+            <string>keyword</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FEDE5D</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Keyword operator</string>
+            <key>scope</key>
+            <string>keyword.operator</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FEDE5D</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Storage (declaration and modifier keywords)</string>
+            <key>scope</key>
+            <string>storage</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FEDE5D</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Function name</string>
+            <key>scope</key>
+            <string>entity.name.function, variable.function, support.function, meta.function-call.generic</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#36F9F6</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Type and class name</string>
+            <key>scope</key>
+            <string>entity.name.type, entity.name.class, support.class, support.type, entity.other.inherited-class</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FE4450</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Markup / HTML tag</string>
+            <key>scope</key>
+            <string>entity.name.tag</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#72F1B8</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Tag attribute</string>
+            <key>scope</key>
+            <string>entity.other.attribute-name</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FEDE5D</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Variable</string>
+            <key>scope</key>
+            <string>variable</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FF7EDB</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Language variable (this, self, super)</string>
+            <key>scope</key>
+            <string>variable.language</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FE4450</string>
+                <key>fontStyle</key>
+                <string>bold</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Parameter</string>
+            <key>scope</key>
+            <string>variable.parameter</string>
+            <key>settings</key>
+            <dict>
+                <key>fontStyle</key>
+                <string>italic</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Support (builtin library surface)</string>
+            <key>scope</key>
+            <string>support</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FE4450</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Punctuation</string>
+            <key>scope</key>
+            <string>punctuation</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#B6B1B1</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>String punctuation (quotes share the string color)</string>
+            <key>scope</key>
+            <string>punctuation.definition.string</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FF8B39</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Embedded punctuation (interpolation)</string>
+            <key>scope</key>
+            <string>punctuation.section.embedded</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FEDE5D</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Property and object key</string>
+            <key>scope</key>
+            <string>meta.object-literal.key, support.type.property-name</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FF7EDB</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Preprocessor directive (C includes, defines)</string>
+            <key>scope</key>
+            <string>keyword.control.directive</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#72F1B8</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Attribute (rust #[..], python decorators)</string>
+            <key>scope</key>
+            <string>meta.annotation</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FE4450</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Go storage types read green (official mapping)</string>
+            <key>scope</key>
+            <string>source.go storage.type</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#72F1B8</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Markup heading</string>
+            <key>scope</key>
+            <string>markup.heading, entity.name.section</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#FF7EDB</string>
+                <key>fontStyle</key>
+                <string>bold</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -23,7 +23,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 /// Timeout cap: 300 s, clamped to the cap when exceeded.
 const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Per-stream stdout / stderr output cap: 30 KB.
-const MAX_OUTPUT_BYTES: usize = 30 * 1024;
+pub(crate) const MAX_OUTPUT_BYTES: usize = 30 * 1024;
 
 /// Whether OS-level confinement applies to shell spawns.
 ///
@@ -75,7 +75,7 @@ pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
 /// and appends its marker), while a chatty child can no longer grow the
 /// process by output-rate x timeout: buffering stops at the cap and the
 /// rest is drained and discarded.
-const STREAM_CAPTURE_CAP: usize = MAX_OUTPUT_BYTES + 1024 * 1024;
+pub(crate) const STREAM_CAPTURE_CAP: usize = MAX_OUTPUT_BYTES + 1024 * 1024;
 
 /// Collect one child output stream into at most `cap` bytes.
 ///
@@ -96,6 +96,40 @@ async fn collect_capped<R: tokio::io::AsyncRead + Unpin>(mut stream: R, cap: usi
         }
     }
     buf
+}
+
+/// Spawn `cmd` and collect its piped streams into at most `cap` bytes each.
+///
+/// Reads run to EOF so the child never blocks on a full pipe; bytes past
+/// the cap are drained and discarded. Read errors degrade to a truncated
+/// capture (the exit code still surfaces) instead of failing the call.
+/// Shared by `Shell` and the script tools so no child-output path buffers
+/// unbounded; the caller owns the timeout wrapper (kill_on_drop semantics).
+pub(crate) async fn spawn_and_collect(
+    cmd: &mut tokio::process::Command,
+    cap: usize,
+) -> std::io::Result<std::process::Output> {
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().map(|s| collect_capped(s, cap));
+    let stderr = child.stderr.take().map(|s| collect_capped(s, cap));
+    let stdout = async {
+        match stdout {
+            Some(read) => read.await,
+            None => Vec::new(),
+        }
+    };
+    let stderr = async {
+        match stderr {
+            Some(read) => read.await,
+            None => Vec::new(),
+        }
+    };
+    let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
+    Ok(std::process::Output {
+        status: status?,
+        stdout,
+        stderr,
+    })
 }
 
 /// Execute a shell command (a writing tool: may modify files or spawn processes, needs serial scheduling).
@@ -193,36 +227,12 @@ impl Tool for Shell {
         // drain concurrently (join!), so a full pipe buffer cannot deadlock
         // it, and each stream stops buffering at STREAM_CAPTURE_CAP so a
         // chatty child cannot grow memory without bound.
-        let run = async {
-            let mut child = cmd.spawn()?;
-            let stdout = child
-                .stdout
-                .take()
-                .map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
-            let stderr = child
-                .stderr
-                .take()
-                .map(|s| collect_capped(s, STREAM_CAPTURE_CAP));
-            let stdout = async {
-                match stdout {
-                    Some(read) => read.await,
-                    None => Vec::new(),
-                }
-            };
-            let stderr = async {
-                match stderr {
-                    Some(read) => read.await,
-                    None => Vec::new(),
-                }
-            };
-            let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
-            Ok::<std::process::Output, std::io::Error>(std::process::Output {
-                status: status?,
-                stdout,
-                stderr,
-            })
-        };
-        let output = match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+        let output = match tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            spawn_and_collect(&mut cmd, STREAM_CAPTURE_CAP),
+        )
+        .await
+        {
             Ok(Ok(output)) => output,
             // Timeout: the run future was dropped, and kill_on_drop guarantees the process is killed.
             Err(_) => {

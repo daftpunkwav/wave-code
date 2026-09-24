@@ -106,6 +106,12 @@ fn build_argv(flag: &str, script: &str, extra: &[String]) -> Vec<String> {
 
 /// Shared spawn path: stdin closed, cwd confined, env scrubbed, timeout
 /// kills the process, both output streams truncated via the shell helper.
+///
+/// Output capture rides the shell tool's capped path (`spawn_and_collect`
+/// with [`crate::shell_tool::STREAM_CAPTURE_CAP`]): reads run to EOF so a
+/// full pipe cannot deadlock, and buffering stops at the cap so a chatty
+/// script cannot grow the process by output-rate x timeout. The visible
+/// contract is unchanged (`truncate_output` still cuts to the display cap).
 async fn run_script(
     program: &str,
     argv: &[String],
@@ -121,8 +127,12 @@ async fn run_script(
         .kill_on_drop(true);
     // Same scrubbing as Shell: deny_env list plus sensitive-suffix fallback.
     crate::shell_tool::sanitize_env(&mut cmd, ctx);
-    let run = async { cmd.spawn()?.wait_with_output().await };
-    let output = match tokio::time::timeout(Duration::from_millis(timeout_ms), run).await {
+    let output = match tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        crate::shell_tool::spawn_and_collect(&mut cmd, crate::shell_tool::STREAM_CAPTURE_CAP),
+    )
+    .await
+    {
         Ok(Ok(output)) => output,
         Err(_) => {
             return Ok(err_output(format!(
@@ -466,5 +476,28 @@ mod tests {
                 .unwrap()
                 .is_error
         );
+    }
+
+    #[tokio::test]
+    async fn chatty_output_is_capped_not_buffered_unbounded() {
+        if discover(python_candidates()).is_none() {
+            eprintln!("skipping: no Python interpreter on PATH");
+            return;
+        }
+        let (_d, c) = ctx();
+        // ~1.8MB on stdout, far past STREAM_CAPTURE_CAP: the tool must
+        // still return promptly with the usual truncation marker (the cap
+        // only bounds buffering, not the visible contract).
+        let out = PythonTool
+            .execute(
+                serde_json::json!({"command": "print('A' * 1800000)", "timeout_ms": 60000}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("[truncated]"));
+        // Well under the captured stream: the cap stopped buffering.
+        assert!(out.content.len() < 4 * crate::shell_tool::MAX_OUTPUT_BYTES);
     }
 }

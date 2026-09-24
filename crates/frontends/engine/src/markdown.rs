@@ -343,9 +343,7 @@ fn break_before_bold_lines(text: &str) -> std::borrow::Cow<'_, str> {
             out.push(line);
             continue;
         }
-        if !in_fence
-            && is_bold_led(line)
-            && out.last().is_some_and(|prev| !prev.trim().is_empty())
+        if !in_fence && is_bold_led(line) && out.last().is_some_and(|prev| !prev.trim().is_empty())
         {
             out.push("");
         }
@@ -600,7 +598,11 @@ mod tests {
     fn cjk_bold_with_fullwidth_punctuation_on_both_sides() {
         let mut md = renderer();
         let lines = md.render("前文：**执行环境**。后文", 40);
-        assert!(lines[0].contains("\x1b[1m执行环境\x1b[0m"), "{:?}", lines[0]);
+        assert!(
+            lines[0].contains("\x1b[1m执行环境\x1b[0m"),
+            "{:?}",
+            lines[0]
+        );
         assert_no_leaked_markers(&lines);
     }
 
@@ -651,7 +653,9 @@ mod tests {
             "bold heading on its own line: {plain:?}"
         );
         assert!(
-            !plain.iter().any(|l| l.contains("诊断信息") && l.contains("执行环境")),
+            !plain
+                .iter()
+                .any(|l| l.contains("诊断信息") && l.contains("执行环境")),
             "blocks must not glue: {plain:?}"
         );
     }
@@ -671,10 +675,18 @@ mod tests {
         let text = "先看环境。\n**迷宫场景**: 用 Three.js 拼出迷宫\n**起点**: 蓝色发光方块";
         let lines = md.render(text, 60);
         let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
-        assert!(plain.contains(&"迷宫场景: 用 Three.js 拼出迷宫".to_string()), "{plain:?}");
-        assert!(plain.contains(&"起点: 蓝色发光方块".to_string()), "{plain:?}");
         assert!(
-            !plain.iter().any(|l| l.contains("先看环境。") && l.contains("迷宫场景")),
+            plain.contains(&"迷宫场景: 用 Three.js 拼出迷宫".to_string()),
+            "{plain:?}"
+        );
+        assert!(
+            plain.contains(&"起点: 蓝色发光方块".to_string()),
+            "{plain:?}"
+        );
+        assert!(
+            !plain
+                .iter()
+                .any(|l| l.contains("先看环境。") && l.contains("迷宫场景")),
             "blocks must not glue: {plain:?}"
         );
     }
@@ -721,7 +733,9 @@ mod tests {
             "standalone bold line owns a line: {plain:?}"
         );
         assert!(
-            !plain.iter().any(|l| l.contains("诊断信息") && l.contains("执行环境")),
+            !plain
+                .iter()
+                .any(|l| l.contains("诊断信息") && l.contains("执行环境")),
             "blocks must not glue: {plain:?}"
         );
     }

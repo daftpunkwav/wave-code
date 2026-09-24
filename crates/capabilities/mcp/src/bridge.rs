@@ -1425,7 +1425,9 @@ async fn connect_one(
 /// Discovery tools (`read_resource` / `get_prompt`) only register when the
 /// server advertised the capability; a listing that fails despite the
 /// advertisement skips that one tool quietly (same scoped degradation as a
-/// single malformed tool item).
+/// single malformed tool item). A discovery bridge never overwrites a tool
+/// the server itself listed under the same name — the registry replaces on
+/// register, and the server's explicit tool is the one the model was shown.
 async fn bridge_server(
     name: &str,
     client: Arc<dyn McpClient>,
@@ -1433,10 +1435,12 @@ async fn bridge_server(
     registry: &Arc<wavecode_tools::Registry>,
 ) -> std::result::Result<usize, McpError> {
     let mut count = 0;
+    let mut bridged: std::collections::HashSet<String> = std::collections::HashSet::new();
     for def in &client.list_tools().await? {
         // Empty tool names never reach the registry; the handshake told
         // us the server speaks, so one bad item skips quietly.
         if let Some(bridge) = McpToolBridge::new(name, def, client.clone()) {
+            bridged.insert(bridge.name().to_owned());
             registry.register(Arc::new(bridge));
             count += 1;
         }
@@ -1444,6 +1448,7 @@ async fn bridge_server(
     if caps.resources
         && let Ok(resources) = client.list_resources().await
         && let Some(bridge) = McpResourceBridge::new(name, &resources, client.clone())
+        && bridged.insert(bridge.name().to_owned())
     {
         registry.register(Arc::new(bridge));
         count += 1;
@@ -1451,6 +1456,7 @@ async fn bridge_server(
     if caps.prompts
         && let Ok(prompts) = client.list_prompts().await
         && let Some(bridge) = McpPromptBridge::new(name, &prompts, client.clone())
+        && bridged.insert(bridge.name().to_owned())
     {
         registry.register(Arc::new(bridge));
         count += 1;
@@ -2086,6 +2092,62 @@ mod tests {
         assert_eq!(count, 1);
         assert!(plain_registry.get("mcp__srv__read_resource").is_none());
         assert!(plain_registry.get("mcp__srv__get_prompt").is_none());
+    }
+
+    /// A server may list a tool named exactly like a discovery bridge
+    /// (`read_resource` / `get_prompt`). The registry replaces on register,
+    /// so a later discovery bridge would silently overwrite the server's own
+    /// tool; the explicit tool must win and the discovery surface stays out.
+    #[tokio::test]
+    async fn discovery_bridges_never_shadow_same_named_tools() {
+        let resources = vec![McpResourceDef {
+            uri: "file:///a.txt".to_string(),
+            name: "a".to_string(),
+            description: None,
+            mime_type: None,
+        }];
+        let prompts = vec![McpPromptDef {
+            name: "review".to_string(),
+            description: None,
+            arguments: vec![],
+        }];
+        let client = Arc::new(FakeClient {
+            caps: ServerCaps {
+                resources: true,
+                prompts: true,
+            },
+            resources,
+            prompts,
+            ..FakeClient::new(vec![def("read_resource"), def("get_prompt")])
+        });
+        let registry = Arc::new(wavecode_tools::Registry::builtin());
+        let count = bridge_server("srv", client.clone(), client.caps, &registry)
+            .await
+            .unwrap();
+        // Two explicit tools only; neither discovery bridge registered.
+        assert_eq!(count, 2);
+        let out = registry
+            .get("mcp__srv__read_resource")
+            .expect("the server's own read_resource tool stays bridged")
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            out.content.contains("ran read_resource"),
+            "the explicit tool answers, not the resource bridge: {}",
+            out.content
+        );
+        let out = registry
+            .get("mcp__srv__get_prompt")
+            .expect("the server's own get_prompt tool stays bridged")
+            .execute(serde_json::json!({}), &ctx())
+            .await
+            .unwrap();
+        assert!(
+            out.content.contains("ran get_prompt"),
+            "the explicit tool answers, not the prompt bridge: {}",
+            out.content
+        );
     }
 
     /// Minimal hand-rolled HTTP/1.1 stub over TCP (one connection per

@@ -4,10 +4,12 @@
 //! (`[]`, `()`, `{}`, `(( ))`, `[[]]`) all collapse onto one
 //! box-drawing box, edges ride `-->`, `---`, `-.->`, `==>` with
 //! optional labels (`-->|text|` or `-- text -->`), and chained
-//! statements (`a --> b --> c`) parse. Anything else — `LR`/`RL`/`BT`
-//! directions, subgraphs, other diagram types — returns `None` so the
-//! caller falls back to the source view. The render/source toggle is
-//! process-global (Ctrl+M in the console), like the color depth.
+//! statements (`a --> b --> c`) parse. State diagrams render through a
+//! flowchart adapter, and sequence / pie / class / gantt diagrams get
+//! their own terminal layouts. Anything else — `LR`/`RL`/`BT`
+//! directions, subgraphs, unsupported constructs — returns `None` so
+//! the caller falls back to the source view. The render/source toggle
+//! is process-global (Ctrl+M in the console), like the color depth.
 //!
 //! Layout is a layered flow: nodes stack in bands by longest-path
 //! depth, edges route down the band gaps with a single elbow per edge

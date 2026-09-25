@@ -76,7 +76,11 @@ impl Default for ModalitiesSpec {
 
 /// One catalog model: everything the runtime needs to build a client
 /// and everything the UI needs to describe the model.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+///
+/// Hand-written redacted `Debug`: `api_key` never shows the real value
+/// (Some renders as `***`, None as `None`), mirroring
+/// [`ProviderConfig`] — secrets cannot leak via log / error output.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelSpec {
     /// Provider id this model groups under (synthesized into
     /// `model_providers` on load).
@@ -105,6 +109,25 @@ pub struct ModelSpec {
     /// Accepted input / produced output modalities.
     #[serde(default)]
     pub modalities: ModalitiesSpec,
+}
+
+impl std::fmt::Debug for ModelSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModelSpec")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .field("api_key_env", &self.api_key_env)
+            // Redacted: keep only the Some/None shape, the real key never
+            // enters Debug output.
+            .field("api_key", &self.api_key.as_ref().map(|_| "***"))
+            .field("context_window", &self.context_window)
+            .field("max_output", &self.max_output)
+            .field("reasoning", &self.reasoning)
+            .field("modalities", &self.modalities)
+            .finish()
+    }
 }
 
 impl ModelSpec {
@@ -168,6 +191,8 @@ pub struct ModelCatalog {
 pub enum CatalogError {
     /// The file exists but is not valid catalog JSON.
     Parse(String),
+    /// The file could not be read.
+    Read(std::io::Error),
     /// The file could not be written.
     Write(std::io::Error),
 }
@@ -181,17 +206,22 @@ impl ModelCatalog {
     /// Load the catalog; a missing file is an empty catalog (the
     /// catalog is optional — config.toml models keep working alone).
     /// A malformed file is an error, never silently swallowed: a typoed
-    /// catalog must not look like an empty one.
+    /// catalog must not look like an empty one. Any other read failure
+    /// (a directory in the way, denied permissions) surfaces too — a
+    /// silently-empty catalog would hide the user's models.
     pub fn load(home: &Path) -> Result<Self, CatalogError> {
         let path = Self::path(home);
         let content = match std::fs::read_to_string(&path) {
             Ok(content) => content,
-            Err(_) => return Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(CatalogError::Read(e)),
         };
         serde_json::from_str(&content).map_err(|e| CatalogError::Parse(e.to_string()))
     }
 
-    /// Write the catalog back to `~/.wavecode/models.json`.
+    /// Write the catalog back to `~/.wavecode/models.json`. The file may
+    /// hold inline API keys, so on Unix it is created and kept
+    /// owner-only (0600) instead of world-readable.
     pub fn save(&self, home: &Path) -> Result<(), CatalogError> {
         let path = Self::path(home);
         if let Some(parent) = path.parent() {
@@ -199,7 +229,29 @@ impl ModelCatalog {
         }
         let content =
             serde_json::to_string_pretty(self).map_err(|e| CatalogError::Parse(e.to_string()))?;
-        std::fs::write(&path, content + "\n").map_err(CatalogError::Write)
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(CatalogError::Write)?;
+            // An existing file keeps its mode on rewrite: tighten it to
+            // owner-only as well, so a once-world-readable catalog does
+            // not stay that way after an edit.
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(CatalogError::Write)?;
+            file.write_all(content.as_bytes())
+                .and_then(|()| file.write_all(b"\n"))
+                .map_err(CatalogError::Write)?;
+        }
+        #[cfg(not(unix))]
+        std::fs::write(&path, content + "\n").map_err(CatalogError::Write)?;
+        Ok(())
     }
 
     /// The spec for `alias`.
@@ -288,6 +340,74 @@ mod tests {
         std::fs::create_dir_all(dir.join(".wavecode")).unwrap();
         std::fs::write(dir.join(".wavecode").join("models.json"), "{ not json").unwrap();
         assert!(ModelCatalog::load(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A read failure other than a missing file (here: the catalog path
+    /// is a directory) surfaces as an error instead of looking empty.
+    #[test]
+    fn unreadable_catalog_is_an_error_not_empty() {
+        let dir = std::env::temp_dir().join("wavecode-catalog-blocked");
+        let path = dir.join(".wavecode").join("models.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(matches!(
+            ModelCatalog::load(&dir),
+            Err(CatalogError::Read(_))
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rendered Debug of a spec keeps the Some/None shape of the
+    /// inline key but never its value — log and error output included.
+    #[test]
+    fn debug_output_redacts_the_inline_key() {
+        let catalog: ModelCatalog = serde_json::from_str(SAMPLE).unwrap();
+        let mut spec = catalog.get("GLM-5.3").unwrap().clone();
+        spec.api_key = Some("sk-super-secret".into());
+        let rendered = format!("{spec:?}");
+        assert!(
+            !rendered.contains("sk-super-secret"),
+            "key leaked via Debug: {rendered}"
+        );
+        assert!(rendered.contains("***"), "shape kept: {rendered}");
+        let rendered = format!("{catalog:?}");
+        assert!(
+            !rendered.contains("sk-super-secret"),
+            "no key via the catalog Debug either"
+        );
+    }
+
+    /// On Unix the catalog file (which may hold an inline key) is
+    /// written owner-only, including tightening a pre-existing file.
+    #[cfg(unix)]
+    #[test]
+    fn saved_catalog_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("wavecode-catalog-perms");
+        let path = dir.join(".wavecode").join("models.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{}\n").unwrap();
+        let mut spec = ModelCatalog::default();
+        spec.insert(
+            "m",
+            ModelSpec {
+                provider: "p".into(),
+                model: "m-1".into(),
+                kind: ApiKind::OpenaiChat,
+                base_url: "https://x".into(),
+                api_key_env: None,
+                api_key: Some("k".into()),
+                context_window: None,
+                max_output: None,
+                reasoning: ReasoningSpec::default(),
+                modalities: ModalitiesSpec::default(),
+            },
+        );
+        spec.save(&dir).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "owner-only catalog: {mode:o}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

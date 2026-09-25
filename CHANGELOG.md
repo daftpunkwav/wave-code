@@ -52,6 +52,12 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   column (the `diff layout` setting is gone).
 
 ### Fixed
+- Web fetch refuses redirect hops onto link-local hosts at every hop,
+  so a public server cannot 302 the tool into cloud metadata or
+  local-link addresses.
+- MCP response bodies are read with a 32 MiB cap, and captured shell
+  and script output stops at a per-stream cap, so a chatty server or
+  child process cannot grow memory without bound.
 - Markdown rendering: exactly one blank line between blocks, fenced
   code framed with dim rules instead of literal backtick markers
   (language tags sanitized), inline code spans without visible

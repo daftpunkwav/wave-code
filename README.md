@@ -1,7 +1,8 @@
 # WaveCode
 
 Headless-first AI coding agent in Rust: one `wavecode` binary serves single-turn
-execution, an interactive REPL, a fullscreen TUI, and legacy session resume over
+execution, an interactive REPL, an inline console UI (full-viewport frames on
+the main screen, native scrollback preserved), and legacy session resume over
 a shared agent core (multi-turn ReAct loop, tools, skills, memory, MCP).
 
 > 🚧 Under active development; no stable release yet.
@@ -27,7 +28,7 @@ wavecode exec "fix the failing test"   # single turn, exit code follows outcome
 wavecode exec --json "summarize"       # JSONL events on stdout
 wavecode repl                          # interactive multi-turn session
 wavecode resume                        # list previous sessions / resume one
-wavecode                               # fullscreen TUI on a TTY, REPL otherwise
+wavecode                               # inline console on a TTY, REPL otherwise
 wavecode --plan                        # start in plan mode (-y for auto mode)
 wavecode --debug                       # debug-level file logging (~/.wavecode/logs)
 wavecode metrics                       # per-model, per-tool quality report
@@ -115,7 +116,8 @@ model = "your-model-fast"
   (compress context now), `/memory` (show memory index), `/mcp` (list
   servers), `/permissions` (approval mode), `/quit` (end session),
   `/help`. `/skill-name args` invokes a user-invocable skill by name.
-- TUI: same session behind a fullscreen interface — inline approval prompts
+- Console: same session behind a full-viewport inline interface (native
+  scrollback preserved) — approval prompts render inline
   (file-write approvals show the affected lines as a colored diff), `/mcp`
   status rows, `/btw` side questions (read-only, answers stream into a panel
   without touching the conversation), and dialogs for `/model` (provider tabs,
@@ -320,15 +322,17 @@ cargo fmt --check
 ```
 
 Layout: the workspace is a flat crate DAG under `crates/<group>/<crate>`,
-dependencies pointing downward only — `infrastructure` (primitives),
-`foundation` (config, llm, protocol, auth) and `capabilities` (tools, skills,
-memory, mcp, ...) form the capability stack, `state` (conversation,
-persistence, trajectory) and `safety` (policy, approvals, sandbox) hold
-durable data and policy, `action` (tool registry, tasks, workflows) and
-`runtime` (run loop, child turns, scheduler) execute, `operations` (wire
-protocol, actor, bootstrap composition root, gateway) assembles, and
-`frontends` hosts the `wavecode` binary and TUI. `apps/` holds thin
-Web/Desktop/SDK shells. See [docs/architecture.md](docs/architecture.md).
+dependencies pointing downward only — `infrastructure` (leaf primitives),
+`foundation` (wire types, config, llm, protocol vocabulary, auth) and
+`capabilities` (tools, skills, memory, mcp, sandbox, hooks, context) form
+the capability stack, `state` (store, persistence, checkpoint, goal, plan)
+and `safety` (gate, guardrail, audit, secrets) hold durable data and
+policy, `action` (tasks, workflow, jobs, browser, retrieval) and `runtime`
+(run loop, child turns, scheduler, prompt assembly, plugin seam) execute,
+`operations` (actor, bootstrap composition root, gateway, eval) assembles,
+`transport` carries the MCP byte framing, and `frontends` hosts the
+`wavecode` binary and the console UI. The TypeScript SDK lives in
+`sdk/typescript`. See [docs/architecture.md](docs/architecture.md).
 Not every crate in that DAG is reachable from the shipped binary: the
 architecture doc's [Wiring status](docs/architecture.md#wiring-status) table
 lists the unwired ones, so a crate existing on disk is not a feature claim.

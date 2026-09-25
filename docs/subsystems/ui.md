@@ -133,7 +133,10 @@ receivers remain compatible.
   original (prints the `--session` command); `/title <title>` renames;
   `/new` starts a fresh session (new context and journal) through the
   same re-assembly path; `/clear` remains a soft screen reset. Resume
-  is text-level by design: tool blocks are not replayed.
+  is block-level whenever the session's write-ahead history journal
+  exists (tool calls, tool results, thinking and images come back);
+  sessions written before the journal existed fall back to the text
+  snapshot. See `docs/subsystems/sessions-state.md`.
 - `/btw <question>` asks a side question in a read-only side session
   (plan mode, seeded with the main dialogue via the same session
   factory): answers stream into a panel above the editor and never

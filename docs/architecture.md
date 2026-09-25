@@ -1,6 +1,6 @@
 # Architecture
 
-WaveCode is a headless-first AI coding agent in Rust. One `wavecode` binary serves single-turn execution (`exec`), an interactive REPL, a fullscreen TUI, and legacy session resume over a shared agent core: a multi-turn ReAct loop with tools, skills, memory, and MCP.
+WaveCode is a headless-first AI coding agent in Rust. One `wavecode` binary serves single-turn execution (`exec`), an interactive REPL, an inline console UI (full-viewport frames on the main screen, native scrollback preserved), and legacy session resume over a shared agent core: a multi-turn ReAct loop with tools, skills, memory, and MCP.
 
 The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies point downward only; there are no cycles. This document describes the groups bottom-up, the dependency rules that hold the layering together, and the life of a turn.
 
@@ -15,27 +15,28 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 ## Layer map
 
 ```
-frontends      wavecode binary (exec / repl / resume / TUI launch) and the TUI client
+frontends      wavecode binary (exec / repl / resume / console launch) and
+                 the console client
                  │
-operations     wire protocol, session actor (with the shared session
-               contract), bootstrap composition root, RPC gateway (the
-               live ACP / HTTP+SSE / MCP-serve surfaces), eval, observe,
-               simulate
+operations     session actor (with the shared session contract), bootstrap
+               composition root, RPC gateway (the live ACP / HTTP+SSE /
+               MCP-serve surfaces), eval, observe, simulate
                  │
 runtime        RunLoop, child turns, scheduler, prompt assembly, plugin seam,
                capability inventory, identity, skill routing
                  │
-action         tool registry + attributes, child tasks, workflow engine,
-               background jobs, browser seam, term retrieval
+action         child tasks, workflow engine, background jobs, browser seam,
+               term retrieval
                  │
 safety         tool policy, approval gate, injection guardrail, audit log,
-               secrets vault, OS sandbox backends
-state          conversation store, turn journal, trajectory, checkpoints,
-               durable goals, plans, profiles, workspaces, artifacts
+               secrets vault
+state          conversation store, turn journal, checkpoints, durable goals,
+               plans, artifacts
                  │
 capabilities   tools, skills, memory, MCP client, sandbox policy, hooks,
                context pipeline          (the "wavecode-*" stack)
-foundation     config, multi-provider LLM client, protocol vocabulary, auth
+foundation     wire types, config, multi-provider LLM client, protocol
+               vocabulary, auth
                  │
 infrastructure channels + interrupts + limits, TTL/LRU cache, layered config,
                leases, token-bucket rate limit, model routing, JSON schema

@@ -4,7 +4,7 @@ The RunLoop lives in `crates/runtime/runner/src/lib.rs` and owns one turn end to
 
 ## Seams
 
-`RunLoop<E, P, H, M, A, T, C>` is generic over seven traits, all in the same file:
+`RunLoop<E, P, H, M, A, T, C>` is generic over seven traits, all in the same file (the goal seam rides a defaulted `dyn GoalTracker` field rather than a parameter):
 
 | Seam | Role | Production adapter |
 | --- | --- | --- |

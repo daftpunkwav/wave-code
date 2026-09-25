@@ -5,7 +5,7 @@ Guide for working on the WaveCode repository. For how the crates fit together, s
 ## Prerequisites
 
 - Rust stable (edition 2024 requires 1.85+). A C toolchain is needed to build dependencies on some platforms.
-- Node.js and pnpm only if you touch the `apps/` or `sdk/typescript/` shells (currently placeholders).
+- Node.js and pnpm only if you touch the `sdk/typescript/` package.
 
 ## Commands
 

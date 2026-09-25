@@ -186,14 +186,19 @@ pub struct ModelCatalog {
     pub models: BTreeMap<String, ModelSpec>,
 }
 
-/// Catalog load/save failures.
-#[derive(Debug)]
+/// Catalog load/save failures. `Display` renders the operation and the
+/// cause, so callers report it directly (`{e}`) instead of through the
+/// Debug shape.
+#[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
     /// The file exists but is not valid catalog JSON.
+    #[error("parse models.json: {0}")]
     Parse(String),
     /// The file could not be read.
+    #[error("read models.json: {0}")]
     Read(std::io::Error),
     /// The file could not be written.
+    #[error("write models.json: {0}")]
     Write(std::io::Error),
 }
 
@@ -356,6 +361,14 @@ mod tests {
             Err(CatalogError::Read(_))
         ));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Display renders the operation and its cause, so callers report
+    /// `{e}` directly instead of the Debug shape.
+    #[test]
+    fn catalog_error_displays_operation_and_cause() {
+        let error = CatalogError::Parse("bad json".to_string());
+        assert_eq!(error.to_string(), "parse models.json: bad json");
     }
 
     /// The rendered Debug of a spec keeps the Some/None shape of the

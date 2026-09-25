@@ -1553,7 +1553,7 @@ fn load_config_opt(
     if let Some(home) = wavecode_config::home_dir() {
         match wavecode_config::ModelCatalog::load(&home) {
             Ok(catalog) => catalog.merge_into(&mut config),
-            Err(e) => eprintln!("model catalog ignored: {e:?}"),
+            Err(e) => eprintln!("model catalog ignored: {e}"),
         }
     }
     Ok(config)

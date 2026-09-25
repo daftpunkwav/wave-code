@@ -2367,7 +2367,7 @@ verify from the repository.";
         let mut catalog = match wavecode_config::ModelCatalog::load(&home) {
             Ok(catalog) => catalog,
             Err(e) => {
-                self.push_status(&format!("model catalog load failed: {e:?}"), true);
+                self.push_status(&format!("model catalog load failed: {e}"), true);
                 return;
             }
         };
@@ -2410,9 +2410,7 @@ verify from the repository.";
                     if catalog.remove(alias).is_some() {
                         match catalog.save(&home) {
                             Ok(()) => self.push_status(&format!("removed {alias}"), false),
-                            Err(e) => {
-                                self.push_status(&format!("catalog save failed: {e:?}"), true)
-                            }
+                            Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
                         }
                     } else {
                         self.push_status(&format!("no model named {alias}"), true);
@@ -2459,7 +2457,7 @@ verify from the repository.";
                     Ok(()) => {
                         self.push_status(&format!("{alias} updated ({field} = {value})"), false)
                     }
-                    Err(e) => self.push_status(&format!("catalog save failed: {e:?}"), true),
+                    Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
                 }
             }
             Some("add") => {
@@ -2501,7 +2499,7 @@ verify from the repository.";
                     Ok(()) => {
                         self.push_status(&format!("added {} (restart applies it)", parts[1]), false)
                     }
-                    Err(e) => self.push_status(&format!("catalog save failed: {e:?}"), true),
+                    Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
                 }
             }
             _ => {

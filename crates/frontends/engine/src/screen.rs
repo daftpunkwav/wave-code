@@ -449,8 +449,10 @@ impl Screen {
                 continue;
             };
             if let Some(byte) = line.find(CURSOR_MARKER) {
-                let cleaned = line.replace(CURSOR_MARKER, "");
-                let col = self.margin + width::width(&cleaned[..byte]);
+                // The prefix before the first marker holds no marker, so
+                // its width needs no marker-stripping copy (this runs
+                // every frame; the editor line always carries one).
+                let col = self.margin + width::width(&line[..byte]);
                 let row = (row - self.base).min(height.saturating_sub(1));
                 let _ = write!(out, "\x1b[{};{}H\x1b[?25h", row + 1, col + 1);
                 self.cursor_row = row;

@@ -356,7 +356,7 @@ impl ConsoleUi {
         ui.state.session_id = ctx.session_id.clone();
         ui.state.session_title = ctx.session_title.clone();
         ui.state.home = ctx.home.clone();
-        ui.state.git_branch = crate::gitinfo::branch(&ui.state.cwd);
+        ui.state.git_branch = crate::git_info::branch(&ui.state.cwd);
         ui.status_line
             .set_command(ui.settings.get().status_line_command.clone());
         let info = welcome_info_of(&ui.state, &ui.version);
@@ -762,7 +762,7 @@ impl ConsoleUi {
             EventMsg::TurnStarted { .. } => {
                 self.state.phase = StreamingPhase::Waiting;
                 // Cheap .git/HEAD read: catches checkout/branch switches.
-                self.state.git_branch = crate::gitinfo::branch(&self.state.cwd);
+                self.state.git_branch = crate::git_info::branch(&self.state.cwd);
                 true
             }
             EventMsg::AgentThinkingDelta { text } => {
@@ -1171,7 +1171,7 @@ impl ConsoleUi {
         state.session_id = ctx.session_id.clone();
         state.session_title = ctx.session_title.clone();
         state.home = ctx.home.clone();
-        state.git_branch = crate::gitinfo::branch(&state.cwd);
+        state.git_branch = crate::git_info::branch(&state.cwd);
         self.state = state;
         self.model_entries = ctx.model_entries.clone();
         self.thinking_levels = ctx.thinking_levels.clone();
@@ -1980,7 +1980,7 @@ verify from the repository.";
             .set_command(view.status_line_command.clone());
         let theme_name = self.theme_name.clone();
         self.apply_theme(&theme_name);
-        self.state.git_branch = crate::gitinfo::branch(&self.state.cwd);
+        self.state.git_branch = crate::git_info::branch(&self.state.cwd);
         self.push_status("reloaded settings, theme, and git state", false);
     }
 

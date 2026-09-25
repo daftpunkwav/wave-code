@@ -20,7 +20,7 @@ pub mod complete;
 pub mod controllers;
 pub mod dialogs;
 pub mod diff;
-pub mod gitinfo;
+pub mod git_info;
 pub mod highlight;
 pub mod history;
 pub mod messages;

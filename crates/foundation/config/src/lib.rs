@@ -336,7 +336,6 @@ deny = ["Bash(rm -rf *)"]
     }
 
     /// hooks config (P7, SPEC section 9): single-table and array-of-tables forms; empty map by default.
-    /// hooks config (P7, SPEC section 9): single-table and array-of-tables forms; empty map by default.
     /// Event-point validity is not checked in the config layer (no in-workspace deps; core checks during conversion).
     #[test]
     fn hooks_parse_single_and_array_forms() {

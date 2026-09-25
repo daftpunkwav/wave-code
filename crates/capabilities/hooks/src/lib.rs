@@ -494,7 +494,8 @@ enum ExecOutcome {
 /// Timeout killing relies on `kill_on_drop`: the timeout branch drops the
 /// `wait_with_output` future, which drops the child, and tokio sends the kill;
 /// the known grandchild-reaping limitation matches the shell tool (process-
-/// group-level reaping is M2 work, see the tools/shell_tool.rs notes).
+/// group-level reaping is not implemented yet, see the tools/shell_tool.rs
+/// notes).
 async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>) -> ExecOutcome {
     let payload = serde_json::json!({
         "event": point.as_str(),

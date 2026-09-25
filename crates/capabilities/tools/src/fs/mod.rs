@@ -80,7 +80,6 @@ pub(super) async fn atomic_write(path: &std::path::Path, content: &str) -> std::
     Ok(())
 }
 
-/// Read a text file (read-only).
 mod edit;
 mod image;
 mod present;

@@ -1,13 +1,13 @@
 //! shell tool: cross-platform command execution (non-interactive: stdin is nulled; stdout/stderr are piped and captured).
-//! Failure semantics match fs_tools: business failures (non-zero exit code, timeout, spawn failure, missing/mistyped params)
+//! Failure semantics match the `fs` file tools: business failures (non-zero exit code, timeout, spawn failure, missing/mistyped params)
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level failures.
 //!
-//! Known limitation (tracked for M2): `kill_on_drop` only kills the shell process itself; grandchildren already
+//! Known limitation: `kill_on_drop` only kills the shell process itself; grandchildren already
 //! inherited copies of cmd's pipe handles at spawn (command-line redirection cannot prevent that) and survive as
 //! orphans after the shell is killed -- the real variable is how long those orphaned grandchildren live.
 //! Production risk: when wavecode exits and drops the tokio runtime it may block for an arbitrarily long time
 //! (e.g. when a grandchild is a dev server). The proper fix is process-group-level reaping (Windows Job
-//! Object / Unix killpg), handled in M2.
+//! Object / Unix killpg); it is not implemented yet.
 
 use std::time::Duration;
 
@@ -194,8 +194,8 @@ impl Tool for Shell {
         let (program, flag) = shell_invocation();
         let mut cmd = tokio::process::Command::new(program);
         cmd.arg(flag).arg(command).current_dir(&ctx.cwd);
-        // OS confinement (chain: bwrap -> Landlock -> seatbelt; opt-in via
-        // WAVECODE_SANDBOX_OS): confine FIRST — rewriting backends replace
+        // OS confinement (chain: bwrap -> Landlock -> seatbelt -> Windows
+        // job object; opt-in via WAVECODE_SANDBOX_OS): confine FIRST — rewriting backends replace
         // `cmd` wholesale, so stdio, env scrubbing and kill_on_drop below
         // apply to the final confined command. Any failure fails closed
         // here (SANDBOX_UNAVAILABLE when no backend is available) — the

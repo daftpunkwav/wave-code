@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::theme;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use test_support::{NullStatus, TestLink};
 use tui_engine::width::strip_ansi;
@@ -57,7 +57,7 @@ fn transcript_plain(ui: &mut ConsoleUi) -> String {
 }
 
 /// Seed a catalog holding one spec and return the file path.
-fn seed(home: &PathBuf) -> PathBuf {
+fn seed(home: &Path) -> PathBuf {
     let path = ModelCatalog::path(home);
     std::fs::write(
         &path,
@@ -115,7 +115,7 @@ fn add_rejects_an_unknown_api_kind_without_writing() {
 #[test]
 fn set_patches_one_field_and_saves() {
     let (mut ui, home) = ui_with_home("set");
-    let path = seed(&home);
+    seed(&home);
     ui.user_submit("/model set glm context 123000");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("glm updated (context = 123000)"), "{text}");

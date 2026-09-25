@@ -4,8 +4,8 @@
 
 use std::sync::Mutex;
 
-use tui_engine::mermaid::{MermaidFences, render_diagram, render_enabled, set_render_enabled};
 use tui_engine::markdown::{FenceRenderer, Markdown, MarkdownStyle, PlainHighlighter};
+use tui_engine::mermaid::{MermaidFences, render_diagram, render_enabled, set_render_enabled};
 
 /// Serializes tests that flip the process-global render toggle.
 static TOGGLE_LOCK: Mutex<()> = Mutex::new(());
@@ -32,8 +32,8 @@ fn keyword_dispatches_to_one_renderer_per_kind() {
         ("gantt\n    t :a, 2026-01-01, 5d", "gantt"),
     ];
     for (source, kind) in sources {
-        let lines = render_diagram(source, 80)
-            .unwrap_or_else(|| panic!("{kind} dispatches to a renderer"));
+        let lines =
+            render_diagram(source, 80).unwrap_or_else(|| panic!("{kind} dispatches to a renderer"));
         assert!(!lines.is_empty(), "{kind}: no lines");
     }
 }
@@ -44,8 +44,11 @@ fn keyword_dispatches_to_one_renderer_per_kind() {
 fn keyword_match_ignores_case_and_comments() {
     assert!(render_diagram("%% a comment\nGRAPH TD\n a --> b", 80).is_some());
     assert!(
-        render_diagram("SequenceDiagram\n    participant A\n    participant B\n    A->>B: hi", 80)
-            .is_some()
+        render_diagram(
+            "SequenceDiagram\n    participant A\n    participant B\n    A->>B: hi",
+            80
+        )
+        .is_some()
     );
 }
 
@@ -54,11 +57,11 @@ fn keyword_match_ignores_case_and_comments() {
 #[test]
 fn unsupported_sources_return_none() {
     for source in [
-        "graph LR\n a --> b",   // unsupported direction
+        "graph LR\n a --> b",                    // unsupported direction
         "graph TD\n subgraph s\n a --> b\n end", // subgraphs
-        "a --> b",              // no keyword line
-        "mindmap\n root",       // unsupported kind
-        "",                     // empty source
+        "a --> b",                               // no keyword line
+        "mindmap\n root",                        // unsupported kind
+        "",                                      // empty source
     ] {
         assert!(
             render_diagram(source, 80).is_none(),
@@ -81,7 +84,11 @@ fn oversized_diagrams_fall_back_to_none() {
 fn rendered_lines_respect_the_column_budget() {
     let source = "graph TD\n A[输入] --> B{校验?} --> C[输出]";
     let lines = render_diagram(source, 40).expect("renders at 40");
-    assert!(lines.iter().all(|line| tui_engine::width::width(line) <= 40));
+    assert!(
+        lines
+            .iter()
+            .all(|line| tui_engine::width::width(line) <= 40)
+    );
 }
 
 /// Through the markdown seam, only `mermaid` fences (and only while
@@ -93,15 +100,27 @@ fn mermaid_fences_gate_on_language_and_toggle() {
     let previous = render_enabled();
 
     set_render_enabled(false);
-    assert!(MermaidFences.render_fence("mermaid", "graph TD\n a --> b", 80).is_none());
+    assert!(
+        MermaidFences
+            .render_fence("mermaid", "graph TD\n a --> b", 80)
+            .is_none()
+    );
     set_render_enabled(true);
-    assert!(MermaidFences.render_fence("mermaid", "graph TD\n a --> b", 80).is_some());
+    assert!(
+        MermaidFences
+            .render_fence("mermaid", "graph TD\n a --> b", 80)
+            .is_some()
+    );
     set_render_enabled(previous);
 
     // Any other language (or an unsupported diagram) is None even with
     // the toggle on.
     assert!(MermaidFences.render_fence("python", "x = 1", 80).is_none());
-    assert!(MermaidFences.render_fence("mermaid", "graph LR\n a --> b", 80).is_none());
+    assert!(
+        MermaidFences
+            .render_fence("mermaid", "graph LR\n a --> b", 80)
+            .is_none()
+    );
 }
 
 /// End to end through the public markdown API: a mermaid fence renders
@@ -113,7 +132,10 @@ fn markdown_renders_mermaid_fences_through_the_seam() {
     let previous = render_enabled();
     let text = "```mermaid\ngraph TD\n a --> b\n```";
     let strip = |lines: &[String]| -> Vec<String> {
-        lines.iter().map(|l| tui_engine::width::strip_ansi(l)).collect()
+        lines
+            .iter()
+            .map(|l| tui_engine::width::strip_ansi(l))
+            .collect()
     };
 
     set_render_enabled(true);

@@ -9,7 +9,10 @@ fn renderer() -> Markdown {
 }
 
 fn plain(lines: &[String]) -> Vec<String> {
-    lines.iter().map(|l| tui_engine::width::strip_ansi(l)).collect()
+    lines
+        .iter()
+        .map(|l| tui_engine::width::strip_ansi(l))
+        .collect()
 }
 
 /// One call returns one string per output row; identical input and
@@ -26,7 +29,10 @@ fn render_contract_shape_and_cache() {
         "same input+width reuses the allocation"
     );
     let wider = md.render("# Title\n\nbody text", 80);
-    assert!(!std::sync::Arc::ptr_eq(&first, &wider), "width change re-renders");
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &wider),
+        "width change re-renders"
+    );
     assert_eq!(plain(&first), plain(&wider)[..first.len()]);
 }
 
@@ -35,10 +41,17 @@ fn render_contract_shape_and_cache() {
 #[test]
 fn blocks_separate_with_exactly_one_blank_line() {
     let mut md = renderer();
-    let text = "para one\n\n## Heading\n\n- a\n- b\n\n> quote\n\n---\n\n| h |\n|---|\n| c |\n\nlast";
+    let text =
+        "para one\n\n## Heading\n\n- a\n- b\n\n> quote\n\n---\n\n| h |\n|---|\n| c |\n\nlast";
     let lines = plain(&md.render(text, 40));
-    assert!(!lines.first().is_some_and(|l| l.is_empty()), "no leading blank");
-    assert!(!lines.last().is_some_and(|l| l.is_empty()), "no trailing blank");
+    assert!(
+        !lines.first().is_some_and(|l| l.is_empty()),
+        "no leading blank"
+    );
+    assert!(
+        !lines.last().is_some_and(|l| l.is_empty()),
+        "no trailing blank"
+    );
     for pair in lines.windows(2) {
         assert!(
             !(pair[0].is_empty() && pair[1].is_empty()),

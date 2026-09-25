@@ -1554,8 +1554,7 @@ fn fork_writes_journal_history_with_model_side_flags() {
         .into_iter()
         .find(|meta| meta.title.starts_with("Fork:"))
         .expect("fork recorded in the index");
-    let history =
-        state_persistence::sessions::load_session_history(dir.path(), &fork.id).unwrap();
+    let history = state_persistence::sessions::load_session_history(dir.path(), &fork.id).unwrap();
     assert_eq!(
         history,
         vec![
@@ -1696,18 +1695,21 @@ async fn btw_streams_answers_through_the_side_session() {
     // no new factory launch).
     ui.user_submit("/btw and now what?");
     for _ in 0..100 {
-        let landed = submitted.lock().unwrap().iter().any(
-            |op| matches!(op, Op::UserInput { text, .. } if text.contains("and now what")),
-        );
+        let landed =
+            submitted.lock().unwrap().iter().any(
+                |op| matches!(op, Op::UserInput { text, .. } if text.contains("and now what")),
+            );
         if landed {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(
-        submitted.lock().unwrap().iter().any(
-            |op| matches!(op, Op::UserInput { text, .. } if text.contains("and now what"))
-        ),
+        submitted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|op| matches!(op, Op::UserInput { text, .. } if text.contains("and now what"))),
         "follow-up must reach the same side session"
     );
     // Esc closes the panel and cancels the side session.

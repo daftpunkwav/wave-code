@@ -271,22 +271,27 @@ fn looks_like_ddg_results(html: &str) -> bool {
     html.contains("result__a") || html.contains("result__snippet") || html.contains("results")
 }
 
+/// Result link pattern (`class="result__a"` anchors with their href);
+/// compiled once, shared across searches.
+static LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#)
+        .expect("link regex compiles")
+});
+/// Snippet pattern (`class="result__snippet"` anchors); compiled once.
+static SNIPPET_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r#"<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#)
+        .expect("snippet regex compiles")
+});
+
 /// Parse DDG HTML into hits (pure function, hermetic tests target this):
 /// result anchors (`class="result__a"`) pair with the next snippet anchor
 /// (`class="result__snippet"`); at most `count` hits.
 pub fn parse_ddg_html(html: &str, count: usize) -> Vec<SearchResult> {
-    let link_re = regex::Regex::new(
-        r#"<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]*)"[^>]*>(.*?)</a>"#,
-    )
-    .expect("link regex compiles");
-    let snippet_re =
-        regex::Regex::new(r#"<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>"#)
-            .expect("snippet regex compiles");
-    let snippets: Vec<String> = snippet_re
+    let snippets: Vec<String> = SNIPPET_RE
         .captures_iter(html)
         .map(|c| decode_entities(strip_tags(c[1].trim()).trim()))
         .collect();
-    link_re
+    LINK_RE
         .captures_iter(html)
         .take(count)
         .enumerate()

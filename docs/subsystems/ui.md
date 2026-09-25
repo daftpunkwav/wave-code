@@ -14,12 +14,13 @@ The interactive console is two crates over the wire + actor seam:
 
 ## Wave identity
 
-Basic wave kinds map one-to-one onto activity categories; the same
-glyph always means the same kind of surface:
+The glyph family maps one-to-one onto activity categories; the same
+glyph always means the same kind of surface. User input is the one
+non-wave mark (a keyed-in chevron); the machine surfaces trace waves:
 
 | Wave | Category | Surfaces |
 | --- | --- | --- |
-| square `⊓` | user input (keyed-in pulses) | editor prompt, user bullet, queue pointer |
+| chevron `❯` | user input (keyed-in strokes) | editor prompt, user bullet, queue pointer |
 | sine `∿` | assistant speech | assistant bullet, composing spinner |
 | triangle `△` | thinking | thinking spinner + bullet |
 | saw `◿` | machine work | tool/shell running dot, waiting/tool spinner |
@@ -35,7 +36,7 @@ One frame is the full logical line array:
 transcript (welcome, user/assistant messages, thinking blocks, tool cards, shell cards, status)
 todo panel               (todowrite mirror: ● in-progress / ✓ done / ○ pending)
 queue pane               (queued user messages + steer hint)
-editor box               (rounded frame, `⊓⊔` prompt, autocomplete popup below)
+editor box               (rounded frame, `❯` prompt, autocomplete popup below)
 footer row 1             (▍mode model cwd ⎇ branch · rotating tip)
 footer row 2             (transient exit hint ... context: N% (used/max))
 ```
@@ -58,6 +59,32 @@ Two screen-layer invariants keep the frame stable while it streams:
   marker the screen layer resolves to a cell), so no transcript, footer
   or streaming row can ever park a blinking cursor. Terminal modes
   restore on exit (and on panic), including the cursor.
+
+### Segmented frames and the write-time gutter
+
+`Component::render` returns a `Segment` — one reference-counted line
+array (`Arc<Vec<String>>`). A frame is a list of segments, one per
+component; nothing is flattened into a flat `Vec<String>` on the way
+to the screen. The diff renderer keeps the previous frame as segments
+too, which buys two things:
+
+- **Refcount store**: storing the previous frame is a refcount bump per
+  segment, not a per-line deep copy.
+- **Pointer-equality skip**: a segment whose allocation is identical to
+  the previous frame's same-range segment is identical by
+  construction — the diff skips its whole range without comparing a
+  single line. Cache-hit components (settled messages, welcome card)
+  hand back the same allocation every frame, so idle regions cost one
+  refcount comparison; rebuilt segments (streaming draft, status lines)
+  fall back to per-line comparison with flat-compare semantics.
+
+The frame gutter is applied at write time, not in the frame:
+`Screen::set_margin` indents every row as the renderer writes it and
+shrinks the truncation budget accordingly, so stored lines stay
+unpadded and no frame ever pays a per-line padding copy. Cache
+invalidation (theme switches, the mermaid toggle) walks the transcript
+with `invalidate_all` and drops the streaming draft, so cached
+segments never carry a stale palette or mode.
 
 ## Wire extensions the UI consumes
 
@@ -256,22 +283,22 @@ receivers remain compatible.
   wordmark (`WAVECODE`, generated with pyfiglet) fading primary→accent
   top to bottom, sitting directly on the braille oscilloscope trace —
   a 1-pixel amplitude-modulated sine line that flows out of the
-  letters — above the dim-label info grid (model / dir + ⎇ branch /
-  mode + mcp + version). Below 56 columns the wordmark falls back to
-  the spaced `W A V E C O D E` line. Resizing stirs the trace: it
-  slides right with an ease-out tail for 1.4 s, then settles (a tick
-  drives the frames; `Welcome::is_rippling` reports the state). A
-  `#[ignore]` snapshot test (`welcome_snapshot`) prints it for
-  eyeballing.
+  letters — one blank spacer, then the left-aligned info grid
+  (model / dir + ⎇ branch / mode + mcp + version). Below 56 columns
+  the wordmark falls back to the spaced `W A V E C O D E` line.
+  Resizing stirs the trace: it slides right with an ease-out tail for
+  1.4 s, then settles (a tick drives the frames; `Welcome::is_rippling`
+  reports the state). A `#[ignore]` snapshot test (`welcome_snapshot`)
+  prints it for eyeballing.
 - Every semantic glyph comes from `chrome/symbols.rs` (single source):
-  `⊓⊔` square wave for user input, `∿` sine for assistant speech, `△`
+  `❯` chevron for user input, `∿` sine for assistant speech, `△`
   triangle for thinking, `●`/`✓`/`○`/`✗` neutral results, `⎇` branch.
   Motion is a single-cell pulse instead of moving blocks: the editor
-  prompt phase-flips `⊓⊔`↔`⊔⊓` every 400 ms while a turn runs (idle
+  prompt pulses `❯`↔`›` every 400 ms while a turn runs (idle
   is static; shell mode keeps `!`), the streaming assistant draft
   breathes through the sine amplitude frames before settling on `∿`,
   a running tool or shell card pulses the saw amplitude, queued
-  messages flip square-wave phases.
+  messages flip the chevron pulse.
 
 ## Input sanitizing
 

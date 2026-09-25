@@ -238,7 +238,8 @@ mod tests {
             "sleep 30"
         };
         let mut job = ShellJob::spawn(sleep).expect("spawn");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // No settle sleep is needed: `spawn` already awaited the child
+        // process, so cancel deterministically lands on a live job.
         job.cancel();
         let (_out, _err, code) = run_to_done(&mut job).await;
         assert_eq!(code, Some(None), "cancelled job reports no exit code");

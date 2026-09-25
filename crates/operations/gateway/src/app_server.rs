@@ -542,50 +542,8 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_stubs::{CONFIG, OneShotModel, done_script};
     use std::collections::VecDeque;
-
-    const CONFIG: &str = r#"
-model = "m1"
-model_provider = "p1"
-
-[model_providers.p1]
-type = "anthropic"
-base_url = "https://api.example.com/anthropic"
-api_key = "k-inline"
-"#;
-
-    /// Scripted model: serves one queued script, then a plain completion
-    /// so follow-up samples terminate the loop.
-    struct OneShotModel {
-        script: std::sync::Mutex<Option<Vec<wavecode_llm::StreamEvent>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl wavecode_llm::ChatModel for OneShotModel {
-        async fn stream(
-            &self,
-            _req: wavecode_llm::ChatRequest,
-        ) -> wavecode_llm::Result<wavecode_llm::EventStream> {
-            let fallback = || {
-                vec![
-                    wavecode_llm::StreamEvent::TextDelta {
-                        text: "done".to_string(),
-                    },
-                    wavecode_llm::StreamEvent::MessageComplete {
-                        stop_reason: "end_turn".to_string(),
-                        usage: wavecode_llm::Usage::default(),
-                    },
-                ]
-            };
-            let script = self
-                .script
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .unwrap_or_else(fallback);
-            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-        }
-    }
 
     /// Assembly seam for tests: config from a tempdir, scripted model.
     #[derive(Clone)]
@@ -613,10 +571,8 @@ api_key = "k-inline"
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .pop_front()
-                .unwrap_or_default();
-            let model: Arc<dyn wavecode_llm::ChatModel> = Arc::new(OneShotModel {
-                script: std::sync::Mutex::new(Some(script)),
-            });
+                .unwrap_or_else(done_script);
+            let model: Arc<dyn wavecode_llm::ChatModel> = Arc::new(OneShotModel::new(script));
             Ok(operations_bootstrap::session::assemble_session_with_model(
                 operations_bootstrap::session::WithModel {
                     config,
@@ -878,7 +834,11 @@ api_key = "k-inline"
         let session_id = created["session_id"].as_str().unwrap().to_string();
 
         let response = open_events(&http, port, &session_id).await;
-        let events_task = tokio::spawn(collect_events(response, 8));
+        // Exactly the five pre-park events: turn_started, the text delta,
+        // its completion, tool_call_begin, approval_requested. The stream
+        // stays open while the turn parks, so an over-large count here
+        // would stall on the deadline instead of returning.
+        let events_task = tokio::spawn(collect_events(response, 5));
         let status = http
             .post(format!(
                 "http://127.0.0.1:{port}/sessions/{session_id}/prompt"

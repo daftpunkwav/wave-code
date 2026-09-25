@@ -1011,70 +1011,93 @@ mod tests {
     use tokio::io::DuplexStream;
     use wavecode_llm::{ChatModel, ChatRequest, EventStream, StreamEvent, Usage};
 
+    use crate::test_stubs::{CONFIG, OneShotModel, done_script};
+    use infrastructure_base::InterruptHandle;
     use operations_bootstrap::SessionHandle;
     use operations_bootstrap::session::{WithModel, assemble_session_with_model};
-
-    const CONFIG: &str = r#"
-model = "m1"
-model_provider = "p1"
-
-[model_providers.p1]
-type = "anthropic"
-base_url = "https://api.example.com/anthropic"
-api_key = "k-inline"
-"#;
-
-    /// Scripted model serving one queued script, then empty completions so
-    /// follow-up samples always terminate the loop.
-    struct OneShotModel {
-        script: std::sync::Mutex<Option<Vec<StreamEvent>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ChatModel for OneShotModel {
-        async fn stream(&self, _req: ChatRequest) -> wavecode_llm::Result<EventStream> {
-            let script = self
-                .script
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .unwrap_or_else(done_script);
-            Ok(Box::pin(futures::stream::iter(script.into_iter().map(Ok))))
-        }
-    }
 
     /// Model blocked on a gate: prompt turns stay in flight until the
     /// test releases them, so cancel paths run deterministically.
     struct GateModel {
-        gate: Arc<tokio::sync::Notify>,
+        gate: Arc<TurnGate>,
     }
 
     #[async_trait::async_trait]
     impl ChatModel for GateModel {
         async fn stream(&self, _req: ChatRequest) -> wavecode_llm::Result<EventStream> {
-            self.gate.notified().await;
+            self.gate.entered.notify_one();
+            self.gate.release.notified().await;
             Ok(Box::pin(futures::stream::iter(
                 done_script().into_iter().map(Ok),
             )))
         }
     }
 
-    fn done_script() -> Vec<StreamEvent> {
-        vec![
-            StreamEvent::TextDelta {
-                text: "done".to_string(),
-            },
-            StreamEvent::MessageComplete {
-                stop_reason: "end_turn".to_string(),
-                usage: Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    ..Usage::default()
-                },
-            },
-        ]
+    /// Barrier between the test and the gated model, both directions
+    /// signal-safe (each `Notify` stores a permit, so wake order never
+    /// loses a signal).
+    struct TurnGate {
+        /// Fired by the model once `stream` is entered: the turn is
+        /// provably running and past the runner's turn-start interrupt
+        /// reset, so a cancel from here on cannot be swallowed.
+        entered: tokio::sync::Notify,
+        /// Fired by the test to let the model finish the turn.
+        release: tokio::sync::Notify,
     }
 
+    /// Test-side controls for the gated model plus the assembled
+    /// session's interrupt handle: together they turn the cancel tests'
+    /// ordering hopes into observations.
+    #[derive(Clone)]
+    struct TurnControls {
+        gate: Arc<TurnGate>,
+        /// Filled by the test assembler with the session's interrupt
+        /// handle; triggering it is the actor's last step when serving a
+        /// queued cancel.
+        interrupt: Arc<std::sync::Mutex<Option<InterruptHandle>>>,
+    }
+
+    impl TurnControls {
+        fn new() -> Self {
+            Self {
+                gate: Arc::new(TurnGate {
+                    entered: tokio::sync::Notify::new(),
+                    release: tokio::sync::Notify::new(),
+                }),
+                interrupt: Arc::new(std::sync::Mutex::new(None)),
+            }
+        }
+
+        /// Wait until the gated model entered its stream: the turn is
+        /// in flight and its interrupt reset already ran.
+        async fn wait_turn_started(&self) {
+            self.gate.entered.notified().await;
+        }
+
+        /// Wait until the queued cancel reached the actor (the interrupt
+        /// flag is the actor's own acknowledgement). Releasing the model
+        /// only after this makes the `cancelled` stop reason independent
+        /// of scheduling: the gateway's cancel flag is already set and no
+        /// turn-end event can exist yet (the model is still parked).
+        async fn wait_cancel_landed(&self) {
+            let handle = self
+                .interrupt
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .expect("session must be assembled before waiting for the cancel");
+            while !handle.is_triggered() {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        /// Let the gated model finish the turn.
+        fn release_turn(&self) {
+            self.gate.release.notify_one();
+        }
+    }
+
+    /// Scripted write turn: text, a write tool call, completion.
     fn write_script() -> Vec<StreamEvent> {
         vec![
             StreamEvent::TextDelta {
@@ -1103,11 +1126,13 @@ api_key = "k-inline"
     ///
     /// Honors the requested config path exactly like production (so
     /// assembly failures map the same way) and pops one queued script
-    /// per session; the gate model overrides scripts when set.
+    /// per session; the gated model overrides scripts when controls
+    /// are set, and the session's interrupt handle lands in the
+    /// controls for the cancel tests to observe.
     struct TestAssemble {
         scripts: Arc<std::sync::Mutex<VecDeque<Vec<StreamEvent>>>>,
         fallback_config: PathBuf,
-        gate: Option<Arc<tokio::sync::Notify>>,
+        controls: Option<TurnControls>,
     }
 
     impl TestAssemble {
@@ -1121,8 +1146,10 @@ api_key = "k-inline"
                 .model_override
                 .clone()
                 .unwrap_or_else(|| config.model.clone());
-            let model: Arc<dyn ChatModel> = match &self.gate {
-                Some(gate) => Arc::new(GateModel { gate: gate.clone() }),
+            let model: Arc<dyn ChatModel> = match &self.controls {
+                Some(controls) => Arc::new(GateModel {
+                    gate: controls.gate.clone(),
+                }),
                 None => {
                     let script = self
                         .scripts
@@ -1130,12 +1157,10 @@ api_key = "k-inline"
                         .unwrap_or_else(|e| e.into_inner())
                         .pop_front()
                         .unwrap_or_else(done_script);
-                    Arc::new(OneShotModel {
-                        script: std::sync::Mutex::new(Some(script)),
-                    })
+                    Arc::new(OneShotModel::new(script))
                 }
             };
-            Ok(assemble_session_with_model(WithModel {
+            let handle = assemble_session_with_model(WithModel {
                 config,
                 model,
                 model_name,
@@ -1158,7 +1183,12 @@ api_key = "k-inline"
                 headless: true,
                 initial_history: Vec::new(),
                 warnings: Vec::new(),
-            }))
+            });
+            if let Some(controls) = &self.controls {
+                *controls.interrupt.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(handle.interrupt());
+            }
+            Ok(handle)
         }
     }
 
@@ -1245,7 +1275,7 @@ api_key = "k-inline"
 
     async fn spawn_full(
         scripts: Vec<Vec<StreamEvent>>,
-        gate: Option<Arc<tokio::sync::Notify>>,
+        controls: Option<TurnControls>,
         config_path: Option<PathBuf>,
     ) -> (Harness, tokio::task::JoinHandle<std::io::Result<()>>) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1257,7 +1287,7 @@ api_key = "k-inline"
         let assemble = TestAssemble {
             scripts: Arc::new(std::sync::Mutex::new(scripts.into_iter().collect())),
             fallback_config: fallback,
-            gate,
+            controls,
         };
         let base = AcpServerOptions {
             config_path,
@@ -1536,8 +1566,8 @@ api_key = "k-inline"
 
     #[tokio::test]
     async fn cancel_interrupts_the_in_flight_turn() {
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let (mut h, _server) = spawn_full(vec![], Some(gate.clone()), None).await;
+        let controls = TurnControls::new();
+        let (mut h, _server) = spawn_full(vec![], Some(controls.clone()), None).await;
         let session = h.new_session(serde_json::json!({})).await;
         // Send the prompt without waiting: the gated model holds the
         // turn open until released below.
@@ -1553,7 +1583,10 @@ api_key = "k-inline"
             },
         }))
         .await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The model entering its stream proves the turn is running; the
+        // queued cancel must then reach the actor before the model is
+        // freed, so the cancel can no longer lose the race.
+        controls.wait_turn_started().await;
         let cancel = h
             .request(
                 "session/cancel",
@@ -1561,7 +1594,8 @@ api_key = "k-inline"
             )
             .await;
         assert_eq!(cancel.get("result"), Some(&serde_json::Value::Null));
-        gate.notify_one();
+        controls.wait_cancel_landed().await;
+        controls.release_turn();
         let reply = loop {
             let line = h.next_line().await;
             if line.get("id") == Some(&serde_json::json!(id)) {
@@ -1578,8 +1612,8 @@ api_key = "k-inline"
     /// it must interrupt the in-flight turn and produce no reply line.
     #[tokio::test]
     async fn cancel_notification_interrupts_without_replying() {
-        let gate = Arc::new(tokio::sync::Notify::new());
-        let (mut h, _server) = spawn_full(vec![], Some(gate.clone()), None).await;
+        let controls = TurnControls::new();
+        let (mut h, _server) = spawn_full(vec![], Some(controls.clone()), None).await;
         let session = h.new_session(serde_json::json!({})).await;
         let id = h.next_id;
         h.next_id += 1;
@@ -1593,7 +1627,10 @@ api_key = "k-inline"
             },
         }))
         .await;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // The model entering its stream proves the turn is running; the
+        // notification's cancel must then reach the actor before the
+        // model is freed, so the cancel can no longer lose the race.
+        controls.wait_turn_started().await;
         // The spec shape: no id, no response expected.
         h.send(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -1601,7 +1638,8 @@ api_key = "k-inline"
             "params": { "sessionId": session },
         }))
         .await;
-        gate.notify_one();
+        controls.wait_cancel_landed().await;
+        controls.release_turn();
         let reply = loop {
             let line = h.next_line().await;
             if line.get("id") == Some(&serde_json::json!(id)) {

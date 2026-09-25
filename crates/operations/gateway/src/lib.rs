@@ -23,3 +23,8 @@
 pub mod acp;
 pub mod app_server;
 pub mod mcp_serve;
+
+/// Shared stubs for this crate's server tests; never compiled into a
+/// production build.
+#[cfg(test)]
+pub(crate) mod test_stubs;

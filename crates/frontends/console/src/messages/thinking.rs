@@ -331,4 +331,35 @@ mod tests {
         assert_eq!(lines.len(), 5, "header + 3 rows + spacer: {lines:?}");
         assert!(strip_ansi(&lines[3]).contains("three"));
     }
+
+    /// Replacing the streamed text re-renders: the cached lines must
+    /// not survive a `set_text` that mirrors the full buffer.
+    #[test]
+    fn set_text_replaces_the_streamed_content() {
+        theme::set(theme::Theme::synthwave());
+        let mut block = Thinking::live(ExpandedFlag::new());
+        block.push("stale");
+        let lines = block.render(60);
+        assert!(strip_ansi(&lines[1]).contains("stale"), "{lines:?}");
+        block.set_text("fresh".to_string());
+        let lines = block.render(60);
+        assert!(strip_ansi(&lines[1]).contains("fresh"), "{lines:?}");
+        assert!(!strip_ansi(&lines[1]).contains("stale"), "{lines:?}");
+    }
+
+    /// The finalized header freezes its duration: it reads the duration
+    /// captured at `finalize`, not the still-running clock, so waiting
+    /// past a second boundary cannot change `Thought for Ns`.
+    #[test]
+    fn finalized_header_freezes_its_duration() {
+        theme::set(theme::Theme::synthwave());
+        let mut block = Thinking::live(ExpandedFlag::new());
+        block.push("work");
+        block.finalize();
+        let before = strip_ansi(&block.render(60)[0]);
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let after = strip_ansi(&block.render(60)[0]);
+        assert_eq!(before, after, "frozen header: {before:?} vs {after:?}");
+        assert!(before.contains("Thought for 0s"), "{before:?}");
+    }
 }

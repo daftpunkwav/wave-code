@@ -441,6 +441,29 @@ mod tests {
         );
     }
 
+    /// The highlight band stretches across the full terminal width:
+    /// every row (wrapped rows included) pads to `columns` with
+    /// band-painted spaces, so no default-background gap shows at the
+    /// right edge.
+    #[test]
+    fn user_band_spans_the_full_terminal_width() {
+        theme::set(theme::Theme::synthwave());
+        let long = "a wrapped input line that exceeds the width ".repeat(3);
+        let mut message = UserMessage::new(long, true);
+        for columns in [30, 61] {
+            let lines = message.render(columns);
+            let body = &lines[..lines.len() - 1]; // drop the trailing spacer
+            assert!(body.len() >= 2, "wrapped at {columns}: {lines:?}");
+            for line in body {
+                assert_eq!(
+                    width::width(&strip_ansi(line)),
+                    columns,
+                    "full-width row at {columns}: {line:?}"
+                );
+            }
+        }
+    }
+
     /// The pending phase lightens the role color (renderer rebuilt) and
     /// the settled phase restores it.
     #[test]

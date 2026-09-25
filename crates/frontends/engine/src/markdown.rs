@@ -18,6 +18,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use unicode_width::UnicodeWidthStr;
 
 use crate::color::Style;
+use crate::sanitize::sanitize_terminal;
 use crate::width;
 
 /// Syntax highlighting seam: the engine ships a no-op implementation;
@@ -55,6 +56,12 @@ pub struct MarkdownStyle {
     pub quote: Style,
     /// Horizontal rules.
     pub rule: Style,
+    /// Diff fence additions (`+` lines).
+    pub diff_added: Style,
+    /// Diff fence removals (`-` lines).
+    pub diff_removed: Style,
+    /// Diff metadata (file headers, `@@` hunks).
+    pub diff_meta: Style,
 }
 
 impl Default for MarkdownStyle {
@@ -67,6 +74,9 @@ impl Default for MarkdownStyle {
             fence: Style::new().dim(),
             quote: Style::new().dim().italic(),
             rule: Style::new().dim(),
+            diff_added: Style::new(),
+            diff_removed: Style::new(),
+            diff_meta: Style::new().dim(),
         }
     }
 }
@@ -115,9 +125,16 @@ impl InlineState {
             style = style.italic();
         }
         if self.strike {
-            style = style.dim();
+            style = style.strikethrough();
         }
         style
+    }
+}
+
+impl MarkdownStyle {
+    /// Wrap this style plus a highlighter into a renderer.
+    pub fn into_markdown(self, highlighter: Box<dyn SyntaxHighlighter>) -> Markdown {
+        Markdown::new(self, highlighter)
     }
 }
 
@@ -125,7 +142,7 @@ impl InlineState {
 pub struct Markdown {
     style: MarkdownStyle,
     highlighter: Box<dyn SyntaxHighlighter>,
-    cache: Option<(String, usize, Vec<String>)>,
+    cache: Option<(String, usize, std::sync::Arc<Vec<String>>)>,
 }
 
 impl Markdown {
@@ -139,46 +156,97 @@ impl Markdown {
     }
 
     /// The dim rule opening a code block, with a language tag when one
-    /// is known: `╭─ python ─────`. Raw fence info never reaches the
+    /// is known: `╭─ python ─────╮`. Raw fence info never reaches the
     /// output — the tag keeps only a safe character whitelist.
-    fn frame_top(&self, lang: Option<&str>, columns: usize) -> String {
-        let total = frame_width(columns);
+    fn frame_top(&self, lang: Option<&str>, total: usize) -> String {
         let tag = lang.and_then(lang_tag);
         let head = match tag {
             Some(tag) => format!("╭─ {tag} "),
             None => "╭─".to_string(),
         };
-        let fill = total.saturating_sub(width::width(&head));
+        let fill = total.saturating_sub(width::width(&head) + 1);
         self.style
             .fence
-            .paint(&format!("{head}{}", "─".repeat(fill)))
+            .paint(&format!("{head}{}╮", "─".repeat(fill)))
     }
 
-    /// The dim rule closing a code block: `╰──────`.
-    fn frame_bottom(&self, columns: usize) -> String {
-        let total = frame_width(columns);
+    /// The dim rule closing a code block: `╰──────╯`.
+    fn frame_bottom(&self, total: usize) -> String {
         self.style
             .fence
-            .paint(&format!("╰{}", "─".repeat(total - 1)))
+            .paint(&format!("╰{}╯", "─".repeat(total.saturating_sub(2))))
     }
 
-    /// Render markdown `text` to ANSI lines at `width`.
-    pub fn render(&mut self, text: &str, columns: usize) -> Vec<String> {
+    /// One framed code row: `│ {content padded to the frame} │`. The
+    /// content line is already ANSI-painted (highlighter or plain) and
+    /// must not be re-wrapped — overlong lines truncate at the frame.
+    fn frame_row(&self, line: &str, total: usize) -> String {
+        let inner = total.saturating_sub(4);
+        let cut = width::truncate_to_width(line, inner);
+        format!(
+            "{}{}{}",
+            self.style.fence.paint("│ "),
+            width::pad_to_width(&cut, inner),
+            self.style.fence.paint(" │")
+        )
+    }
+
+    /// Render markdown `text` to ANSI lines at `width`. Cache hits
+    /// share the rendered array by reference (one refcount bump).
+    pub fn render(&mut self, text: &str, columns: usize) -> std::sync::Arc<Vec<String>> {
         if let Some((cached_text, cached_width, lines)) = &self.cache
             && cached_text == text
             && *cached_width == columns
         {
-            return lines.clone();
+            return std::sync::Arc::clone(lines);
         }
-        let lines = self.render_uncached(text, columns);
-        self.cache = Some((text.to_string(), columns, lines.clone()));
+        let lines = std::sync::Arc::new(self.render_uncached(text, columns));
+        self.cache = Some((text.to_string(), columns, std::sync::Arc::clone(&lines)));
         lines
     }
 
+    /// Drop the rendered cache (theme or render-mode switches).
+    pub fn clear_cache(&mut self) {
+        self.cache = None;
+    }
+
+    /// Paint a ```diff fence: whole lines ride the diff colors —
+    /// additions green, removals red, file headers and `@@` hunks in
+    /// the metadata tone, context plain. Generic syntax highlighting
+    /// cannot express a diff.
+    fn diff_lines(&self, code: &str) -> Vec<String> {
+        code.lines()
+            .map(|line| {
+                let line = line.strip_suffix('\r').unwrap_or(line);
+                // File headers and `@@` hunks share the metadata tone;
+                // +/- lines carry the added/removed colors; context is
+                // plain prose.
+                let style =
+                    if line.starts_with("@@") || line.starts_with("+++") || line.starts_with("---")
+                    {
+                        self.style.diff_meta
+                    } else if line.starts_with('+') {
+                        self.style.diff_added
+                    } else if line.starts_with('-') {
+                        self.style.diff_removed
+                    } else {
+                        self.style.text
+                    };
+                style.paint(line)
+            })
+            .collect()
+    }
+
     fn render_uncached(&self, text: &str, columns: usize) -> Vec<String> {
-        let text = break_before_bold_lines(text);
-        let options =
-            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+        let highlighted = highlight_to_bold(text);
+        let scripted = script_spans_to_unicode(&highlighted);
+        let fixed_html = html_fixups(&scripted);
+        let text = break_before_bold_lines(&fixed_html);
+        let options = Options::ENABLE_TABLES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_MATH
+            | Options::ENABLE_FOOTNOTES;
         let parser = Parser::new_ext(&text, options);
         let mut out: Vec<String> = Vec::new();
         let mut inline = String::new();
@@ -186,11 +254,13 @@ impl Markdown {
         let mut list_stack: Vec<Option<u64>> = Vec::new();
         let mut heading_level: Option<HeadingLevel> = None;
         let mut in_quote = false;
+        let mut in_code = false;
         let mut code_lang: Option<String> = None;
         // Table collection: cells accumulate the styled inline buffer,
         // rows accumulate on row end, the table renders on table end.
         let mut table_rows: Vec<Vec<String>> = Vec::new();
         let mut table_row: Vec<String> = Vec::new();
+        let mut table_aligns: Vec<pulldown_cmark::Alignment> = Vec::new();
 
         macro_rules! flush_inline {
             () => {
@@ -261,13 +331,17 @@ impl Markdown {
                         if let CodeBlockKind::Fenced(info) = kind {
                             code_lang = info.split(' ').next().map(|s| s.to_string());
                         }
-                        let lang = code_lang.as_deref();
-                        out.push(self.frame_top(lang, columns));
+                        in_code = true;
                     }
-                    Tag::Table(_) => {
+                    Tag::FootnoteDefinition(label) => {
+                        ensure_blank(&mut out);
+                        inline.push_str(&self.style.code.paint(&format!("[{label}]: ")));
+                    }
+                    Tag::Table(alignments) => {
                         flush_inline!();
                         ensure_blank(&mut out);
                         table_rows = Vec::new();
+                        table_aligns = alignments;
                     }
                     Tag::TableHead | Tag::TableRow => table_row = Vec::new(),
                     Tag::TableCell => inline = String::new(),
@@ -315,21 +389,63 @@ impl Markdown {
                         in_quote = false;
                     }
                     TagEnd::CodeBlock => {
+                        in_code = false;
                         let lang = code_lang.take();
-                        let code = std::mem::take(&mut inline);
-                        // The bar carries the dim fence style; the line
-                        // itself is already ANSI-painted by the
-                        // highlighter and must not be re-wrapped (the
-                        // inner resets would cancel the wrapper).
-                        let bar = self.style.fence.paint("│ ");
-                        for line in self.highlighter.highlight(&code, lang.as_deref()) {
-                            out.push(format!("{bar}{line}"));
+                        // Code content rides raw through the inline
+                        // buffer (no style paint) and is sanitized once
+                        // here: model-sourced escapes must never reach
+                        // the highlighter or the frame.
+                        let taken = std::mem::take(&mut inline);
+                        let code = sanitize_terminal(&taken).into_owned();
+                        // Mermaid fences render as diagrams when the
+                        // toggle is on; anything unsupported (or too
+                        // wide) falls back to the source view.
+                        let diagram = match lang.as_deref() {
+                            Some("mermaid") if crate::mermaid::render_enabled() => {
+                                crate::mermaid::render_diagram(
+                                    &code,
+                                    frame_width(columns).saturating_sub(4),
+                                )
+                            }
+                            _ => None,
+                        };
+                        // Diff fences get dedicated +- and hunk coloring
+                        // instead of generic syntax highlighting.
+                        let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
+                        let body = match diagram {
+                            Some(body) => body,
+                            None if is_diff => self.diff_lines(&code),
+                            None => self.highlighter.highlight(&code, lang.as_deref()),
+                        };
+                        // The frame hugs its content (plus the tag) and
+                        // only stretches to the width cap on wide rows —
+                        // a full-width frame starves the right side.
+                        let content = body
+                            .iter()
+                            .map(|line| width::width(line))
+                            .max()
+                            .unwrap_or(0);
+                        let tag_width = lang
+                            .as_deref()
+                            .and_then(lang_tag)
+                            .map(|tag| width::width(&tag) + 6)
+                            .unwrap_or(0);
+                        let total = content
+                            .max(tag_width)
+                            .saturating_add(4)
+                            .min(frame_width(columns));
+                        out.push(self.frame_top(lang.as_deref(), total));
+                        for line in &body {
+                            out.push(self.frame_row(line, total));
                         }
-                        out.push(self.frame_bottom(columns));
+                        out.push(self.frame_bottom(total));
+                    }
+                    TagEnd::FootnoteDefinition => {
+                        flush_inline!();
                     }
                     TagEnd::Table => {
                         flush_inline!();
-                        render_table(&table_rows, columns, &self.style, &mut out);
+                        render_table(&table_rows, &table_aligns, columns, &self.style, &mut out);
                     }
                     TagEnd::TableHead | TagEnd::TableRow => {
                         table_rows.push(std::mem::take(&mut table_row));
@@ -338,6 +454,15 @@ impl Markdown {
                     _ => {}
                 },
                 Event::Text(text_event) => {
+                    // Code block and heading content stays raw: code is
+                    // painted by the highlighter, and heading text is
+                    // painted once at the heading end — a pre-painted
+                    // buffer would double-paint and its inner reset
+                    // would cancel the outer style.
+                    if in_code || heading_level.is_some() {
+                        inline.push_str(text_event.as_ref());
+                        continue;
+                    }
                     let styled = state.compose(self.style).paint(text_event.as_ref());
                     if state.link {
                         // Hyperlink targets must be control-character free
@@ -356,6 +481,14 @@ impl Markdown {
                     }
                 }
                 Event::Code(code) => {
+                    // Inside a heading the span rides raw with the rest
+                    // of the heading text: painting here would drop an
+                    // inner reset mid-heading that cuts the heading
+                    // style short (the heading paints once at its end).
+                    if heading_level.is_some() {
+                        inline.push_str(code.as_ref());
+                        continue;
+                    }
                     // Color alone marks the span; visible quotes would leak
                     // into the transcript as content the model never wrote.
                     inline.push_str(&self.style.code.paint(code.as_ref()));
@@ -370,14 +503,29 @@ impl Markdown {
                     out.push(self.style.rule.paint("─".repeat(columns.min(80)).as_str()));
                 }
                 Event::Html(html) | Event::InlineHtml(html) => inline.push_str(html.as_ref()),
-                Event::InlineMath(math) | Event::DisplayMath(math) => {
-                    inline.push_str(&self.style.code.paint(math.as_ref()));
+                Event::InlineMath(math) => {
+                    let converted = crate::math::render(math.as_ref());
+                    inline.push_str(&self.style.text.paint(&converted));
+                }
+                Event::DisplayMath(math) => {
+                    // Block math becomes its own block: matrix
+                    // environments lay out over multiple aligned lines.
+                    flush_inline!();
+                    ensure_blank(&mut out);
+                    for line in crate::math::render_block(math.as_ref(), columns) {
+                        out.push(self.style.text.paint(&line));
+                    }
+                    out.push(String::new());
                 }
                 Event::TaskListMarker(checked) => {
                     // Lands right after the item bullet, before the text.
                     inline.push_str(if checked { "[x] " } else { "[ ] " });
                 }
-                Event::FootnoteReference(_) => {}
+                Event::FootnoteReference(name) => {
+                    // Footnote markers render as bracketed references;
+                    // the definition renders at its own site below.
+                    inline.push_str(&self.style.code.paint(&format!("[{name}]")));
+                }
             }
         }
         flush_inline!();
@@ -424,6 +572,221 @@ fn break_before_bold_lines(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out.join("\n"))
 }
 
+/// Fold `==highlight==` spans onto bold: the highlight marker is not
+/// CommonMark, and an unparsed `==` reads as leaked markup. Fenced
+/// code passes through untouched, and `===` setext underlines (no
+/// paired close on the line) are left alone.
+fn highlight_to_bold(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("==") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut fence: Option<char> = None;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last = lines.len().saturating_sub(1);
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(open) if trimmed.starts_with(open) => fence = None,
+            Some(_) => {}
+            None if trimmed.starts_with("```") => fence = Some('`'),
+            None if trimmed.starts_with("~~~") => fence = Some('~'),
+            None => {}
+        }
+        if fence.is_none() {
+            out.push_str(&highlight_line(line));
+        } else {
+            out.push_str(line);
+        }
+        if index < last {
+            out.push('\n');
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Rewrite the outermost `==...==` pair on one line to `**...**`.
+fn highlight_line(line: &str) -> std::borrow::Cow<'_, str> {
+    let Some(open) = find_marker(line, 0) else {
+        return std::borrow::Cow::Borrowed(line);
+    };
+    let Some(close) = find_marker(line, open + 2) else {
+        return std::borrow::Cow::Borrowed(line);
+    };
+    let mut out = String::with_capacity(line.len());
+    out.push_str(&line[..open]);
+    out.push_str("**");
+    out.push_str(&line[open + 2..close]);
+    out.push_str("**");
+    out.push_str(&line[close + 2..]);
+    std::borrow::Cow::Owned(out)
+}
+
+/// The next `==` run at or after `from`.
+fn find_marker(line: &str, from: usize) -> Option<usize> {
+    line[from..].find("==").map(|position| from + position)
+}
+
+/// Fold `^sup^` / `~sub~` spans onto unicode script code points
+/// when every glyph in the span has one (`x^2^` becomes `x²`,
+/// `H~2~O` becomes `H₂O`); spans with unmappable characters stay
+/// verbatim. CommonMark has no superscript/subscript syntax, and
+/// pulldown-cmark only parses them at word boundaries — the prepass
+/// covers the intraword forms models actually emit. Fenced code passes
+/// through untouched, and `~~strike~~` / `===` rules are never
+/// touched (a script span opens with exactly one marker).
+fn script_spans_to_unicode(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('^') && !text.contains('~') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut fence: Option<char> = None;
+    let mut out = String::with_capacity(text.len());
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last = lines.len().saturating_sub(1);
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(open) if trimmed.starts_with(open) => fence = None,
+            Some(_) => {}
+            None if trimmed.starts_with("```") => fence = Some('`'),
+            None if trimmed.starts_with("~~~") => fence = Some('~'),
+            None => {}
+        }
+        if fence.is_none() {
+            out.push_str(&script_line(line));
+        } else {
+            out.push_str(line);
+        }
+        if index < last {
+            out.push('\n');
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Rewrite script spans on one line. A span opens with `^` or `~`
+/// (not doubled), holds 1-16 whitespace-free characters without its own
+/// marker, and closes with the same marker; every character must map
+/// onto a script code point or the span stands.
+fn script_line(line: &str) -> String {
+    const MAX_SPAN: usize = 16;
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let marker = chars[i];
+        let sub = marker == '~';
+        let doubled = i + 1 < chars.len() && chars[i + 1] == marker;
+        if (marker != '^' && marker != '~') || doubled {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut close = None;
+        for (offset, c) in chars
+            .iter()
+            .enumerate()
+            .take(chars.len().min(i + 1 + MAX_SPAN))
+            .skip(i + 1)
+        {
+            if *c == marker {
+                close = Some(offset);
+                break;
+            }
+            if c.is_whitespace() || *c == '^' || *c == '~' {
+                break;
+            }
+        }
+        let Some(close) = close else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        let inner: String = chars[i + 1..close].iter().collect();
+        let mapped = if sub {
+            crate::math::to_subscript(&inner)
+        } else {
+            crate::math::to_superscript(&inner)
+        };
+        match mapped {
+            Some(scripted) => {
+                out.push_str(&scripted);
+                i = close + 1;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Fold the HTML constructs models emit onto markdown the terminal
+/// can show: `<details>`/`</details>` lines vanish (a terminal cannot
+/// collapse), `<summary>X</summary>` becomes a bold `▸ X` marker row,
+/// and `<kbd>C</kbd>` becomes inline code (`C`) — a key cap. Fenced
+/// code passes through untouched. Unknown tags keep flowing through
+/// the existing HTML passthrough.
+fn html_fixups(text: &str) -> std::borrow::Cow<'_, str> {
+    if !(text.contains("<details") || text.contains("<summary") || text.contains("<kbd")) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut fence: Option<char> = None;
+    let mut out: Vec<String> = Vec::with_capacity(text.lines().count());
+    for line in text.split('\n') {
+        let trimmed = line.trim_start();
+        match fence {
+            Some(open) if trimmed.starts_with(open) => fence = None,
+            Some(_) => {}
+            None if trimmed.starts_with("```") => fence = Some('`'),
+            None if trimmed.starts_with("~~~") => fence = Some('~'),
+            None => {}
+        }
+        if fence.is_none() {
+            let t = trimmed;
+            if t == "<details>" || t == "</details>" {
+                continue; // drop the container rows entirely
+            }
+            if t.starts_with("<summary>") && t.ends_with("</summary>") {
+                let inner = &t["<summary>".len()..t.len() - "</summary>".len()];
+                out.push(format!("**\u{25b8} {inner}**"));
+                continue;
+            }
+            if t.contains("<kbd>") {
+                out.push(kbd_line(line));
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    std::borrow::Cow::Owned(out.join("\n"))
+}
+
+/// Replace every `<kbd>key</kbd>` span on the line with `key` inline
+/// code.
+fn kbd_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("<kbd>") {
+        out.push_str(&rest[..start]);
+        rest = &rest[start + "<kbd>".len()..];
+        match rest.find("</kbd>") {
+            Some(end) => {
+                let key = &rest[..end];
+                out.push_str(&format!("`{key}`"));
+                rest = &rest[end + "</kbd>".len()..];
+            }
+            None => {
+                out.push_str("<kbd>");
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// True when the line opens with a bold delimiter run: up to three
 /// leading spaces (the CommonMark paragraph indent) then `**`.
 fn is_bold_led(line: &str) -> bool {
@@ -455,6 +818,7 @@ fn lang_tag(info: &str) -> Option<String> {
 /// multiple terminal lines.
 fn render_table(
     rows: &[Vec<String>],
+    aligns: &[pulldown_cmark::Alignment],
     columns: usize,
     style: &MarkdownStyle,
     out: &mut Vec<String>,
@@ -491,15 +855,15 @@ fn render_table(
             *w = (*w).min(each);
         }
     }
+    // Rules and rows paint every segment separately: a styled span
+    // carries its own reset, so wrapping one paint inside another would
+    // cancel the outer style mid-line and leave the border half-painted.
     let rule = |out: &mut Vec<String>, left: &str, mid: &str, right: &str| {
         let segments: Vec<String> = widths.iter().map(|w| "─".repeat(w + 2)).collect();
-        out.push(border.paint(&format!(
-            "{left}{}{right}",
-            segments.join(&border.paint(mid).to_string())
-        )));
+        out.push(border.paint(&format!("{left}{}{right}", segments.join(mid))));
     };
     let render_row = |out: &mut Vec<String>, row: &[String], header: bool| {
-        let mut line = String::from("│");
+        let mut line = border.paint("│");
         for (index, w) in widths.iter().enumerate() {
             let cell = row.get(index).map(String::as_str).unwrap_or_default();
             // Shrunken tables truncate overflowing cells to the column.
@@ -512,14 +876,27 @@ fn render_table(
                 cut
             };
             let pad = w.saturating_sub(width::width(&cut));
+            // Markdown column alignment (`:---:`, `---:`) controls where
+            // the slack lands; the default hugs the left.
+            let (left, right) = match aligns.get(index) {
+                Some(pulldown_cmark::Alignment::Center) => (pad / 2, pad - pad / 2),
+                Some(pulldown_cmark::Alignment::Right) => (pad, 0),
+                _ => (0, pad),
+            };
             let styled = if header {
                 style.heading.bold().paint(&cut)
             } else {
                 style.text.paint(&cut)
             };
-            line.push_str(&format!(" {styled}{} │", " ".repeat(pad)));
+            line.push_str(&format!(
+                " {}{}{} ",
+                " ".repeat(left),
+                styled,
+                " ".repeat(right)
+            ));
+            line.push_str(&border.paint("│"));
         }
-        out.push(border.paint(&line));
+        out.push(line);
     };
     rule(out, "┌", "┬", "┐");
     if let Some(head) = rows.first() {
@@ -634,14 +1011,21 @@ mod tests {
         let lines = md.render("```rust\nfn a() {}\n```", 40);
         let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
         assert!(plain[0].starts_with("╭─ rust "), "top frame: {plain:?}");
-        assert_eq!(plain[1], "│ fn a() {}", "bar + code: {plain:?}");
+        assert!(plain[0].ends_with('╮'), "top frame closes: {plain:?}");
+        assert!(
+            plain[1].starts_with("│ fn a() {}") && plain[1].trim_end().ends_with('│'),
+            "bar + code: {plain:?}"
+        );
         assert!(plain[2].starts_with("╰─"), "bottom frame: {plain:?}");
+        assert!(plain[2].ends_with('╯'), "bottom frame closes: {plain:?}");
         assert!(
             !plain.iter().any(|l| l.contains("```")),
             "no literal fence markers: {plain:?}"
         );
-        // The frame rules share one width so top and bottom align.
-        assert_eq!(plain[0].chars().count(), plain[2].chars().count());
+        // The frame rules share one width so top and bottom align, and
+        // every row spans the full frame (right border included).
+        let grid = width::width(&plain[0]);
+        assert!(plain.iter().all(|l| width::width(l) == grid), "{plain:?}");
     }
 
     #[test]
@@ -682,7 +1066,7 @@ mod tests {
         let lines = md.render("```rust\nfn a() {}", 40);
         let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
         assert!(plain[0].starts_with("╭─ rust "), "{plain:?}");
-        assert_eq!(plain[1], "│ fn a() {}");
+        assert!(plain[1].starts_with("│ fn a() {}"));
     }
 
     #[test]
@@ -844,6 +1228,181 @@ mod tests {
         assert_eq!(flat_cell("clean"), "clean");
     }
 
+    /// Code block content rides raw into the highlighter: escape
+    /// sequences embedded in the source (a model echoing terminal
+    /// output) are sanitized instead of reaching the frame.
+    #[test]
+    fn code_content_escapes_are_sanitized() {
+        let mut md = renderer();
+        let lines = md.render("```\n\x1b[97mbright\x1b[0m\n```", 40);
+        let plain = strip_ansi(&lines[1]);
+        assert!(plain.starts_with("│ bright"), "{plain:?}");
+        assert!(!plain.contains("[97m"), "residue: {plain:?}");
+    }
+
+    /// Table rules and rows paint each span separately: every SGR open
+    /// is matched by exactly one reset, so a border can never lose its
+    /// style mid-line to a nested paint.
+    /// Math segments convert to unicode ($E = mc^2$ renders the
+    /// superscript, no raw $ markers) — math, not source.
+    #[test]
+    fn math_segments_render_as_unicode() {
+        let mut md = renderer();
+        let lines = md.render("$E = mc^2$ is famous", 60);
+        let plain = strip_ansi(&lines[0]);
+        assert!(plain.contains("E = mc"), "{plain:?}");
+        assert!(plain.contains("\u{00b2}"), "{plain:?}");
+        assert!(!plain.contains('$'), "no raw dollars: {plain:?}");
+    }
+
+    /// A ```diff fence rides the diff styles: + green, - red, @@ in
+    /// the meta tone, context plain — no syntax highlighting.
+    #[test]
+    fn diff_fences_use_dedicated_line_styles() {
+        let style = MarkdownStyle {
+            diff_added: Style::new().fg(Color::rgb(10, 200, 10)),
+            diff_removed: Style::new().fg(Color::rgb(200, 10, 10)),
+            diff_meta: Style::new().fg(Color::rgb(100, 100, 100)),
+            ..MarkdownStyle::default()
+        };
+        let mut md = Markdown::new(style, Box::new(PlainHighlighter));
+        let text = "```diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n context\n```";
+        let lines = md.render(text, 60);
+        assert!(
+            lines[5].contains("\u{1b}[38;2;10;200;10m"),
+            "+ line green: {:?}",
+            lines[5]
+        );
+        assert!(
+            lines[4].contains("\u{1b}[38;2;200;10;10m"),
+            "- line red: {:?}",
+            lines[4]
+        );
+        assert!(
+            lines[3].contains("\u{1b}[38;2;100;100;100m"),
+            "hunk meta: {:?}",
+            lines[3]
+        );
+        assert!(
+            !lines[6].contains("\u{1b}[38;2;"),
+            "context plain: {:?}",
+            lines[6]
+        );
+    }
+
+    /// Markdown column alignment centers `:---:` columns and
+    /// right-aligns `---:` columns.
+    #[test]
+    fn table_column_alignment_pads_by_alignment() {
+        let mut md = renderer();
+        let text = "| head | head |\n|:---:|---:|\n| ab | cd |";
+        let lines = md.render(text, 40);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        // Column content width is 4 (from the header); the centered
+        // `ab` sits one space off each side, the right-aligned `cd`
+        // hugs the right border.
+        assert!(
+            plain[3].starts_with("│  ab ") && plain[3].ends_with("   cd │"),
+            "{plain:?}"
+        );
+        // Header cells follow the same alignment as their columns.
+        assert!(
+            plain[1].starts_with("│ head ") && plain[1].ends_with("head │"),
+            "{plain:?}"
+        );
+    }
+
+    /// `==highlight==` folds onto bold instead of leaking markers.
+    #[test]
+    fn highlight_folds_onto_bold() {
+        let mut md = renderer();
+        let lines = md.render("==marked== text", 40);
+        assert!(
+            lines[0].contains("\u{1b}[1mmarked\u{1b}[0m"),
+            "bold: {:?}",
+            lines[0]
+        );
+        assert!(!lines[0].contains("=="), "{:?}", lines[0]);
+    }
+
+    /// `x^2^` maps onto superscript code points, intraword included;
+    /// unmappable spans stand.
+    #[test]
+    fn superscript_maps_to_unicode() {
+        let mut md = renderer();
+        let lines = md.render("x^2^ big", 40);
+        assert!(
+            strip_ansi(&lines[0]).contains("x\u{00b2} big"),
+            "{:?}",
+            lines[0]
+        );
+        let lines = md.render("H~2~O is water", 40);
+        assert!(
+            strip_ansi(&lines[0]).contains("H\u{2082}O is water"),
+            "{:?}",
+            lines[0]
+        );
+        // `~~del~~` is strikethrough, not subscript.
+        let lines = md.render("~~del~~", 40);
+        assert!(strip_ansi(&lines[0]).contains("del"), "{:?}", lines[0]);
+        // Unmappable inner text stands.
+        let lines = md.render("x^q^ big", 40);
+        assert!(strip_ansi(&lines[0]).contains("x^q^ big"), "{:?}", lines[0]);
+    }
+
+    /// Code frames hug their content: a short snippet gets a narrow
+    /// frame instead of a full-width one.
+    #[test]
+    fn code_frames_hug_their_content() {
+        let mut md = renderer();
+        let lines = md.render("```rust\nfn a() {}\n```", 80);
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let frame_w = width::width(&plain[0]);
+        assert!(frame_w < 30, "content-fit frame, got {frame_w}: {plain:?}");
+        assert!(
+            plain.iter().all(|l| width::width(l) == frame_w),
+            "one grid: {plain:?}"
+        );
+    }
+
+    #[test]
+    fn table_spans_stay_balanced() {
+        let style = MarkdownStyle {
+            text: Style::new().fg(Color::rgb(1, 2, 3)),
+            fence: Style::new().fg(Color::rgb(4, 5, 6)),
+            ..MarkdownStyle::default()
+        };
+        let mut md = Markdown::new(style, Box::new(PlainHighlighter));
+        let lines = md.render("| a | b |\n|---|---|\n| 1 | 2 |", 40);
+        for line in lines.iter() {
+            let opens = line.matches("\x1b[").count();
+            let resets = line.matches("\x1b[0m").count();
+            assert_eq!(opens, resets * 2, "balanced spans: {line:?}");
+        }
+    }
+
+    /// A code span inside a heading rides raw: painting it separately
+    /// would drop an inner reset mid-heading that cuts the heading
+    /// style short over the tail of the line.
+    #[test]
+    fn heading_inline_code_stays_raw_so_the_heading_style_holds() {
+        let style = MarkdownStyle {
+            heading: Style::new().bold(),
+            code: Style::new().fg(Color::rgb(9, 9, 9)),
+            ..MarkdownStyle::default()
+        };
+        let mut md = Markdown::new(style, Box::new(PlainHighlighter));
+        let lines = md.render("# Run `cargo test` First", 60);
+        // One paint around the whole heading, no inner spans.
+        assert_eq!(
+            lines[0].matches("\x1b[").count(),
+            2,
+            "open + reset only: {:?}",
+            lines[0]
+        );
+        assert!(lines[0].contains("cargo test"), "{:?}", lines[0]);
+    }
+
     // --- CJK-adjacent emphasis (regression locks) ---
     //
     // CommonMark flanking treats CJK ideographs as word characters, so
@@ -903,8 +1462,8 @@ mod tests {
         assert!(lines[0].contains("\x1b[3m斜体\x1b[0m"), "{:?}", lines[0]);
         assert!(lines[2].contains("删除"), "{:?}", lines[2]);
         assert!(
-            lines[2].contains("\x1b[2m"),
-            "strikethrough dims: {:?}",
+            lines[2].contains("\x1b[9m"),
+            "strikethrough uses SGR 9: {:?}",
             lines[2]
         );
         assert!(
@@ -975,7 +1534,7 @@ mod tests {
     fn bold_lines_inside_a_code_fence_are_left_alone() {
         let mut md = renderer();
         let lines = md.render("```\n**not a heading**\n```", 40);
-        assert_eq!(strip_ansi(&lines[1]), "│ **not a heading**");
+        assert!(strip_ansi(&lines[1]).starts_with("│ **not a heading**"));
     }
 
     /// Tilde fences are fenced code too: a bold-led line inside a `~~~`
@@ -988,11 +1547,11 @@ mod tests {
         let lines = md.render(text, 40);
         let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
         assert!(
-            plain.iter().any(|l| l == "│ **not a heading**"),
+            plain.iter().any(|l| l.starts_with("│ **not a heading**")),
             "tilde-fenced bold line intact: {plain:?}"
         );
         assert!(
-            plain.iter().any(|l| l == "│ **still code**"),
+            plain.iter().any(|l| l.starts_with("│ **still code**")),
             "inner backtick run does not close the tilde fence: {plain:?}"
         );
         // The break-before pass must not inject a blank code line: every
@@ -1051,7 +1610,7 @@ ls -la
             plain[6].starts_with("╭─ bash "),
             "frame after the blank: {plain:?}"
         );
-        assert_eq!(plain[7], "│ ls -la");
+        assert!(plain[7].starts_with("│ ls -la"));
         assert!(plain[8].starts_with("╰"));
     }
 

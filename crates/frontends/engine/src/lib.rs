@@ -34,6 +34,8 @@ pub mod fuzzy;
 pub mod keys;
 pub mod loader;
 pub mod markdown;
+pub mod math;
+pub mod mermaid;
 pub mod paste_burst;
 pub mod sanitize;
 pub mod screen;

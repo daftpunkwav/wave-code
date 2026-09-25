@@ -45,7 +45,7 @@ pub mod text;
 pub mod width;
 
 pub use autocomplete::{Completion, CompletionProvider};
-pub use component::{Component, Container, Focusable};
+pub use component::{Component, Container, Focusable, Segment};
 pub use editor::{Editor, EditorAction, EditorStyle};
 pub use keys::{Key, KeyEvent, Mods};
 pub use screen::{Screen, ScreenOptions};

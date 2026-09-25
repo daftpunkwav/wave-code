@@ -381,9 +381,11 @@ fn layout_class_diagram(d: &ClassDiagram, columns: usize) -> Option<Vec<String>>
         return None;
     }
     let mut widths = Vec::with_capacity(d.classes.len());
-    for (_, members) in &d.classes {
+    for (name, members) in &d.classes {
         let member_w = members.iter().map(|m| width::width(m)).max().unwrap_or(0);
-        widths.push(member_w.max(8));
+        // The name row draws `│name│`: the box must fit the name plus
+        // both bars, or a long name bleeds into the neighbor box.
+        widths.push(member_w.max(8).max(width::width(name) + 2));
     }
     let gap = 3usize;
     let total: usize = widths.iter().sum::<usize>() + gap * d.classes.len().saturating_sub(1);
@@ -464,41 +466,49 @@ fn parse_gantt(source: &str) -> Option<Gantt> {
         if line.is_empty() || line.starts_with("%%") {
             continue;
         }
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("gantt") {
+        if starts_with_keyword(line, "gantt") {
             continue;
         }
-        if let Some(rest) = lower.strip_prefix("title") {
-            let offset = line.len() - rest.len();
-            title = Some(line[offset..].trim().to_string());
+        if starts_with_keyword(line, "title") {
+            title = Some(line["title".len()..].trim().to_string());
             continue;
         }
-        if lower.starts_with("dateformat")
-            || lower.starts_with("section")
-            || lower.starts_with("excludes")
+        if starts_with_keyword(line, "dateformat")
+            || starts_with_keyword(line, "section")
+            || starts_with_keyword(line, "excludes")
         {
             continue;
         }
-        // Task: `name :id, start, Nd` (start = date or `after id`).
+        // Task: `name :[id,] (start|after x), Nd[, tag...]`. The id is
+        // optional and the trailing tag (`done`, `active`, ...) is
+        // ignored; an id-less task is referenced by its name.
         let (name, spec) = line.split_once(':')?;
         let name = name.trim().to_string();
         let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
-        if parts.len() < 3 {
+        // A leading date or `after` clause means the id was omitted.
+        let (id, rest): (&str, &[&str]) = match parts.split_first() {
+            Some((first, _)) if is_start_spec(first) => ("", parts.as_slice()),
+            Some((first, rest)) => (first, rest),
+            None => return None,
+        };
+        let start_spec = rest.first().copied()?;
+        let duration: i64 = rest
+            .get(1)
+            .and_then(|part| part.strip_suffix('d'))
+            .and_then(|days| days.parse().ok())?;
+        if !(0..=MAX_GANTT_DAYS).contains(&duration) {
             return None;
         }
-        //  — id first, then a date or ,
-        // then the day duration (a trailing tag may follow it).
-        let id = parts[0].trim();
-        let duration: i64 = parts
-            .last()?
-            .strip_suffix('d')
-            .and_then(|d| d.parse().ok())?;
-        let start = if let Some(dep) = parts.get(1).and_then(|s| s.strip_prefix("after ")) {
+        let start = if let Some(dep) = start_spec.strip_prefix("after ") {
             *starts.get(dep.trim())?
         } else {
-            days_from_civil(parts.get(1).copied().unwrap_or(""))?
+            days_from_civil(start_spec)?
         };
-        starts.insert(id.to_string(), start);
+        if !id.is_empty() {
+            starts.insert(id.to_string(), start);
+        } else {
+            starts.insert(name.clone(), start);
+        }
         tasks.push((name, start, duration));
     }
     if tasks.is_empty() {
@@ -507,6 +517,27 @@ fn parse_gantt(source: &str) -> Option<Gantt> {
     Some(Gantt { title, tasks })
 }
 
+/// True when the part is a start spec (a `YYYY-MM-DD` date or an
+/// `after id` clause) rather than a task id.
+fn is_start_spec(part: &str) -> bool {
+    part.starts_with("after ") || days_from_civil(part).is_some()
+}
+
+/// True when `line` starts with the case-insensitive directive `kw`
+/// followed by whitespace or end-of-line: task and slice lines whose
+/// first word merely extends the keyword stay data.
+fn starts_with_keyword(line: &str, kw: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    match lower.strip_prefix(kw) {
+        Some(rest) => rest.is_empty() || rest.starts_with(char::is_whitespace),
+        None => false,
+    }
+}
+
+/// Upper bound on a task duration in days (ten thousand years): keeps
+/// `start + days` and the inverse civil-date arithmetic inside i64.
+const MAX_GANTT_DAYS: i64 = 3_652_059;
+
 /// Days since 1970-01-01 for a `YYYY-MM-DD` date (Howard Hinnant's
 /// days_from_civil, proleptic Gregorian).
 fn days_from_civil(date: &str) -> Option<i64> {
@@ -514,7 +545,9 @@ fn days_from_civil(date: &str) -> Option<i64> {
     let y: i64 = parts.next()?.parse().ok()?;
     let m: i64 = parts.next()?.parse().ok()?;
     let d: i64 = parts.next()?.parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    // Gregorian wall-clock dates only: the year bound keeps the day
+    // arithmetic (and `civil_from_days` of `start + days`) inside i64.
+    if !(1..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
     let y = if m <= 2 { y - 1 } else { y };
@@ -588,9 +621,9 @@ fn parse_pie(source: &str) -> Option<Pie> {
             continue;
         }
         let lower = line.to_ascii_lowercase();
-        if lower.starts_with("pie") {
+        if starts_with_keyword(line, "pie") {
             // `pie title X` or a bare `pie`.
-            let rest = line[3..].trim();
+            let rest = line["pie".len()..].trim();
             if let Some(t) = rest.strip_prefix("title") {
                 title = Some(t.trim().to_string());
             }
@@ -621,7 +654,9 @@ fn layout_pie(pie: &Pie, columns: usize) -> Option<Vec<String>> {
         .max(4);
     let bar_max = 20usize;
     let total: f64 = pie.slices.iter().map(|(_, value)| value).sum();
-    if total <= 0.0 {
+    // A poisoned total (NaN, or non-positive after negative slices)
+    // falls back to the source view instead of rendering `NaN%`.
+    if !total.is_finite() || total <= 0.0 {
         return None;
     }
     if max_label + 1 + bar_max + 8 > columns {
@@ -1266,6 +1301,24 @@ graph TD
         assert!(lines.iter().all(|l| width::width(l) <= 80), "{lines:?}");
     }
 
+    /// A class name wider than its members sizes the box: a long name
+    /// must not bleed across the gutter and erase the neighbor box.
+    #[test]
+    fn class_boxes_grow_to_fit_their_names() {
+        let src =
+            "classDiagram\n    class VeryLongClassName {\n        +run()\n    }\n    class Short";
+        let lines = render_diagram(src, 80).expect("class diagram renders");
+        let name_row = lines
+            .iter()
+            .find(|l| l.contains("VeryLongClassName"))
+            .expect("name row");
+        assert!(
+            name_row.contains("Short"),
+            "neighbor box survives the long name: {name_row:?}"
+        );
+        assert!(lines.iter().all(|l| width::width(l) <= 80), "{lines:?}");
+    }
+
     #[test]
     fn gantt_charts_render_scaled_bars() {
         let src = "gantt\n    title plan\n    dateFormat YYYY-MM-DD\n    section s\n    任务一 :a1, 2026-01-01, 10d\n    任务二 :a2, after a1, 5d";
@@ -1284,6 +1337,68 @@ graph TD
                 .unwrap()
         };
         assert!(bar_of("任务一") > bar_of("任务二"), "{lines:?}");
+    }
+
+    /// Real-world gantt shapes: a task with a trailing tag (`done`) and
+    /// a task with the id omitted must both render, not fall back.
+    #[test]
+    fn gantt_tasks_with_tags_and_without_ids_render() {
+        let tagged =
+            "gantt\n    任务一 :a1, 2026-01-01, 10d, done\n    任务二 :a2, after a1, 5d, active";
+        let lines = render_diagram(tagged, 80).expect("tagged tasks render");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("任务一") && joined.contains("任务二"),
+            "{joined}"
+        );
+        let idless = "gantt\n    任务一 :2026-01-01, 10d\n    任务二 :after 任务一, 5d";
+        let lines = render_diagram(idless, 80).expect("id-less tasks render");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("任务一") && joined.contains("任务二"),
+            "{joined}"
+        );
+    }
+
+    /// Leap-year dates round-trip: 2024-02-29 plus one day ends 03-01.
+    #[test]
+    fn gantt_leap_year_dates_render() {
+        let src = "gantt\n    跳日 :a1, 2024-02-29, 1d";
+        let lines = render_diagram(src, 80).expect("leap date renders");
+        let joined = lines.join("\n");
+        assert!(joined.contains("03-01"), "end after the leap day: {joined}");
+    }
+
+    /// Absurd dates and durations fall back to the source view instead
+    /// of overflowing the day arithmetic.
+    #[test]
+    fn gantt_out_of_range_values_fall_back_to_none() {
+        let huge_year = "gantt\n    t :a, 9223372036854775807-01-01, 5d";
+        assert!(render_diagram(huge_year, 80).is_none(), "huge year");
+        let huge_span = "gantt\n    t :a, 2026-01-01, 9223372036854775807d";
+        assert!(render_diagram(huge_span, 80).is_none(), "huge duration");
+        let negative = "gantt\n    t :a, 2026-01-01, -5d";
+        assert!(render_diagram(negative, 80).is_none(), "negative duration");
+    }
+
+    /// A pie slice whose label merely starts with the word `pie` is
+    /// data, not the diagram header.
+    #[test]
+    fn pie_slices_named_like_the_header_still_render() {
+        let src = "pie\n    piece : 5\n    other : 5";
+        let lines = render_diagram(src, 80).expect("pie renders");
+        let joined = lines.join("\n");
+        assert!(joined.contains("piece"), "slice kept: {joined}");
+        assert!(joined.contains("other"), "{joined}");
+        assert!(joined.contains("50.0%"), "share: {joined}");
+    }
+
+    /// A NaN slice value poisons the total: fall back instead of
+    /// rendering `NaN%`.
+    #[test]
+    fn pie_nan_values_fall_back_to_none() {
+        let src = "pie\n    a : NaN\n    b : 5";
+        assert!(render_diagram(src, 80).is_none(), "NaN total falls back");
     }
 
     #[test]

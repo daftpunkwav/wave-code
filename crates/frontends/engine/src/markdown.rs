@@ -2,8 +2,9 @@
 //!
 //! A streaming-tolerant subset of the reference renderer: headings,
 //! emphasis, inline code, links (OSC 8 hyperlinks), fenced code blocks
-//! with pluggable syntax highlighting and framed rendering, lists with
-//! nesting, block quotes, tables (box-drawing), and horizontal rules.
+//! with pluggable fence renderers (mermaid diagrams) and syntax
+//! highlighting, framed rendering, lists with nesting, block quotes,
+//! tables (box-drawing), and horizontal rules.
 //! One deliberate deviation: a standalone `**bold**` line always starts
 //! a new block (models emit these as pseudo-headings; CommonMark would
 //! fold them into the previous paragraph as a lazy continuation).
@@ -36,6 +37,18 @@ impl SyntaxHighlighter for PlainHighlighter {
     fn highlight(&self, code: &str, _lang: Option<&str>) -> Vec<String> {
         code.lines().map(|l| l.to_string()).collect()
     }
+}
+
+/// Fenced-block seam: renders one language-tagged fence body before the
+/// syntax highlighter runs. The engine ships the mermaid diagram
+/// renderer through this seam ([`crate::mermaid::MermaidFences`]);
+/// applications register more with [`Markdown::with_fence`] instead of
+/// this module growing a special case per language.
+pub trait FenceRenderer {
+    /// Render the body of the fence tagged `lang` within `columns`
+    /// display columns (the frame's inner budget); `None` falls through
+    /// to the next renderer — diff handling, then the highlighter.
+    fn render_fence(&self, lang: &str, code: &str, columns: usize) -> Option<Vec<String>>;
 }
 
 /// Visual style knobs for markdown rendering.
@@ -142,17 +155,30 @@ impl MarkdownStyle {
 pub struct Markdown {
     style: MarkdownStyle,
     highlighter: Box<dyn SyntaxHighlighter>,
+    /// Fence renderers consulted before the highlighter; the default
+    /// set carries the engine-builtin mermaid diagrams.
+    fences: Vec<Box<dyn FenceRenderer>>,
     cache: Option<(String, usize, std::sync::Arc<Vec<String>>)>,
 }
 
 impl Markdown {
-    /// A renderer with the given style and highlighter.
+    /// A renderer with the given style and highlighter. The default
+    /// fence-renderer set (mermaid diagrams) rides along; applications
+    /// extend it with [`Markdown::with_fence`].
     pub fn new(style: MarkdownStyle, highlighter: Box<dyn SyntaxHighlighter>) -> Self {
         Self {
             style,
             highlighter,
+            fences: vec![Box::new(crate::mermaid::MermaidFences)],
             cache: None,
         }
+    }
+
+    /// Register one more fenced-block renderer, kept for this
+    /// renderer's lifetime.
+    pub fn with_fence(mut self, fence: Box<dyn FenceRenderer>) -> Self {
+        self.fences.push(fence);
+        self
     }
 
     /// The dim rule opening a code block, with a language tag when one
@@ -400,18 +426,15 @@ impl Markdown {
                         // the highlighter or the frame.
                         let taken = std::mem::take(&mut inline);
                         let code = sanitize_terminal(&taken).into_owned();
-                        // Mermaid fences render as diagrams when the
-                        // toggle is on; anything unsupported (or too
-                        // wide) falls back to the source view.
-                        let diagram = match lang.as_deref() {
-                            Some("mermaid") if crate::mermaid::render_enabled() => {
-                                crate::mermaid::render_diagram(
-                                    &code,
-                                    frame_width(columns).saturating_sub(4),
-                                )
-                            }
-                            _ => None,
-                        };
+                        // Fence renderers get first pass at the body
+                        // (the mermaid seam); then diff fences; the
+                        // rest rides the syntax highlighter.
+                        let body_budget = frame_width(columns).saturating_sub(4);
+                        let diagram = lang.as_deref().and_then(|lang| {
+                            self.fences
+                                .iter()
+                                .find_map(|fence| fence.render_fence(lang, &code, body_budget))
+                        });
                         // Diff fences get dedicated +- and hunk coloring
                         // instead of generic syntax highlighting.
                         let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
@@ -1768,5 +1791,27 @@ ls -la
                 .any(|l| l.contains("诊断信息") && l.contains("执行环境")),
             "blocks must not glue: {plain:?}"
         );
+    }
+
+    /// A custom fence renderer plugs through the seam: its body lands
+    /// inside the standard frame, other languages (and a `None`) fall
+    /// through to the plain highlighter.
+    struct UpperFences;
+
+    impl FenceRenderer for UpperFences {
+        fn render_fence(&self, lang: &str, code: &str, _columns: usize) -> Option<Vec<String>> {
+            (lang == "upper").then(|| vec![code.to_ascii_uppercase()])
+        }
+    }
+
+    #[test]
+    fn fence_renderers_plug_through_the_seam() {
+        let mut md = Markdown::new(MarkdownStyle::default(), Box::new(PlainHighlighter))
+            .with_fence(Box::new(UpperFences));
+        let lines = md.render("```upper\nshout\n```", 40);
+        assert!(strip_ansi(&lines[1]).starts_with("│ SHOUT"), "{lines:?}");
+        // Untagged for the seam: the highlighter path stands.
+        let lines = md.render("```text\nshout\n```", 40);
+        assert!(strip_ansi(&lines[1]).starts_with("│ shout"), "{lines:?}");
     }
 }

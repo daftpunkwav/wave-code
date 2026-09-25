@@ -73,6 +73,21 @@ pub fn render_diagram(source: &str, columns: usize) -> Option<Vec<String>> {
     }
 }
 
+/// The fenced-block renderer wiring mermaid into the markdown seam:
+/// fences tagged `mermaid` render as diagrams while the toggle is on;
+/// any other language — or an unsupported, too-wide diagram — is
+/// `None`, and the fence falls back to the source view.
+pub struct MermaidFences;
+
+impl crate::markdown::FenceRenderer for MermaidFences {
+    fn render_fence(&self, lang: &str, code: &str, columns: usize) -> Option<Vec<String>> {
+        if lang != "mermaid" || !render_enabled() {
+            return None;
+        }
+        render_diagram(code, columns)
+    }
+}
+
 /// Rewrite state-diagram syntax into flowchart syntax: `a --> b: lbl`
 /// becomes `a -- lbl --> b`, `[*]` terminators become `◉` nodes.
 /// Composite states and notes are unsupported (`None`).

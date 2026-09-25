@@ -1,7 +1,7 @@
 //! The glyph family: the single source of every semantic symbol the
-//! console renders. User input rides a chevron, assistant speech a
-//! sine, thinking a triangle — fine-lined to match the braille
-//! oscilloscope banner; result marks stay neutral.
+//! console renders. User input rides a chevron; machine work animates
+//! the loader's saw frames; result marks stay neutral (the assistant
+//! message bullet and the thinking header also compose from them).
 //!
 //! Adding a symbol here is a design-system change: keep the family
 //! consistent (thin strokes, no filled blocks) and note the category.
@@ -13,12 +13,6 @@ pub const USER_PROMPT: &str = "❯";
 /// The thin pulse of [`USER_PROMPT`]: the busy-tick and queue-wait
 /// marker (bold↔thin alternation reads as a pulse).
 pub const USER_PROMPT_PULSE: &str = "›";
-
-/// Sine wave — assistant speech: the message bullet.
-pub const SINE_WAVE: &str = "∿";
-
-/// Triangle wave — thinking: the finalized thinking-block bullet.
-pub const TRIANGLE_WAVE: &str = "△";
 
 /// Neutral result: completed successfully.
 pub const DONE: &str = "●";

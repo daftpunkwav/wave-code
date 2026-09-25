@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 mod hooks;
 mod mcp;
+mod model_catalog;
 mod permissions;
 mod provider;
 
@@ -97,6 +98,9 @@ pub fn home_dir() -> Option<PathBuf> {
 
 pub use hooks::{ConfigError, HookRule, HookRuleSet};
 pub use mcp::McpServerRaw;
+pub use model_catalog::{
+    ApiKind, CatalogError, ModalitiesSpec, ModelCatalog, ModelSpec, ReasoningSpec,
+};
 pub use permissions::PermissionsConfig;
 pub use provider::{
     DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT_TOKENS, ProviderConfig, ProviderKind,

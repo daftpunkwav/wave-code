@@ -116,13 +116,31 @@ impl Transcript {
         self.entries.drain(keep..).count()
     }
 
-    /// Render every entry to lines at `columns`.
-    pub fn render(&mut self, columns: usize) -> Vec<String> {
-        let mut lines = Vec::new();
+    /// Render every entry to frame segments at `columns` (one shared
+    /// line array per entry — no flattening, no per-line copies).
+    pub fn render(&mut self, columns: usize) -> Vec<tui_engine::component::Segment> {
+        let mut segments = Vec::with_capacity(self.entries.len());
         for entry in &mut self.entries {
-            lines.extend(entry.component.render(columns));
+            segments.push(entry.component.render(columns));
         }
-        lines
+        segments
+    }
+
+    /// Mutably borrow the newest entry that downcasts to `T` (the live
+    /// turn's user message sits after every older one).
+    pub fn last_as_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.entries
+            .iter_mut()
+            .rev()
+            .find_map(|entry| entry.component.as_any_mut().downcast_mut::<T>())
+    }
+
+    /// Drop every entry's cached render state (theme or render-mode
+    /// switches): cached lines never carry a stale palette or mode.
+    pub fn invalidate_all(&mut self) {
+        for entry in &mut self.entries {
+            entry.component.invalidate();
+        }
     }
 
     /// Clear all transcript entries and reset the turn counter so the
@@ -206,7 +224,11 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.push_new_turn(status("alpha"));
         transcript.push(status("beta"));
-        let lines = transcript.render(60);
+        let lines: Vec<String> = transcript
+            .render(60)
+            .into_iter()
+            .flat_map(|segment| (*segment).clone())
+            .collect();
         let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
         assert!(plain.iter().any(|l| l.contains("alpha")));
         assert!(plain.iter().any(|l| l.contains("beta")));

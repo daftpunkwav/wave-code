@@ -44,26 +44,34 @@ pub fn resolve(choice: Option<&str>) -> Theme {
 
 /// Resolve the terminal color depth from the environment: `COLORTERM`
 /// advertises truecolor, `TERM` advertises 256-color or direct color,
-/// and anything else degrades to the 16 classic ANSI colors (conservative
-/// but always readable). Call once at startup.
+/// and Windows 10+ terminals speak truecolor natively even when `TERM`
+/// is unset. Anything else degrades to the 16 classic ANSI colors
+/// (conservative but always readable). Call once at startup.
 pub fn color_depth() -> ColorDepth {
     color_depth_from(
         std::env::var("COLORTERM").ok().as_deref(),
         std::env::var("TERM").ok().as_deref(),
+        cfg!(windows),
     )
 }
 
-/// Pure core of [`color_depth`], taking the environment values.
-fn color_depth_from(colorterm: Option<&str>, term: Option<&str>) -> ColorDepth {
+/// Pure core of [`color_depth`], taking the environment values and a
+/// Windows flag (Windows terminal hosts advertise truecolor without
+/// setting the Unix environment variables).
+fn color_depth_from(colorterm: Option<&str>, term: Option<&str>, windows: bool) -> ColorDepth {
     if colorterm.is_some_and(|v| v.contains("truecolor") || v.contains("24bit")) {
         return ColorDepth::TrueColor;
     }
     let Some(term) = term else {
-        return ColorDepth::Ansi16;
+        return if windows {
+            ColorDepth::TrueColor
+        } else {
+            ColorDepth::Ansi16
+        };
     };
     if term.contains("256color") {
         ColorDepth::Color256
-    } else if term.contains("truecolor") || term.contains("direct") {
+    } else if term.contains("truecolor") || term.contains("direct") || windows {
         ColorDepth::TrueColor
     } else {
         ColorDepth::Ansi16
@@ -107,13 +115,19 @@ mod tests {
     fn color_depth_follows_terminal_advertisement() {
         use ColorDepth::{Ansi16, Color256, TrueColor};
         let f = super::color_depth_from;
-        assert_eq!(f(Some("truecolor"), None), TrueColor);
-        assert_eq!(f(Some("24bit"), Some("xterm")), TrueColor);
-        assert_eq!(f(None, Some("xterm-256color")), Color256);
-        assert_eq!(f(None, Some("xterm-direct")), TrueColor);
-        assert_eq!(f(None, Some("xterm")), Ansi16);
-        assert_eq!(f(None, None), Ansi16);
+        assert_eq!(f(Some("truecolor"), None, false), TrueColor);
+        assert_eq!(f(Some("24bit"), Some("xterm"), false), TrueColor);
+        assert_eq!(f(None, Some("xterm-256color"), false), Color256);
+        assert_eq!(f(None, Some("xterm-direct"), false), TrueColor);
+        assert_eq!(f(None, Some("xterm"), false), Ansi16);
+        assert_eq!(f(None, None, false), Ansi16);
+        // Windows hosts speak truecolor without the Unix env vars.
+        assert_eq!(f(None, None, true), TrueColor);
+        assert_eq!(f(None, Some("xterm"), true), TrueColor);
         // 256color in TERM does not beat an explicit COLORTERM.
-        assert_eq!(f(Some("truecolor"), Some("xterm-256color")), TrueColor);
+        assert_eq!(
+            f(Some("truecolor"), Some("xterm-256color"), false),
+            TrueColor
+        );
     }
 }

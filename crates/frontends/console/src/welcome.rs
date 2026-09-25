@@ -4,7 +4,7 @@
  *
  * Responsibilities:
  * - Render the figlet wordmark over the braille oscilloscope trace.
- * - Display session facts as a centered, aligned info grid.
+ * - Display session facts as a left-aligned info grid.
  * - Stir the trace on resizes (ripple animation).
  *
  * This module must not depend on: runtime or capability crates.
@@ -12,13 +12,14 @@
 
 //! The welcome card: the `slant` figlet wordmark fading primary→accent,
 //! sitting directly on the braille oscilloscope trace (the wave flows
-//! out of the letters), then the centered info grid. Resizing stirs the
-//! trace with an easing tail before it settles.
+//! out of the letters), then the left-aligned info grid. Resizing stirs
+//! the trace with an easing tail before it settles.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::theme::{self, Token};
-use tui_engine::component::Component;
+use tui_engine::component::{Component, Segment};
 use tui_engine::width;
 
 /// How long the resize ripple flows before the wave settles.
@@ -91,7 +92,11 @@ pub fn render(info: &WelcomeInfo, width: usize) -> Vec<String> {
     content.push(wave.0);
     content.push(wave.1);
 
-    // Info grid: dim labels in a fixed column, values to the right.
+    // One blank spacer keeps the info grid clear of the logo's trace.
+    content.push(String::new());
+
+    // Info grid, left-aligned: dim labels in a fixed column, values to
+    // the right.
     let facts = [
         ("model", info.model.clone(), String::new()),
         (
@@ -101,7 +106,6 @@ pub fn render(info: &WelcomeInfo, width: usize) -> Vec<String> {
         ),
         ("mode", mode_row(info), String::new()),
     ];
-    let mut rows: Vec<String> = Vec::new();
     for (label, value, suffix) in facts {
         let mut line = theme.paint(Token::TextMuted, &format!("{label:<6}"));
         line.push_str(&theme.paint(Token::Text, &value));
@@ -111,16 +115,7 @@ pub fn render(info: &WelcomeInfo, width: usize) -> Vec<String> {
                 &format!("  {} {suffix}", crate::chrome::symbols::BRANCH),
             ));
         }
-        rows.push(line);
-    }
-    let grid_width = rows
-        .iter()
-        .map(|row| width::width(row))
-        .max()
-        .unwrap_or(0)
-        .min(inner);
-    for row in rows {
-        content.push(center_line_fixed(row, grid_width, inner));
+        content.push(line);
     }
 
     // One blank spacer keeps the transcript below from hugging the card.
@@ -239,7 +234,7 @@ fn shorten_home(path: &str) -> String {
 pub struct Welcome {
     info: WelcomeInfo,
     width: usize,
-    lines: Option<Vec<String>>,
+    lines: Option<Segment>,
     ripple: Option<Instant>,
 }
 
@@ -262,23 +257,24 @@ impl Welcome {
 }
 
 impl Component for Welcome {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: usize) -> Segment {
         if self.width != width {
             self.width = width;
             self.lines = None;
             self.ripple = Some(Instant::now());
         }
         let Some(started) = self.ripple else {
-            if self.lines.is_none() {
-                self.lines = Some(render(&self.info, width));
-            }
-            return self.lines.clone().unwrap_or_default();
+            let lines = self
+                .lines
+                .get_or_insert_with(|| Arc::new(render(&self.info, width)));
+            return Arc::clone(lines);
         };
         let t = started.elapsed().as_secs_f32() / RIPPLE_DURATION.as_secs_f32();
         if t >= 1.0 {
             self.ripple = None;
-            self.lines = Some(render(&self.info, width));
-            return self.lines.clone().unwrap_or_default();
+            let lines = Arc::new(render(&self.info, width));
+            self.lines = Some(Arc::clone(&lines));
+            return lines;
         }
         // Ease-out cubic: the trace surges, then glides to a stop.
         let ease = 1.0 - (1.0 - t).powi(3);
@@ -296,7 +292,11 @@ impl Component for Welcome {
             frame[offset] = top;
             frame[offset + 1] = bottom;
         }
-        frame
+        Arc::new(frame)
+    }
+
+    fn invalidate(&mut self) {
+        self.lines = None;
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -390,6 +390,19 @@ mod tests {
         );
     }
 
+    /// The info grid sits left-aligned one blank line below the trace.
+    #[test]
+    fn info_grid_is_left_aligned_below_a_spacer() {
+        theme::set(theme::Theme::synthwave());
+        let mut card = Welcome::new(info());
+        let lines = card.render(60);
+        let text: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        assert!(text[8].is_empty(), "spacer after the trace: {text:?}");
+        for (row, label) in text[9..=11].iter().zip(["model", "dir", "mode"]) {
+            assert!(row.starts_with(label), "{label} left-aligned: {row:?}");
+        }
+    }
+
     #[test]
     fn narrow_width_falls_back_to_spaced_wordmark() {
         theme::set(theme::Theme::synthwave());
@@ -414,7 +427,7 @@ mod tests {
     fn welcome_snapshot() {
         theme::set(theme::Theme::synthwave());
         let mut card = Welcome::new(info());
-        for line in card.render(60) {
+        for line in card.render(60).iter() {
             println!("{line}");
         }
     }

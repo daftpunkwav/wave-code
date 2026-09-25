@@ -21,7 +21,7 @@ pub fn render_todos(todos: &[TodoEntry], expanded: bool, columns: usize) -> Vec<
     let theme = theme::current();
     let mut out = Vec::new();
     out.push(theme.paint(Token::Border, &"─".repeat(columns.min(80))));
-    out.push(format!("  {}", theme.bold(Token::Primary, "Todo")));
+    out.push(format!("  {}", theme.bold(Token::TextStrong, "Todo")));
 
     let rows: Vec<String> = todos
         .iter()
@@ -87,13 +87,13 @@ pub fn render_todos(todos: &[TodoEntry], expanded: bool, columns: usize) -> Vec<
     out
 }
 
-/// One todo row: `● in-progress` (bold primary), `✓ done` (success,
+/// One todo row: `● in-progress` (bold white), `✓ done` (success,
 /// struck through), `○ pending` (dim).
 fn todo_row(theme: &crate::theme::Theme, entry: &TodoEntry, columns: usize) -> String {
     let (marker, marker_token, text_style) = match entry.status {
         TodoStatus::InProgress => (
             crate::chrome::symbols::IN_PROGRESS,
-            Token::Primary,
+            Token::TextStrong,
             theme.style(Token::Text).bold(),
         ),
         TodoStatus::Completed => (

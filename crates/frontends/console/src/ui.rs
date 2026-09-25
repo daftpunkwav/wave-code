@@ -42,6 +42,7 @@ use wavecode_wire::{Event, EventMsg, Op, Submission};
 
 use crate::chrome::footer as footer_chrome;
 use crate::chrome::notify;
+use crate::chrome::symbols;
 use crate::chrome::title;
 use crate::chrome::{TIP_ROTATE_INTERVAL, TransientHint, render_todos};
 use crate::complete::{ConsoleProvider, FileInventory};
@@ -257,6 +258,10 @@ pub struct ConsoleUi {
     /// text changed, so frames without deltas (ticks, keystrokes) reuse
     /// the markdown render cache instead of re-parsing the whole buffer.
     streaming_draft: Option<AssistantMessage>,
+    /// The persisted live thinking block: created once per turn so its
+    /// header clock and spinner keep advancing across frames (the
+    /// same pattern as the streamed assistant draft).
+    streaming_thinking: Option<Thinking>,
     /// Pending Ctrl+G request: the draft handed to the external editor,
     /// drained by the run loop (raw-mode suspend happens there).
     pending_external_edit: Option<String>,
@@ -290,6 +295,9 @@ impl ConsoleUi {
             theme_name: "auto".to_string(),
             editor: {
                 let mut editor = Editor::new(editor_style());
+                // The engine default prompt is a fallback; the single
+                // source for the glyph is chrome/symbols.rs.
+                editor.set_prompt(symbols::USER_PROMPT);
                 let mut command_names: Vec<String> =
                     slash::COMMANDS.iter().map(|s| s.to_string()).collect();
                 command_names.extend(ctx.skill_names.iter().cloned());
@@ -314,7 +322,13 @@ impl ConsoleUi {
                 editor
             },
             transcript: Transcript::new(),
-            screen: Screen::new(),
+            screen: {
+                let mut screen = Screen::new();
+                // The frame gutter applies at write time: stored lines
+                // stay unpadded, so frames carry no per-line pad copies.
+                screen.set_margin(GUTTER);
+                screen
+            },
             streaming: StreamingController::new(),
             streaming_flushed_assistant: false,
             expanded: ExpandedFlag::new(),
@@ -347,6 +361,7 @@ impl ConsoleUi {
             btw_buffer: String::new(),
             btw_running: false,
             streaming_draft: None,
+            streaming_thinking: None,
             pending_external_edit: None,
             last_esc_at: None,
             version: version.into(),
@@ -727,10 +742,17 @@ impl ConsoleUi {
     /// Fold the live thinking block into a finalized transcript entry.
     fn finalize_thinking(&mut self) {
         if !self.streaming.thinking.is_empty() {
-            let text = std::mem::take(&mut self.streaming.thinking);
-            self.transcript
-                .push(Box::new(Thinking::finalized(text, self.expanded.clone())));
+            // Reuse the persisted live block when possible: finalize()
+            // freezes the duration measured from its original start.
+            let mut block = self
+                .streaming_thinking
+                .take()
+                .unwrap_or_else(|| Thinking::live(self.expanded.clone()));
+            block.set_text(std::mem::take(&mut self.streaming.thinking));
+            block.finalize();
+            self.transcript.push(Box::new(block));
         }
+        self.streaming_thinking = None;
     }
 
     /// Flush the streamed assistant draft into a transcript message.
@@ -1240,6 +1262,8 @@ impl ConsoleUi {
                             self.state.thinking_effort.clone(),
                             self.thinking_levels.clone(),
                         )));
+                    } else if invocation.name == "model" {
+                        self.handle_model_command(&invocation.args);
                     } else if invocation.name == "permissions" && invocation.args.is_empty() {
                         self.dialog = Some(Dialog::Permissions(
                             crate::dialogs::PermissionPickerDialog::new(
@@ -1278,8 +1302,6 @@ impl ConsoleUi {
                         self.transcript.push(Box::new(panel));
                     } else if invocation.name == "version" {
                         self.push_status(&format!("WaveCode v{}", self.version), false);
-                    } else if invocation.name == "model" {
-                        // Non-empty args already dispatched to Op::SetModel.
                     } else if invocation.name == "memory" {
                         let text = self.status.plan_status().unwrap_or_else(|| {
                             "no reviewed plan yet; ask the agent to propose one with the plan tool"
@@ -1963,12 +1985,33 @@ verify from the repository.";
             }
         }
         // Chrome built at construction carries colors by value: the
-        // editor (and its popup) must be rebuilt for the new palette.
+        // editor (and its popup) must be rebuilt for the new palette,
+        // and every transcript component drops its cached lines.
         self.editor.set_style(editor_style());
+        self.transcript.invalidate_all();
         // The live draft bakes the old palette into its cached lines.
         self.streaming_draft = None;
         self.screen.invalidate();
         self.push_status(&format!("theme switched ({name})"), false);
+    }
+
+    /// Toggle mermaid fence rendering between diagrams and source, and
+    /// drop every cached render so open blocks re-render in the new
+    /// mode immediately.
+    fn toggle_mermaid(&mut self) {
+        let next = !tui_engine::mermaid::render_enabled();
+        tui_engine::mermaid::set_render_enabled(next);
+        self.transcript.invalidate_all();
+        self.streaming_draft = None;
+        self.screen.invalidate();
+        self.push_status(
+            if next {
+                "mermaid: rendering diagrams (ctrl+m to show source)"
+            } else {
+                "mermaid: showing source (ctrl+m to render diagrams)"
+            },
+            false,
+        );
     }
 
     /// `/reload`: re-read settings and the theme from disk, refresh
@@ -2062,6 +2105,10 @@ verify from the repository.";
             }
             (Key::Char('t'), m) if m.ctrl => {
                 self.state.todo_expanded = !self.state.todo_expanded;
+                Flow::Continue
+            }
+            (Key::Char('m'), m) if m.ctrl => {
+                self.toggle_mermaid();
                 Flow::Continue
             }
             (Key::Char('s'), m) if m.ctrl => {
@@ -2203,79 +2250,272 @@ verify from the repository.";
         })
     }
 
-    /// Assemble the full frame at (columns, rows).
+    /// Assemble the full frame at (columns, rows), flattened to one
+    /// line array (tests and probes; the render path streams segments).
     pub fn frame(&mut self, columns: usize, rows: usize) -> Vec<String> {
-        self.frame_with_tail(columns, rows).0
+        self.frame_with_tail(columns, rows)
+            .0
+            .into_iter()
+            .flat_map(|segment| (*segment).clone())
+            .collect()
     }
 
     /// Assemble the full frame plus the size of its pinned tail (the
     /// editor box, autocomplete popup, and footer rows), which the
     /// screen renderer re-anchors to the physical bottom rows on every
-    /// writing frame.
-    fn frame_with_tail(&mut self, columns: usize, rows: usize) -> (Vec<String>, usize) {
+    /// writing frame. Segmented: cacheable components hand back their
+    /// shared line arrays, so a frame costs one refcount bump per cache
+    /// hit instead of a deep copy. The gutter margin is the screen's
+    /// job (applied at write time), not a per-line transform here.
+    fn frame_with_tail(
+        &mut self,
+        columns: usize,
+        rows: usize,
+    ) -> (Vec<tui_engine::component::Segment>, usize) {
+        use tui_engine::component::Segment;
         let inner = columns.saturating_sub(GUTTER * 2);
         self.update_chrome();
         self.animate_editor_prompt();
-        let mut lines = Vec::new();
+        // Request phase: this turn's input lightens while the harness
+        // waits for the model's first response byte, and returns to
+        // full color once SSE deltas start flowing.
+        let waiting = self.state.phase == crate::state::StreamingPhase::Waiting;
+        if let Some(user) = self.transcript.last_as_mut::<UserMessage>() {
+            user.set_pending(waiting);
+        }
+        let mut lines: Vec<Segment> = Vec::new();
         lines.extend(self.transcript.render(inner));
         // Live thinking block (moves to the transcript when finalized).
+        // The block persists across frames like the draft below: a
+        // rebuilt instance would restart its header clock and spinner
+        // on every flush.
         if !self.streaming.thinking.is_empty() {
-            let mut block = Thinking::live(self.expanded.clone());
-            block.push(&self.streaming.thinking.clone());
-            lines.extend(Component::render(&mut block, inner));
+            if self.streaming_thinking.is_none() {
+                self.streaming_thinking = Some(Thinking::live(self.expanded.clone()));
+            }
+            if let Some(block) = self.streaming_thinking.as_mut() {
+                block.set_text(self.streaming.thinking.clone());
+                lines.push(Component::render(block, inner));
+            }
+        } else {
+            self.streaming_thinking = None;
         }
-        // Live assistant draft. The draft component persists across
-        // frames and is rebuilt only when its text no longer mirrors
-        // the streaming buffer (a new delta, the draft byte cap, or a
-        // theme switch): unchanged frames then reuse the cached
-        // markdown render instead of re-parsing the whole buffer.
+        // Live assistant draft. The draft persists across frames and is
+        // updated in place when its text no longer mirrors the
+        // streaming buffer (a new delta or the draft byte cap):
+        // `update_text` drops the caches but keeps the render clock, so
+        // the bullet animation keeps breathing across flushes.
         if !self.streaming.assistant.is_empty() {
             if self
                 .streaming_draft
                 .as_ref()
                 .is_none_or(|draft| draft.text() != self.streaming.assistant)
             {
-                self.streaming_draft = Some(AssistantMessage::streaming(
-                    self.streaming.assistant.clone(),
-                    crate::highlight::highlighter(),
-                ));
+                match self.streaming_draft.as_mut() {
+                    Some(draft) => draft.update_text(self.streaming.assistant.clone()),
+                    None => {
+                        self.streaming_draft = Some(AssistantMessage::streaming(
+                            self.streaming.assistant.clone(),
+                            crate::highlight::highlighter(),
+                        ));
+                    }
+                }
             }
             if let Some(draft) = self.streaming_draft.as_mut() {
-                lines.extend(Component::render(draft, inner));
+                lines.push(Component::render(draft, inner));
             }
         } else {
             self.streaming_draft = None;
         }
-        lines.extend(render_todos(
+        lines.push(Arc::new(render_todos(
             &self.state.todos,
             self.state.todo_expanded,
             inner,
-        ));
-        lines.extend(panes::render_queue(
+        )));
+        lines.push(Arc::new(panes::render_queue(
             &self.state.queued,
             inner,
             Instant::now(),
-        ));
+        )));
         // Modal dialogs render as an inline panel above the editor: they
         // own the keyboard, so the frame must show them.
         if let Some(dialog) = &mut self.dialog {
-            lines.extend(dialog.render(inner));
+            lines.push(Arc::new(dialog.render(inner)));
         }
         // The /btw side-question panel streams answers above the editor.
         if self.btw_open() {
-            lines.extend(self.render_btw_panel(inner));
+            lines.push(Arc::new(self.render_btw_panel(inner)));
         }
         // Everything from here on is the bottom-anchored input region.
-        let tail_start = lines.len();
-        lines.extend(self.editor.render_box(inner, rows));
-        lines.extend(self.footer(inner));
-        let tail = lines.len() - tail_start;
-        let pad = " ".repeat(GUTTER);
-        let lines = lines
-            .into_iter()
-            .map(|line| format!("{pad}{line}"))
-            .collect();
+        let tail_start: usize = lines.iter().map(|segment| segment.len()).sum();
+        lines.push(Arc::new(self.editor.render_box(inner, rows)));
+        lines.push(Arc::new(self.footer(inner)));
+        let tail = lines.iter().map(|segment| segment.len()).sum::<usize>() - tail_start;
         (lines, tail)
+    }
+
+    /// `/model` subcommands against the single `~/.wavecode/models.json`
+    /// catalog: `list`, `remove <alias>`, `set <alias> <field> <value>`,
+    /// `add <alias> <kind> <provider> <base_url> <model> [context]
+    /// [max_output]`. Bare `/model` (no args) opened the picker above;
+    /// any other word switches models through the usual op.
+    fn handle_model_command(&mut self, args: &str) {
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("model catalog needs a home directory", true);
+            return;
+        };
+        let mut catalog = match wavecode_config::ModelCatalog::load(&home) {
+            Ok(catalog) => catalog,
+            Err(e) => {
+                self.push_status(&format!("model catalog load failed: {e:?}"), true);
+                return;
+            }
+        };
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        match parts.first().copied() {
+            Some("list") => {
+                if catalog.models.is_empty() {
+                    self.push_status("model catalog is empty (/model add ...)", false);
+                    return;
+                }
+                for (alias, spec) in &catalog.models {
+                    let reasoning = spec
+                        .reasoning
+                        .variants
+                        .join("/")
+                        .is_empty()
+                        .then(String::new)
+                        .unwrap_or_else(|| spec.reasoning.variants.join("/"));
+                    self.push_status(
+                        &format!(
+                            "{alias} · {} ({}) ctx {} out {} thinking [{}] in [{}] out [{}]",
+                            spec.model,
+                            spec.base_url,
+                            spec.context_window
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "default".into()),
+                            spec.max_output
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "default".into()),
+                            reasoning,
+                            spec.modalities.input.join(","),
+                            spec.modalities.output.join(","),
+                        ),
+                        false,
+                    );
+                }
+            }
+            Some("remove") => match parts.get(1) {
+                Some(alias) => {
+                    if catalog.remove(alias).is_some() {
+                        match catalog.save(&home) {
+                            Ok(()) => self.push_status(&format!("removed {alias}"), false),
+                            Err(e) => {
+                                self.push_status(&format!("catalog save failed: {e:?}"), true)
+                            }
+                        }
+                    } else {
+                        self.push_status(&format!("no model named {alias}"), true);
+                    }
+                }
+                None => self.push_status("usage: /model remove <alias>", true),
+            },
+            Some("set") => {
+                // /model set <alias> <context|output|thinking|input> <value>
+                let (Some(alias), Some(field), Some(value)) =
+                    (parts.get(1), parts.get(2), parts.get(3))
+                else {
+                    self.push_status(
+                        "usage: /model set <alias> <context|output|thinking|input> <value>",
+                        true,
+                    );
+                    return;
+                };
+                let Some(spec) = catalog.models.get_mut(*alias) else {
+                    self.push_status(&format!("no model named {alias}"), true);
+                    return;
+                };
+                match *field {
+                    "context" => spec.context_window = value.parse().ok(),
+                    "output" => spec.max_output = value.parse().ok(),
+                    "thinking" => {
+                        spec.reasoning.enabled = !value.eq_ignore_ascii_case("off");
+                        spec.reasoning.default =
+                            (!value.eq_ignore_ascii_case("off")).then(|| value.to_string());
+                    }
+                    "input" => {
+                        spec.modalities.input = value
+                            .split(',')
+                            .map(str::trim)
+                            .map(str::to_string)
+                            .collect();
+                    }
+                    other => {
+                        self.push_status(&format!("unknown field {other}"), true);
+                        return;
+                    }
+                }
+                match catalog.save(&home) {
+                    Ok(()) => {
+                        self.push_status(&format!("{alias} updated ({field} = {value})"), false)
+                    }
+                    Err(e) => self.push_status(&format!("catalog save failed: {e:?}"), true),
+                }
+            }
+            Some("add") => {
+                // /model add <alias> <kind> <provider> <base_url> <model>
+                //              [context] [max_output]
+                if parts.len() < 6 {
+                    self.push_status(
+                        "usage: /model add <alias> <anthropic-messages|openai-chat|openai-responses> \
+                         <provider> <base_url> <model> [context] [max_output]",
+                        true,
+                    );
+                    return;
+                }
+                let kind = match parts[2].to_ascii_lowercase().as_str() {
+                    "anthropic-messages" | "anthropic" => {
+                        wavecode_config::ApiKind::AnthropicMessages
+                    }
+                    "openai-chat" | "openai" => wavecode_config::ApiKind::OpenaiChat,
+                    "openai-responses" | "responses" => wavecode_config::ApiKind::OpenaiResponses,
+                    other => {
+                        self.push_status(&format!("unknown api kind {other}"), true);
+                        return;
+                    }
+                };
+                let spec = wavecode_config::ModelSpec {
+                    provider: parts[3].to_string(),
+                    model: parts[5].to_string(),
+                    kind,
+                    base_url: parts[4].to_string(),
+                    api_key_env: None,
+                    api_key: None,
+                    context_window: parts.get(6).and_then(|v| v.parse().ok()),
+                    max_output: parts.get(7).and_then(|v| v.parse().ok()),
+                    reasoning: wavecode_config::ReasoningSpec::default(),
+                    modalities: wavecode_config::ModalitiesSpec::default(),
+                };
+                catalog.insert(parts[1].to_string(), spec);
+                match catalog.save(&home) {
+                    Ok(()) => {
+                        self.push_status(&format!("added {} (restart applies it)", parts[1]), false)
+                    }
+                    Err(e) => self.push_status(&format!("catalog save failed: {e:?}"), true),
+                }
+            }
+            _ => {
+                // `/model <name>`: switch through the existing op path.
+                if let Some(invocation) = crate::slash::parse(&format!("/model {args}"))
+                    && let crate::slash::Effect::Ops(ops) =
+                        crate::slash::dispatch(&invocation, &self.state, self.status.as_ref())
+                {
+                    for op in ops {
+                        self.enqueue(op);
+                    }
+                }
+            }
+        }
     }
 
     /// Sync the window title and tab progress with state; queues raw
@@ -2317,16 +2557,20 @@ verify from the repository.";
         }
     }
 
-    /// Flip the editor's square-wave prompt while a turn runs: high↔low
-    /// phase every 400 ms (a calm pulse); idle restores the resting
-    /// cycle. Shell mode keeps its `!` marker regardless.
+    /// Pulse the editor's chevron prompt while a turn runs: bold↔thin
+    /// every 400 ms (a calm pulse); idle restores the resting chevron.
+    /// Shell mode keeps its `!` marker regardless.
     fn animate_editor_prompt(&mut self) {
         if self.shell_chrome {
             self.editor.set_prompt("!");
             return;
         }
         let ticking = self.state.busy() && (self.started_at.elapsed().as_millis() / 400) % 2 == 1;
-        self.editor.set_prompt(if ticking { "⊔⊓" } else { "⊓⊔" });
+        self.editor.set_prompt(if ticking {
+            symbols::USER_PROMPT_PULSE
+        } else {
+            symbols::USER_PROMPT
+        });
     }
 
     /// Take the queued terminal sequence, if any.
@@ -2459,9 +2703,10 @@ fn mode_border_style(mode: &str) -> tui_engine::color::Style {
 fn editor_style() -> EditorStyle {
     let theme = theme::current();
     EditorStyle {
-        border: theme.style(Token::Border),
-        // The square-wave prompt carries the brand color.
-        prompt: theme.style(Token::Primary).bold(),
+        border: theme.style(Token::Neutral),
+        // The input chrome rides the neutral gray band (the colored
+        // surface is the sent message row, not the editor).
+        prompt: theme.style(Token::Neutral).bold(),
         slash_command: theme.style(Token::Primary).bold(),
         shell_command: theme.style(Token::ShellMode),
         hint: theme.style(Token::TextDim),
@@ -2578,7 +2823,7 @@ impl ConsoleUi {
         };
         body.push(theme.bold(
             Token::BorderFocus,
-            &format!("{} btw — {status}", symbols::SINE_WAVE),
+            &format!("{} btw — {status}", symbols::DONE),
         ));
         // Flatten the log into lines, then keep the tail.
         let mut lines: Vec<(bool, String)> = Vec::new();
@@ -2955,7 +3200,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            joined.contains("⊓⊔ second") || joined.contains("⊔⊓ second"),
+            joined.contains("❯ second") || joined.contains("› second"),
             "queue pane: {joined}"
         );
         assert!(joined.contains("ctrl-s to steer"), "steer hint: {joined}");
@@ -3265,7 +3510,7 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("thinking…"), "live header: {joined}");
+        assert!(joined.contains("Thinking for"), "live header: {joined}");
         assert!(joined.contains("pondering"), "live tail: {joined}");
         // Assistant output finalizes the thinking block.
         ui.handle_wire_event(&EventMsg::AgentMessageDelta {
@@ -3319,6 +3564,33 @@ mod tests {
             ui.streaming_draft.is_none(),
             "draft dropped once streaming ends"
         );
+    }
+
+    /// The live thinking block persists across frames: a rebuilt
+    /// instance would restart its header clock and spinner on every
+    /// flush (the same regression class as the streamed draft).
+    #[test]
+    fn streamed_thinking_block_persists_across_frames() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentThinkingDelta {
+            text: "deep thought".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        let before: *const Thinking = ui.streaming_thinking.as_ref().unwrap();
+        ui.handle_wire_event(&EventMsg::AgentThinkingDelta {
+            text: " more".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        assert!(
+            std::ptr::eq(before, ui.streaming_thinking.as_ref().unwrap()),
+            "same block instance across frames"
+        );
+        // Completion folds the persisted block into the transcript and
+        // retires it.
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "answer".to_string(),
+        });
+        assert!(ui.streaming_thinking.is_none(), "block retired");
     }
 
     #[test]

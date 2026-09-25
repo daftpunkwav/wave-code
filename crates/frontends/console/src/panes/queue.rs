@@ -4,7 +4,8 @@ use crate::theme::{self, Token};
 use std::time::Instant;
 use tui_engine::width;
 
-/// Square-wave phase flip (the queued pulses tick while waiting).
+/// Chevron pulse: bold↔thin flip (the queued marker ticks while
+/// waiting).
 const QUEUE_FLIP_INTERVAL_MS: u128 = 400;
 
 /// Render the queued-message pane lines (empty when nothing queued).
@@ -14,9 +15,9 @@ pub fn render(queued: &[String], columns: usize, now: Instant) -> Vec<String> {
     }
     let theme = theme::current();
     let marker = if (now.elapsed().as_millis() / QUEUE_FLIP_INTERVAL_MS).is_multiple_of(2) {
-        "⊓⊔"
+        crate::chrome::symbols::USER_PROMPT
     } else {
-        "⊔⊓"
+        crate::chrome::symbols::USER_PROMPT_PULSE
     };
     let mut out = Vec::new();
     // Top rule separates the pane from the transcript above.
@@ -25,7 +26,7 @@ pub fn render(queued: &[String], columns: usize, now: Instant) -> Vec<String> {
         let text = width::truncate_to_width(item, columns.saturating_sub(5));
         out.push(format!(
             "  {} {}",
-            theme.paint(Token::Accent, marker),
+            theme.paint(Token::RoleUser, marker),
             theme.paint(Token::Text, &text)
         ));
     }
@@ -57,7 +58,7 @@ mod tests {
         );
         let plain: Vec<String> = lines.iter().map(|l| width::strip_ansi(l)).collect();
         assert_eq!(plain.len(), 4, "rule + 2 items + hint");
-        assert!(plain[1].contains("⊓⊔ first") || plain[1].contains("⊔⊓ first"));
+        assert!(plain[1].contains("❯ first") || plain[1].contains("› first"));
         assert!(plain[2].contains("second"));
         assert!(plain[3].contains("ctrl-s to steer"));
     }

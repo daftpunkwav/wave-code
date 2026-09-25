@@ -62,6 +62,11 @@ pub enum Token {
     RoleUser,
     /// Shell-mode prompt and border.
     ShellMode,
+    /// Neutral lines and chrome: code frames, table borders, rules, the
+    /// editor prompt/border — a true gray with no accent hue.
+    Neutral,
+    /// The user input row's subtle background highlight.
+    InputBg,
 }
 
 /// A resolved palette: one color per token.
@@ -88,6 +93,10 @@ pub struct Palette {
     pub diff_meta: Color,
     pub role_user: Color,
     pub shell_mode: Color,
+    /// Neutral gray for lines and input chrome (no accent hue).
+    pub neutral: Color,
+    /// The user input row's background highlight.
+    pub input_bg: Color,
 }
 
 impl Palette {
@@ -114,18 +123,20 @@ impl Palette {
             Token::DiffMeta => self.diff_meta,
             Token::RoleUser => self.role_user,
             Token::ShellMode => self.shell_mode,
+            Token::Neutral => self.neutral,
+            Token::InputBg => self.input_bg,
         }
     }
 }
 
 /// The dark palette: the **synthwave** identity (hex values locked by
-/// test). Neon cyan leads the chrome, pink carries user input, and the
-/// neon family maps onto the message categories:
+/// test). Neon cyan leads the chrome, amber carries user input, and
+/// the neon family maps onto the message categories:
 ///
 /// | Token      | Role                          | Hue                    |
 /// |------------|-------------------------------|------------------------|
 /// | Primary    | assistant, prompt, headings   | cyan `#36F9F6`         |
-/// | RoleUser   | user input                    | pink `#FF7EDB`         |
+/// | RoleUser   | user input                    | amber `#FFB86C`        |
 /// | Accent     | secondary accents             | periwinkle `#B6B1FF`   |
 /// | Success    | tool results, checks          | green `#72F1B8`        |
 /// | Warning    | auto badges, warnings         | salmon `#F97E72`       |
@@ -157,9 +168,14 @@ pub fn synthwave_palette() -> Palette {
         diff_removed_strong: Color::from_hex("#FF5E5B").unwrap(),
         diff_gutter: Color::from_hex("#4A4166").unwrap(),
         diff_meta: Color::from_hex("#8B85A8").unwrap(),
-        // User input: neon pink, distinct from the cyan assistant.
-        role_user: Color::from_hex("#FF7EDB").unwrap(),
+        // User input: warm amber — one readable accent against the
+        // neutral agent speech, distinct from the salmon error band.
+        role_user: Color::from_hex("#FFB86C").unwrap(),
         shell_mode: Color::from_hex("#B084EB").unwrap(),
+        // Lines and input chrome: a true gray, no purple cast.
+        neutral: Color::from_hex("#C9C6D2").unwrap(),
+        // The user input band: a few steps lighter than the background.
+        input_bg: Color::from_hex("#322C42").unwrap(),
     }
 }
 
@@ -196,6 +212,8 @@ pub fn deepwave_palette() -> Palette {
         // Square wave / user input (cyan band).
         role_user: Color::from_hex("#22D3EE").unwrap(),
         shell_mode: Color::from_hex("#BD93F9").unwrap(),
+        neutral: Color::from_hex("#BEC3C7").unwrap(),
+        input_bg: Color::from_hex("#24303A").unwrap(),
     }
 }
 
@@ -223,6 +241,8 @@ pub fn light_palette() -> Palette {
         diff_meta: Color::from_hex("#5F5F5F").unwrap(),
         role_user: Color::from_hex("#155E75").unwrap(),
         shell_mode: Color::from_hex("#7C3AED").unwrap(),
+        neutral: Color::from_hex("#5F6B73").unwrap(),
+        input_bg: Color::from_hex("#E3EAEE").unwrap(),
     }
 }
 
@@ -235,7 +255,7 @@ mod tests {
     fn synthwave_palette_values_are_locked() {
         let palette = synthwave_palette();
         assert_eq!(palette.primary, Color::rgb(0x36, 0xF9, 0xF6));
-        assert_eq!(palette.role_user, Color::rgb(0xFF, 0x7E, 0xDB));
+        assert_eq!(palette.role_user, Color::rgb(0xFF, 0xB8, 0x6C));
         assert_eq!(palette.accent, Color::rgb(0xB6, 0xB1, 0xFF));
         assert_eq!(palette.text, Color::rgb(0xED, 0xEA, 0xF0));
         assert_eq!(palette.text_dim, Color::rgb(0x8B, 0x85, 0xA8));
@@ -247,6 +267,45 @@ mod tests {
         assert_eq!(palette.warning, Color::rgb(0xF9, 0x7E, 0x72));
         assert_eq!(palette.error, Color::rgb(0xFE, 0x44, 0x50));
         assert_eq!(palette.shell_mode, Color::rgb(0xB0, 0x84, 0xEB));
+        assert_eq!(palette.neutral, Color::rgb(0xC9, 0xC6, 0xD2));
+        assert_eq!(palette.input_bg, Color::rgb(0x32, 0x2C, 0x42));
+    }
+
+    /// The neutral line gray must carry no accent hue: channels stay
+    /// within a narrow band of each other.
+    #[test]
+    fn neutral_is_a_true_gray() {
+        for palette in [synthwave_palette(), deepwave_palette()] {
+            let n = palette.neutral;
+            let (mn, mx) = (n.r.min(n.g).min(n.b), n.r.max(n.g).max(n.b));
+            assert!(
+                mx as i32 - mn as i32 <= 12,
+                "neutral must be desaturated: {n:?}"
+            );
+        }
+    }
+
+    /// User amber sits far from the salmon warning band: the two must
+    /// stay distinguishable at a glance.
+    #[test]
+    fn role_user_amber_keeps_distance_from_warning_salmon() {
+        let palette = synthwave_palette();
+        let distance = |a: Color, b: Color| {
+            let dr = a.r as i32 - b.r as i32;
+            let dg = a.g as i32 - b.g as i32;
+            let db = a.b as i32 - b.b as i32;
+            (dr * dr + dg * dg + db * db) as f32
+        };
+        let warning = palette.warning;
+        assert!(
+            distance(palette.role_user, warning) > 3_000.0,
+            "amber must not collapse into the salmon band: {palette:?}"
+        );
+        // Amber reads warm: red dominates blue by a wide margin.
+        assert!(
+            palette.role_user.r as i32 - palette.role_user.b as i32 > 100,
+            "user amber is a warm hue: {palette:?}"
+        );
     }
 
     /// The synthwave identity: neon cyan leads, backgrounds stay deep.

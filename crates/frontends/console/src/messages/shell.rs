@@ -5,11 +5,12 @@
 //! collapses to a preview with an elision row, and Ctrl+O expansion is
 //! driven through the shared flag like every other expandable block.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::messages::ExpandedFlag;
 use crate::theme::{self, Token};
-use tui_engine::component::Component;
+use tui_engine::component::{Component, Segment};
 use tui_engine::loader::SAW_FRAMES;
 use tui_engine::width;
 
@@ -81,7 +82,7 @@ impl ShellCard {
 }
 
 impl Component for ShellCard {
-    fn render(&mut self, columns: usize) -> Vec<String> {
+    fn render(&mut self, columns: usize) -> Segment {
         let theme = theme::current();
         let expanded = self.expanded_flag.get();
         let running = self.is_running();
@@ -161,7 +162,7 @@ impl Component for ShellCard {
             }
         }
         out.push(String::new());
-        out
+        Arc::new(out)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

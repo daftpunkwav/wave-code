@@ -12,11 +12,12 @@
 //! The compaction transcript card: live pulse while summarizing, then a
 //! settled summary line.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::state::format_tokens;
 use crate::theme::{self, Token};
-use tui_engine::component::Component;
+use tui_engine::component::{Component, Segment};
 use tui_engine::loader::SAW_FRAMES;
 use tui_engine::width::strip_ansi;
 
@@ -81,10 +82,10 @@ impl CompactionCard {
 }
 
 impl Component for CompactionCard {
-    fn render(&mut self, _columns: usize) -> Vec<String> {
+    fn render(&mut self, _columns: usize) -> Segment {
         let theme = theme::current();
         let trigger = strip_ansi(&self.trigger);
-        match self.outcome {
+        Arc::new(match self.outcome {
             Outcome::Running => {
                 let step = (self.started.elapsed().as_millis()
                     / tui_engine::loader::SAW_INTERVAL_MS as u128)
@@ -115,7 +116,7 @@ impl Component for CompactionCard {
                     &format!("● compaction failed ({trigger}); context unchanged"),
                 )]
             }
-        }
+        })
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

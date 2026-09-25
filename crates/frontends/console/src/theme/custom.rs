@@ -94,6 +94,8 @@ pub struct ThemeColors {
     pub diff_meta: Option<String>,
     pub role_user: Option<String>,
     pub shell_mode: Option<String>,
+    pub neutral: Option<String>,
+    pub input_bg: Option<String>,
 }
 
 /// Why a theme file could not be used.
@@ -204,6 +206,8 @@ impl CustomTheme {
             "shell_mode",
             &self.colors.shell_mode,
         )?;
+        apply(&mut palette.neutral, "neutral", &self.colors.neutral)?;
+        apply(&mut palette.input_bg, "input_bg", &self.colors.input_bg)?;
         Ok(palette)
     }
 }

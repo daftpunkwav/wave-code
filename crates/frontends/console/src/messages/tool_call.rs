@@ -5,13 +5,14 @@
 //! the shared Ctrl+O flag expands the result body. Per-tool argument
 //! summaries come from [`args_summary`].
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::diff;
 use crate::messages::ExpandedFlag;
 use crate::settings::{EditDisplay, ToolDisplay};
 use crate::theme::{self, Token};
-use tui_engine::component::Component;
+use tui_engine::component::{Component, Segment};
 use tui_engine::sanitize::sanitize_terminal;
 use tui_engine::width;
 
@@ -148,7 +149,7 @@ pub struct ToolCall {
     expanded: ExpandedFlag,
     settings: crate::settings::SharedSettings,
     started: Instant,
-    lines: Option<(usize, ToolState, bool, usize, Vec<String>)>,
+    lines: Option<(usize, ToolState, bool, usize, Segment)>,
 }
 
 /// Per-tool output styling for one (possibly wrapped) line. Grep match
@@ -252,8 +253,8 @@ impl ToolCall {
         let mut line = format!(
             "{} {} {}",
             theme.paint(dot_token, &dot),
-            theme.bold(Token::Primary, &verb),
-            theme.bold(Token::Primary, &self.name)
+            theme.bold(Token::TextStrong, &verb),
+            theme.bold(Token::TextStrong, &self.name)
         );
         // Names verbosity stops right after the tool name.
         if !self.args.is_empty() && self.settings.get().tool_display != ToolDisplay::Names {
@@ -375,7 +376,7 @@ impl ToolCall {
 }
 
 impl Component for ToolCall {
-    fn render(&mut self, columns: usize) -> Vec<String> {
+    fn render(&mut self, columns: usize) -> Segment {
         let expanded = self.expanded.get();
         // The running animation is part of the cache key so live ticks
         // repaint; finished cards pin frame 0 forever.
@@ -391,13 +392,18 @@ impl Component for ToolCall {
             && *cached_expanded == expanded
             && *cached_frame == frame
         {
-            return lines.clone();
+            return Arc::clone(lines);
         }
         let mut lines = vec![self.header()];
         lines.extend(self.body(columns));
         lines.push(String::new());
-        self.lines = Some((columns, self.state, expanded, frame, lines.clone()));
+        let lines = Arc::new(lines);
+        self.lines = Some((columns, self.state, expanded, frame, Arc::clone(&lines)));
         lines
+    }
+
+    fn invalidate(&mut self) {
+        self.lines = None;
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

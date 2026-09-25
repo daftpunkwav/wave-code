@@ -3,7 +3,9 @@
 
 use crate::state::{TokenUsage, context_percent, format_tokens};
 use crate::theme::{self, Token};
-use tui_engine::component::Component;
+use std::sync::Arc;
+
+use tui_engine::component::{Component, Segment};
 
 /// Width of the context bar in cells.
 pub const BAR_WIDTH: usize = 20;
@@ -47,7 +49,7 @@ pub fn severity_token(percent: u64) -> Token {
 }
 
 impl Component for UsagePanel {
-    fn render(&mut self, columns: usize) -> Vec<String> {
+    fn render(&mut self, columns: usize) -> Segment {
         let theme = theme::current();
         let label_width = 12;
         let mut out = Vec::new();
@@ -109,7 +111,7 @@ impl Component for UsagePanel {
             theme.paint(Token::Text, &format_tokens(self.usage.total())),
         );
         out.push(String::new());
-        out
+        Arc::new(out)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -151,11 +153,7 @@ mod tests {
                 cache_creation: 2_000,
             },
         );
-        let lines: Vec<String> = panel
-            .render(80)
-            .into_iter()
-            .map(|l| strip_ansi(&l))
-            .collect();
+        let lines: Vec<String> = panel.render(80).iter().map(|l| strip_ansi(l)).collect();
         let joined = lines.join("\n");
         assert!(joined.contains("42% (82.0k/195k)"), "{joined}");
         assert!(
@@ -177,11 +175,7 @@ mod tests {
     fn panel_without_samples_says_so() {
         theme::set(theme::Theme::synthwave());
         let mut panel = UsagePanel::new(None, None, TokenUsage::default());
-        let lines: Vec<String> = panel
-            .render(80)
-            .into_iter()
-            .map(|l| strip_ansi(&l))
-            .collect();
+        let lines: Vec<String> = panel.render(80).iter().map(|l| strip_ansi(l)).collect();
         assert!(lines.join("\n").contains("no samples yet"));
     }
 }

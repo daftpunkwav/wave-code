@@ -127,6 +127,8 @@ static ACTIVE: RwLock<Theme> = RwLock::new(Theme {
         diff_meta: Color { r: 0, g: 0, b: 0 },
         role_user: Color { r: 0, g: 0, b: 0 },
         shell_mode: Color { r: 0, g: 0, b: 0 },
+        neutral: Color { r: 0, g: 0, b: 0 },
+        input_bg: Color { r: 0, g: 0, b: 0 },
     },
     syntax_theme: SyntaxTheme::Synthwave84,
 });

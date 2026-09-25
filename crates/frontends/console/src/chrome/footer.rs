@@ -8,7 +8,7 @@ use tui_engine::width;
 /// as a fixed order.
 pub const TIPS: [&str; 6] = [
     "ctrl+o expand tool output",
-    "shift+enter for newline",
+    "ctrl+m toggle mermaid diagrams",
     "ctrl+s steer a running turn",
     "! for shell mode",
     "@ to mention files",

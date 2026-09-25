@@ -1,21 +1,28 @@
 //! The thinking/reasoning transcript component.
 //!
-//! Live: a triangle-wave spinner, `thinking…`, and a scrolling tail of
-//! the last two wrapped lines (dim italic). Finalized: a triangle bullet
-//! with a collapsed two-line preview plus an ellipsis row; Ctrl+O expansion
-//! is driven through a shared flag so every expandable block responds
-//! in one keystroke.
+//! Live: a spinner, `✻ Thinking for Ns… (ctrl+o to expand)`, and a
+//! scrolling tail of the last two wrapped lines (dim italic, `└`
+//! branch prefix). Finalized: the header freezes to `✻ Thought for Ns
+//! (ctrl+o to expand)` above the same collapsed preview; Ctrl+O
+//! expansion is driven through a shared flag so every expandable block
+//! responds in one keystroke.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use crate::theme::{self, Token};
-use tui_engine::component::Component;
+use tui_engine::component::{Component, Segment};
 use tui_engine::loader::{Loader, SpinnerStyle};
 use tui_engine::width;
 
 /// Wrapped preview lines shown when collapsed (both live and final).
 pub const PREVIEW_LINES: usize = 2;
+
+/// The branch prefix glyph on preview lines.
+const BRANCH: &str = "└";
+/// The finalized thinking header glyph.
+const FLOWER: &str = "✻";
 
 /// Shared Ctrl+O expansion flag across expandable components.
 #[derive(Debug, Clone)]
@@ -50,9 +57,12 @@ impl Default for ExpandedFlag {
 pub struct Thinking {
     text: String,
     live: bool,
+    started: Instant,
+    /// Frozen at [`Thinking::finalize`] (finalized header duration).
+    duration: Option<Duration>,
     expanded_flag: ExpandedFlag,
     spinner: Loader,
-    lines: Option<(usize, String, bool, bool, Vec<String>)>,
+    lines: Option<(usize, String, bool, bool, Segment)>,
 }
 
 impl Thinking {
@@ -61,10 +71,12 @@ impl Thinking {
         Self {
             text: String::new(),
             live: true,
+            started: Instant::now(),
+            duration: None,
             expanded_flag,
             spinner: Loader::new(
                 SpinnerStyle::Triangle,
-                "thinking…",
+                "",
                 theme::current().style(Token::TextDim),
                 theme::current().style(Token::TextDim),
             ),
@@ -77,10 +89,12 @@ impl Thinking {
         Self {
             text,
             live: false,
+            started: Instant::now(),
+            duration: None,
             expanded_flag,
             spinner: Loader::new(
                 SpinnerStyle::Triangle,
-                "thinking…",
+                "",
                 theme::current().style(Token::TextDim),
                 theme::current().style(Token::TextDim),
             ),
@@ -94,8 +108,20 @@ impl Thinking {
         self.lines = None;
     }
 
-    /// Stop live animation; the block collapses to a preview.
+    /// Replace the streamed text (the persisted live block mirrors the
+    /// full buffer each frame). The render clock is untouched — the
+    /// header duration and spinner keep advancing across flushes.
+    pub fn set_text(&mut self, text: String) {
+        if self.text != text {
+            self.text = text;
+            self.lines = None;
+        }
+    }
+
+    /// Stop live animation; the header freezes and the block collapses
+    /// to a preview.
     pub fn finalize(&mut self) {
+        self.duration = Some(self.started.elapsed());
         self.live = false;
         self.lines = None;
     }
@@ -116,7 +142,7 @@ impl Thinking {
 }
 
 impl Component for Thinking {
-    fn render(&mut self, columns: usize) -> Vec<String> {
+    fn render(&mut self, columns: usize) -> Segment {
         let theme = theme::current();
         let expanded = self.expanded_flag.get();
         if let Some((cached_columns, cached_text, cached_live, cached_expanded, lines)) =
@@ -126,17 +152,19 @@ impl Component for Thinking {
             && *cached_live == self.live
             && *cached_expanded == expanded
         {
-            return lines.clone();
+            return Arc::clone(lines);
         }
-        let body_width = columns.saturating_sub(4);
+        let body_width = columns.saturating_sub(6);
         let italic_dim = theme.style(Token::TextDim).italic();
         let mut out = Vec::new();
         if self.live {
             let frame = self.spinner.current_frame();
+            let secs = self.started.elapsed().as_secs();
             out.push(format!(
-                "{} {}",
+                "{} {}{}",
                 theme.paint(Token::TextDim, frame),
-                theme.paint(Token::TextDim, "thinking…")
+                theme.paint(Token::TextStrong, &format!("Thinking for {secs}s…")),
+                theme.paint(Token::TextDim, " (ctrl+o to expand)")
             ));
             // Scrolling tail: the last wrapped lines only. Segments wrap
             // independently, so collecting backwards from the final one
@@ -154,11 +182,22 @@ impl Component for Thinking {
             tail.reverse();
             let start = tail.len().saturating_sub(PREVIEW_LINES);
             for line in &tail[start..] {
-                out.push(format!("  {}", italic_dim.paint(line)));
+                out.push(format!("  {BRANCH} {}", italic_dim.paint(line)));
             }
         } else if self.text.is_empty() {
-            return Vec::new();
+            return Segment::new(Vec::new());
         } else {
+            // Frozen header: the spinner swaps for a static glyph and
+            // the duration stops ticking.
+            let secs = self
+                .duration
+                .unwrap_or_else(|| self.started.elapsed())
+                .as_secs();
+            out.push(format!(
+                "{FLOWER} {}{}",
+                theme.paint(Token::TextStrong, &format!("Thought for {secs}s")),
+                theme.paint(Token::TextDim, " (ctrl+o to expand)")
+            ));
             let mut rows: Vec<String> = Vec::new();
             for (index, segment) in self.text.split('\n').enumerate() {
                 for (row_index, line) in width::wrap_line(segment, body_width)
@@ -166,16 +205,9 @@ impl Component for Thinking {
                     .enumerate()
                 {
                     if index == 0 && row_index == 0 {
-                        rows.push(format!(
-                            "{}{}",
-                            theme.paint(
-                                Token::TextDim,
-                                &format!("{} ", crate::chrome::symbols::TRIANGLE_WAVE)
-                            ),
-                            italic_dim.paint(&line)
-                        ));
+                        rows.push(format!("  {BRANCH} {}", italic_dim.paint(&line)));
                     } else {
-                        rows.push(format!("  {}", italic_dim.paint(&line)));
+                        rows.push(format!("    {}", italic_dim.paint(&line)));
                     }
                 }
             }
@@ -194,8 +226,22 @@ impl Component for Thinking {
             }
         }
         out.push(String::new());
-        self.lines = Some((columns, self.text.clone(), self.live, expanded, out.clone()));
-        out
+        let lines = Arc::new(out);
+        self.lines = Some((
+            columns,
+            self.text.clone(),
+            self.live,
+            expanded,
+            Arc::clone(&lines),
+        ));
+        lines
+    }
+
+    fn invalidate(&mut self) {
+        // Only the cached lines carry baked-in styling: the spinner's
+        // frame is read per render and painted with the live palette,
+        // so rebuilding it here would just reset its animation clock.
+        self.lines = None;
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -215,12 +261,11 @@ mod tests {
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("first line\nsecond line\nthird line");
         let lines = block.render(60);
-        assert!(
-            strip_ansi(&lines[0]).ends_with("thinking…"),
-            "live header: {lines:?}"
-        );
-        assert!(strip_ansi(&lines[1]).contains("second line"));
-        assert!(strip_ansi(&lines[2]).contains("third line"));
+        let header = strip_ansi(&lines[0]);
+        assert!(header.contains("Thinking for"), "live header: {lines:?}");
+        assert!(header.ends_with("(ctrl+o to expand)"), "{lines:?}");
+        assert!(strip_ansi(&lines[1]).starts_with("  └ second line"));
+        assert!(strip_ansi(&lines[2]).starts_with("  └ third line"));
         assert!(!strip_ansi(&lines[1]).contains("first line"), "tail only");
     }
 
@@ -236,14 +281,14 @@ mod tests {
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push(&body);
         let lines = block.render(60);
-        let body_width = 60usize.saturating_sub(4);
+        let body_width = 60usize.saturating_sub(6);
         let full: Vec<String> = body
             .split('\n')
             .flat_map(|segment| width::wrap_line(segment, body_width))
             .collect();
         let expected = &full[full.len() - PREVIEW_LINES..];
         for (line, want) in lines[1..1 + expected.len()].iter().zip(expected) {
-            assert_eq!(strip_ansi(line), format!("  {want}"), "{lines:?}");
+            assert_eq!(strip_ansi(line), format!("  └ {want}"), "{lines:?}");
         }
         assert_eq!(
             lines.len(),
@@ -259,10 +304,17 @@ mod tests {
         block.push("one\ntwo\nthree");
         block.finalize();
         let lines = block.render(60);
-        assert_eq!(lines.len(), 4, "bullet row + 2 preview + hint: {lines:?}");
-        assert!(strip_ansi(&lines[0]).starts_with("△ one"));
+        assert_eq!(
+            lines.len(),
+            5,
+            "header + 2 preview + hint + spacer: {lines:?}"
+        );
+        let header = strip_ansi(&lines[0]);
+        assert!(header.contains("Thought for"), "{lines:?}");
+        assert!(header.contains("(ctrl+o to expand)"), "{lines:?}");
+        assert!(strip_ansi(&lines[1]).starts_with("  └ one"), "{lines:?}");
         assert!(
-            strip_ansi(&lines[2]).contains("… (1 more lines, ctrl+o to expand)"),
+            strip_ansi(&lines[3]).contains("… (1 more lines, ctrl+o to expand)"),
             "{lines:?}"
         );
     }
@@ -276,7 +328,7 @@ mod tests {
         block.finalize();
         flag.toggle();
         let lines = block.render(60);
-        assert_eq!(lines.len(), 4, "3 rows + spacer: {lines:?}");
-        assert!(strip_ansi(&lines[2]).contains("three"));
+        assert_eq!(lines.len(), 5, "header + 3 rows + spacer: {lines:?}");
+        assert!(strip_ansi(&lines[3]).contains("three"));
     }
 }

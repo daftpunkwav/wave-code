@@ -349,9 +349,13 @@ impl Markdown {
                 },
                 Event::End(tag_end) => match tag_end {
                     TagEnd::Heading(_) => {
+                        // Take the level unconditionally: an empty heading
+                        // (`##` alone) emits no text, and a level left
+                        // parked here would push every later span onto
+                        // the raw unstyled path.
+                        let level = heading_level.take();
                         if !inline.is_empty() {
                             ensure_blank(&mut out);
-                            let level = heading_level;
                             let text = std::mem::take(&mut inline);
                             let style = self.style.heading.bold();
                             if let Some(HeadingLevel::H1) = level {
@@ -364,7 +368,6 @@ impl Markdown {
                             } else {
                                 out.push(style.paint(&text));
                             }
-                            heading_level = None;
                         }
                     }
                     TagEnd::Paragraph => {
@@ -1401,6 +1404,32 @@ mod tests {
             lines[0]
         );
         assert!(lines[0].contains("cargo test"), "{:?}", lines[0]);
+    }
+
+    /// An empty heading (`##` alone) must not leave the heading state
+    /// stuck: later text and code spans go back to their normal styled
+    /// rendering.
+    #[test]
+    fn empty_heading_releases_the_raw_text_path() {
+        let style = MarkdownStyle {
+            text: Style::new().fg(Color::rgb(1, 2, 3)),
+            code: Style::new().fg(Color::rgb(9, 9, 9)),
+            ..MarkdownStyle::default()
+        };
+        let mut md = Markdown::new(style, Box::new(PlainHighlighter));
+        let lines = md.render("##\n\nafter `code` tail", 60);
+        let body = lines
+            .iter()
+            .find(|l| strip_ansi(l).contains("after"))
+            .expect("body line");
+        assert!(
+            body.contains("\x1b[38;2;1;2;3m"),
+            "prose styled again: {body:?}"
+        );
+        assert!(
+            body.contains("\x1b[38;2;9;9;9m"),
+            "code span styled again: {body:?}"
+        );
     }
 
     // --- CJK-adjacent emphasis (regression locks) ---

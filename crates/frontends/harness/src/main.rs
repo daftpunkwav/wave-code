@@ -1541,10 +1541,22 @@ fn load_images(paths: &[std::path::PathBuf]) -> anyhow::Result<Vec<wavecode_wire
 fn load_config_opt(
     path: Option<&std::path::Path>,
 ) -> Result<wavecode_config::Config, wavecode_config::ConfigError> {
-    match path {
+    let mut config = match path {
         Some(path) => wavecode_config::Config::load_from(path),
         None => wavecode_config::Config::load(),
+    }?;
+    // The model catalog (`~/.wavecode/models.json`) merges on top: its
+    // models become `[models]` entries and synthesized
+    // `catalog:<provider>` providers (config.toml providers win on id
+    // collisions). Catalog load failures degrade to an empty catalog —
+    // config.toml models keep the session usable.
+    if let Some(home) = wavecode_config::home_dir() {
+        match wavecode_config::ModelCatalog::load(&home) {
+            Ok(catalog) => catalog.merge_into(&mut config),
+            Err(e) => eprintln!("model catalog ignored: {e:?}"),
+        }
     }
+    Ok(config)
 }
 
 /// Resolve the config's `secondary_model` alias into the

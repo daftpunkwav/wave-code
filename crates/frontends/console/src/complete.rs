@@ -125,7 +125,12 @@ impl ConsoleProvider {
                 ("medium", ""),
                 ("high", ""),
             ],
-            "theme" => &[("light", ""), ("dark", ""), ("auto", "follow the terminal")],
+            "theme" => &[
+                ("light", ""),
+                ("dark", ""),
+                ("deepwave", "the previous teal identity"),
+                ("auto", "follow the terminal"),
+            ],
             "permissions" => &[("plan", ""), ("auto", ""), ("wave", "")],
             _ => &[],
         };

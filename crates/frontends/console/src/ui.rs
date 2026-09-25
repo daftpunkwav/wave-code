@@ -943,6 +943,15 @@ impl ConsoleUi {
             } => {
                 self.push_status(&format!("error: {message}"), true);
                 if !*recoverable {
+                    // The turn is over even if no TurnCompleted follows
+                    // (a producer dying between the two, a replayed
+                    // stream): settle the live blocks like TurnCompleted
+                    // does, or the spinner and the draft linger and the
+                    // stale buffers bleed into the next turn's deltas.
+                    self.finalize_thinking();
+                    self.flush_assistant_draft();
+                    self.streaming.clear();
+                    self.streaming_flushed_assistant = false;
                     self.state.phase = StreamingPhase::Idle;
                     // Same reasoning as TurnCompleted: the gates are
                     // gone, so a parked modal must not linger.
@@ -3649,6 +3658,56 @@ mod tests {
             text: "answer".to_string(),
         });
         assert!(ui.streaming_thinking.is_none(), "block retired");
+    }
+
+    /// A fatal error ends the turn even when no TurnCompleted follows
+    /// behind it: the live blocks settle into the transcript and the
+    /// buffers drain, so no spinner spins forever and stale text cannot
+    /// bleed into the next turn's deltas.
+    #[test]
+    fn fatal_error_settles_the_streaming_blocks() {
+        let mut ui = ui();
+        ui.handle_wire_event(&EventMsg::AgentThinkingDelta {
+            text: "deep thought".to_string(),
+        });
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "partial answer".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        assert!(ui.streaming_draft.is_some(), "draft live while streaming");
+        ui.handle_wire_event(&EventMsg::Error {
+            message: "connection lost".to_string(),
+            recoverable: false,
+            code: None,
+        });
+        // Like TurnCompleted, the buffers drain at once; the draft
+        // instance retires on the next frame.
+        let _ = ui.frame(80, 24);
+        assert!(
+            ui.streaming_draft.is_none(),
+            "draft retired on the fatal error"
+        );
+        assert!(ui.streaming.is_empty(), "buffers drained");
+        assert!(!ui.state.busy(), "phase back to idle");
+        // The partial answer survives next to the error status line.
+        let frame = ui.frame(80, 24);
+        let joined: String = frame
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("partial answer"),
+            "partial text kept: {joined}"
+        );
+        assert!(joined.contains("error: connection lost"), "{joined}");
+        // The next turn starts from empty buffers.
+        ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+            text: "next".to_string(),
+        });
+        let _ = ui.frame(80, 24);
+        let draft = ui.streaming_draft.as_ref().expect("fresh draft");
+        assert_eq!(draft.text(), "next", "no stale text");
     }
 
     #[test]

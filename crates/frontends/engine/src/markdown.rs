@@ -563,6 +563,25 @@ impl Markdown {
     }
 }
 
+/// Advance the fenced-code state over one line; returns true when the
+/// line sits outside a fenced block (the closing fence line itself
+/// counts as outside — every gated transform is a no-op on a bare
+/// fence marker). `fence` carries the opening marker between lines.
+/// The single shared skeleton behind the preprocessing passes
+/// ([`break_before_bold_lines`], [`highlight_to_bold`],
+/// [`script_spans_to_unicode`], [`html_fixups`]).
+fn step_fence(fence: &mut Option<char>, line: &str) -> bool {
+    let trimmed = line.trim_start();
+    match *fence {
+        Some(open) if trimmed.starts_with(open) => *fence = None,
+        Some(_) => {}
+        None if trimmed.starts_with("```") => *fence = Some('`'),
+        None if trimmed.starts_with("~~~") => *fence = Some('~'),
+        None => {}
+    }
+    fence.is_none()
+}
+
 /// Insert a paragraph break before bold-led lines: model output uses a
 /// standalone `**Heading**` line as a pseudo-heading, but CommonMark
 /// folds it into the previous bullet/paragraph as a lazy continuation
@@ -574,20 +593,13 @@ fn break_before_bold_lines(text: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(text);
     }
     let mut out: Vec<&str> = Vec::new();
-    // Track fenced code by marker character: inside a fence only a run
-    // of the same marker closes it, so `~~~` blocks (and backtick runs
-    // inside them) never let a bold-led code line gain a phantom break.
     let mut fence: Option<char> = None;
     for line in text.split('\n') {
-        let trimmed = line.trim_start();
-        match fence {
-            Some(open) if trimmed.starts_with(open) => fence = None,
-            Some(_) => {}
-            None if trimmed.starts_with("```") => fence = Some('`'),
-            None if trimmed.starts_with("~~~") => fence = Some('~'),
-            None => {}
-        }
-        if fence.is_none()
+        // Track fenced code by marker character: inside a fence only a
+        // run of the same marker closes it, so `~~~` blocks (and backtick
+        // runs inside them) never let a bold-led code line gain a
+        // phantom break.
+        if step_fence(&mut fence, line)
             && is_bold_led(line)
             && out.last().is_some_and(|prev| !prev.trim().is_empty())
         {
@@ -611,15 +623,7 @@ fn highlight_to_bold(text: &str) -> std::borrow::Cow<'_, str> {
     let lines: Vec<&str> = text.split('\n').collect();
     let last = lines.len().saturating_sub(1);
     for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        match fence {
-            Some(open) if trimmed.starts_with(open) => fence = None,
-            Some(_) => {}
-            None if trimmed.starts_with("```") => fence = Some('`'),
-            None if trimmed.starts_with("~~~") => fence = Some('~'),
-            None => {}
-        }
-        if fence.is_none() {
+        if step_fence(&mut fence, line) {
             out.push_str(&highlight_line(line));
         } else {
             out.push_str(line);
@@ -670,15 +674,7 @@ fn script_spans_to_unicode(text: &str) -> std::borrow::Cow<'_, str> {
     let lines: Vec<&str> = text.split('\n').collect();
     let last = lines.len().saturating_sub(1);
     for (index, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        match fence {
-            Some(open) if trimmed.starts_with(open) => fence = None,
-            Some(_) => {}
-            None if trimmed.starts_with("```") => fence = Some('`'),
-            None if trimmed.starts_with("~~~") => fence = Some('~'),
-            None => {}
-        }
-        if fence.is_none() {
+        if step_fence(&mut fence, line) {
             out.push_str(&script_line(line));
         } else {
             out.push_str(line);
@@ -761,16 +757,8 @@ fn html_fixups(text: &str) -> std::borrow::Cow<'_, str> {
     let mut fence: Option<char> = None;
     let mut out: Vec<String> = Vec::with_capacity(text.lines().count());
     for line in text.split('\n') {
-        let trimmed = line.trim_start();
-        match fence {
-            Some(open) if trimmed.starts_with(open) => fence = None,
-            Some(_) => {}
-            None if trimmed.starts_with("```") => fence = Some('`'),
-            None if trimmed.starts_with("~~~") => fence = Some('~'),
-            None => {}
-        }
-        if fence.is_none() {
-            let t = trimmed;
+        if step_fence(&mut fence, line) {
+            let t = line.trim_start();
             if t == "<details>" || t == "</details>" {
                 continue; // drop the container rows entirely
             }

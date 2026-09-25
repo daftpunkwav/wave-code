@@ -133,7 +133,7 @@ Legacy-named `wavecode-*` crates. Bootstrap is their default consumer; the recor
 | --- | --- |
 | `transport-mcp` | JSON-RPC framing over child-process stdio pipes |
 | `harness-cli` | The `wavecode` binary: exec, REPL, resume; exit codes follow turn outcomes |
-| `tui-engine` | Inline terminal rendering engine: components, editor, markdown, diff screen |
+| `tui-engine` | Inline terminal rendering engine: components, editor, markdown (math, mermaid diagrams, fenced-block seam), diff screen |
 | `console-ui` | Themed console frontend over the wire + actor (transcript, dialogs, slash commands) |
 
 ### Wiring status

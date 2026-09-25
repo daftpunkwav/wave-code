@@ -12,21 +12,23 @@ The interactive console is two crates over the wire + actor seam:
   `operations-actor` (locked by `dependency_matrix_locked`), and never
   names capabilities or the composition root.
 
-## Wave identity
+## Glyph identity
 
-The glyph family maps one-to-one onto activity categories; the same
-glyph always means the same kind of surface. User input is the one
-non-wave mark (a keyed-in chevron); the machine surfaces trace waves:
+The glyph family maps one-to-one onto activity categories. User input
+is the one non-wave mark (a keyed-in chevron); animated work rides the
+loader waveforms:
 
-| Wave | Category | Surfaces |
+| Glyph | Category | Surfaces |
 | --- | --- | --- |
 | chevron `❯` | user input (keyed-in strokes) | editor prompt, user bullet, queue pointer |
-| sine `∿` | assistant speech | assistant bullet, composing spinner |
-| triangle `△` | thinking | thinking spinner + bullet |
-| saw `◿` | machine work | tool/shell running dot, waiting/tool spinner |
+| triangle sweep `▁▃▅▇▅▃` | thinking (live) | the streaming thinking header spinner |
+| saw ramp `▁▃▅▇` | machine work | tool/shell running dots, the compaction card pulse |
+| flower `✻` | thinking (finalized) | the frozen `Thought for Ns` header |
 
-Result markers (`●` done, `✗` failed, `○` pending) stay neutral — they
-report outcome, not activity kind.
+Result markers (`●` done, `✗` failed, `○` pending, `✓` checked) stay
+neutral — they report outcome, not activity kind. The assistant message
+bullet is the neutral `●` dot: it blinks on a fixed cadence while the
+draft streams and settles steady once the message is complete.
 
 ## Frame model
 
@@ -175,7 +177,10 @@ receivers remain compatible.
   type-to-search, ↑/↓ navigation, a `← current` marker, and an `N more`
   collapse. Entries come from the config `[models]` table
   (`[models.<alias>]` with `provider`/`model`/optional
-  `reasoning_effort`) plus the configured default model. Enter saves the
+  `reasoning_effort`) plus the model catalog `~/.wavecode/models.json`
+  (its models merge into `[models]` with synthesized `catalog:<provider>`
+  providers; a config.toml provider with the same id wins) and the
+  configured default model. Enter saves the
   choice as the default (`default_model`/`default_provider` in
   `~/.wavecode/console-settings.json`; CLI `--model` still wins;
   a cross-provider default applies on the next launch — live switches
@@ -187,6 +192,18 @@ receivers remain compatible.
   `SetThinking` live (same-provider picks only, so a picked model's
   effort never leaks onto the model still running). `/effort <level>`
   sets the level directly; `/model <name>` keeps direct name switching.
+  The catalog itself is edited through `/model` subcommands:
+  `/model list` prints every spec one status line each, `/model add
+  <alias> <kind> <provider> <base_url> <model> [context] [max_output]`
+  inserts one (the command never takes a credential; `api_key_env` or
+  an inline `api_key` can be set by editing the file, which stays
+  owner-only on Unix),
+  `/model set <alias> <context|output|thinking|input> <value>` patches
+  one field, and `/model remove <alias>` drops it. The catalog is
+  optional: a missing file is an empty catalog, while a malformed one
+  reports and leaves the subcommand cancelled (plain `/model <name>`
+  switching never touches the file, so a broken catalog cannot take
+  live switching down too).
 - `/permissions` opens a mode picker (plan/auto/wave with
   descriptions); `/plan`, `/auto`, `/wave` apply directly.
 - `/help` opens a scrollable panel (keybindings plus every command with
@@ -291,14 +308,14 @@ receivers remain compatible.
   reports the state). A `#[ignore]` snapshot test (`welcome_snapshot`)
   prints it for eyeballing.
 - Every semantic glyph comes from `chrome/symbols.rs` (single source):
-  `❯` chevron for user input, `∿` sine for assistant speech, `△`
-  triangle for thinking, `●`/`✓`/`○`/`✗` neutral results, `⎇` branch.
-  Motion is a single-cell pulse instead of moving blocks: the editor
-  prompt pulses `❯`↔`›` every 400 ms while a turn runs (idle
-  is static; shell mode keeps `!`), the streaming assistant draft
-  breathes through the sine amplitude frames before settling on `∿`,
-  a running tool or shell card pulses the saw amplitude, queued
-  messages flip the chevron pulse.
+  `❯` chevron for user input, `●`/`✓`/`○`/`✗` neutral results, `⎇`
+  branch. Motion stays single-cell: the editor prompt pulses `❯`↔`›`
+  every 400 ms while a turn runs (idle is static; shell mode keeps
+  `!`), the streaming assistant draft's `●` bullet blinks on a fixed
+  cadence before settling steady, a running tool or shell card pulses
+  the saw ramp frames, queued messages flip the chevron pulse, and the
+  live thinking header spins the triangle sweep before freezing into
+  `✻ Thought for Ns`.
 
 ## Input sanitizing
 
@@ -320,9 +337,11 @@ is the established seam (the actor already wraps the runner).
 ## Theming
 
 The default dark palette is the **synthwave** identity: neon cyan as
-the primary accent, pink for user input, green success, salmon
+the primary accent, amber for user input, green success, salmon
 warning, red-pink error, on a deep purple-dark ground (see
-`theme/colors.rs`). 20 semantic tokens, dark/light palettes (hex values
+`theme/colors.rs`). Line and input chrome rides a desaturated neutral
+gray (no accent hue), and the user-input row sits on a subtle lighter
+band. 20 semantic tokens, dark/light palettes (hex values
 locked by test),
 `light|dark|deepwave|auto` resolution (OSC 11 probe on Unix — a bounded `poll`,
 never a blocking reader thread, since byte-reads on the console input
@@ -371,10 +390,36 @@ Fenced code blocks render as a dim rounded frame — `╭─ lang ───` on
 top (language tag only when the fence carries one, whitelisted to
 language-name characters so fence info can never inject escape
 sequences), a dim `│ ` bar before each highlighted line, `╰────` at
-the bottom. The literal ``` markers never render. The frame width
-follows the terminal (capped at 80 columns); the highlighted text
-itself is not re-wrapped in the fence style, since the inner ANSI
-resets would cancel it.
+the bottom. The literal ``` markers never render. The frame hugs its
+content (plus the tag) and caps at 80 columns on wide terminals; the
+highlighted text itself is not re-wrapped in the fence style, since
+the inner ANSI resets would cancel it.
+
+### Fenced-block renderers and inline fixups
+
+Fences consult pluggable renderers before the syntax highlighter (the
+`FenceRenderer` seam; applications register more with
+`Markdown::with_fence`):
+
+- ```mermaid fences render as box-drawing diagrams while the toggle is
+  on (Ctrl+M in the console; toggling again returns the source view).
+  Supported kinds: `graph`/`flowchart` (top-to-bottom; node shapes
+  collapse onto boxes), `stateDiagram(-v2)` through a flowchart
+  adapter, `sequenceDiagram`, `classDiagram`, `gantt`, and `pie`.
+  Anything unsupported, or wider than the columns budget, returns
+  nothing and the fence falls back to the plain source view.
+- ```diff / ```patch fences ride dedicated line styles: additions
+  green, removals red, file headers and `@@` hunks in the metadata
+  tone, context plain.
+
+Inline preprocessing (all fenced-code aware, applied before parsing):
+`$…$` / `$$…$$` math converts to unicode (`E = mc²`; block math lays
+matrix environments out over aligned lines), `==highlight==` folds
+onto bold, `^sup^` / `~sub~` map onto superscript/subscript code
+points when every glyph in the span has one, `<details>`/`</details>`
+rows vanish while `<summary>X</summary>` becomes a bold `▸ X` marker
+row, and `<kbd>C</kbd>` becomes inline code. Spans that cannot map —
+or tags outside the handled set — pass through unchanged.
 
 ### Reference study (codex, opencode, claude-code, kimi-code)
 

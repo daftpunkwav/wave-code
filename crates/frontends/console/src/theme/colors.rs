@@ -1,7 +1,7 @@
 //! Semantic color tokens and the palettes.
 //!
-//! The default dark palette is the **synthwave** identity: neon pink,
-//! cyan, and purple on deep purple-dark, retro-80s. The previous
+//! The default dark palette is the **synthwave** identity: neon cyan,
+//! periwinkle, and amber on deep purple-dark, retro-80s. The previous
 //! identity, **deepwave / sonar**, stays selectable. Both pair with a
 //! syntax theme (see `syntax.rs`): synthwave drives the bundled
 //! SynthWave '84 tmTheme, deepwave rides base16-ocean.dark, and the

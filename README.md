@@ -70,6 +70,13 @@ provider = "your-provider"
 model = "your-model-fast"
 # reasoning_effort = "low"   # OpenAI-compatible providers only
 
+# The same picker also reads `~/.wavecode/models.json`, a standalone model
+# catalog holding full provider specs (endpoint, API kind, context/output
+# limits, thinking variants, modalities). Edit it in the console with
+# `/model list` / `add` / `set` / `remove`, or by hand; its models merge
+# into `[models]` at startup, and a config.toml provider with the same id
+# wins over a catalog one.
+
 # Optional: cheap model for routine side sessions. `/btw` answers sample
 # through this [models] entry instead of the primary model; an explicit
 # /model choice in the session still wins, and a dangling alias degrades
@@ -122,7 +129,9 @@ model = "your-model-fast"
   status rows, `/btw` side questions (read-only, answers stream into a panel
   without touching the conversation), and dialogs for `/model` (provider tabs,
   search, session-only Alt+S, a thinking-level row on OpenAI-compatible
-  providers), `/permissions`, `/theme` (built-ins plus custom themes), and
+  providers, plus `/model list|add|set|remove` editing the
+  `~/.wavecode/models.json` catalog), `/permissions`, `/theme` (built-ins
+  plus custom themes), and
   `/help` (scrollable keybinding + command reference).
   Session commands: `/sessions` (alias `/resume`) resumes a recorded session
   in place, `/fork` snapshots a resumable copy, `/title` renames, `/new`
@@ -240,7 +249,7 @@ backend is live and how far it reaches.
 
 ## Themes
 
-The default dark look is the **synthwave** identity (neon cyan primary, pink
+The default dark look is the **synthwave** identity (neon cyan primary, amber
 user input, deep purple-dark ground); the previous teal **deepwave** identity
 stays selectable. One selection colors both the interface chrome and code
 blocks: synthwave pairs with the bundled SynthWave '84 syntax theme, deepwave

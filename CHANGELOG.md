@@ -22,7 +22,16 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
 - Console UI: wave-themed rendering, syntax highlighting, window
   title and tab progress, kill-ring/yank-pop, paste-burst protection,
   external status-line command (Claude Code contract), custom JSON
-  themes, `/undo` rewind picker, `/editor` (Ctrl+G), `/reload`.
+  themes, `/undo` rewind picker, `/editor` (Ctrl+G), `/reload`,
+  `/btw` side questions, and a model catalog (`~/.wavecode/models.json`)
+  edited through `/model list|add|set|remove` beside the picker.
+- Markdown rendering: fenced mermaid blocks draw box-drawing diagrams
+  (`graph`/`flowchart`, `stateDiagram`, `sequenceDiagram`,
+  `classDiagram`, `gantt`, `pie`; Ctrl+M returns the source view),
+  ```diff fences color additions/removals/hunks, `$…$` math converts
+  to unicode, `==highlight==` folds onto bold, `^sup^`/`~sub~` map to
+  superscript/subscript glyphs, and `<details>`/`<summary>`/`<kbd>`
+  reduce to plain terminal rows.
 - Theming: `/theme light|dark|deepwave|auto` plus custom theme files
   with per-token color overrides and a `syntax_theme` alias; one
   selection colors both the chrome and code blocks (the bundled
@@ -41,8 +50,11 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
 
 ### Changed
 - The default dark theme is the synthwave identity (neon cyan
-  primary, pink user input, deep purple-dark ground); the previous
+  primary, amber user input on a subtle highlight band, a desaturated
+  neutral gray for line chrome, deep purple-dark ground); the previous
   deepwave identity stays selectable via `/theme deepwave`.
+- Fenced code frames hug their content instead of spanning the
+  terminal (still capped at 80 columns on wide terminals).
 - `max_tool_rounds` default raised from 32 to 256, and goal
   continuations per turn from 5 to 8, for super-long-horizon turns.
 - Warnings and loop notices render in the theme's warning color

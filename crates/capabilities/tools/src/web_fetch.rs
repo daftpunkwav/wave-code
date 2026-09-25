@@ -258,8 +258,9 @@ impl Tool for WebFetch {
          Redirects are followed (up to 5 hops); other schemes (file, ftp, \
          data, ...) are rejected. Use max_bytes to bound the body (default \
          262144, clamped to max 1048576); oversize bodies are cut with a \
-         [truncated] marker. Use timeout_ms to bound the whole fetch \
-         (default 30000 ms, clamped to max 300000 ms)."
+         [truncated] marker. Use timeout_ms to bound each request \
+         (default 30000 ms, clamped to max 300000 ms); a redirect chain \
+         can issue up to 6 requests."
     }
 
     fn input_schema(&self) -> Value {
@@ -276,7 +277,7 @@ impl Tool for WebFetch {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (default 30000, clamped to max 300000)"
+                    "description": "Per-request timeout in milliseconds (default 30000, clamped to max 300000)"
                 },
                 "raw": {
                     "type": "boolean",

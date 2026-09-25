@@ -1,21 +1,33 @@
 //! The component model: retained objects that render to ANSI lines.
 //!
-//! A component owns its state and produces one ANSI-styled string per
-//! terminal line for a given width (`render(width) -> Vec<String>`),
-//! mirroring the immediate-retained hybrid of the reference design: the
-//! screen layer diffs those line arrays; components may cache their
-//! output behind [`Component::invalidate`].
+//! A component owns its state and produces the ANSI-styled strings for
+//! its terminal rows at a given width, mirroring the immediate-retained
+//! hybrid of the reference design: the screen layer diffs those line
+//! arrays; components may cache their output behind
+//! [`Component::invalidate`].
+//!
+//! Render output is a [`Segment`] — one reference-counted line array.
+//! Cache hits hand back the same allocation (a refcount bump) instead
+//! of deep-copying every line per frame; the screen layer keeps the
+//! previous frame as segments too, so unchanged segments diff by
+//! pointer equality.
 
 use crate::keys::KeyEvent;
+use std::sync::Arc;
+
+/// One component's rendered lines, shared by reference across frames.
+pub type Segment = Arc<Vec<String>>;
 
 /// A renderable piece of the interface.
 pub trait Component {
     /// Produce the lines of this component at `width`. One string per
     /// terminal row; callers diff these arrays between frames.
-    fn render(&mut self, width: usize) -> Vec<String>;
+    fn render(&mut self, width: usize) -> Segment;
 
-    /// Drop any cached render state; the next render recomputes.
-    fn invalidate(&self) {}
+    /// Drop any cached render state; the next render recomputes. Theme
+    /// and render-mode switches call this on every live component so
+    /// cached lines never carry a stale palette or mode.
+    fn invalidate(&mut self) {}
 
     /// Typed access for callers that store mixed children and must
     /// update specific component types in place (e.g. tool cards).
@@ -84,16 +96,19 @@ impl Container {
 }
 
 impl Component for Container {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: usize) -> Segment {
+        // Concatenation materializes one array per frame; containers
+        // with cacheable children should sit behind a caching parent
+        // instead (the transcript does).
         let mut lines = Vec::new();
         for child in &mut self.children {
-            lines.extend(child.render(width));
+            lines.extend(child.render(width).iter().cloned());
         }
-        lines
+        Arc::new(lines)
     }
 
-    fn invalidate(&self) {
-        for child in &self.children {
+    fn invalidate(&mut self) {
+        for child in &mut self.children {
             child.invalidate();
         }
     }
@@ -113,7 +128,10 @@ mod tests {
         let mut container = Container::new();
         container.push(Box::new(Text::new("a")));
         container.push(Box::new(Text::new("b")));
-        assert_eq!(container.render(80), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            *container.render(80),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

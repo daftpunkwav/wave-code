@@ -81,12 +81,27 @@ impl Color {
         self.fg_params_for_depth(color_depth())
     }
 
+    /// Background SGR parameters at the installed [`ColorDepth`]:
+    /// `48;2;r;g;b` (truecolor), `48;5;idx` (256), or `4n`/`10n` (16).
+    pub fn bg_params(&self) -> String {
+        self.bg_params_for_depth(color_depth())
+    }
+
     /// Foreground SGR parameters under an explicit depth.
     pub fn fg_params_for_depth(&self, depth: ColorDepth) -> String {
         match depth {
             ColorDepth::TrueColor => format!("38;2;{};{};{}", self.r, self.g, self.b),
             ColorDepth::Color256 => format!("38;5;{}", self.nearest_xterm256()),
             ColorDepth::Ansi16 => ansi16_fg_params(self.nearest_ansi16()),
+        }
+    }
+
+    /// Background SGR parameters under an explicit depth.
+    pub fn bg_params_for_depth(&self, depth: ColorDepth) -> String {
+        match depth {
+            ColorDepth::TrueColor => format!("48;2;{};{};{}", self.r, self.g, self.b),
+            ColorDepth::Color256 => format!("48;5;{}", self.nearest_xterm256()),
+            ColorDepth::Ansi16 => ansi16_bg_params(self.nearest_ansi16()),
         }
     }
 
@@ -164,6 +179,15 @@ fn ansi16_fg_params(index: u8) -> String {
     }
 }
 
+/// Background SGR parameters for an ANSI-16 index (0-15).
+fn ansi16_bg_params(index: u8) -> String {
+    if index < 8 {
+        format!("4{index}")
+    } else {
+        format!("10{}", index - 8)
+    }
+}
+
 /// SGR reset ending every styled span.
 pub const RESET: &str = "\x1b[0m";
 
@@ -172,6 +196,8 @@ pub const RESET: &str = "\x1b[0m";
 pub struct Style {
     /// Foreground color; `None` keeps the terminal default.
     pub fg: Option<Color>,
+    /// Background color; `None` keeps the terminal default.
+    pub bg: Option<Color>,
     /// Bold or increased-intensity text.
     pub bold: bool,
     /// Dim or decreased-intensity text.
@@ -191,6 +217,7 @@ impl Style {
     pub const fn new() -> Self {
         Self {
             fg: None,
+            bg: None,
             bold: false,
             dim: false,
             italic: false,
@@ -203,6 +230,12 @@ impl Style {
     /// Set the foreground color.
     pub const fn fg(mut self, color: Color) -> Self {
         self.fg = Some(color);
+        self
+    }
+
+    /// Set the background color.
+    pub const fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
         self
     }
 
@@ -242,6 +275,9 @@ impl Style {
         let mut params: Vec<String> = Vec::new();
         if let Some(fg) = self.fg {
             params.push(fg.fg_params());
+        }
+        if let Some(bg) = self.bg {
+            params.push(bg.bg_params());
         }
         if self.bold {
             params.push("1".to_string());
@@ -356,7 +392,7 @@ mod tests {
     fn ansi16_mapping_keeps_synthwave_hue_families() {
         let cases = [
             ("#36F9F6", 14), // primary/code_span cyan -> bright cyan
-            ("#FF7EDB", 13), // role_user pink -> bright magenta
+            ("#FFB86C", 11), // role_user amber -> bright yellow
             ("#B6B1FF", 12), // accent periwinkle -> bright blue
             ("#B084EB", 13), // shell_mode purple -> bright magenta
             ("#72F1B8", 10), // success green -> bright green

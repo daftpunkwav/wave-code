@@ -97,13 +97,13 @@ impl Loader {
 }
 
 impl Component for Loader {
-    fn render(&mut self, _width: usize) -> Vec<String> {
+    fn render(&mut self, _width: usize) -> std::sync::Arc<Vec<String>> {
         let frame = self.current_frame();
-        vec![format!(
+        std::sync::Arc::new(vec![format!(
             "{} {}",
             self.frame_style.paint(frame),
             self.label_style.paint(&self.label)
-        )]
+        )])
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

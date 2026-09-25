@@ -122,9 +122,11 @@ impl SelectList {
 }
 
 impl Component for SelectList {
-    fn render(&mut self, width_budget: usize) -> Vec<String> {
+    fn render(&mut self, width_budget: usize) -> std::sync::Arc<Vec<String>> {
         if self.items.is_empty() {
-            return vec![self.style.description.paint("  No matching commands")];
+            return std::sync::Arc::new(vec![
+                self.style.description.paint("  No matching commands"),
+            ]);
         }
         let primary_column = self.primary_column();
         let total = self.items.len();
@@ -165,7 +167,7 @@ impl Component for SelectList {
                     .paint(&format!("  ({}/{total})", self.selected + 1)),
             );
         }
-        out
+        std::sync::Arc::new(out)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

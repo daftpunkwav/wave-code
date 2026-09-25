@@ -14,6 +14,8 @@
 //! through as [`EditorAction::Passthrough`] when the cursor sits on the
 //! first/last visual row, so the host can bind history recall there.
 
+use std::sync::Arc;
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -45,7 +47,7 @@ struct YankRecord {
 pub struct EditorStyle {
     /// Border color (switched to accent colors in plan/shell modes).
     pub border: Style,
-    /// The prompt glyph (a full square-wave cycle `⊓⊔`, or `!` in
+    /// The prompt glyph (the keyed-in chevron `❯`, or `!` in
     /// shell mode).
     pub prompt: Style,
     /// Bold highlight for a leading `/command` token.
@@ -160,7 +162,7 @@ impl Editor {
             goal_col: None,
             last_body_width: 40,
             style,
-            prompt: "⊓⊔".to_string(),
+            prompt: "❯".to_string(),
             label: None,
             argument_hint: None,
             history: History::default(),
@@ -1060,11 +1062,14 @@ impl Editor {
         if !self.popup_open() {
             return;
         }
-        let mut popup_rows = self.popup.list_mut().render(total_width.saturating_sub(2));
-        for row in popup_rows.iter_mut() {
-            *row = format!("  {row}");
+        // The popup re-renders per frame and the rows are transformed
+        // (indented) here, so the shared array is consumed by value.
+        let popup_rows =
+            Arc::try_unwrap(self.popup.list_mut().render(total_width.saturating_sub(2)))
+                .unwrap_or_else(|rows| rows.as_ref().clone());
+        for row in &popup_rows {
+            out.push(format!("  {row}"));
         }
-        out.extend(popup_rows);
     }
 }
 
@@ -1259,7 +1264,7 @@ mod tests {
         let body = &rows[1];
         assert!(body.contains("\x1b[1m"), "bold slash token: {body:?}");
         assert!(!body.contains("\x1b[4m"), "no shell style: {body:?}");
-        assert!(plain_row(&rows, 1).contains("⊓⊔ /help now"), "{body:?}");
+        assert!(plain_row(&rows, 1).contains("❯ /help now"), "{body:?}");
     }
 
     #[test]
@@ -1270,7 +1275,7 @@ mod tests {
         let body = &rows[1];
         assert!(body.contains("\x1b[4m"), "underlined shell token: {body:?}");
         assert!(!body.contains("\x1b[1m"), "no slash style: {body:?}");
-        assert!(plain_row(&rows, 1).contains("⊓⊔ !ls -la"), "{body:?}");
+        assert!(plain_row(&rows, 1).contains("❯ !ls -la"), "{body:?}");
     }
 
     #[test]
@@ -1556,7 +1561,7 @@ mod tests {
         assert_eq!(strip_ansi(&rows[0]), "╭──────────────────╮");
         assert_eq!(
             strip_ansi(&rows[1]),
-            "│ ⊓⊔ hi            │",
+            "│ ❯ hi             │",
             "cursor at end: {:?}",
             rows[1]
         );
@@ -1582,9 +1587,9 @@ mod tests {
         let mut editor = editor();
         type_string(&mut editor, "aaaaaaaaaaaaaaaaaaaaaa"); // 22 chars
         let rows = editor.render_box(20, 24);
-        // Body budget: 20 - 2 - 4 - 2 = 12 → two visual rows + borders.
+        // Body budget: 20 - 2 - 2 - 2 = 14 → two visual rows + borders.
         assert_eq!(rows.len(), 4, "wrapped into 2 body rows: {rows:?}");
-        assert!(strip_ansi(&rows[1]).starts_with("│ ⊓⊔ aaaaaaaaa"));
+        assert!(strip_ansi(&rows[1]).starts_with("│ ❯ aaaaaaaaa"));
     }
 
     #[test]

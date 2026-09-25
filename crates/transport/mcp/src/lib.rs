@@ -24,6 +24,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 /// Streamable-HTTP transport (JSON-RPC over POST with SSE responses).
 pub mod http;
 
+/// HTTP stub for this crate's tests and downstream test suites;
+/// compiled under `test-support` (or this crate's own tests), never in
+/// production builds.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 /// Next request id seed; ids increase monotonically per transport.
 pub const FIRST_REQUEST_ID: u64 = 1;
 

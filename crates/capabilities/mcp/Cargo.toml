@@ -17,3 +17,8 @@ futures.workspace = true
 transport-mcp = { path = "../../transport/mcp" }
 wavecode-config = { path = "../../foundation/config" }
 wavecode-tools = { path = "../tools" }
+
+[dev-dependencies]
+# Test-only: reuse the transport's hand-rolled HTTP stub instead of a
+# second private copy (the feature compiles test_support solely for tests).
+transport-mcp = { path = "../../transport/mcp", features = ["test-support"] }

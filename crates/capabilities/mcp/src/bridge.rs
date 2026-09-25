@@ -1514,7 +1514,6 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
     /// Scripted transport: pops queued rpc outcomes; each construction
     /// bumps `connects` so tests can observe the healing count.
@@ -2155,82 +2154,23 @@ mod tests {
         );
     }
 
-    /// Minimal hand-rolled HTTP/1.1 stub over TCP (one connection per
-    /// request): the handler maps the request's JSON-RPC method and
-    /// `mcp-session-id` header to a status, extra headers, and body.
-    /// Hermetic mirror of the stub style of the `transport-mcp` HTTP tests.
+    /// Handler shape the HTTP tests reason in: JSON-RPC method plus the
+    /// `mcp-session-id` request header, answered with a status, extra
+    /// headers, and a UTF-8 body.
     type StubHandler =
         Arc<dyn Fn(&str, Option<&str>) -> (u16, Vec<(String, String)>, String) + Send + Sync>;
 
+    /// Serve one HTTP stub over the transport crate's shared test server:
+    /// the shared socket plumbing records requests; this adapter keeps the
+    /// method/session handler shape the tests below are written in.
     async fn spawn_rpc_stub(handler: StubHandler) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            loop {
-                let Ok((socket, _)) = listener.accept().await else {
-                    return;
-                };
-                let handler = handler.clone();
-                tokio::spawn(async move {
-                    let (reader, mut writer) = socket.into_split();
-                    let mut reader = tokio::io::BufReader::new(reader);
-                    let mut line = String::new();
-                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                        return;
-                    }
-                    let mut headers = HashMap::new();
-                    let mut content_length = 0usize;
-                    loop {
-                        line.clear();
-                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
-                            return;
-                        }
-                        let trimmed = line.trim_end();
-                        if trimmed.is_empty() {
-                            break;
-                        }
-                        if let Some((name, value)) = trimmed.split_once(':') {
-                            let name = name.trim().to_ascii_lowercase();
-                            if name == "content-length" {
-                                content_length = value.trim().parse().unwrap_or(0);
-                            }
-                            headers.insert(name, value.trim().to_owned());
-                        }
-                    }
-                    let mut body = vec![0u8; content_length];
-                    if content_length > 0 && reader.read_exact(&mut body).await.is_err() {
-                        return;
-                    }
-                    let method = serde_json::from_slice::<serde_json::Value>(&body)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("method")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .unwrap_or_default();
-                    let session = headers.get("mcp-session-id").cloned();
-                    let (status, extra, resp_body) = handler(&method, session.as_deref());
-                    let reason = match status {
-                        200 => "OK",
-                        202 => "Accepted",
-                        404 => "Not Found",
-                        _ => "OK",
-                    };
-                    let mut head = format!(
-                        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n",
-                        resp_body.len()
-                    );
-                    for (name, value) in &extra {
-                        head.push_str(&format!("{name}: {value}\r\n"));
-                    }
-                    head.push_str("\r\n");
-                    let _ = writer.write_all(head.as_bytes()).await;
-                    let _ = writer.write_all(resp_body.as_bytes()).await;
-                });
-            }
-        });
-        format!("http://{addr}/mcp")
+        let server = transport_mcp::test_support::StubServer::spawn(Arc::new(move |request| {
+            let session = request.headers.get("mcp-session-id").map(String::as_str);
+            let (status, extra, body) = handler(&request.rpc_method(), session);
+            (status, extra, body.into_bytes())
+        }))
+        .await;
+        server.url("/mcp")
     }
 
     /// End-to-end session expiry over the local stub: the first

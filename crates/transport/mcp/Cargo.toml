@@ -10,3 +10,8 @@ thiserror.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
+
+[features]
+# Test-only build switch: compiles the in-crate HTTP stub (test_support)
+# for downstream test suites; never enabled by production builds.
+test-support = []

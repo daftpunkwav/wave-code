@@ -536,7 +536,14 @@ impl ConsoleUi {
                 effort,
                 session_only,
             }) => {
-                self.apply_model_selection(label, provider, model, effort, session_only);
+                self.apply_model_selection(
+                    label,
+                    provider,
+                    model,
+                    effort,
+                    session_only,
+                    "use Enter to save it as the default",
+                );
             }
             Some(Answer::PermissionSelected { mode }) => {
                 self.apply_permission_mode(&mode);
@@ -554,7 +561,9 @@ impl ConsoleUi {
 
     /// Apply a picker selection: live switch within the same provider,
     /// persistence for the default (Enter), and a restart hint when the
-    /// provider differs (cross-provider needs re-assembly).
+    /// provider differs (cross-provider needs re-assembly). `restart_hint`
+    /// names how to persist, which differs per entry point (picker Enter
+    /// vs the /model command).
     fn apply_model_selection(
         &mut self,
         label: String,
@@ -562,6 +571,7 @@ impl ConsoleUi {
         model: String,
         effort: Option<String>,
         session_only: bool,
+        restart_hint: &str,
     ) {
         if label == self.state.model_name
             && provider == self.state.provider_id
@@ -595,9 +605,10 @@ impl ConsoleUi {
                 );
             } else {
                 // A different provider cannot go live mid-session, and
-                // session-only would persist nothing; point at Enter.
+                // session-only would persist nothing; point at the
+                // caller's persist path.
                 self.push_status(
-                    "switching provider needs a restart — use Enter to save it as the default",
+                    &format!("switching provider needs a restart — {restart_hint}"),
                     true,
                 );
             }
@@ -2354,164 +2365,213 @@ verify from the repository.";
         (lines, tail)
     }
 
-    /// `/model` subcommands against the single `~/.wavecode/models.json`
-    /// catalog: `list`, `remove <alias>`, `set <alias> <field> <value>`,
-    /// `add <alias> <kind> <provider> <base_url> <model> [context]
-    /// [max_output]`. Bare `/model` (no args) opened the picker above;
-    /// any other word switches models through the usual op.
+    /// `/model` entry point: bare (no args) opened the picker above; the
+    /// catalog subcommands edit `~/.wavecode/models.json` (see
+    /// [`Self::catalog_list`] and friends); any other word switches
+    /// models through the picker semantics (see
+    /// [`Self::switch_model_command`]).
     fn handle_model_command(&mut self, args: &str) {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        match parts.first().copied() {
+            Some("list") => self.catalog_list(),
+            Some("remove") => self.catalog_remove(parts.get(1).copied()),
+            Some("set") => self.catalog_set(&parts[1..]),
+            Some("add") => self.catalog_add(&parts[1..]),
+            _ => self.switch_model_command(args.trim()),
+        }
+    }
+
+    /// Load the on-disk catalog for a CRUD subcommand: a missing home
+    /// directory or a malformed models.json reports and cancels the
+    /// subcommand. Plain `/model <name>` switching never touches the
+    /// catalog, so a broken file cannot take live switching down too.
+    fn load_catalog(&mut self) -> Option<(wavecode_config::ModelCatalog, PathBuf)> {
         let Some(home) = self.state.home.clone() else {
             self.push_status("model catalog needs a home directory", true);
-            return;
+            return None;
         };
-        let mut catalog = match wavecode_config::ModelCatalog::load(&home) {
-            Ok(catalog) => catalog,
+        match wavecode_config::ModelCatalog::load(&home) {
+            Ok(catalog) => Some((catalog, home)),
             Err(e) => {
                 self.push_status(&format!("model catalog load failed: {e}"), true);
+                None
+            }
+        }
+    }
+
+    /// `/model list`: every catalog spec, one status line each.
+    fn catalog_list(&mut self) {
+        let Some((catalog, _home)) = self.load_catalog() else {
+            return;
+        };
+        if catalog.models.is_empty() {
+            self.push_status("model catalog is empty (/model add ...)", false);
+            return;
+        }
+        for (alias, spec) in &catalog.models {
+            let reasoning = spec
+                .reasoning
+                .variants
+                .join("/")
+                .is_empty()
+                .then(String::new)
+                .unwrap_or_else(|| spec.reasoning.variants.join("/"));
+            self.push_status(
+                &format!(
+                    "{alias} · {} ({}) ctx {} out {} thinking [{}] in [{}] out [{}]",
+                    spec.model,
+                    spec.base_url,
+                    spec.context_window
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "default".into()),
+                    spec.max_output
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "default".into()),
+                    reasoning,
+                    spec.modalities.input.join(","),
+                    spec.modalities.output.join(","),
+                ),
+                false,
+            );
+        }
+    }
+
+    /// `/model remove <alias>`: drop the spec and save.
+    fn catalog_remove(&mut self, alias: Option<&str>) {
+        let Some(alias) = alias else {
+            self.push_status("usage: /model remove <alias>", true);
+            return;
+        };
+        let Some((mut catalog, home)) = self.load_catalog() else {
+            return;
+        };
+        if catalog.remove(alias).is_some() {
+            match catalog.save(&home) {
+                Ok(()) => self.push_status(&format!("removed {alias}"), false),
+                Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
+            }
+        } else {
+            self.push_status(&format!("no model named {alias}"), true);
+        }
+    }
+
+    /// `/model set <alias> <context|output|thinking|input> <value>`:
+    /// patch one spec field and save.
+    fn catalog_set(&mut self, rest: &[&str]) {
+        let (Some(alias), Some(field), Some(value)) = (rest.first(), rest.get(1), rest.get(2))
+        else {
+            self.push_status(
+                "usage: /model set <alias> <context|output|thinking|input> <value>",
+                true,
+            );
+            return;
+        };
+        let (alias, field, value) = (*alias, *field, *value);
+        let Some((mut catalog, home)) = self.load_catalog() else {
+            return;
+        };
+        let Some(spec) = catalog.models.get_mut(alias) else {
+            self.push_status(&format!("no model named {alias}"), true);
+            return;
+        };
+        match field {
+            "context" => spec.context_window = value.parse().ok(),
+            "output" => spec.max_output = value.parse().ok(),
+            "thinking" => {
+                spec.reasoning.enabled = !value.eq_ignore_ascii_case("off");
+                spec.reasoning.default =
+                    (!value.eq_ignore_ascii_case("off")).then(|| value.to_string());
+            }
+            "input" => {
+                spec.modalities.input = value
+                    .split(',')
+                    .map(str::trim)
+                    .map(str::to_string)
+                    .collect();
+            }
+            other => {
+                self.push_status(&format!("unknown field {other}"), true);
+                return;
+            }
+        }
+        match catalog.save(&home) {
+            Ok(()) => self.push_status(&format!("{alias} updated ({field} = {value})"), false),
+            Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
+        }
+    }
+
+    /// `/model add <alias> <kind> <provider> <base_url> <model>
+    /// [context] [max_output]`: insert a spec and save.
+    fn catalog_add(&mut self, rest: &[&str]) {
+        if rest.len() < 5 {
+            self.push_status(
+                "usage: /model add <alias> <anthropic-messages|openai-chat|openai-responses> \
+                 <provider> <base_url> <model> [context] [max_output]",
+                true,
+            );
+            return;
+        }
+        let kind = match rest[1].to_ascii_lowercase().as_str() {
+            "anthropic-messages" | "anthropic" => wavecode_config::ApiKind::AnthropicMessages,
+            "openai-chat" | "openai" => wavecode_config::ApiKind::OpenaiChat,
+            "openai-responses" | "responses" => wavecode_config::ApiKind::OpenaiResponses,
+            other => {
+                self.push_status(&format!("unknown api kind {other}"), true);
                 return;
             }
         };
-        let parts: Vec<&str> = args.split_whitespace().collect();
-        match parts.first().copied() {
-            Some("list") => {
-                if catalog.models.is_empty() {
-                    self.push_status("model catalog is empty (/model add ...)", false);
-                    return;
-                }
-                for (alias, spec) in &catalog.models {
-                    let reasoning = spec
-                        .reasoning
-                        .variants
-                        .join("/")
-                        .is_empty()
-                        .then(String::new)
-                        .unwrap_or_else(|| spec.reasoning.variants.join("/"));
-                    self.push_status(
-                        &format!(
-                            "{alias} · {} ({}) ctx {} out {} thinking [{}] in [{}] out [{}]",
-                            spec.model,
-                            spec.base_url,
-                            spec.context_window
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| "default".into()),
-                            spec.max_output
-                                .map(|v| v.to_string())
-                                .unwrap_or_else(|| "default".into()),
-                            reasoning,
-                            spec.modalities.input.join(","),
-                            spec.modalities.output.join(","),
-                        ),
-                        false,
-                    );
-                }
-            }
-            Some("remove") => match parts.get(1) {
-                Some(alias) => {
-                    if catalog.remove(alias).is_some() {
-                        match catalog.save(&home) {
-                            Ok(()) => self.push_status(&format!("removed {alias}"), false),
-                            Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
-                        }
-                    } else {
-                        self.push_status(&format!("no model named {alias}"), true);
-                    }
-                }
-                None => self.push_status("usage: /model remove <alias>", true),
-            },
-            Some("set") => {
-                // /model set <alias> <context|output|thinking|input> <value>
-                let (Some(alias), Some(field), Some(value)) =
-                    (parts.get(1), parts.get(2), parts.get(3))
-                else {
-                    self.push_status(
-                        "usage: /model set <alias> <context|output|thinking|input> <value>",
-                        true,
-                    );
-                    return;
-                };
-                let Some(spec) = catalog.models.get_mut(*alias) else {
-                    self.push_status(&format!("no model named {alias}"), true);
-                    return;
-                };
-                match *field {
-                    "context" => spec.context_window = value.parse().ok(),
-                    "output" => spec.max_output = value.parse().ok(),
-                    "thinking" => {
-                        spec.reasoning.enabled = !value.eq_ignore_ascii_case("off");
-                        spec.reasoning.default =
-                            (!value.eq_ignore_ascii_case("off")).then(|| value.to_string());
-                    }
-                    "input" => {
-                        spec.modalities.input = value
-                            .split(',')
-                            .map(str::trim)
-                            .map(str::to_string)
-                            .collect();
-                    }
-                    other => {
-                        self.push_status(&format!("unknown field {other}"), true);
-                        return;
-                    }
-                }
-                match catalog.save(&home) {
-                    Ok(()) => {
-                        self.push_status(&format!("{alias} updated ({field} = {value})"), false)
-                    }
-                    Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
-                }
-            }
-            Some("add") => {
-                // /model add <alias> <kind> <provider> <base_url> <model>
-                //              [context] [max_output]
-                if parts.len() < 6 {
-                    self.push_status(
-                        "usage: /model add <alias> <anthropic-messages|openai-chat|openai-responses> \
-                         <provider> <base_url> <model> [context] [max_output]",
-                        true,
-                    );
-                    return;
-                }
-                let kind = match parts[2].to_ascii_lowercase().as_str() {
-                    "anthropic-messages" | "anthropic" => {
-                        wavecode_config::ApiKind::AnthropicMessages
-                    }
-                    "openai-chat" | "openai" => wavecode_config::ApiKind::OpenaiChat,
-                    "openai-responses" | "responses" => wavecode_config::ApiKind::OpenaiResponses,
-                    other => {
-                        self.push_status(&format!("unknown api kind {other}"), true);
-                        return;
-                    }
-                };
-                let spec = wavecode_config::ModelSpec {
-                    provider: parts[3].to_string(),
-                    model: parts[5].to_string(),
-                    kind,
-                    base_url: parts[4].to_string(),
-                    api_key_env: None,
-                    api_key: None,
-                    context_window: parts.get(6).and_then(|v| v.parse().ok()),
-                    max_output: parts.get(7).and_then(|v| v.parse().ok()),
-                    reasoning: wavecode_config::ReasoningSpec::default(),
-                    modalities: wavecode_config::ModalitiesSpec::default(),
-                };
-                catalog.insert(parts[1].to_string(), spec);
-                match catalog.save(&home) {
-                    Ok(()) => {
-                        self.push_status(&format!("added {} (restart applies it)", parts[1]), false)
-                    }
-                    Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
-                }
-            }
-            _ => {
-                // `/model <name>`: switch through the existing op path.
-                if let Some(invocation) = crate::slash::parse(&format!("/model {args}"))
-                    && let crate::slash::Effect::Ops(ops) =
-                        crate::slash::dispatch(&invocation, &self.state, self.status.as_ref())
-                {
-                    for op in ops {
-                        self.enqueue(op);
-                    }
-                }
+        let spec = wavecode_config::ModelSpec {
+            provider: rest[2].to_string(),
+            model: rest[4].to_string(),
+            kind,
+            base_url: rest[3].to_string(),
+            api_key_env: None,
+            api_key: None,
+            context_window: rest.get(5).and_then(|v| v.parse().ok()),
+            max_output: rest.get(6).and_then(|v| v.parse().ok()),
+            reasoning: wavecode_config::ReasoningSpec::default(),
+            modalities: wavecode_config::ModalitiesSpec::default(),
+        };
+        let alias = rest[0].to_string();
+        let Some((mut catalog, home)) = self.load_catalog() else {
+            return;
+        };
+        catalog.insert(alias.clone(), spec);
+        match catalog.save(&home) {
+            Ok(()) => self.push_status(&format!("added {alias} (restart applies it)"), false),
+            Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
+        }
+    }
+
+    /// `/model <name>`: switch through the picker semantics. A name
+    /// matching a picker entry (a config or catalog alias) resolves to
+    /// its wire model and default effort under the same-provider guard,
+    /// exactly like the picker's live switch; an unknown name switches
+    /// as typed (a wire model name on the current provider).
+    fn switch_model_command(&mut self, name: &str) {
+        if name.is_empty() {
+            return; // bare /model opened the picker above
+        }
+        let entry = self
+            .model_entries
+            .iter()
+            .find(|entry| entry.label == name)
+            .cloned();
+        match entry {
+            Some(entry) => self.apply_model_selection(
+                entry.label,
+                entry.provider,
+                entry.model,
+                entry.effort,
+                true,
+                "save it as the default from the /model picker",
+            ),
+            None => {
+                self.state.model_name = name.to_string();
+                self.enqueue(Op::SetModel {
+                    name: name.to_string(),
+                });
+                self.push_status(&format!("model: {name}"), false);
             }
         }
     }
@@ -3711,6 +3771,58 @@ mod tests {
             ui.pending_ops().last(),
             Some(Op::SetModel { name }) if name == "fast-model"
         ));
+    }
+
+    /// `/model <alias>` resolves through the picker entries exactly like
+    /// the picker's live switch: the wire model name rides the op, the
+    /// entry's default effort applies, and exactly one switch op is sent
+    /// (the old path double-sent one op per dispatch layer).
+    #[test]
+    fn model_command_resolves_an_alias_like_the_picker() {
+        let mut ui = ui();
+        ui.state.provider_id = "deepseek".to_string();
+        ui.model_entries = vec![ModelEntryView {
+            label: "GLM-5.3".to_string(),
+            provider: "deepseek".to_string(),
+            model: "glm-5.3".to_string(),
+            effort: Some("max".to_string()),
+        }];
+        ui.user_submit("/model GLM-5.3");
+        assert_eq!(ui.state.model_name, "GLM-5.3");
+        assert_eq!(ui.state.thinking_effort.as_deref(), Some("max"));
+        let ops = ui.pending_ops();
+        assert_eq!(
+            ops.iter()
+                .filter(|op| matches!(op, Op::SetModel { .. }))
+                .count(),
+            1,
+            "one switch op, not one per dispatch path: {ops:?}"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::SetModel { name } if name == "glm-5.3")),
+            "the wire model name rides the op: {ops:?}"
+        );
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::SetThinking { effort } if effort == "max")),
+            "the entry's default effort applies: {ops:?}"
+        );
+    }
+
+    /// A cross-provider alias refuses the live switch like the picker
+    /// does instead of silently keeping the old provider.
+    #[test]
+    fn model_command_refuses_cross_provider_switch_like_the_picker() {
+        let mut ui = ui_with_models();
+        ui.user_submit("/model MiniMax-M3");
+        assert!(
+            !ui.pending_ops()
+                .iter()
+                .any(|op| matches!(op, Op::SetModel { .. })),
+            "cross-provider live switch refused: {:?}",
+            ui.pending_ops()
+        );
     }
 
     #[test]

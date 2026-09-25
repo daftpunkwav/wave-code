@@ -112,13 +112,12 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
             }])
         }
         "model" => {
-            if invocation.args.is_empty() {
-                Effect::Ops(Vec::new()) // opens the picker
-            } else {
-                Effect::Ops(vec![Op::SetModel {
-                    name: invocation.args.clone(),
-                }])
-            }
+            // The UI caller owns /model entirely: bare opens the picker,
+            // the subcommands edit the models.json catalog, and a name
+            // switches with picker semantics (alias resolution, effort,
+            // same-provider guard). No op here — one would double-send
+            // beside the caller's resolved switch.
+            Effect::Ops(Vec::new())
         }
         "effort" => {
             if invocation.args.is_empty() {
@@ -296,13 +295,10 @@ mod tests {
             assert_eq!(effect, Effect::Ops(Vec::new()), "{name}");
         }
 
+        // `/model <name>` is caller-owned (picker semantics and the
+        // catalog subcommands); dispatch carries no op.
         let effect = dispatch(&parse("/model fast").unwrap(), &state(), status.as_ref());
-        assert_eq!(
-            effect,
-            Effect::Ops(vec![Op::SetModel {
-                name: "fast".to_string()
-            }])
-        );
+        assert_eq!(effect, Effect::Ops(Vec::new()));
 
         let effect = dispatch(&parse("/plan").unwrap(), &state(), status.as_ref());
         assert_eq!(

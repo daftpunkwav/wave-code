@@ -127,8 +127,10 @@ impl Transcript {
     }
 
     /// Mutably borrow the newest entry that downcasts to `T` (the live
-    /// turn's user message sits after every older one).
-    pub fn last_as_mut<T: 'static>(&mut self) -> Option<&mut T> {
+    /// turn's user message sits after every older one). Not the same as
+    /// downcasting the last entry: older matches win when the newest
+    /// entry is a different component.
+    pub fn newest_as_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.entries
             .iter_mut()
             .rev()

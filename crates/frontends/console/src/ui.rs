@@ -2300,7 +2300,7 @@ verify from the repository.";
         // waits for the model's first response byte, and returns to
         // full color once SSE deltas start flowing.
         let waiting = self.state.phase == crate::state::StreamingPhase::Waiting;
-        if let Some(user) = self.transcript.last_as_mut::<UserMessage>() {
+        if let Some(user) = self.transcript.newest_as_mut::<UserMessage>() {
             user.set_pending(waiting);
         }
         let mut lines: Vec<Segment> = Vec::new();

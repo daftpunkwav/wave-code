@@ -160,7 +160,13 @@ impl Screen {
     ) {
         let view = FrameView::new(segments);
         let size_changed = self.size != (columns, height);
-        if !self.started || size_changed || view.total < self.base || height == 0 || columns == 0 {
+        // A frame that shrank to (or below) the base has no
+        // rewrite-eligible rows: the whole viewport is stale scrollback
+        // and only a full repaint can re-show the surviving rows. An
+        // empty frame (total 0) stays on the diff path, where the stale
+        // rows clear without an erase.
+        let shrank_to_base = view.total <= self.base && view.total > 0;
+        if !self.started || size_changed || shrank_to_base || height == 0 || columns == 0 {
             self.synchronized_start(out);
             self.full_redraw(out, &view, columns, height);
             self.pin_tail(out, &view, columns, height);
@@ -863,6 +869,35 @@ mod tests {
         draw(&mut screen, &mut out, &["alpha"], 40, 10);
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("\x1b[J"), "erase-to-end present: {text:?}");
+    }
+
+    /// A frame shrinking exactly onto the rewrite base has no
+    /// rewrite-eligible rows left: only a full repaint can bring the
+    /// surviving rows back into the viewport (a diff would leave the
+    /// screen blank while the frame still holds content).
+    #[test]
+    fn shrink_onto_the_base_repaints_the_frame() {
+        let mut screen = Screen::with_options(ScreenOptions {
+            synchronized: false,
+            clear_scrollback: false,
+        });
+        let mut out = Vec::new();
+        draw(&mut screen, &mut out, &["a", "b", "c", "d", "e"], 40, 2);
+        assert_eq!(screen.base, 3, "overflowed frame: base at total-height");
+        out.clear();
+        // Five rows shrink to three: total lands exactly on the base.
+        draw(&mut screen, &mut out, &["a", "b", "c"], 40, 2);
+        let text = String::from_utf8(out.clone()).unwrap();
+        assert!(
+            text.contains("\x1b[2J"),
+            "full repaint, not a blank diff: {text:?}"
+        );
+        assert!(text.contains('c'), "viewport shows the last rows: {text:?}");
+        // The follow-up frame diffs from a sane base again.
+        out.clear();
+        draw(&mut screen, &mut out, &["a", "b", "C"], 40, 2);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("C") && !text.contains("\x1b[2J"), "{text:?}");
     }
 
     #[test]

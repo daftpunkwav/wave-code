@@ -86,5 +86,6 @@ data, never Rust:
 | `theme/syntax.rs` | The syntax-highlighting aliases. |
 
 Adding a bundled theme = adding one JSON file to `theme/themes/` and
-one line in `builtin.rs` (`IDS` + the `include_str!` + the parse
-entry). Nothing else changes.
+the matching entries in `builtin.rs` (the `include_str!` constant, the
+`IDS` list, the `builtins()` array, and its `[BuiltinTheme; N]`
+lengths). Nothing else changes.

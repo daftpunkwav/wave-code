@@ -226,7 +226,9 @@ impl ModelCatalog {
 
     /// Write the catalog back to `~/.wavecode/models.json`. The file may
     /// hold inline API keys, so on Unix it is created and kept
-    /// owner-only (0600) instead of world-readable.
+    /// owner-only (0600) instead of world-readable. The write lands in
+    /// a sibling temp file and is renamed into place, so a crash
+    /// mid-write can never leave a truncated catalog behind.
     pub fn save(&self, home: &Path) -> Result<(), CatalogError> {
         let path = Self::path(home);
         if let Some(parent) = path.parent() {
@@ -234,6 +236,7 @@ impl ModelCatalog {
         }
         let content =
             serde_json::to_string_pretty(self).map_err(|e| CatalogError::Parse(e.to_string()))?;
+        let tmp = path.with_extension("json.tmp");
         #[cfg(unix)]
         {
             use std::io::Write as _;
@@ -243,11 +246,11 @@ impl ModelCatalog {
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
-                .open(&path)
+                .open(&tmp)
                 .map_err(CatalogError::Write)?;
-            // An existing file keeps its mode on rewrite: tighten it to
-            // owner-only as well, so a once-world-readable catalog does
-            // not stay that way after an edit.
+            // An existing temp file keeps its mode on rewrite: tighten
+            // it to owner-only as well, and the rename carries that mode
+            // onto the catalog.
             file.set_permissions(std::fs::Permissions::from_mode(0o600))
                 .map_err(CatalogError::Write)?;
             file.write_all(content.as_bytes())
@@ -255,8 +258,12 @@ impl ModelCatalog {
                 .map_err(CatalogError::Write)?;
         }
         #[cfg(not(unix))]
-        std::fs::write(&path, content + "\n").map_err(CatalogError::Write)?;
-        Ok(())
+        std::fs::write(&tmp, content + "\n").map_err(CatalogError::Write)?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            // Leave no temp litter behind when the rename fails.
+            let _ = std::fs::remove_file(&tmp);
+            CatalogError::Write(e)
+        })
     }
 
     /// The spec for `alias`.
@@ -447,6 +454,9 @@ mod tests {
         catalog.save(&dir).unwrap();
         let loaded = ModelCatalog::load(&dir).unwrap();
         assert_eq!(loaded.models["m"].model, "m-1");
+        // The write lands through a sibling temp file renamed into
+        // place; a completed save leaves no temp litter behind.
+        assert!(!ModelCatalog::path(&dir).with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

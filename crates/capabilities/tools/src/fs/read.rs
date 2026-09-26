@@ -2,7 +2,21 @@
 
 use super::*;
 
-pub struct ReadFile;
+pub struct ReadFile {
+    ledger: FileLedger,
+}
+
+impl ReadFile {
+    pub(crate) fn new(ledger: FileLedger) -> Self {
+        Self { ledger }
+    }
+}
+
+impl Default for ReadFile {
+    fn default() -> Self {
+        Self::new(FileLedger::new())
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for ReadFile {
@@ -131,6 +145,10 @@ impl Tool for ReadFile {
         if truncated {
             content.push_str("\n[truncated]");
         }
+        // The content just returned becomes the session's baseline for
+        // this file: later write/edit calls refuse to run over an outside
+        // change that landed after this point.
+        self.ledger.record(&path, &meta);
         Ok(ok_output(content))
     }
 }

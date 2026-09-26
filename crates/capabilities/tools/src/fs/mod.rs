@@ -3,11 +3,73 @@
 //! Failure semantics: business failures (missing file, non-unique match, missing/mistyped params, path escape)
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level io failures.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
+
+/// Per-session record of what the session last saw on disk for the files
+/// its file tools touched. `read` records a fingerprint when it returns
+/// content; `write` / `edit` compare the on-disk fingerprint against the
+/// recorded one before mutating and refuse a mismatch, so an edit decided
+/// against an outdated view cannot silently clobber an outside change
+/// (formatter, git checkout, another process) that landed after the read.
+/// Absent entries never block: a file the session never saw has no
+/// baseline to defend. A fingerprint that cannot be taken (filesystem
+/// without mtime support) simply opts that file out.
+#[derive(Clone, Default)]
+pub(crate) struct FileLedger(Arc<Mutex<HashMap<PathBuf, (std::time::SystemTime, u64)>>>);
+
+impl FileLedger {
+    /// Ledger shared by one session's `read` / `write` / `edit` trio.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record what the session just observed on disk.
+    fn record(&self, path: &std::path::Path, meta: &std::fs::Metadata) {
+        if let Ok(mtime) = meta.modified() {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(path.to_path_buf(), (mtime, meta.len()));
+        }
+    }
+
+    /// Re-stat after this session's own write so the recorded fingerprint
+    /// matches the file it left behind; stat failures skip recording.
+    pub(crate) async fn refresh(&self, path: &std::path::Path) {
+        if let Ok(meta) = tokio::fs::metadata(path).await {
+            self.record(path, &meta);
+        }
+    }
+
+    /// Business-failure output when the on-disk file drifted from the
+    /// recorded fingerprint; `None` when the write may proceed (no recorded
+    /// baseline, stat failure, or an unchanged file).
+    pub(crate) async fn check_fresh(&self, path: &std::path::Path) -> Option<ToolOutput> {
+        let expected = *self
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)?;
+        let meta = tokio::fs::metadata(path).await.ok()?;
+        let current = match meta.modified() {
+            Ok(mtime) => Some((mtime, meta.len())),
+            Err(_) => None,
+        };
+        if current == Some(expected) {
+            return None;
+        }
+        Some(err_output(format!(
+            "{} changed on disk since it was last read (modified outside this session); re-read it before writing",
+            path.display()
+        )))
+    }
+}
 
 /// read output cap: 2000 lines / 50 KB.
 const MAX_LINES: usize = 2000;
@@ -109,7 +171,7 @@ mod tests {
     #[tokio::test]
     async fn write_then_read_roundtrip() {
         let (_d, c) = ctx();
-        let out = WriteFile
+        let out = WriteFile::default()
             .execute(
                 serde_json::json!({"path":"sub/hello.txt","content":"hi"}),
                 &c,
@@ -117,7 +179,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error);
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"sub/hello.txt"}), &c)
             .await
             .unwrap();
@@ -129,25 +191,25 @@ mod tests {
     #[tokio::test]
     async fn write_overwrites_without_temp_leftovers() {
         let (_d, c) = ctx();
-        WriteFile
+        WriteFile::default()
             .execute(serde_json::json!({"path":"a.txt","content":"v1"}), &c)
             .await
             .unwrap();
-        WriteFile
+        WriteFile::default()
             .execute(
                 serde_json::json!({"path":"a.txt","content":"v2-longer"}),
                 &c,
             )
             .await
             .unwrap();
-        EditFile
+        EditFile::default()
             .execute(
                 serde_json::json!({"path":"a.txt","old_string":"v2","new_string":"v3"}),
                 &c,
             )
             .await
             .unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"a.txt"}), &c)
             .await
             .unwrap();
@@ -167,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn read_missing_file_is_error_output_not_err() {
         let (_d, c) = ctx();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"nope.txt"}), &c)
             .await
             .unwrap();
@@ -177,14 +239,14 @@ mod tests {
     #[tokio::test]
     async fn edit_requires_unique_match() {
         let (_d, c) = ctx();
-        WriteFile
+        WriteFile::default()
             .execute(
                 serde_json::json!({"path":"a.txt","content":"foo bar foo"}),
                 &c,
             )
             .await
             .unwrap();
-        let dup = EditFile
+        let dup = EditFile::default()
             .execute(
                 serde_json::json!({"path":"a.txt","old_string":"foo","new_string":"x"}),
                 &c,
@@ -192,7 +254,7 @@ mod tests {
             .await
             .unwrap();
         assert!(dup.is_error);
-        let ok = EditFile
+        let ok = EditFile::default()
             .execute(
                 serde_json::json!({"path":"a.txt","old_string":"bar foo","new_string":"baz"}),
                 &c,
@@ -200,7 +262,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!ok.is_error);
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"a.txt"}), &c)
             .await
             .unwrap();
@@ -239,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn missing_param_is_error_output() {
         let (_d, c) = ctx();
-        let out = WriteFile
+        let out = WriteFile::default()
             .execute(serde_json::json!({"path":"x.txt"}), &c)
             .await
             .unwrap(); // missing content
@@ -250,17 +312,17 @@ mod tests {
     async fn read_empty_file_with_offset_is_error_not_panic() {
         // Regression: an empty file with offset>0 used to trigger a usize underflow panic.
         let (_d, c) = ctx();
-        WriteFile
+        WriteFile::default()
             .execute(serde_json::json!({"path":"empty.txt","content":""}), &c)
             .await
             .unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"empty.txt","offset":5}), &c)
             .await
             .unwrap();
         assert!(out.is_error);
         // offset=0 on an empty file still returns an empty string normally.
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"empty.txt"}), &c)
             .await
             .unwrap();
@@ -273,7 +335,7 @@ mod tests {
         let (_d, c) = ctx();
         let big = vec![b'x'; (MAX_READ_BYTES + 1) as usize];
         std::fs::write(c.cwd.join("big.txt"), big).unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"big.txt"}), &c)
             .await
             .unwrap();
@@ -284,7 +346,7 @@ mod tests {
     async fn read_dir_path_is_error() {
         let (_d, c) = ctx();
         std::fs::create_dir(c.cwd.join("sub")).unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"sub"}), &c)
             .await
             .unwrap();
@@ -294,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_offset_limit_is_error() {
         let (_d, c) = ctx();
-        WriteFile
+        WriteFile::default()
             .execute(serde_json::json!({"path":"a.txt","content":"l1\nl2"}), &c)
             .await
             .unwrap();
@@ -303,7 +365,7 @@ mod tests {
             serde_json::json!({"path":"a.txt","offset":-1}),
             serde_json::json!({"path":"a.txt","limit":"100"}),
         ] {
-            let out = ReadFile.execute(bad.clone(), &c).await.unwrap();
+            let out = ReadFile::default().execute(bad.clone(), &c).await.unwrap();
             assert!(out.is_error, "input {bad} should return is_error");
         }
     }
@@ -312,7 +374,7 @@ mod tests {
     async fn write_rejects_oversized_content() {
         let (_d, c) = ctx();
         let big = "x".repeat(MAX_WRITE_BYTES + 1);
-        let out = WriteFile
+        let out = WriteFile::default()
             .execute(serde_json::json!({"path":"big.txt","content":big}), &c)
             .await
             .unwrap();
@@ -326,7 +388,7 @@ mod tests {
         let (_d, c) = ctx();
         let big = vec![b'x'; (MAX_READ_BYTES + 1) as usize];
         std::fs::write(c.cwd.join("big.txt"), big).unwrap();
-        let out = EditFile
+        let out = EditFile::default()
             .execute(
                 serde_json::json!({"path":"big.txt","old_string":"x","new_string":"y"}),
                 &c,
@@ -342,7 +404,7 @@ mod tests {
         let (_d, c) = ctx();
         let text: String = (0..3000).map(|i| format!("line{i}\n")).collect();
         std::fs::write(c.cwd.join("many.txt"), text).unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"many.txt"}), &c)
             .await
             .unwrap();
@@ -360,7 +422,7 @@ mod tests {
         let (_d, c) = ctx();
         let text = "€".repeat(MAX_BYTES); // 3 * 50 KB bytes
         std::fs::write(c.cwd.join("euro.txt"), text).unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(serde_json::json!({"path":"euro.txt"}), &c)
             .await
             .unwrap();
@@ -379,7 +441,7 @@ mod tests {
         let (_d, c) = ctx();
         let text: String = (0..100).map(|i| format!("line{i}\n")).collect();
         std::fs::write(c.cwd.join("page.txt"), text).unwrap();
-        let out = ReadFile
+        let out = ReadFile::default()
             .execute(
                 serde_json::json!({"path":"page.txt","offset":10,"limit":5}),
                 &c,
@@ -392,5 +454,108 @@ mod tests {
             out.content,
             "line10\nline11\nline12\nline13\nline14\n[truncated]"
         );
+    }
+
+    /// Staleness trio sharing one ledger, like the assembly registers them.
+    fn fresh_trio() -> (ReadFile, WriteFile, EditFile) {
+        let ledger = FileLedger::new();
+        (
+            ReadFile::new(ledger.clone()),
+            WriteFile::new(ledger.clone()),
+            EditFile::new(ledger),
+        )
+    }
+
+    /// After the session read a file, an outside change (formatter, git
+    /// checkout, another process) blocks edit until the model re-reads;
+    /// the re-read re-records the baseline and the same edit then applies.
+    #[tokio::test]
+    async fn edit_refuses_after_outside_change_until_reread() {
+        let (_d, c) = ctx();
+        let (r, _w, e) = fresh_trio();
+        std::fs::write(c.cwd.join("f.txt"), "alpha beta gamma\n").unwrap();
+        r.execute(serde_json::json!({"path": "f.txt"}), &c)
+            .await
+            .unwrap();
+        // Outside change: different length so the fingerprint differs even
+        // on coarse-mtime filesystems.
+        std::fs::write(c.cwd.join("f.txt"), "alpha beta GAMMA CHANGED\n").unwrap();
+        let out = e
+            .execute(
+                serde_json::json!({"path": "f.txt", "old_string": "alpha", "new_string": "ALPHA"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error, "{:?}", out.content);
+        assert!(out.content.contains("changed on disk"), "{}", out.content);
+        assert!(!out.content.contains("ALPHA"), "file untouched: {}", out.content);
+        assert_eq!(std::fs::read_to_string(c.cwd.join("f.txt")).unwrap(), "alpha beta GAMMA CHANGED\n");
+        // Re-read re-records the baseline; the same edit now applies.
+        r.execute(serde_json::json!({"path": "f.txt"}), &c)
+            .await
+            .unwrap();
+        let out = e
+            .execute(
+                serde_json::json!({"path": "f.txt", "old_string": "GAMMA", "new_string": "gamma"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+    }
+
+    /// The guard covers whole-file overwrites too, and a write with no
+    /// recorded baseline (file the session never read) still goes through.
+    #[tokio::test]
+    async fn write_refuses_after_outside_change_but_unseen_files_pass() {
+        let (_d, c) = ctx();
+        let (r, w, _e) = fresh_trio();
+        // No baseline for a brand-new file: the write proceeds.
+        let out = w
+            .execute(serde_json::json!({"path": "new.txt", "content": "v1"}), &c)
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        // Baseline via read; outside change then blocks the overwrite.
+        r.execute(serde_json::json!({"path": "new.txt"}), &c)
+            .await
+            .unwrap();
+        std::fs::write(c.cwd.join("new.txt"), "v1 externally extended\n").unwrap();
+        let out = w
+            .execute(serde_json::json!({"path": "new.txt", "content": "v2"}), &c)
+            .await
+            .unwrap();
+        assert!(out.is_error, "{:?}", out.content);
+        assert!(out.content.contains("changed on disk"), "{}", out.content);
+        assert_eq!(std::fs::read_to_string(c.cwd.join("new.txt")).unwrap(), "v1 externally extended\n");
+    }
+
+    /// The session's own writes keep the ledger current: an edit following
+    /// a write (or a second edit) never trips the guard.
+    #[tokio::test]
+    async fn own_writes_keep_the_ledger_current() {
+        let (_d, c) = ctx();
+        let (_r, w, e) = fresh_trio();
+        w.execute(serde_json::json!({"path": "seq.txt", "content": "one"}), &c)
+            .await
+            .unwrap();
+        let out = e
+            .execute(
+                serde_json::json!({"path": "seq.txt", "old_string": "one", "new_string": "two"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        let out = e
+            .execute(
+                serde_json::json!({"path": "seq.txt", "old_string": "two", "new_string": "three"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(std::fs::read_to_string(c.cwd.join("seq.txt")).unwrap(), "three");
     }
 }

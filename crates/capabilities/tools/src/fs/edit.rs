@@ -2,7 +2,21 @@
 
 use super::*;
 
-pub struct EditFile;
+pub struct EditFile {
+    ledger: FileLedger,
+}
+
+impl EditFile {
+    pub(crate) fn new(ledger: FileLedger) -> Self {
+        Self { ledger }
+    }
+}
+
+impl Default for EditFile {
+    fn default() -> Self {
+        Self::new(FileLedger::new())
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for EditFile {
@@ -85,6 +99,12 @@ impl Tool for EditFile {
                 path.display()
             )));
         }
+        // Freshness guard: an edit decided against the session's last view
+        // must not apply onto an outside change that landed after that view
+        // (see [`FileLedger`]).
+        if let Some(out) = self.ledger.check_fresh(&path).await {
+            return Ok(out);
+        }
         let bytes = match tokio::fs::read(&path).await {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -117,6 +137,7 @@ impl Tool for EditFile {
                 match fuzzy_line_replace(&text, old_string, new_string) {
                     FuzzyOutcome::Replaced { updated } => {
                         super::atomic_write(&path, &updated).await?;
+                        self.ledger.refresh(&path).await;
                         Ok(ok_output(format!(
                             "replaced 1 occurrence in {} (fuzzy line match: whitespace-insensitive; retry with exact text to pin the match)",
                             path.display()
@@ -140,6 +161,7 @@ impl Tool for EditFile {
                 let updated = text.replacen(old_string, new_string, 1);
                 // Atomic write: the original file stays intact when the read succeeds but the write fails (temp+rename).
                 super::atomic_write(&path, &updated).await?;
+                self.ledger.refresh(&path).await;
                 Ok(ok_output(format!(
                     "replaced 1 occurrence in {}",
                     path.display()
@@ -387,7 +409,7 @@ mod fuzzy_tests {
             cwd: dir.path().to_path_buf(),
             deny_env: Vec::new(),
         };
-        let out = EditFile
+        let out = EditFile::default()
             .execute(
                 serde_json::json!({
                     "path": "code.rs",

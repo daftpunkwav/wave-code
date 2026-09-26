@@ -255,9 +255,13 @@ impl Registry {
         let reg = Self {
             tools: Mutex::new(HashMap::new()),
         };
-        reg.register(Arc::new(fs::ReadFile));
-        reg.register(Arc::new(fs::WriteFile));
-        reg.register(Arc::new(fs::EditFile));
+        // One freshness ledger across the file trio: `read` records what
+        // the session saw, `write`/`edit` refuse to run over an outside
+        // change that landed after that view.
+        let ledger = fs::FileLedger::new();
+        reg.register(Arc::new(fs::ReadFile::new(ledger.clone())));
+        reg.register(Arc::new(fs::WriteFile::new(ledger.clone())));
+        reg.register(Arc::new(fs::EditFile::new(ledger)));
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
         reg.register(Arc::new(shell_tool::Shell));

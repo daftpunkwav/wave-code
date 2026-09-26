@@ -2,7 +2,21 @@
 
 use super::*;
 
-pub struct WriteFile;
+pub struct WriteFile {
+    ledger: FileLedger,
+}
+
+impl WriteFile {
+    pub(crate) fn new(ledger: FileLedger) -> Self {
+        Self { ledger }
+    }
+}
+
+impl Default for WriteFile {
+    fn default() -> Self {
+        Self::new(FileLedger::new())
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for WriteFile {
@@ -68,8 +82,15 @@ impl Tool for WriteFile {
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        // Freshness guard: an overwrite decided against the session's last
+        // view must not clobber an outside change that landed after that
+        // view (see [`FileLedger`]).
+        if let Some(out) = self.ledger.check_fresh(&path).await {
+            return Ok(out);
+        }
         // Atomic write: a mid-write failure leaves the existing file intact (temp+rename, see atomic_write).
         super::atomic_write(&path, content).await?;
+        self.ledger.refresh(&path).await;
         Ok(ok_output(format!(
             "wrote {} bytes to {}",
             content.len(),

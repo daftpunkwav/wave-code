@@ -46,6 +46,15 @@ pub fn set_render_enabled(on: bool) {
 /// Render `source` into diagram lines at most `columns` wide; `None`
 /// when the diagram kind is unsupported or does not fit.
 pub fn render_diagram(source: &str, columns: usize) -> Option<Vec<String>> {
+    let lines = diagram_lines(source, columns)?;
+    // The fit contract holds per line: a diagram whose labels overflow
+    // the budget (a long sequence label, a huge chart value) falls
+    // back to the source view instead of rows the frame would clip.
+    (!lines.iter().any(|line| width::width(line) > columns)).then_some(lines)
+}
+
+/// The per-kind dispatch behind [`render_diagram`]'s fit check.
+fn diagram_lines(source: &str, columns: usize) -> Option<Vec<String>> {
     let keyword = source
         .lines()
         .map(str::trim)
@@ -184,6 +193,11 @@ struct GraphEdge {
     style: EdgeStyle,
 }
 
+/// Upper bound on nodes in one diagram: the band/column layouts refuse
+/// more, so refusing at creation keeps parsing (and per-group member
+/// dedup) bounded on oversized sources.
+const MAX_NODES: usize = 100;
+
 /// The shared graph IR: node label lines in definition order, styled
 /// edges between indices, and subgraph groups over member indices.
 struct Diagram {
@@ -205,18 +219,28 @@ impl Diagram {
 
     /// Register (or look up) a node by id; `lines` are its box body
     /// lines. A later body (a class/entity block after a relation
-    /// referenced it bare) fills in a bare single-line node.
-    fn node(&mut self, ids: &mut HashMap<String, usize>, id: &str, lines: Vec<String>) -> usize {
+    /// referenced it bare) fills in a bare single-line node. `None` past
+    /// [`MAX_NODES`]: the layouts reject that count anyway, and the cap
+    /// bounds subgraph bookkeeping for pathological sources.
+    fn node(
+        &mut self,
+        ids: &mut HashMap<String, usize>,
+        id: &str,
+        lines: Vec<String>,
+    ) -> Option<usize> {
         if let Some(&index) = ids.get(id) {
             if self.labels[index].len() <= 1 && lines.len() > 1 {
                 self.labels[index] = lines;
             }
-            return index;
+            return Some(index);
+        }
+        if self.labels.len() >= MAX_NODES {
+            return None;
         }
         let index = self.labels.len();
         self.labels.push(lines);
         ids.insert(id.to_string(), index);
-        index
+        Some(index)
     }
 
     /// Push a labeled edge.
@@ -325,7 +349,7 @@ fn parse_statement(
     groups: &[usize],
 ) -> Option<()> {
     let (left, consumed) = scan_node_token(line)?;
-    let from = diagram.node(ids, &node_id(left)?, vec![node_label(left)?]);
+    let from = diagram.node(ids, &node_id(left)?, vec![node_label(left)?])?;
     note_member(&mut diagram.groups, groups, from);
     let rest = line[consumed..].trim();
     if rest.is_empty() {
@@ -349,7 +373,7 @@ fn parse_edges(
         let after = rest[consumed..].trim_start();
         let (label, after) = pipe_label(after, label);
         let (target, tail_consumed) = scan_node_token(after)?;
-        let to = diagram.node(ids, &node_id(target)?, vec![node_label(target)?]);
+        let to = diagram.node(ids, &node_id(target)?, vec![node_label(target)?])?;
         note_member(&mut diagram.groups, groups, to);
         diagram.edge(from, to, label, style);
         let tail = after[tail_consumed..].trim();
@@ -532,9 +556,9 @@ fn parse_class_diagram(source: &str) -> Option<Diagram> {
                 let (id, display) = class_token(head)?;
                 let lines = vec![display];
                 if block {
-                    open = Some(diagram.node(&mut ids, &id, lines));
+                    open = Some(diagram.node(&mut ids, &id, lines)?);
                 } else {
-                    diagram.node(&mut ids, &id, lines);
+                    diagram.node(&mut ids, &id, lines)?;
                     open = None;
                 }
             }
@@ -637,8 +661,8 @@ fn parse_class_relation(
             ".." | "..>" => EdgeStyle::Dotted,
             _ => EdgeStyle::Solid,
         };
-        let from = diagram.node(ids, &from, vec![from.clone()]);
-        let to = diagram.node(ids, &to, vec![to.clone()]);
+        let from = diagram.node(ids, &from, vec![from.clone()])?;
+        let to = diagram.node(ids, &to, vec![to.clone()])?;
         return Some(Some((from, to, label, style)));
     }
     Some(None)
@@ -705,8 +729,8 @@ fn parse_er_diagram(source: &str) -> Option<Diagram> {
             } else {
                 EdgeStyle::Solid
             };
-            let from = diagram.node(&mut ids, &ent1, vec![ent1.clone()]);
-            let to = diagram.node(&mut ids, &ent2, vec![ent2.clone()]);
+            let from = diagram.node(&mut ids, &ent1, vec![ent1.clone()])?;
+            let to = diagram.node(&mut ids, &ent2, vec![ent2.clone()])?;
             diagram.edge(from, to, label, style);
             continue;
         }
@@ -716,7 +740,7 @@ fn parse_er_diagram(source: &str) -> Option<Diagram> {
             if name.is_empty() {
                 return None;
             }
-            open = Some(diagram.node(&mut ids, name, vec![name.to_string()]));
+            open = Some(diagram.node(&mut ids, name, vec![name.to_string()])?);
             continue;
         }
         if line == "}" {
@@ -736,7 +760,7 @@ fn parse_er_diagram(source: &str) -> Option<Diagram> {
                 if name.is_empty() {
                     return None;
                 }
-                diagram.node(&mut ids, name, vec![name.to_string()]);
+                diagram.node(&mut ids, name, vec![name.to_string()])?;
             }
         }
     }
@@ -810,7 +834,7 @@ fn parse_c4_diagram(source: &str) -> Option<Diagram> {
                 for extra in args.iter().skip(2).filter(|a| !a.is_empty()).take(2) {
                     lines.push(extra.clone());
                 }
-                diagram.node(&mut ids, &alias, lines);
+                diagram.node(&mut ids, &alias, lines)?;
             }
             "rel" | "rel_u" | "rel_d" | "rel_l" | "rel_r" | "rel_back" | "birel" => {
                 let args = parse_call_args(rest)?;
@@ -823,8 +847,8 @@ fn parse_c4_diagram(source: &str) -> Option<Diagram> {
                     (args[0].clone(), args[1].clone())
                 };
                 let label = args.get(2).cloned().filter(|l| !l.is_empty());
-                let from = diagram.node(&mut ids, &from, vec![from.clone()]);
-                let to = diagram.node(&mut ids, &to, vec![to.clone()]);
+                let from = diagram.node(&mut ids, &from, vec![from.clone()])?;
+                let to = diagram.node(&mut ids, &to, vec![to.clone()])?;
                 diagram.edge(from, to, label, EdgeStyle::Solid);
             }
             _ => return None,
@@ -886,7 +910,7 @@ fn parse_requirement_diagram(source: &str) -> Option<Diagram> {
             if name.is_empty() {
                 return None;
             }
-            open = Some(diagram.node(&mut ids, name, vec![name.to_string()]));
+            open = Some(diagram.node(&mut ids, name, vec![name.to_string()])?);
             continue;
         }
         if line == "}" {
@@ -917,8 +941,8 @@ fn parse_requirement_diagram(source: &str) -> Option<Diagram> {
                 return None;
             }
             let label = (!rel.is_empty()).then(|| rel.to_string());
-            let from = diagram.node(&mut ids, from_name, vec![from_name.to_string()]);
-            let to = diagram.node(&mut ids, right, vec![right.to_string()]);
+            let from = diagram.node(&mut ids, from_name, vec![from_name.to_string()])?;
+            let to = diagram.node(&mut ids, right, vec![right.to_string()])?;
             diagram.edge(from, to, label, EdgeStyle::Solid);
             continue;
         }
@@ -1652,6 +1676,11 @@ struct Sequence {
     messages: Vec<(usize, usize, String, bool)>,
 }
 
+/// Upper bound on rendered messages: each message draws two canvas
+/// rows, so the cap keeps oversized sources on the source view like
+/// the other layouts' row budgets.
+const MAX_SEQUENCE_MESSAGES: usize = 200;
+
 /// Parse a sequence diagram; `None` for unsupported constructs
 /// (activations, notes, loops) and malformed messages.
 fn parse_sequence(source: &str) -> Option<Sequence> {
@@ -1713,7 +1742,7 @@ fn parse_sequence(source: &str) -> Option<Sequence> {
             }
         }
     }
-    if names.is_empty() {
+    if names.is_empty() || messages.len() > MAX_SEQUENCE_MESSAGES {
         return None;
     }
     Some(Sequence { names, messages })
@@ -2742,6 +2771,39 @@ graph TD
     #[test]
     fn oversized_diagrams_fall_back_to_none() {
         assert!(render_diagram(FLOW, 10).is_none(), "too narrow: fallback");
+    }
+
+    /// The fit contract is per line: a diagram whose labels overflow
+    /// the budget (a sequence label wider than the frame, a chart
+    /// value with hundreds of digits) falls back instead of returning
+    /// rows the frame would clip.
+    #[test]
+    fn overflowing_labels_fall_back_to_none() {
+        let long_label = "x".repeat(120);
+        let sequence = format!(
+            "sequenceDiagram\n    participant A\n    participant B\n    A->>B: {long_label}"
+        );
+        assert!(render_diagram(&sequence, 80).is_none(), "long label");
+        let huge_value = "xychart-beta\n    x-axis [a, b]\n    bar [1e300, 5]";
+        assert!(render_diagram(huge_value, 80).is_none(), "huge value");
+    }
+
+    /// The node cap refuses oversized diagrams at parse time — a huge
+    /// subgraph must fall back instead of grinding the member dedup.
+    #[test]
+    fn diagrams_beyond_the_node_cap_fall_back_to_none() {
+        let mut source = String::from("graph TD\n subgraph big\n a0");
+        for i in 1..150 {
+            source.push_str(&format!(" --> n{i}"));
+        }
+        source.push_str("\n end");
+        assert!(render_diagram(&source, 80).is_none(), "node cap");
+        // A sequence beyond the message cap falls back too.
+        let mut sequence = String::from("sequenceDiagram\n    participant A\n    participant B\n");
+        for _ in 0..201 {
+            sequence.push_str("    A->>B: ping\n");
+        }
+        assert!(render_diagram(&sequence, 80).is_none(), "message cap");
     }
 
     /// LR flowcharts lay out left-to-right with side arrowheads.

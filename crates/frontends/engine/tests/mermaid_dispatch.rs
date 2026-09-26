@@ -16,6 +16,7 @@ fn keyword_dispatches_to_one_renderer_per_kind() {
     let sources = [
         ("graph TD\n a --> b", "flowchart"),
         ("flowchart TD\n a --> b", "flowchart alias"),
+        ("graph LR\n a --> b", "flowchart LR"),
         (
             "stateDiagram-v2\n    [*] --> s1\n    s1 --> [*]",
             "state adapter",
@@ -29,6 +30,16 @@ fn keyword_dispatches_to_one_renderer_per_kind() {
             "classDiagram\n    class A {\n        +run()\n    }",
             "class",
         ),
+        ("erDiagram\n    USER ||--o{ ORDER : places", "er"),
+        ("gitGraph\n    commit id: \"one\"", "git"),
+        ("mindmap\n    root\n    child", "mindmap"),
+        ("timeline\n    2021 : event", "timeline"),
+        ("journey\n    task: 5: me", "journey"),
+        (
+            "quadrantChart\n    quadrant-1 a\n    \"p\": [0.5, 0.5]",
+            "quadrant",
+        ),
+        ("xychart-beta\n    x-axis [a, b]\n    bar [1, 2]", "xychart"),
         ("gantt\n    t :a, 2026-01-01, 5d", "gantt"),
     ];
     for (source, kind) in sources {
@@ -50,6 +61,14 @@ fn keyword_match_ignores_case_and_comments() {
         )
         .is_some()
     );
+    assert!(render_diagram("%% c\nC4Context\n    Person(a, \"A\")", 80).is_some());
+    assert!(
+        render_diagram(
+            "RequirementDiagram\n    requirement r {\n        id: 1\n    }",
+            80
+        )
+        .is_some()
+    );
 }
 
 /// Unsupported or malformed sources return `None` — the caller falls
@@ -57,11 +76,12 @@ fn keyword_match_ignores_case_and_comments() {
 #[test]
 fn unsupported_sources_return_none() {
     for source in [
-        "graph LR\n a --> b",                    // unsupported direction
-        "graph TD\n subgraph s\n a --> b\n end", // subgraphs
-        "a --> b",                               // no keyword line
-        "mindmap\n root",                        // unsupported kind
-        "",                                      // empty source
+        "graph BT\n a --> b", // unsupported direction
+        "graph RL\n a --> b", // unsupported direction
+        "a --> b",            // no keyword line
+        "",                   // empty source
+        "block-beta\n block", // unsupported kind
+        "sankey-beta\n\nA,B,1",
     ] {
         assert!(
             render_diagram(source, 80).is_none(),
@@ -118,7 +138,7 @@ fn mermaid_fences_gate_on_language_and_toggle() {
     assert!(MermaidFences.render_fence("python", "x = 1", 80).is_none());
     assert!(
         MermaidFences
-            .render_fence("mermaid", "graph LR\n a --> b", 80)
+            .render_fence("mermaid", "block-beta\n block: x", 80)
             .is_none()
     );
 }

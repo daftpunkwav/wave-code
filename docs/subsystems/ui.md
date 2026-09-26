@@ -126,14 +126,23 @@ receivers remain compatible.
   /model /effort /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
   /undo /editor /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
-  through as user input (skills). `/usage` renders a severity-colored
+  through as user input (skills). Every command that takes a parameter
+  opens its interactive surface when invoked bare — `/theme` picks from
+  the theme selector, `/effort` from the level list, `/title`, `/editor`,
+  `/export`, and `/compact` open a prefilled free-text prompt, `/undo`
+  opens the rewind picker, and `/btw` asks for the question — while
+  instant actions (`/clear`, `/new`, `/fork`, `/auto`, `/copy`, …) and
+  info-only commands (`/usage`, `/status`, `/mcp`, …) stay direct.
+  `/usage` renders a severity-colored
   context bar plus the cumulative token split accumulated from
   `TokenCount` samples. `/copy` puts the last assistant message on the
-  clipboard via OSC 52; `/export [path]` writes the full untrimmed
-  user/assistant dialogue to markdown. Mode and model commands update
+  clipboard via OSC 52; `/export` writes the full untrimmed
+  user/assistant dialogue to markdown (a path is prompted for; passing
+  one directly skips the prompt). Mode and model commands update
   the local chrome immediately (there is no mode-changed wire event).
-- `/compact [instruction]` compresses the context now, optionally
-  steering the summary (`CompactTrigger::Manual` carries the focus to
+- `/compact` compresses the context now; the prompt accepts an optional
+  instruction steering the summary (`CompactTrigger::Manual` carries the
+  focus to
   the model summarizer). The transcript shows a live compaction card
   (saw-wave pulse, elapsed seconds) that settles into
   `● compacted: context <before>, summary <N> tokens`, where `before`
@@ -141,13 +150,14 @@ receivers remain compatible.
   no completion event, so the card settles into
   `● compaction failed (…)` on the error (idle `/compact`) or the turn
   end (in-turn auto compaction) that proves it dead.
-- `/undo [n]` drops the last n conversation turns (default 1,
+- `/undo` opens the rewind picker over recent turns (or `/undo <n>`
+  drops the last n directly, default 1,
   idle-only): the wire `Rewind` op truncates the actor's conversation,
   the `HistoryRewound` event trims dialogue and transcript, and the
   truncated dialogue is journaled as the newest snapshot so resume
   replays the rewound conversation. Conversation-level only — file
   changes the dropped turns already made are not undone. Double-Esc
-  (600 ms window, idle only) opens a rewind picker over the most
+  (600 ms window, idle only) opens the same rewind picker over the most
   recent user turns (newest first, up to 8 rows); picking a row feeds
   the same `/undo` path, so the busy/shell guards apply unchanged.
 - Sessions: every interactive launch journals completed turns (text
@@ -336,13 +346,24 @@ is the established seam (the actor already wraps the runner).
 
 ## Theming
 
-The default dark palette is the **synthwave** identity: neon cyan as
-the primary accent, amber for user input, green success, salmon
-warning, red-pink error, on a deep purple-dark ground (see
-`theme/colors.rs`). Line and input chrome rides a desaturated neutral
-gray (no accent hue), and the user-input row sits on a subtle lighter
-band. 20 semantic tokens, dark/light palettes (hex values
-locked by test),
+A theme is pure data: one `theme.json` per theme. The built-ins ship
+as bundled files (`theme/themes/dark|deepwave|light.json`, embedded via
+`include_str!` and parsed once); user themes drop into
+`~/.wavecode/themes/<name>.json` and become `/theme <name>` — see
+`docs/themes.md` for the authoring guide. Theme code is decoupled, one
+responsibility per file (`theme/tokens.rs` semantic contract,
+`theme/file.rs` format + storage, `theme/builtin.rs` bundled data,
+`theme/active.rs` the global + paint helpers, `theme/detect.rs`
+resolution); no color values live in Rust.
+
+All palettes share one minimal structure: a four-step neutral text ramp
+plus true-gray chrome, **one accent hue per theme** (the dark theme
+rides an azure, deepwave a teal, light a GitHub blue) that carries the
+prompt, user input, inline code, and focus chrome, and one semantic
+band (green/amber/red) reused by the diff pair and shell mode. Nothing
+else is colored; code blocks stay colorful through their syntax themes.
+The user-input row sits on a subtle lighter band. 23 semantic tokens,
+hex values locked by test against the parsed data files,
 `light|dark|deepwave|auto` resolution (OSC 11 probe on Unix — a bounded `poll`,
 never a blocking reader thread, since byte-reads on the console input
 would race crossterm's event reader and steal keystrokes; Windows skips
@@ -353,9 +374,38 @@ also resolved once at startup (`COLORTERM` truecolor, `TERM`
 256-color, otherwise the 16 classic ANSI colors) and every paint
 degrades through the same role mapping.
 
-The previous **deepwave / sonar** identity stays selectable
-(`/theme deepwave` or `"base": "deepwave"` in a custom theme): teal
-primary, the four waveform categories across an ocean spectrum.
+Two palette contracts are locked by test so the themes never regress
+into what the old lavender ramp was:
+
+- **No violet grays**: on every neutral ramp token (text, dim, muted,
+  border, neutral, diff gutter) green stays at or above red and the
+  channel progression stays even — blue may run past green by no more
+  than the green-over-red step — so grays read as grays and never
+  purple. The dark palette is a true graphite ramp; deepwave's slate
+  (an even, blue-leaning progression) remains allowed.
+- **Contrast-locked ink**: every ramp step clears WCAG contrast against
+  its own theme `background` token — body ≥ 7:1, dim ≥ 4.5:1, muted
+  ≥ 3.5:1 — and the input band stays a quiet, visible step of that
+  background.
+
+The `background` token is also functional: the light theme applies its
+paper + ink + cursor color to the terminal itself (OSC 11 background,
+OSC 10 foreground, OSC 12 cursor — best-effort) so it stays readable
+and usable on dark-terminal hosts — whose near-white default
+foreground and cursor would otherwise vanish on the paper. Any theme
+switch back to a dark theme — or terminal restore on exit and around
+the external-editor round trip — resets all three to the terminal's
+own colors (OSC 110/111/112). Terminals that ignore the sequences are
+unaffected. As defense in depth, spans that would otherwise inherit
+the terminal's default foreground — the editor draft body, the
+autocomplete popup, markdown list markers, and editor scroll labels —
+are painted from the theme, and the message renderers restyle their
+markdown on every theme switch (a message rendered under `dark`
+repaints under `light`, not the reverse order of operations).
+
+The **deepwave** identity stays selectable (`/theme deepwave` or
+`"base": "deepwave"` in a custom theme): the same minimal structure
+with a teal accent on a slate ramp.
 
 One theme selection drives both the chrome roles and the syntax
 highlighting: each built-in theme pairs with a syntect theme
@@ -366,14 +416,16 @@ only foreground colors and font styles from the syntect theme —
 backgrounds never render, so code blocks always sit on the terminal's
 own background.
 
-Custom themes live in `~/.wavecode/themes/<name>.json`: a `base`
-(`dark`/`light`/`deepwave`) plus any subset of the 20 tokens as `#rrggbb`
-overrides, and an optional `syntax_theme` alias (`synthwave-84`,
-`ocean-dark`, `ocean-light`) overriding the base's syntax pairing.
-Unknown token names, malformed colors, and unknown aliases are rejected (a
-typo must not silently render as the base), path escapes never reach
-the filesystem, and `/theme <name>` applies one live — the editor and
-popup styles are rebuilt from the new palette, as for the built-ins.
+User themes follow the same file format (a `base`
+(`dark`/`light`/`deepwave`) plus any subset of the 23 tokens as
+`#rrggbb` overrides, an optional `syntax_theme` alias, an optional
+`description` shown in the picker, and an optional `dark` kind).
+Unknown token names, malformed colors, unknown aliases, and unknown
+fields are rejected (a typo must not silently render as the base),
+path escapes never reach the filesystem, and `/theme <name>` applies
+one live — the editor and popup styles are rebuilt from the new
+palette, as for the built-ins, and the repaint clears the scrollback
+so rows drawn under the previous palette cannot survive.
 
 ## Markdown rendering conventions
 
@@ -401,13 +453,18 @@ Fences consult pluggable renderers before the syntax highlighter (the
 `FenceRenderer` seam; applications register more with
 `Markdown::with_fence`):
 
-- ```mermaid fences render as box-drawing diagrams while the toggle is
-  on (Ctrl+M in the console; toggling again returns the source view).
-  Supported kinds: `graph`/`flowchart` (top-to-bottom; node shapes
-  collapse onto boxes), `stateDiagram(-v2)` through a flowchart
-  adapter, `sequenceDiagram`, `classDiagram`, `gantt`, and `pie`.
-  Anything unsupported, or wider than the columns budget, returns
-  nothing and the fence falls back to the plain source view.
+- ```mermaid fences render as box-drawing diagrams (on by default;
+  Ctrl+M in the console toggles the source view). One shared graph
+  engine (nodes + styled edges + subgraph frames, layered band or
+  column layouts) carries `graph`/`flowchart` (TD/TB/LR, subgraph
+  groups, node shapes collapse onto boxes), `stateDiagram(-v2)` through
+  a flowchart adapter, `classDiagram`, `erDiagram`,
+  `requirementDiagram`, and the `C4*` family. Kinds with their own
+  geometry: `sequenceDiagram` lanes, `gitGraph` branch timeline,
+  `mindmap`/`timeline` trees, and the chart rows of `pie`, `journey`,
+  `quadrantChart`, and `xychart-beta`. Anything unsupported
+  (`block-beta`, `sankey-beta`), or wider than the columns budget,
+  returns nothing and the fence falls back to the plain source view.
 - ```diff / ```patch fences ride dedicated line styles: additions
   green, removals red, file headers and `@@` hunks in the metadata
   tone, context plain.

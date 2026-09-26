@@ -26,17 +26,31 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `/btw` side questions, and a model catalog (`~/.wavecode/models.json`)
   edited through `/model list|add|set|remove` beside the picker.
 - Markdown rendering: fenced mermaid blocks draw box-drawing diagrams
-  (`graph`/`flowchart`, `stateDiagram`, `sequenceDiagram`,
-  `classDiagram`, `gantt`, `pie`; Ctrl+M returns the source view),
+  (`graph`/`flowchart` TD/TB/LR with subgraphs, `stateDiagram`,
+  `sequenceDiagram`, `classDiagram`, `erDiagram`, `requirementDiagram`,
+  `C4*`, `gitGraph`, `mindmap`, `timeline`, `gantt`, `pie`, `journey`,
+  `quadrantChart`, `xychart-beta`; Ctrl+M returns the source view),
   ```diff fences color additions/removals/hunks, `$…$` math converts
   to unicode, `==highlight==` folds onto bold, `^sup^`/`~sub~` map to
   superscript/subscript glyphs, and `<details>`/`<summary>`/`<kbd>`
   reduce to plain terminal rows.
-- Theming: `/theme light|dark|deepwave|auto` plus custom theme files
-  with per-token color overrides and a `syntax_theme` alias; one
-  selection colors both the chrome and code blocks (the bundled
-  SynthWave '84 tmTheme, or base16-ocean dark/light), with
-  256-color / 16-color degradation for plainer terminals.
+- Theming, data-driven: every theme is one `theme.json` — the
+  built-ins (`dark`, `deepwave`, `light`) are bundled JSON files and
+  user themes drop into `~/.wavecode/themes/` to become
+  `/theme <name>`, VS Code-style (optional `base` inheritance, `dark`
+  kind, `description` for the picker, `syntax_theme` alias; unknown
+  keys rejected). `/theme` picks interactively; one selection colors
+  both the chrome and code blocks, with 256-color / 16-color
+  degradation for plainer terminals. Bare
+  `/theme` (and every other parameterized command) opens an
+  interactive picker; the light theme applies its paper background to
+  the terminal (OSC 11 background + OSC 10 foreground + OSC 12 cursor,
+  so unpainted spans and the caret stay visible) and dark themes
+  restore the terminal's own colors on switch and exit; messages
+  repaint under the new theme when it changes (a message rendered
+  under dark no longer strands near-white text on the light paper);
+  frame-shrinking transitions (dialog close, rewind) repaint the
+  viewport so no stale copy of the input box survives.
 - Long-horizon loop: `max_tool_rounds` config key; persisted tool
   results carry a wall-clock stamp so resumed sessions can reason
   about recency; a `/model` switch onto a smaller-window model
@@ -49,10 +63,18 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   pipeline with sha256-verified archives.
 
 ### Changed
-- The default dark theme is the synthwave identity (neon cyan
-  primary, amber user input on a subtle highlight band, a desaturated
-  neutral gray for line chrome, deep purple-dark ground); the previous
-  deepwave identity stays selectable via `/theme deepwave`.
+- All three themes re-tune their neutrals: the dark theme's lavender
+  (violet-cast) ramp becomes a true graphite ramp under one azure
+  accent, the light theme's slate grays neutralize, and both lock
+  WCAG contrast (body ≥ 7:1, dim ≥ 4.5:1, muted ≥ 3.5:1) and a
+  no-violet-grays contract in tests; deepwave keeps its teal identity
+  with a brighter muted step.
+- Parameterized slash commands open their interactive surface when
+  invoked bare: `/theme` and `/effort` pick from a selector, `/title`,
+  `/editor`, `/export`, `/compact`, and `/btw` open a prefilled
+  free-text prompt, and bare `/undo` opens the rewind picker instead
+  of dropping a turn immediately (while busy it still refuses).
+- The previous deepwave identity stays selectable via `/theme deepwave`.
 - Fenced code frames hug their content instead of spanning the
   terminal (still capped at 80 columns on wide terminals).
 - `max_tool_rounds` default raised from 32 to 256, and goal

@@ -1,5 +1,7 @@
 # Cookbook: adding a tool
 
+English | [中文](adding-a-tool.zh.md)
+
 Worked examples: `web_fetch` (`crates/capabilities/tools/src/web_fetch.rs`, registered in `Registry::builtin()`) and `lsp_diagnostics` (`crates/capabilities/tools/src/lsp.rs`, late-registered in session assembly).
 
 ## 1. Implement the `Tool` trait

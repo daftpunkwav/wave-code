@@ -1,5 +1,7 @@
 # Architecture
 
+English | [中文](architecture.zh.md)
+
 WaveCode is a headless-first AI coding agent in Rust. One `wavecode` binary serves single-turn execution (`exec`), an interactive REPL, an inline console UI (full-viewport frames on the main screen, native scrollback preserved), and legacy session resume over a shared agent core: a multi-turn ReAct loop with tools, skills, memory, and MCP.
 
 The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies point downward only; there are no cycles. This document describes the groups bottom-up, the dependency rules that hold the layering together, and the life of a turn.

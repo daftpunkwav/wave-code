@@ -1,5 +1,7 @@
 # Subsystem: sessions and durable state
 
+English | [中文](sessions-state.zh.md)
+
 Durable state is deliberately dumb: append-only bytes plus versioned formats, with structure owned by the callers. Crates: `state/persistence`, `state/checkpoint`, `state/plan`, `state/goal`, plus the actor's durability helpers in `operations/actor/src/durable.rs`.
 
 ## Turn journal (`crates/state/persistence/src/lib.rs`)

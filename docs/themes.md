@@ -1,5 +1,7 @@
 # Theme authoring guide
 
+English | [中文](themes.zh.md)
+
 A WaveCode theme is **one JSON file — nothing else**. The bundled
 themes live in
 `crates/frontends/console/src/theme/themes/*.json`; your own themes go

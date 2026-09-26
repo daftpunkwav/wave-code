@@ -1,5 +1,7 @@
 # Cookbook: adding a subagent
 
+English | [中文](adding-a-subagent.zh.md)
+
 Subagents are model-invoked through the `task` tool and defined by plain Markdown files with frontmatter. Everything below is implemented in `crates/capabilities/tools/src/agent_task_tool.rs`; depth enforcement lives in `crates/runtime/child/src/lib.rs`.
 
 ## 1. Write the definition file

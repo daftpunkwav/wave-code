@@ -1,5 +1,7 @@
 # Development
 
+English | [中文](development.zh.md)
+
 Guide for working on the WaveCode repository. For how the crates fit together, see [architecture.md](architecture.md).
 
 ## Prerequisites

@@ -1,5 +1,7 @@
 # Subsystem: safety
 
+English | [中文](safety.zh.md)
+
 Safety is layered: vocabulary (`crates/foundation/protocol`), the approval gate (`crates/safety/gate`), the permission sandbox with rule evaluation (`crates/capabilities/sandbox`), and OS confinement backends in the same crate. The runner consumes all of it through the `PolicyDecider` / `ApprovalSource` seams.
 
 ## Permission modes and policy

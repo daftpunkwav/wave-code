@@ -1,5 +1,7 @@
 # Subsystem: context engineering
 
+English | [中文](context-engineering.zh.md)
+
 Context management spans two crates plus glue: the persisted conversation and budget levels (`crates/state/store`), the pipeline passes (`crates/capabilities/context`), and the runner-facing compactor adapter (`crates/operations/bootstrap/src/compactor.rs`).
 
 ## Conversation and budget levels (`crates/state/store/src/lib.rs`)

@@ -1,5 +1,7 @@
 # Subsystem: the core loop
 
+English | [中文](core-loop.zh.md)
+
 The RunLoop lives in `crates/runtime/runner/src/lib.rs` and owns one turn end to end: sample → decide → dispatch → recover. It depends only on trait seams and DTOs; concrete capabilities are injected by the composition root (`crates/operations/bootstrap`). Changing this file requires updating `docs/architecture.md`.
 
 ## Seams

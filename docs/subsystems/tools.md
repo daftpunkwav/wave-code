@@ -1,5 +1,7 @@
 # Subsystem: tools
 
+English | [中文](tools.zh.md)
+
 The tool framework lives in `crates/capabilities/tools` (package `wavecode-tools`): the `Tool` trait, the `Registry`, path confinement, and the built-in tool set. Execution orchestration (hooks, policy, approval) is *not* here — the RunLoop drives it; see `docs/subsystems/core-loop.md`.
 
 ## The `Tool` trait (`crates/capabilities/tools/src/lib.rs`)

@@ -1,12 +1,14 @@
 # Subsystem: extensibility
 
+English | [中文](extensibility.zh.md)
+
 Five extension surfaces: skills, hooks, MCP, plugins, and named agent definitions. All of them ride the existing seams (registry, hooks gateway, task service) instead of loop changes.
 
 ## Skills (`crates/capabilities/skills/src/lib.rs`)
 
 A skill is `<root>/skills/<name>/SKILL.md` — YAML frontmatter plus a Markdown body. Discovery walks roots in ascending priority — builtin < `~/.wavecode/skills` < `<cwd>/.wavecode/skills` — with same-name skills overridden by the higher-priority root (`standard_roots`); skills exposed over MCP are a specified fourth source that is still only a placeholder. Required field is `description`; optional fields: `when_to_use`, `allowed-tools`, `context: inline | fork`, `user-invocable`, `argument-hint`, `paths` (serde aliases accept kebab-case and snake_case).
 
-Frontmatter parsing uses `serde_yaml` rather than a hand-rolled scanner — a deliberate tradeoff, since skill values may hold colons, lists, and multi-line strings, and a minimal parser's edge cases degrade silently. Frontmatter fields take the SPEC section 8.1 table intersection.
+Frontmatter parsing uses `serde_yaml` rather than a hand-rolled scanner — a deliberate tradeoff, since skill values may hold colons, lists, and multi-line strings, and a minimal parser's edge cases degrade silently. Frontmatter fields take the frontmatter table intersection (`description` required, the rest optional).
 
 - **Inline** (default): the body expands into the current session's result text, with `$ARGUMENTS` replaced by the call arguments.
 - **Fork**: the skill runs in a dedicated subagent via the task service; its `allowed-tools` restrict the child's tool surface (forks without a surface get the registry surface minus the child-spawning tools, so no fork can ever re-spawn children).

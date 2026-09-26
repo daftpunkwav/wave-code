@@ -1,5 +1,7 @@
 # Subsystem: evals
 
+English | [中文](evals.zh.md)
+
 Quality assurance runs in five tiers, ordered by cost. Everything in tiers 1, 2, and 5 is offline and keyless; tiers 3 and 4 need a real model and are run by a human on purpose — stated plainly so nobody mistakes CI green for live verification.
 
 ## Tier 1 — unit and integration tests

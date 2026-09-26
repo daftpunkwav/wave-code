@@ -1,5 +1,7 @@
 # Console UI subsystem
 
+English | [中文](ui.zh.md)
+
 The interactive console is two crates over the wire + actor seam:
 
 - `frontends/engine` (`tui-engine`) — a pure rendering library with zero

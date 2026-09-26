@@ -330,9 +330,23 @@ your code answer approval requests (`session.answerApproval(callId, "allow")`).
 Zero runtime dependencies; the wire types in `src/types.ts` mirror the Rust
 `EventMsg` one-to-one. Tests run against a real binary (see the SDK README).
 
+## Documentation
+
+| Document | Role |
+|----------|------|
+| [`docs/architecture.md`](docs/architecture.md) | The crate DAG, dependency direction, and composition root |
+| [`docs/development.md`](docs/development.md) | Build, test, and CI commands; layout conventions |
+| [`docs/themes.md`](docs/themes.md) | Authoring guide for theme JSON files |
+| [`docs/subsystems/`](docs/subsystems/) | Per-subsystem contracts (core loop, tools, UI, safety, memory, sessions, evals, extensibility) |
+| [`docs/cookbook/`](docs/cookbook/) | Task recipes: adding a tool, a subagent, recording and replaying |
+
+Every directory in `crates/` carries its own `README.md` (file map and
+per-crate contracts); a Chinese mirror (`README.zh.md` / `*.zh.md`)
+sits next to each English document.
+
 ## Develop
 
-```bash
+```bash,
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo fmt --check

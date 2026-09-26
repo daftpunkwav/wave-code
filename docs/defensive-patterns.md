@@ -1,5 +1,7 @@
 # Defensive patterns
 
+English | [中文](defensive-patterns.zh.md)
+
 Recurring guardrails in this codebase, each with a one-line anchor. New code should reuse these instead of inventing local variants.
 
 | Pattern | Rule | Anchor |

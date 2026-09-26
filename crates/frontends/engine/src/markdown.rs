@@ -19,6 +19,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use unicode_width::UnicodeWidthStr;
 
 use crate::color::Style;
+use crate::component::Segment;
 use crate::sanitize::sanitize_terminal;
 use crate::width;
 
@@ -158,7 +159,7 @@ pub struct Markdown {
     /// Fence renderers consulted before the highlighter; the default
     /// set carries the engine-builtin mermaid diagrams.
     fences: Vec<Box<dyn FenceRenderer>>,
-    cache: Option<(String, usize, std::sync::Arc<Vec<String>>)>,
+    cache: Option<(String, usize, Segment)>,
 }
 
 impl Markdown {
@@ -219,15 +220,15 @@ impl Markdown {
 
     /// Render markdown `text` to ANSI lines at `width`. Cache hits
     /// share the rendered array by reference (one refcount bump).
-    pub fn render(&mut self, text: &str, columns: usize) -> std::sync::Arc<Vec<String>> {
+    pub fn render(&mut self, text: &str, columns: usize) -> Segment {
         if let Some((cached_text, cached_width, lines)) = &self.cache
             && cached_text == text
             && *cached_width == columns
         {
-            return std::sync::Arc::clone(lines);
+            return Segment::clone(lines);
         }
-        let lines = std::sync::Arc::new(self.render_uncached(text, columns));
-        self.cache = Some((text.to_string(), columns, std::sync::Arc::clone(&lines)));
+        let lines = Segment::new(self.render_uncached(text, columns));
+        self.cache = Some((text.to_string(), columns, Segment::clone(&lines)));
         lines
     }
 

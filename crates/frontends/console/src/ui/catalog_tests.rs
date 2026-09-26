@@ -145,6 +145,25 @@ fn set_unknown_field_or_alias_reports() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// An unparseable numeric value reports and leaves the field (and the
+/// file) untouched — no silent reset-to-default dressed up as success.
+#[test]
+fn set_rejects_unparseable_numbers_without_writing() {
+    let (mut ui, home) = ui_with_home("set-bad-number");
+    seed(&home);
+    ui.user_submit("/model set glm context abc");
+    ui.user_submit("/model set glm output 1.5");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("invalid context value"), "{text}");
+    assert!(text.contains("invalid output value"), "{text}");
+    assert!(!text.contains("updated"), "no false success: {text}");
+    let catalog = ModelCatalog::load(&home).unwrap();
+    let spec = catalog.get("glm").unwrap();
+    assert_eq!(spec.context_window, Some(1_000_000), "field untouched");
+    assert_eq!(spec.max_output, None, "field untouched");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 #[test]
 fn remove_drops_the_spec_and_saves() {
     let (mut ui, home) = ui_with_home("remove");

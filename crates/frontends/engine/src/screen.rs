@@ -286,7 +286,11 @@ impl Screen {
     /// stripped: they drive `place_hardware_cursor`, not the terminal).
     /// The frame gutter precedes every row.
     fn write_line(&self, out: &mut impl std::io::Write, line: &str, columns: usize) {
-        for _ in 0..self.margin {
+        // A terminal narrower than the gutter drops the indent instead
+        // of writing rows past the budget (the wrap would corrupt the
+        // frame).
+        let margin = self.margin.min(columns);
+        for _ in 0..margin {
             let _ = out.write_all(b" ");
         }
         // Copy only when the cursor marker is present: unmarked lines
@@ -300,10 +304,10 @@ impl Screen {
             line
         };
         // Lines that already fit stream without building a new string.
-        if width::width(line) <= columns.saturating_sub(self.margin) {
+        if width::width(line) <= columns.saturating_sub(margin) {
             let _ = out.write_all(line.as_bytes());
         } else {
-            let truncated = width::truncate_to_width(line, columns.saturating_sub(self.margin));
+            let truncated = width::truncate_to_width(line, columns.saturating_sub(margin));
             let _ = out.write_all(truncated.as_bytes());
         }
         // Styles and hyperlinks never leak across lines.

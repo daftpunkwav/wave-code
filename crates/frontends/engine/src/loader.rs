@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use crate::color::Style;
-use crate::component::Component;
+use crate::component::{Component, Segment};
 
 /// Sine ripple frames: amplitude swells and recedes (80 ms).
 pub const SINE_FRAMES: [&str; 12] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂"];
@@ -97,9 +97,9 @@ impl Loader {
 }
 
 impl Component for Loader {
-    fn render(&mut self, _width: usize) -> std::sync::Arc<Vec<String>> {
+    fn render(&mut self, _width: usize) -> Segment {
         let frame = self.current_frame();
-        std::sync::Arc::new(vec![format!(
+        Segment::new(vec![format!(
             "{} {}",
             self.frame_style.paint(frame),
             self.label_style.paint(&self.label)

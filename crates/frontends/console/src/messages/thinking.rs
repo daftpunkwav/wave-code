@@ -1,6 +1,6 @@
 //! The thinking/reasoning transcript component.
 //!
-//! Live: a spinner, `✻ Thinking for Ns… (ctrl+o to expand)`, and a
+//! Live: a spinner, `Thinking for Ns… (ctrl+o to expand)`, and a
 //! scrolling tail of the last two wrapped lines (dim italic, `└`
 //! branch prefix). Finalized: the header freezes to `✻ Thought for Ns
 //! (ctrl+o to expand)` above the same collapsed preview; Ctrl+O
@@ -27,6 +27,13 @@ const FLOWER: &str = "✻";
 /// Shared Ctrl+O expansion flag across expandable components.
 #[derive(Debug, Clone)]
 pub struct ExpandedFlag(Arc<AtomicBool>);
+
+/// Live blocks re-render on the spinner's frame cadence (the header
+/// seconds counter and the spinner glyph advance even when no delta
+/// arrives); finalized blocks are static.
+fn live_frame_bucket(started: Instant) -> u64 {
+    started.elapsed().as_millis() as u64 / tui_engine::loader::TRIANGLE_INTERVAL_MS
+}
 
 impl ExpandedFlag {
     /// A flag starting collapsed.
@@ -62,7 +69,7 @@ pub struct Thinking {
     duration: Option<Duration>,
     expanded_flag: ExpandedFlag,
     spinner: Loader,
-    lines: Option<(usize, String, bool, bool, Segment)>,
+    lines: Option<(usize, u64, String, bool, bool, Segment)>,
 }
 
 impl Thinking {
@@ -71,24 +78,6 @@ impl Thinking {
         Self {
             text: String::new(),
             live: true,
-            started: Instant::now(),
-            duration: None,
-            expanded_flag,
-            spinner: Loader::new(
-                SpinnerStyle::Triangle,
-                "",
-                theme::current().style(Token::TextDim),
-                theme::current().style(Token::TextDim),
-            ),
-            lines: None,
-        }
-    }
-
-    /// A finalized block built from complete text (transcript folding).
-    pub fn finalized(text: String, expanded_flag: ExpandedFlag) -> Self {
-        Self {
-            text,
-            live: false,
             started: Instant::now(),
             duration: None,
             expanded_flag,
@@ -145,9 +134,21 @@ impl Component for Thinking {
     fn render(&mut self, columns: usize) -> Segment {
         let theme = theme::current();
         let expanded = self.expanded_flag.get();
-        if let Some((cached_columns, cached_text, cached_live, cached_expanded, lines)) =
-            &self.lines
+        let frame = if self.live {
+            live_frame_bucket(self.started)
+        } else {
+            0
+        };
+        if let Some((
+            cached_columns,
+            cached_frame,
+            cached_text,
+            cached_live,
+            cached_expanded,
+            lines,
+        )) = &self.lines
             && *cached_columns == columns
+            && *cached_frame == frame
             && *cached_text == self.text
             && *cached_live == self.live
             && *cached_expanded == expanded
@@ -188,11 +189,8 @@ impl Component for Thinking {
             return Segment::new(Vec::new());
         } else {
             // Frozen header: the spinner swaps for a static glyph and
-            // the duration stops ticking.
-            let secs = self
-                .duration
-                .unwrap_or_else(|| self.started.elapsed())
-                .as_secs();
+            // the duration stops ticking (`finalize` froze it).
+            let secs = self.duration.unwrap_or_default().as_secs();
             out.push(format!(
                 "{FLOWER} {}{}",
                 theme.paint(Token::TextStrong, &format!("Thought for {secs}s")),
@@ -229,6 +227,7 @@ impl Component for Thinking {
         let lines = Arc::new(out);
         self.lines = Some((
             columns,
+            frame,
             self.text.clone(),
             self.live,
             expanded,
@@ -361,5 +360,24 @@ mod tests {
         let after = strip_ansi(&block.render(60)[0]);
         assert_eq!(before, after, "frozen header: {before:?} vs {after:?}");
         assert!(before.contains("Thought for 0s"), "{before:?}");
+    }
+
+    /// A silent stretch must not freeze the live header: the spinner
+    /// frame and seconds counter advance even when no delta re-fills
+    /// the text (the cache key carries the frame bucket).
+    #[test]
+    fn live_block_repaints_during_silent_stretches() {
+        theme::set(theme::Theme::dark());
+        let mut block = Thinking::live(ExpandedFlag::new());
+        block.push("work");
+        let first = strip_ansi(&block.render(60)[0]);
+        std::thread::sleep(std::time::Duration::from_millis(
+            tui_engine::loader::TRIANGLE_INTERVAL_MS + 40,
+        ));
+        let second = strip_ansi(&block.render(60)[0]);
+        assert_ne!(
+            first, second,
+            "spinner must advance on the frame cadence: {first:?} vs {second:?}"
+        );
     }
 }

@@ -3,9 +3,10 @@
 //! Terminal math renders as text: common commands map onto Unicode
 //! (`\int` → `∫`, `\alpha` → `α`, `\times` → `×`), simple `^{...}` /
 //! `_{...}` groups map onto superscript/subscript code points where a
-//! glyph exists (digits, parentheses, operators, most Latin letters),
-//! and anything unmappable keeps its original notation (`x^{22}` stays
-//! `x^{22}` — never silently wrong). `\frac{a}{b}` renders `(a)/(b)`,
+//! glyph exists (digits, parentheses, operators, most Latin letters);
+//! a glyph without a script code point keeps its full-size character,
+//! and the `^` / `_` markers themselves never survive into the output
+//! (`x^{q2}` renders `xq²`). `\frac{a}{b}` renders `(a)/(b)`,
 //! `\sqrt{x}` renders `√(x)`. Unknown commands degrade to their name.
 
 use crate::width;
@@ -612,7 +613,8 @@ mod tests {
     fn scripts_map_or_fall_back() {
         assert_eq!(render("x^{22}"), "x²²");
         assert_eq!(render("H_{2}O"), "H₂O");
-        // No superscript glyphs for those chars: notation is kept.
+        // Every glyph inside the group carries a script code point, so
+        // the whole `\frac` result scripts; the `^{}` markers vanish.
         assert_eq!(render("a^{\\frac{1}{2}}"), "a⁽¹⁾/⁽²⁾");
     }
 

@@ -6,7 +6,7 @@
 //! `(selected/total)` when the list scrolls.
 
 use crate::color::Style;
-use crate::component::Component;
+use crate::component::{Component, Segment};
 use crate::width;
 
 /// One selectable entry.
@@ -127,11 +127,9 @@ impl SelectList {
 }
 
 impl Component for SelectList {
-    fn render(&mut self, width_budget: usize) -> std::sync::Arc<Vec<String>> {
+    fn render(&mut self, width_budget: usize) -> Segment {
         if self.items.is_empty() {
-            return std::sync::Arc::new(vec![
-                self.style.description.paint("  No matching commands"),
-            ]);
+            return Segment::new(vec![self.style.description.paint("  No matching commands")]);
         }
         let primary_column = self.primary_column();
         let total = self.items.len();
@@ -172,7 +170,7 @@ impl Component for SelectList {
                     .paint(&format!("  ({}/{total})", self.selected + 1)),
             );
         }
-        std::sync::Arc::new(out)
+        Segment::new(out)
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

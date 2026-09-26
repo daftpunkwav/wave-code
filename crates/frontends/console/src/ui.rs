@@ -2566,13 +2566,7 @@ verify from the repository.";
             return;
         }
         for (alias, spec) in &catalog.models {
-            let reasoning = spec
-                .reasoning
-                .variants
-                .join("/")
-                .is_empty()
-                .then(String::new)
-                .unwrap_or_else(|| spec.reasoning.variants.join("/"));
+            let reasoning = spec.reasoning.variants.join("/");
             self.push_status(
                 &format!(
                     "{alias} · {} ({}) ctx {} out {} thinking [{}] in [{}] out [{}]",
@@ -2631,9 +2625,24 @@ verify from the repository.";
             self.push_status(&format!("no model named {alias}"), true);
             return;
         };
+        // Numeric fields parse before anything is written: an
+        // unparseable value must report, not silently reset the field
+        // to the default while claiming success.
         match field {
-            "context" => spec.context_window = value.parse().ok(),
-            "output" => spec.max_output = value.parse().ok(),
+            "context" => match value.parse::<u64>() {
+                Ok(parsed) => spec.context_window = Some(parsed),
+                Err(_) => {
+                    self.push_status(&format!("invalid context value {value:?} (a number)"), true);
+                    return;
+                }
+            },
+            "output" => match value.parse::<u32>() {
+                Ok(parsed) => spec.max_output = Some(parsed),
+                Err(_) => {
+                    self.push_status(&format!("invalid output value {value:?} (a number)"), true);
+                    return;
+                }
+            },
             "thinking" => {
                 spec.reasoning.enabled = !value.eq_ignore_ascii_case("off");
                 spec.reasoning.default =

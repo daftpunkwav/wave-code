@@ -316,9 +316,6 @@ fn code_content_escapes_are_sanitized() {
     assert!(!plain.contains("[97m"), "residue: {plain:?}");
 }
 
-/// Table rules and rows paint each span separately: every SGR open
-/// is matched by exactly one reset, so a border can never lose its
-/// style mid-line to a nested paint.
 /// Math segments convert to unicode ($E = mc^2$ renders the
 /// superscript, no raw $ markers) — math, not source.
 #[test]
@@ -441,6 +438,9 @@ fn code_frames_hug_their_content() {
     );
 }
 
+/// Table rules and rows paint each span separately: every SGR open
+/// is matched by exactly one reset, so a border can never lose its
+/// style mid-line to a nested paint.
 #[test]
 fn table_spans_stay_balanced() {
     let style = MarkdownStyle {

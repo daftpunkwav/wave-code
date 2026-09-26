@@ -623,6 +623,30 @@ fn margin_indents_every_row_at_write_time() {
     );
 }
 
+/// A terminal narrower than the gutter drops the indent instead of
+/// writing rows past the column budget (the wrap would corrupt the
+/// frame).
+#[test]
+fn margin_narrower_than_the_terminal_drops_the_indent() {
+    let mut screen = Screen::with_options(ScreenOptions {
+        synchronized: false,
+        clear_scrollback: false,
+    });
+    screen.set_margin(4);
+    let mut out = Vec::new();
+    draw(&mut screen, &mut out, &["abcdef"], 2, 10);
+    let text = String::from_utf8(out).unwrap();
+    // margin clamps to 2 columns; the content truncates to nothing.
+    assert!(
+        text.contains("  \x1b[0m") || text.contains("\r\n  \x1b[0m"),
+        "indent clamped to the width, no extra cells: {text:?}"
+    );
+    assert!(
+        !text.contains("abcdef"),
+        "no content fits a 2-column budget: {text:?}"
+    );
+}
+
 /// The gutter margin composes with the pinned tail: the bottom
 /// re-anchor erases the whole row (`\x1b[K` from column 1 clears the
 /// previous indent) and rewrites it with the margin, so no stale

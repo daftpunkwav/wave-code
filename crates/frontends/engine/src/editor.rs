@@ -350,7 +350,11 @@ impl Editor {
     }
 
     /// Insert a paste; large pastes collapse into an atomic marker.
+    /// The content is sanitized first: clipboard text can carry ANSI /
+    /// OSC sequences that would render straight into the terminal from
+    /// the editor rows (newlines and tabs are kept).
     pub fn insert_paste(&mut self, text: &str) {
+        let text = crate::sanitize::sanitize_terminal(text);
         let line_count = text.split('\n').count();
         let char_count = text.chars().count();
         if line_count > 10 || char_count > 1000 {
@@ -369,7 +373,7 @@ impl Editor {
             });
             self.insert_text(&marker);
         } else {
-            self.insert_text(text);
+            self.insert_text(&text);
         }
     }
 
@@ -1561,6 +1565,22 @@ mod tests {
         let big = "line\n".repeat(15);
         editor.insert_paste(&big);
         assert!(editor.text().contains("[paste #1 +15 lines]"));
+    }
+
+    /// Clipboard text can carry ANSI/OSC sequences: they are stripped
+    /// at insert time (small and collapsed pastes alike) so the editor
+    /// rows never render them into the terminal. Newlines and tabs stay.
+    #[test]
+    fn paste_strips_escape_sequences_keeps_layout() {
+        let mut ed = editor();
+        ed.insert_paste("a\x1b[2Jb\tn");
+        assert_eq!(ed.text(), "ab\tn");
+        let mut ed = editor();
+        let big = format!("x\x1b]0;t\x07y\n{}", "line\n".repeat(15));
+        ed.insert_paste(&big);
+        let expanded = ed.expand_markers(ed.text().as_str());
+        assert!(!expanded.contains('\x1b'), "{expanded:?}");
+        assert!(expanded.contains("xy"));
     }
 
     #[test]

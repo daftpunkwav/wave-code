@@ -12,6 +12,8 @@ use crossterm::event::{
 };
 use crossterm::terminal::{Clear, ClearType};
 
+use crate::color::Color;
+
 /// Guard owning the terminal modes for the UI lifetime.
 pub struct TerminalGuard {
     keyboard_enhanced: bool,
@@ -72,9 +74,13 @@ impl TerminalGuard {
         self.focus_reporting
     }
 
-    /// Restore every mode taken by [`Self::enter`].
+    /// Restore every mode taken by [`Self::enter`]. A color scheme
+    /// applied through [`set_color_scheme`] is reset here too, so the
+    /// terminal returns to its own theme on exit and around the
+    /// external-editor round trip.
     pub fn leave(&mut self) {
         GUARD_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+        reset_color_scheme();
         if self.keyboard_enhanced {
             let _ = crossterm::execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
             self.keyboard_enhanced = false;
@@ -131,6 +137,64 @@ fn restore_terminal_now() {
     }
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+}
+
+/// Whether this process recolored the terminal's default colors via
+/// [`set_color_scheme`] and has not reset them yet.
+static SCHEME_OVERRIDE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Recolor the terminal's default foreground, background, and cursor
+/// (OSC 10/11/12)
+/// so a theme tuned for the opposite background stays readable — the
+/// light theme applies paper + dark ink on dark-terminal hosts, whose
+/// default foreground would otherwise stay near-white. `None` resets
+/// both to the terminal's own configured colors (OSC 110/111).
+/// Best-effort: unsupported terminals ignore the sequences, failures
+/// are swallowed, and the override is tracked so
+/// [`TerminalGuard::leave`] restores the original on exit.
+pub fn set_color_scheme(scheme: Option<(Color, Color, Color)>) {
+    use std::io::Write as _;
+    SCHEME_OVERRIDE.store(scheme.is_some(), std::sync::atomic::Ordering::SeqCst);
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(color_scheme_sequence(scheme).as_bytes());
+    let _ = stdout.flush();
+}
+
+/// The OSC sequences for one [`set_color_scheme`] call: apply fg+bg
+/// (`Some`) or reset both (`None`).
+fn color_scheme_sequence(scheme: Option<(Color, Color, Color)>) -> String {
+    match scheme {
+        Some((fg, bg, cursor)) => format!(
+            "{}{}{}",
+            osc_color_set(10, fg),
+            osc_color_set(11, bg),
+            osc_color_set(12, cursor)
+        ),
+        // 110/111/112 reset the default foreground/background/cursor
+        // respectively.
+        None => "\x1b]110\x07\x1b]111\x07\x1b]112\x07".to_string(),
+    }
+}
+
+/// One OSC 10/11 color set: `ESC]N;rgb:rrrr/gggg/bbbb BEL` (16-bit
+/// channels, scaled from 8-bit by ×257).
+fn osc_color_set(code: u8, color: Color) -> String {
+    format!(
+        "\x1b]{code};rgb:{:04x}/{:04x}/{:04x}\x07",
+        u16::from(color.r) * 257,
+        u16::from(color.g) * 257,
+        u16::from(color.b) * 257
+    )
+}
+
+/// Reset both default colors while an override is active.
+fn reset_color_scheme() {
+    use std::io::Write as _;
+    if SCHEME_OVERRIDE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+        let _ = stdout.flush();
+    }
 }
 
 /// Current terminal size as (width, height) in cells.
@@ -269,6 +333,23 @@ pub fn background_from_colorfgbg(value: &str) -> Option<Background> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_scheme_sequences_apply_and_reset() {
+        let ink = Color::rgb(0x1F, 0x23, 0x28);
+        let paper = Color::rgb(0xF6, 0xF8, 0xFA);
+        let azure = Color::rgb(0x09, 0x69, 0xDA);
+        assert_eq!(
+            color_scheme_sequence(Some((ink, paper, azure))),
+            "\x1b]10;rgb:1f1f/2323/2828\x07\x1b]11;rgb:f6f6/f8f8/fafa\x07\x1b]12;rgb:0909/6969/dada\x07"
+        );
+        // 110/111/112 reset the default foreground/background/cursor
+        // respectively.
+        assert_eq!(
+            color_scheme_sequence(None),
+            "\x1b]110\x07\x1b]111\x07\x1b]112\x07"
+        );
+    }
 
     #[test]
     fn osc11_dark_reply_parses() {

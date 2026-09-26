@@ -236,6 +236,14 @@ impl Markdown {
         self.cache = None;
     }
 
+    /// Swap the inline style in place (theme switches): rendered lines
+    /// repaint under the new style on the next render without touching
+    /// the highlighter or fence renderers.
+    pub fn set_style(&mut self, style: MarkdownStyle) {
+        self.style = style;
+        self.cache = None;
+    }
+
     /// Paint a ```diff fence: whole lines ride the diff colors —
     /// additions green, removals red, file headers and `@@` hunks in
     /// the metadata tone, context plain. Generic syntax highlighting
@@ -344,7 +352,10 @@ impl Markdown {
                             _ => "• ".to_string(),
                         };
                         inline.push_str(&"  ".repeat(depth));
-                        inline.push_str(&marker);
+                        // The marker rides the text style: unpainted text
+                        // inherits the terminal's default foreground, which
+                        // a recolored (light) background leaves unreadable.
+                        inline.push_str(&self.style.text.paint(&marker));
                     }
                     Tag::BlockQuote(_) => {
                         flush_inline!();

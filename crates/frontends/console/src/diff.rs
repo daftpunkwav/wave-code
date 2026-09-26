@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn simple_replacement_diff() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let rows = compute_rows("a\nb\nc", "a\nX\nc", false);
         assert_eq!(
             rows,
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn render_header_shows_counts_and_path() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let lines = render("a\nb\nc", "a\nX\nc", Some("src/lib.rs"), false, 20, 80);
         let plain = plain(&lines);
         assert!(plain[0].contains("+1"), "{plain:?}");
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn render_elides_unchanged_spans() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let old = format!(
             "{}\nOLD\n{}",
             "ctx\n".repeat(10).trim(),
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn render_caps_body_rows() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let lines = render("a\nb\nc", "1\n2\n3", None, false, 4, 80);
         let plain = plain(&lines);
         assert!(
@@ -354,7 +354,7 @@ mod tests {
     /// content starting at the same column.
     #[test]
     fn cjk_edit_renders_single_aligned_column() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let old = "// 初始化配置\nconst size = 10;\n// 渲染循环\nfunction draw() {\n  requestAnimationFrame(draw);\n}\n// 结束\nexport default draw;\n";
         let new = "// 初始化配置\nconst size = 24;\n// 高分屏适配\nconst scale = 2;\n// 渲染循环\nfunction draw() {\n  requestAnimationFrame(draw);\n}\n// 结束\nexport default draw;\n";
         let lines = render(old, new, Some("src/render.js"), false, 40, 80);
@@ -396,7 +396,7 @@ mod tests {
     /// pushing a second column of content to a far-right position.
     #[test]
     fn long_lines_truncate_to_the_content_column() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let long = "x".repeat(200);
         let lines = render(&long, &long, None, false, 40, 80);
         for line in plain(&lines) {
@@ -417,7 +417,7 @@ mod tests {
     /// untouched side's gutter cell stays blank, never renumbered.
     #[test]
     fn pure_additions_and_deletions_share_the_grid() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let lines = render(
             "keep\nend",
             "keep\nnew-1\nnew-2\nnew-3\nend",
@@ -460,7 +460,7 @@ mod tests {
     /// marker lands at the same display column.
     #[test]
     fn gutter_width_is_uniform_across_rows() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut old = String::from("head\n");
         old.extend((0..9).map(|i| format!("line {i}\n")));
         let mut new = String::from("head\n");

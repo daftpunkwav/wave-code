@@ -18,7 +18,7 @@ use super::active::Theme;
 pub fn resolve(choice: Option<&str>) -> Theme {
     match choice {
         Some("light") => return Theme::light(),
-        Some("dark") => return Theme::synthwave(),
+        Some("dark") => return Theme::dark(),
         Some("deepwave") => return Theme::deepwave(),
         _ => {}
     }
@@ -26,10 +26,10 @@ pub fn resolve(choice: Option<&str>) -> Theme {
         || std::env::var_os("CI").is_some()
         || std::env::var("FORCE_COLOR").is_ok_and(|v| v == "0")
     {
-        return Theme::synthwave();
+        return Theme::dark();
     }
     if !std::io::stdout().is_terminal() {
-        return Theme::synthwave();
+        return Theme::dark();
     }
     if let Some(background) = terminal::query_background(250) {
         return background_theme(background);
@@ -39,7 +39,7 @@ pub fn resolve(choice: Option<&str>) -> Theme {
     {
         return background_theme(background);
     }
-    Theme::synthwave()
+    Theme::dark()
 }
 
 /// Resolve the terminal color depth from the environment: `COLORTERM`
@@ -80,7 +80,7 @@ fn color_depth_from(colorterm: Option<&str>, term: Option<&str>, windows: bool) 
 
 fn background_theme(background: Background) -> Theme {
     match background {
-        Background::Dark => Theme::synthwave(),
+        Background::Dark => Theme::dark(),
         Background::Light => Theme::light(),
     }
 }

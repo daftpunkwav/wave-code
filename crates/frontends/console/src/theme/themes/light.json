@@ -1,0 +1,30 @@
+{
+  "dark": false,
+  "description": "paper and blue, readable on any terminal",
+  "syntax_theme": "ocean-light",
+  "colors": {
+    "primary": "#0969DA",
+    "accent": "#0550AE",
+    "text": "#1F2328",
+    "text_strong": "#0A0C10",
+    "text_dim": "#5A646D",
+    "text_muted": "#6E7681",
+    "code_span": "#0969DA",
+    "border": "#D5DAE0",
+    "border_focus": "#0969DA",
+    "success": "#1A7F37",
+    "warning": "#9A6700",
+    "error": "#CF222E",
+    "diff_added": "#1A7F37",
+    "diff_removed": "#CF222E",
+    "diff_added_strong": "#116329",
+    "diff_removed_strong": "#A40E26",
+    "diff_gutter": "#8C959F",
+    "diff_meta": "#6E7681",
+    "role_user": "#0969DA",
+    "shell_mode": "#9A6700",
+    "neutral": "#71767B",
+    "input_bg": "#DCE1E7",
+    "background": "#F6F8FA"
+  }
+}

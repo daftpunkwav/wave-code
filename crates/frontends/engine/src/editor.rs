@@ -47,6 +47,11 @@ struct YankRecord {
 pub struct EditorStyle {
     /// Border color (switched to accent colors in plan/shell modes).
     pub border: Style,
+    /// The draft body text. Unstyled by default (terminal foreground);
+    /// themes set it so a recolored terminal background still shows
+    /// readable draft text even when unpainted spans inherit the host's
+    /// default foreground.
+    pub text: Style,
     /// The prompt glyph (the keyed-in chevron `❯`, or `!` in
     /// shell mode).
     pub prompt: Style,
@@ -66,6 +71,7 @@ impl Default for EditorStyle {
     fn default() -> Self {
         Self {
             border: Style::new(),
+            text: Style::new(),
             prompt: Style::new(),
             slash_command: Style::new().bold(),
             shell_command: Style::new(),
@@ -153,7 +159,7 @@ pub struct Editor {
 impl Editor {
     /// An empty editor with default styling.
     pub fn new(style: EditorStyle) -> Self {
-        let mut popup = AutocompletePopup::new(EditorStyle::default().popup, 5);
+        let mut popup = AutocompletePopup::new(style.popup, 5);
         popup.set_max_visible(5);
         Self {
             lines: vec![String::new()],
@@ -178,8 +184,11 @@ impl Editor {
         }
     }
 
-    /// Swap the styling (theme switches rebuild it).
+    /// Swap the styling (theme switches rebuild it). The autocomplete
+    /// popup carries its own copy of the popup styles; update it too or
+    /// it keeps the styles it was built with.
     pub fn set_style(&mut self, style: EditorStyle) {
+        self.popup.list_mut().set_style(style.popup);
         self.style = style;
     }
 
@@ -1012,11 +1021,9 @@ impl Editor {
                 // within this row.
                 text = insert_cursor_marker(&text, cursor_col);
             }
-            // Leading `/command` and `!command` tokens are painted on
-            // the very first row only.
-            if row.line == 0 && row.start == 0 {
-                text = paint_leading_token(&text, &self.style);
-            }
+            // The body rides the text style; leading `/command` and
+            // `!command` tokens keep their own style on the first row.
+            text = paint_body(&text, &self.style, row.line == 0 && row.start == 0);
             let body = format!("{prefix}{text}");
             let mut padded = width::pad_to_width(&body, content_width);
             if width::width(&padded) > content_width {
@@ -1025,11 +1032,11 @@ impl Editor {
             content.push(padded);
         }
         if hidden_above > 0 && !content.is_empty() {
-            content[0] = border::scroll_label(inner_width, "↑", hidden_above);
+            content[0] = border::scroll_label(inner_width, "↑", hidden_above, self.style.hint);
         }
         if hidden_below > 0 && !content.is_empty() {
             let last = content.len() - 1;
-            content[last] = border::scroll_label(inner_width, "↓", hidden_below);
+            content[last] = border::scroll_label(inner_width, "↓", hidden_below, self.style.hint);
         }
 
         let mut out = Vec::with_capacity(content.len() + 2);
@@ -1073,20 +1080,23 @@ impl Editor {
     }
 }
 
-/// Paint the first whitespace-delimited token of the input's first row:
-/// `/command` in the slash style, `!command` in the shell style. Any
-/// other leading character returns the row untouched.
-fn paint_leading_token(text: &str, style: &EditorStyle) -> String {
+/// Paint a draft row in the theme text color. On the input's first
+/// row a leading `/command` keeps the slash style and `!command` the
+/// shell style, with the remainder in the text style.
+fn paint_body(text: &str, style: &EditorStyle, first_row: bool) -> String {
+    if !first_row {
+        return style.text.paint(text);
+    }
     let token_end = text.find(char::is_whitespace).unwrap_or(text.len());
     let (token, rest) = text.split_at(token_end);
-    let painted = if token.starts_with('/') {
-        style.slash_command.paint(token)
+    let token_style = if token.starts_with('/') {
+        style.slash_command
     } else if token.starts_with('!') {
-        style.shell_command.paint(token)
+        style.shell_command
     } else {
-        return text.to_string();
+        return style.text.paint(text);
     };
-    format!("{painted}{rest}")
+    format!("{}{}", token_style.paint(token), style.text.paint(rest))
 }
 
 /// Byte offset of grapheme index `col` in `line`.

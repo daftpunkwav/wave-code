@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn live_thinking_shows_tail_lines() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("first line\nsecond line\nthird line");
         let lines = block.render(60);
@@ -273,7 +273,7 @@ mod tests {
     fn live_tail_matches_a_full_wrap_of_long_streams() {
         // The tail is collected backwards over the final segments; it
         // must stay identical to wrapping every segment in order.
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let body = (0..500)
             .map(|i| format!("segment {i} with some wrapping filler text"))
             .collect::<Vec<_>>()
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn finalized_thinking_collapses_with_hint() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("one\ntwo\nthree");
         block.finalize();
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn expansion_shows_everything() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let flag = ExpandedFlag::new();
         let mut block = Thinking::live(flag.clone());
         block.push("one\ntwo\nthree");
@@ -336,7 +336,7 @@ mod tests {
     /// not survive a `set_text` that mirrors the full buffer.
     #[test]
     fn set_text_replaces_the_streamed_content() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("stale");
         let lines = block.render(60);
@@ -352,7 +352,7 @@ mod tests {
     /// past a second boundary cannot change `Thought for Ns`.
     #[test]
     fn finalized_header_freezes_its_duration() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push("work");
         block.finalize();

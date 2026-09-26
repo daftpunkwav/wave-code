@@ -175,12 +175,50 @@ impl Screen {
             self.prev = segments.to_vec();
             return;
         }
+        // A frame that SHRANK (a dialog closed, turns rewound) leaves
+        // the previous frame's bottom-anchored rows stranded: the diff's
+        // bottom-erase arithmetic drifts around the pinned tail and can
+        // strand a dead copy of the editor and footer mid-screen (the
+        // two-input-boxes artifact). Repaint the whole viewport instead
+        // — rare, user-visible transitions where one extra repaint is
+        // invisible and correctness is guaranteed.
+        if view.total < FrameView::new(&self.prev).total {
+            self.synchronized_start(out);
+            self.viewport_redraw(out, &view, columns, height);
+            self.pin_tail(out, &view, columns, height);
+            self.synchronized_end(out);
+            self.place_hardware_cursor(out, &view, height);
+            self.prev = segments.to_vec();
+            self.size = (columns, height);
+            return;
+        }
         if !self.diff_draw(out, segments, &view, columns, height) {
             return; // identical region: nothing to paint
         }
         self.pin_tail(out, &view, columns, height);
         self.synchronized_end(out);
         self.place_hardware_cursor(out, &view, height);
+    }
+
+    /// Repaint every physical viewport row: physical row 1 shows
+    /// logical [`Self::base`], so rows past the shrunken frame's end
+    /// erase and the rest rewrite in place. Scrollback above the
+    /// viewport is untouched. Leaves the cursor at the physical bottom
+    /// row ([`Self::place_hardware_cursor`] refines it).
+    fn viewport_redraw(
+        &mut self,
+        out: &mut impl std::io::Write,
+        view: &FrameView,
+        columns: usize,
+        height: usize,
+    ) {
+        for row in 0..height {
+            let _ = write!(out, "\x1b[{};1H\x1b[K", row + 1);
+            if let Some(line) = view.get(self.base + row) {
+                self.write_line(out, line, columns);
+            }
+        }
+        self.cursor_row = height.saturating_sub(1);
     }
 
     /// Rewrite the last [`Screen::pinned_tail`] frame lines at the

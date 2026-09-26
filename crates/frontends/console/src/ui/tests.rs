@@ -28,16 +28,16 @@ async fn wire_warnings_render_with_the_warning_palette() {
         joined.contains("warning: tool round limit reached (256)"),
         "{joined}"
     );
-    // Synthwave Warning amber #F97E72, distinct from the dim body.
+    // Warning amber #D29922, distinct from the dim body.
     let raw = rendered.join(
         "
 ",
     );
-    assert!(raw.contains("[38;2;249;126;114m"), "{raw:?}");
+    assert!(raw.contains("[38;2;210;153;34m"), "{raw:?}");
 }
 
 fn ui() -> ConsoleUi {
-    theme::set(theme::Theme::synthwave());
+    theme::set(theme::Theme::dark());
     let mut ui = ConsoleUi::new(
         Box::new(TestLink::new()),
         &UiContext {
@@ -138,12 +138,12 @@ fn undo_enqueues_rewind_and_rewound_trims_the_transcript() {
         text: "answer two".to_string(),
     });
     // `/undo` while idle queues one Rewind op.
-    let flow = ui.user_submit("/undo");
+    let flow = ui.user_submit("/undo 1");
     assert_eq!(flow, Flow::Continue);
     assert_eq!(
         ui.pending_ops().last(),
         Some(&Op::Rewind { turns: 1 }),
-        "bare /undo rewinds one turn"
+        "/undo 1 rewinds one turn"
     );
     // Busy turns refuse the rewind.
     ui.submit("three");
@@ -402,6 +402,28 @@ fn turn_finished_notification_respects_focus() {
     assert!(
         ui.take_pending_sequence().is_some(),
         "focus lost resumes pings"
+    );
+}
+
+/// A wire warning that already carries the `warning:` marker must
+/// not stack it twice on render.
+#[test]
+fn wire_warning_prefix_never_stacks() {
+    let mut ui = ui();
+    ui.handle_wire_event(&EventMsg::Warning {
+        message: "warning: already marked".to_string(),
+    });
+    let index = ui.transcript.last_index().expect("status pushed");
+    let entry = ui.transcript.get_mut(index).expect("entry");
+    let rendered = entry.component.render(80);
+    let joined = strip_ansi(&rendered.join(
+        "
+",
+    ));
+    assert!(joined.contains("warning: already marked"), "{joined}");
+    assert!(
+        !joined.contains("warning: warning:"),
+        "no double marker: {joined}"
     );
 }
 
@@ -1730,9 +1752,20 @@ async fn btw_streams_answers_through_the_side_session() {
 }
 
 #[test]
-fn btw_without_args_shows_usage() {
+fn btw_without_args_opens_the_question_prompt() {
     let mut ui = ui();
     ui.user_submit("/btw");
+    assert!(
+        matches!(ui.dialog, Some(Dialog::Prompt(_))),
+        "the prompt opens"
+    );
+    // The typed question routes into the side-question path; this
+    // surface has no factory, so the ask lands on the unavailable note.
+    for c in "what?".chars() {
+        ui.handle_key(KeyEvent::plain(Key::Char(c)));
+    }
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert!(ui.dialog.is_none(), "prompt closes on submit");
     let frame = ui.frame(80, 24);
     let joined: String = frame
         .iter()
@@ -1742,7 +1775,143 @@ fn btw_without_args_shows_usage() {
             "
 ",
         );
-    assert!(joined.contains("usage: /btw"), "{joined}");
+    assert!(
+        joined.contains("side questions are unavailable"),
+        "{joined}"
+    );
+    // Esc dismisses without asking.
+    ui.user_submit("/btw");
+    ui.handle_key(KeyEvent::plain(Key::Esc));
+    assert!(ui.dialog.is_none(), "esc dismisses");
+}
+
+#[test]
+fn bare_undo_opens_the_rewind_picker() {
+    let mut ui = ui();
+    ui.submit("one");
+    ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+    ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+        text: "answer one".to_string(),
+    });
+    ui.user_submit("/undo");
+    assert!(matches!(ui.dialog, Some(Dialog::Undo(_))), "picker opens");
+    let answer = ui
+        .dialog
+        .as_mut()
+        .and_then(|d| d.handle_key(KeyEvent::plain(Key::Enter)));
+    ui.dialog = None;
+    ui.submit_answer(answer);
+    assert_eq!(
+        ui.pending_ops().last(),
+        Some(&Op::Rewind { turns: 1 }),
+        "picker Enter feeds the rewind path"
+    );
+}
+
+#[test]
+fn theme_no_args_opens_picker_and_enter_applies() {
+    let mut ui = ui();
+    ui.user_submit("/theme");
+    assert!(matches!(ui.dialog, Some(Dialog::Theme(_))), "picker opens");
+    let frame = ui.frame(80, 24);
+    let joined: String = frame
+        .iter()
+        .map(|l| strip_ansi(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("Select a theme"), "{joined}");
+    assert!(joined.contains("deepwave"), "{joined}");
+    // Enter on the highlighted row (auto, seeded at startup) applies.
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert!(ui.dialog.is_none());
+    assert_eq!(ui.theme_name, "auto");
+    // Quick-select digit 3 applies deepwave.
+    ui.user_submit("/theme");
+    ui.handle_key(KeyEvent::plain(Key::Char('3')));
+    assert!(ui.dialog.is_none());
+    assert_eq!(ui.theme_name, "deepwave");
+    let frame = ui.frame(80, 24);
+    let joined: String = frame
+        .iter()
+        .map(|l| strip_ansi(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("theme switched (deepwave)"), "{joined}");
+}
+
+#[test]
+fn effort_no_args_opens_picker_and_digit_applies() {
+    let mut ui = ui_with_models();
+    ui.user_submit("/effort");
+    assert!(matches!(ui.dialog, Some(Dialog::Effort(_))), "picker opens");
+    // Digit 2 = "low" (off seeds first).
+    ui.handle_key(KeyEvent::plain(Key::Char('2')));
+    assert!(ui.dialog.is_none());
+    assert_eq!(ui.state.thinking_effort.as_deref(), Some("low"));
+    assert!(
+        ui.pending_ops()
+            .iter()
+            .any(|op| matches!(op, Op::SetThinking { effort } if effort == "low")),
+    );
+    // Selecting "off" clears the level (digit 1 = the seeded "off").
+    ui.user_submit("/effort");
+    ui.handle_key(KeyEvent::plain(Key::Char('1')));
+    assert_eq!(ui.state.thinking_effort, None);
+    assert!(
+        ui.pending_ops()
+            .iter()
+            .any(|op| matches!(op, Op::SetThinking { effort } if effort == "off")),
+    );
+}
+
+#[test]
+fn compact_no_args_opens_prompt_and_text_steers() {
+    let mut ui = ui();
+    ui.user_submit("/compact");
+    assert!(matches!(ui.dialog, Some(Dialog::Prompt(_))));
+    // Empty submit compacts without steering.
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert!(ui.dialog.is_none());
+    assert_eq!(
+        ui.pending_ops().last(),
+        Some(&Op::Compact { instruction: None }),
+        "empty submit compacts now"
+    );
+    // A typed instruction steers the summary.
+    ui.user_submit("/compact");
+    for c in "keep the api decisions".chars() {
+        ui.handle_key(KeyEvent::plain(Key::Char(c)));
+    }
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert_eq!(
+        ui.pending_ops().last(),
+        Some(&Op::Compact {
+            instruction: Some("keep the api decisions".to_string())
+        }),
+        "typed text rides the op"
+    );
+}
+
+#[test]
+fn title_no_args_opens_prompt_and_enter_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ui = ui();
+    ui.state.home = Some(dir.path().to_path_buf());
+    // A recorded session gives the rename something to land on.
+    ui.submit("hello assistant");
+    ui.handle_wire_event(&EventMsg::TurnCompleted { interrupted: false });
+    ui.user_submit("/title");
+    assert!(matches!(ui.dialog, Some(Dialog::Prompt(_))));
+    for c in "the real topic".chars() {
+        ui.handle_key(KeyEvent::plain(Key::Char(c)));
+    }
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert!(ui.dialog.is_none());
+    assert_eq!(
+        ui.state.session_title.as_deref(),
+        Some("the real topic"),
+        "the prompt renames the session"
+    );
 }
 
 /// A link whose session is already over: `next_event` ends

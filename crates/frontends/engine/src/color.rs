@@ -366,18 +366,17 @@ mod tests {
     fn ansi16_mapping_keeps_hue_families() {
         let cases = [
             ("#2DD4BF", 14), // primary teal -> bright cyan
-            ("#22D3EE", 14), // role_user cyan -> bright cyan
-            ("#60A5FA", 12), // accent azure -> bright blue
+            ("#5EEAD4", 14), // accent lighter teal -> bright cyan
             ("#5FB878", 10), // success sea-green -> bright green
             ("#E5C07B", 11), // warning amber -> bright yellow
-            ("#D8B871", 11), // code sand -> bright yellow
             ("#E06C75", 9),  // error coral -> bright red
-            ("#BD93F9", 13), // shell blue-violet -> bright magenta
-            ("#7C3AED", 13), // light-shell violet -> bright magenta
-            ("#D8E1E8", 15), // text -> white
-            ("#8B9BB4", 7),  // dim slate -> silver
-            ("#4A5866", 8),  // gutter -> bright black
-            ("#0F1A1E", 0),  // near black -> black
+            ("#7FD79A", 10), // diff_added_strong mint -> bright green
+            ("#F0939A", 9),  // diff_removed_strong rose -> bright red
+            ("#D5DEE5", 15), // text -> white
+            ("#93A4B4", 7),  // dim slate -> silver
+            ("#7E8FA0", 7),  // muted slate -> silver
+            ("#31424A", 6),  // border -> dim cyan
+            ("#22303A", 4),  // input_bg -> blue
         ];
         for (hex, expected) in cases {
             let color = Color::from_hex(hex).unwrap();
@@ -386,24 +385,24 @@ mod tests {
     }
 
     /// The synthwave dark roles degrade to the expected ANSI-16
-    /// family: the neon hues must stay distinguishable without
+    /// family: the accent hues must stay distinguishable without
     /// truecolor.
     #[test]
     fn ansi16_mapping_keeps_synthwave_hue_families() {
         let cases = [
-            ("#36F9F6", 14), // primary/code_span cyan -> bright cyan
-            ("#FFB86C", 11), // role_user amber -> bright yellow
-            ("#B6B1FF", 12), // accent periwinkle -> bright blue
-            ("#B084EB", 13), // shell_mode purple -> bright magenta
-            ("#72F1B8", 10), // success green -> bright green
-            ("#97F1D8", 14), // diff_added_strong mint -> bright cyan
-            ("#F97E72", 9),  // warning salmon -> bright red
-            ("#FE4450", 9),  // error red-pink -> bright red
-            ("#FF5E5B", 9),  // diff_removed_strong -> bright red
-            ("#EDEAF0", 15), // text -> white
-            ("#8B85A8", 7),  // dim -> silver
-            ("#6C5F9C", 12), // muted -> bright blue
-            ("#4A4166", 4),  // border/gutter -> blue
+            ("#4DA5FF", 12), // primary azure -> bright blue
+            ("#8FC7FF", 12), // accent lighter azure -> bright blue
+            ("#3FB950", 10), // success green -> bright green
+            ("#56D364", 10), // diff_added_strong light green -> bright green
+            ("#D29922", 11), // warning amber -> bright yellow
+            ("#F85149", 9),  // error red -> bright red
+            ("#FF7B72", 9),  // diff_removed_strong coral -> bright red
+            ("#DEE2E7", 15), // text -> white
+            ("#99A2AC", 7),  // dim -> silver
+            ("#75808B", 7),  // muted -> silver
+            ("#39414B", 8),  // border/gutter -> bright black
+            ("#A8ADB2", 7),  // neutral -> silver
+            ("#252A32", 8),  // input_bg -> bright black
         ];
         for (hex, expected) in cases {
             let color = Color::from_hex(hex).unwrap();

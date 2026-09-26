@@ -49,7 +49,9 @@ use crate::complete::{ConsoleProvider, FileInventory};
 use crate::controllers::StreamingController;
 use crate::controllers::btw::BtwJob;
 use crate::controllers::shell::{ShellEvent, ShellJob};
-use crate::dialogs::{Answer, ApprovalDialog, Dialog, ModelEntryView, QuestionDialog, SessionRow};
+use crate::dialogs::{
+    Answer, ApprovalDialog, Dialog, ModelEntryView, PromptPurpose, QuestionDialog, SessionRow,
+};
 use crate::history;
 use crate::messages::compaction::CompactionCard;
 use crate::messages::shell::ShellCard;
@@ -312,7 +314,7 @@ impl ConsoleUi {
                         .with_themes(
                             ctx.home
                                 .as_deref()
-                                .map(crate::theme::custom::list)
+                                .map(crate::theme::file::list)
                                 .unwrap_or_default(),
                         ),
                 ));
@@ -555,6 +557,25 @@ impl ConsoleUi {
             Some(Answer::RewindTurns { turns }) => {
                 self.rewind_turns_command(&turns.to_string());
             }
+            Some(Answer::ThemeSelected { name }) => {
+                self.apply_theme(&name);
+            }
+            Some(Answer::EffortSelected { level }) => {
+                let effort = level.unwrap_or_else(|| "off".to_string());
+                self.state.thinking_effort = (effort != "off").then(|| effort.clone());
+                self.enqueue(Op::SetThinking { effort });
+            }
+            Some(Answer::Prompt { purpose, value }) => match purpose {
+                PromptPurpose::SessionTitle => self.set_session_title(&value),
+                PromptPurpose::EditorCommand => self.set_editor_command(&value),
+                PromptPurpose::ExportPath => self.export_markdown(&value),
+                PromptPurpose::CompactInstruction => {
+                    self.enqueue(Op::Compact {
+                        instruction: (!value.is_empty()).then_some(value),
+                    });
+                }
+                PromptPurpose::BtwQuestion => self.handle_btw(&value),
+            },
             None => {}
         }
     }
@@ -933,7 +954,15 @@ impl ConsoleUi {
                 true
             }
             EventMsg::Warning { message } => {
-                self.push_warning(&format!("warning: {message}"));
+                // Wire messages usually arrive bare, but senders that
+                // prefix already (or pass-through notices) must not
+                // stack the marker twice.
+                let prefixed = message.starts_with("warning:");
+                self.push_warning(&if prefixed {
+                    message.clone()
+                } else {
+                    format!("warning: {message}")
+                });
                 true
             }
             EventMsg::Error {
@@ -1254,6 +1283,84 @@ impl ConsoleUi {
             return Flow::Continue;
         }
         if let Some(invocation) = slash::parse(text) {
+            // Bare forms of parameterized commands open their
+            // interactive surface instead of guessing an argument;
+            // instant actions (/clear, /new, /fork, …) and info-only
+            // commands stay direct.
+            if invocation.args.is_empty() {
+                match invocation.name.as_str() {
+                    "theme" => {
+                        self.open_theme_picker();
+                        return Flow::Continue;
+                    }
+                    "effort" => {
+                        self.open_effort_picker();
+                        return Flow::Continue;
+                    }
+                    "title" => {
+                        self.open_prompt_dialog(
+                            "Session title",
+                            PromptPurpose::SessionTitle,
+                            &self.state.session_title.clone().unwrap_or_default(),
+                            "↵ renames the session · empty keeps it · esc cancels",
+                        );
+                        return Flow::Continue;
+                    }
+                    "editor" => {
+                        let current = self.resolve_editor_command().unwrap_or_default();
+                        self.open_prompt_dialog(
+                            "External editor command",
+                            PromptPurpose::EditorCommand,
+                            &current,
+                            "↵ saves the command (used by ctrl+g) · esc cancels",
+                        );
+                        return Flow::Continue;
+                    }
+                    "export" => {
+                        let stamp = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        self.open_prompt_dialog(
+                            "Export path",
+                            PromptPurpose::ExportPath,
+                            &format!("wavecode-export-{stamp}.md"),
+                            "↵ writes the dialogue to markdown · esc cancels",
+                        );
+                        return Flow::Continue;
+                    }
+                    "compact" => {
+                        self.open_prompt_dialog(
+                            "Compact the context",
+                            PromptPurpose::CompactInstruction,
+                            "",
+                            "↵ compacts now · add text to steer the summary · esc cancels",
+                        );
+                        return Flow::Continue;
+                    }
+                    "btw" => {
+                        self.open_prompt_dialog(
+                            "Side question",
+                            PromptPurpose::BtwQuestion,
+                            "",
+                            "↵ asks a read-only side session · esc cancels",
+                        );
+                        return Flow::Continue;
+                    }
+                    "undo" => {
+                        // While a turn or shell runs the picker would
+                        // only offer rows the rewind path refuses, so
+                        // the busy guard answers directly.
+                        if self.state.busy() || self.shell.is_some() {
+                            self.rewind_turns_command("");
+                        } else {
+                            self.open_undo_picker();
+                        }
+                        return Flow::Continue;
+                    }
+                    _ => {}
+                }
+            }
             return match slash::dispatch(&invocation, &self.state, self.status.as_ref()) {
                 slash::Effect::Ops(ops) => {
                     if invocation.name == "clear" {
@@ -1306,11 +1413,6 @@ impl ConsoleUi {
                         self.init_project();
                     } else if invocation.name == "mcp" {
                         self.list_mcp_servers();
-                    } else if invocation.name == "effort" && invocation.args.is_empty() {
-                        match &self.state.thinking_effort {
-                            Some(level) => self.push_status(&format!("thinking: {level}"), false),
-                            None => self.push_status("thinking: off (unset)", false),
-                        }
                     } else if invocation.name == "btw" {
                         self.handle_btw(&invocation.args);
                     } else if invocation.name == "usage" {
@@ -1578,6 +1680,46 @@ impl ConsoleUi {
         self.dialog = Some(Dialog::Undo(picker));
     }
 
+    /// Bare `/theme`: pick among the built-ins plus custom themes, the
+    /// live theme marked; Enter applies through the same path as
+    /// `/theme <name>`.
+    fn open_theme_picker(&mut self) {
+        let custom = self
+            .state
+            .home
+            .as_deref()
+            .map(theme::file::describe)
+            .unwrap_or_default();
+        let current = self.theme_name.clone();
+        self.dialog = Some(Dialog::Theme(crate::dialogs::ThemePickerDialog::new(
+            &current, custom,
+        )));
+    }
+
+    /// Bare `/effort`: pick a reasoning-effort level from the
+    /// provider's levels (the standard ramp as fallback), the live
+    /// level marked.
+    fn open_effort_picker(&mut self) {
+        let picker = crate::dialogs::EffortPickerDialog::new(
+            self.state.thinking_effort.as_deref(),
+            &self.thinking_levels,
+        );
+        self.dialog = Some(Dialog::Effort(picker));
+    }
+
+    /// Open a bare-command text prompt over prefilled text.
+    fn open_prompt_dialog(
+        &mut self,
+        title: &str,
+        purpose: PromptPurpose,
+        initial: &str,
+        hint: &'static str,
+    ) {
+        self.dialog = Some(Dialog::Prompt(crate::dialogs::PromptDialog::new(
+            title, purpose, initial, hint,
+        )));
+    }
+
     /// `/undo [n]`: drop the last n conversation turns (default 1).
     /// The agent stops seeing the dropped turns; file changes they
     /// already made stay. Idle-only, and the landed event trims the
@@ -1748,6 +1890,9 @@ impl ConsoleUi {
         *guard =
             TerminalGuard::enter().map_err(|e| anyhow::anyhow!("terminal restore failed: {e}"))?;
         let _ = guard.keyboard_enhanced();
+        // The guard round trip resets a recolored background; the
+        // active theme's pairing must ride again.
+        theme::apply_terminal_scheme();
         let _ = std::fs::remove_file(&temp);
         match outcome {
             Ok(text) if text.is_empty() => {
@@ -1961,7 +2106,7 @@ verify from the repository.";
             "light" => theme::set(theme::Theme::light()),
             // "dark" tracks the default dark identity (synthwave);
             // "deepwave" pins the previous ocean identity.
-            "dark" => theme::set(theme::Theme::synthwave()),
+            "dark" => theme::set(theme::Theme::dark()),
             "deepwave" => theme::set(theme::Theme::deepwave()),
             // Re-query the terminal background (OSC 11) and pick the
             // default dark or the light theme from the answer.
@@ -1971,7 +2116,7 @@ verify from the repository.";
                     .state
                     .home
                     .as_deref()
-                    .map(theme::custom::list)
+                    .map(theme::file::list)
                     .unwrap_or_default();
                 if custom.is_empty() {
                     self.push_status(
@@ -1995,7 +2140,7 @@ verify from the repository.";
                     self.push_status("custom themes need a home directory", true);
                     return;
                 };
-                match theme::custom::load(&home, custom) {
+                match theme::file::load(&home, custom) {
                     Ok(resolved) => theme::set(resolved),
                     Err(error) => {
                         self.push_status(&format!("theme {custom:?} failed: {error}"), true);
@@ -2011,6 +2156,9 @@ verify from the repository.";
         self.transcript.invalidate_all();
         // The live draft bakes the old palette into its cached lines.
         self.streaming_draft = None;
+        // The light theme pairs with a recolored terminal background;
+        // dark themes hand the terminal its own background back.
+        theme::apply_terminal_scheme();
         self.screen.invalidate();
         self.push_status(&format!("theme switched ({name})"), false);
     }
@@ -2771,6 +2919,10 @@ fn editor_style() -> EditorStyle {
     let theme = theme::current();
     EditorStyle {
         border: theme.style(Token::Neutral),
+        // The draft body rides the text ramp: with the light theme's
+        // recolored terminal, an unpainted draft would inherit the
+        // host's default (near-white) foreground and vanish on paper.
+        text: theme.style(Token::Text),
         // The input chrome rides the neutral gray band (the colored
         // surface is the sent message row, not the editor).
         prompt: theme.style(Token::Neutral).bold(),
@@ -2964,6 +3116,10 @@ pub async fn run_with_factory(
     // first paint (theme switches never change it).
     tui_engine::color::set_color_depth(theme::detect::color_depth());
     theme::set(theme::detect::resolve(None));
+    // The light theme recolors the terminal background (OSC 11) so it
+    // stays readable on dark-terminal hosts; dark resets to the host's
+    // own background.
+    theme::apply_terminal_scheme();
 
     let (mut columns, mut rows) = terminal::size().unwrap_or((80, 24));
     let mut ui = ConsoleUi::new(Box::new(client), &ctx, env!("CARGO_PKG_VERSION"));
@@ -3155,6 +3311,9 @@ pub(crate) mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+mod showcase;
 
 #[cfg(test)]
 mod catalog_tests;

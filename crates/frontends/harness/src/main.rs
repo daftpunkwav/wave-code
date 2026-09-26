@@ -1992,12 +1992,12 @@ fn doctor_checks(config_path: Option<&std::path::Path>, home: Option<&Path>) -> 
     }
 
     // Custom themes: every file must resolve.
-    let themes = console_ui::theme::custom::list(home);
+    let themes = console_ui::theme::file::list(home);
     if themes.is_empty() {
         checks.push(ok("themes: none custom"));
     } else {
         for name in &themes {
-            match console_ui::theme::custom::load(home, name) {
+            match console_ui::theme::file::load(home, name) {
                 Ok(_) => checks.push(ok(format!("theme {name}: parses"))),
                 Err(error) => checks.push(fail(format!("theme {name}: {error}"))),
             }

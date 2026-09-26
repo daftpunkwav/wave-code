@@ -61,6 +61,39 @@ pub enum Answer {
     },
     /// The dialog closed without producing an answer (settings).
     Dismissed,
+    /// A theme picked in the theme selector.
+    ThemeSelected {
+        /// Theme name to apply (`auto` / `dark` / `deepwave` / `light`
+        /// or a custom theme name).
+        name: String,
+    },
+    /// A reasoning-effort level picked in the effort selector.
+    EffortSelected {
+        /// Chosen level (`None` = off).
+        level: Option<String>,
+    },
+    /// Free text submitted by the bare-command prompt.
+    Prompt {
+        /// Which command asked for the text.
+        purpose: PromptPurpose,
+        /// The submitted (trimmed) text.
+        value: String,
+    },
+}
+
+/// Which bare-command prompt an [`Answer::Prompt`] routes back to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromptPurpose {
+    /// `/title` — rename the session.
+    SessionTitle,
+    /// `/editor` — set the external editor command.
+    EditorCommand,
+    /// `/export` — the markdown export path.
+    ExportPath,
+    /// `/compact` — an optional steering instruction.
+    CompactInstruction,
+    /// `/btw` — the side question.
+    BtwQuestion,
 }
 
 /// Which dialog is showing.
@@ -81,6 +114,13 @@ pub enum Dialog {
     Sessions(SessionPickerDialog),
     /// The rewind picker (double-Esc; feeds the `/undo` path).
     Undo(UndoPickerDialog),
+    /// The theme selector (`/theme`).
+    Theme(ThemePickerDialog),
+    /// The reasoning-effort selector (`/effort`).
+    Effort(EffortPickerDialog),
+    /// The bare-command free-text prompt (`/title`, `/editor`,
+    /// `/export`, `/compact`, `/btw`).
+    Prompt(PromptDialog),
 }
 
 impl Dialog {
@@ -95,6 +135,9 @@ impl Dialog {
             Self::Help(dialog) => dialog.title.clone(),
             Self::Sessions(dialog) => dialog.title.clone(),
             Self::Undo(dialog) => dialog.title.clone(),
+            Self::Theme(dialog) => dialog.title.clone(),
+            Self::Effort(dialog) => dialog.title.clone(),
+            Self::Prompt(dialog) => dialog.title.clone(),
         }
     }
 
@@ -109,6 +152,9 @@ impl Dialog {
             Self::Help(dialog) => dialog.handle_key(event),
             Self::Sessions(dialog) => dialog.handle_key(event),
             Self::Undo(dialog) => dialog.handle_key(event),
+            Self::Theme(dialog) => dialog.handle_key(event),
+            Self::Effort(dialog) => dialog.handle_key(event),
+            Self::Prompt(dialog) => dialog.handle_key(event),
         }
     }
 
@@ -123,6 +169,9 @@ impl Dialog {
             Self::Help(dialog) => dialog.render(width),
             Self::Sessions(dialog) => dialog.render(width),
             Self::Undo(dialog) => dialog.render(width),
+            Self::Theme(dialog) => dialog.render(width),
+            Self::Effort(dialog) => dialog.render(width),
+            Self::Prompt(dialog) => dialog.render(width),
         }
     }
 
@@ -424,7 +473,7 @@ mod tests {
 
     #[test]
     fn approval_quick_select_and_enter() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ApprovalDialog::new("c1".to_string(), ApprovalKind::Exec, "npm test");
         let answer = dialog.handle_key(KeyEvent::plain(Key::Char('1')));
         match answer {
@@ -438,7 +487,7 @@ mod tests {
 
     #[test]
     fn approval_escape_denies() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ApprovalDialog::new("c2".to_string(), ApprovalKind::Write, "write x");
         match dialog.handle_key(KeyEvent::plain(Key::Esc)) {
             Some(Answer::Approval {
@@ -451,7 +500,7 @@ mod tests {
 
     #[test]
     fn approval_selection_moves_and_enters() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ApprovalDialog::new("c3".to_string(), ApprovalKind::Exec, "ls");
         // One Down lands on the middle "always allow" choice.
         dialog.handle_key(KeyEvent::plain(Key::Down));
@@ -479,7 +528,7 @@ mod tests {
 
     #[test]
     fn approval_quick_select_always() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ApprovalDialog::new("c5".to_string(), ApprovalKind::Exec, "npm test");
         let answer = dialog.handle_key(KeyEvent::plain(Key::Char('2')));
         match answer {
@@ -493,7 +542,7 @@ mod tests {
 
     #[test]
     fn question_options_and_free_text() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = QuestionDialog::new(
             "q1".to_string(),
             "Pick one",
@@ -518,7 +567,7 @@ mod tests {
 
     #[test]
     fn approval_renders_focus_frame() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ApprovalDialog::new("c4".to_string(), ApprovalKind::Exec, "echo hi");
         let lines = dialog.render(70);
         let joined: String = lines
@@ -534,7 +583,7 @@ mod tests {
 
     #[test]
     fn write_approval_colors_diff_lines() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let detail = "write: src/lib.rs\n+fn added() {}\n-fn gone() {}";
         let mut dialog = ApprovalDialog::new("c5".to_string(), ApprovalKind::Write, detail);
         let lines = dialog.render(70);
@@ -607,7 +656,7 @@ mod tests {
 
     #[test]
     fn model_picker_search_filters_and_enter_resolves() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ModelPickerDialog::new(
             picker_entries(),
             "deepseek-chat".to_string(),
@@ -651,7 +700,7 @@ mod tests {
 
     #[test]
     fn model_picker_alt_s_marks_session_only() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog =
             ModelPickerDialog::new(picker_entries(), "none".to_string(), None, Vec::new());
         // No thinking levels: effort stays None.
@@ -675,7 +724,7 @@ mod tests {
 
     #[test]
     fn model_picker_thinking_row_switches_with_arrows() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = ModelPickerDialog::new(
             picker_entries(),
             "deepseek-chat".to_string(),
@@ -705,7 +754,7 @@ mod tests {
 
     #[test]
     fn model_picker_tab_cycles_providers() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog =
             ModelPickerDialog::new(picker_entries(), "none".to_string(), None, Vec::new());
         // Tab once moves to the "deepseek" tab; only its entries show.
@@ -725,7 +774,7 @@ mod tests {
 
     #[test]
     fn permission_picker_digits_apply() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut dialog = PermissionPickerDialog::new("auto");
         let answer = dialog.handle_key(KeyEvent::plain(Key::Char('3')));
         assert!(matches!(
@@ -736,12 +785,10 @@ mod tests {
 
     #[test]
     fn help_panel_scrolls_and_closes() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let lines = (0..40).map(|i| format!("line {i}")).collect();
         let mut panel = HelpPanel::new(lines);
-        for _ in 0..3 {
-            panel.handle_key(KeyEvent::plain(Key::PageDown));
-        }
+        panel.handle_key(KeyEvent::plain(Key::PageDown));
         let rendered = panel.render(80);
         let joined: String = rendered
             .iter()
@@ -749,6 +796,20 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("40/40 lines"), "{joined}");
+        // At the last page the panel is pinned: further scrolling neither
+        // shrinks the frame nor changes the visible window.
+        for key in [Key::Down, Key::PageDown, Key::Down, Key::Down] {
+            panel.handle_key(KeyEvent::plain(key));
+        }
+        assert_eq!(
+            panel
+                .render(80)
+                .iter()
+                .map(|l| strip_ansi(l))
+                .collect::<Vec<_>>(),
+            rendered.iter().map(|l| strip_ansi(l)).collect::<Vec<_>>(),
+            "render must stay stable at the bottom"
+        );
         assert!(
             panel.handle_key(KeyEvent::plain(Key::Char('q'))).is_some(),
             "q closes the panel"
@@ -757,7 +818,7 @@ mod tests {
 
     #[test]
     fn session_picker_searches_and_resumes() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let rows = vec![
             SessionRow {
                 id: "id-refactor".to_string(),
@@ -843,6 +904,101 @@ mod tests {
         let empty = vec![user_entry("   "), assistant_entry("only noise")];
         assert!(UndoPickerDialog::new(&empty).is_empty());
         assert!(UndoPickerDialog::new(&[]).is_empty());
+    }
+
+    #[test]
+    fn theme_picker_marks_current_and_applies_builtins() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ThemePickerDialog::new("deepwave", vec![("sunset".to_string(), None)]);
+        assert_eq!(dialog.selected, 2, "the live theme preselects");
+        let lines = dialog.render(70);
+        let joined: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Select a theme"), "{joined}");
+        assert!(joined.contains("← current"), "{joined}");
+        assert!(joined.contains("the teal ocean identity"), "{joined}");
+        // Custom rows describe themselves once highlighted.
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        let lines = dialog.render(70);
+        let joined: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("custom theme"), "{joined}");
+        // Digit quick-select resolves the matching builtin.
+        match dialog.handle_key(KeyEvent::plain(Key::Char('4'))) {
+            Some(Answer::ThemeSelected { name }) => assert_eq!(name, "light"),
+            other => panic!("expected a theme selection: {other:?}"),
+        }
+        // Arrows move with wrap-around; Enter resolves the cursor row.
+        let mut dialog = ThemePickerDialog::new("auto", Vec::new());
+        dialog.handle_key(KeyEvent::plain(Key::Up));
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        match answer {
+            Some(Answer::ThemeSelected { name }) => assert_eq!(name, "light"),
+            other => panic!("expected a theme selection: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effort_picker_seeds_off_and_resolves_levels() {
+        theme::set(theme::Theme::dark());
+        let mut dialog =
+            EffortPickerDialog::new(Some("high"), &["low".to_string(), "high".to_string()]);
+        assert_eq!(dialog.levels, vec!["off", "low", "high"], "off seeds first");
+        assert_eq!(dialog.selected, 2, "the live level preselects");
+        match dialog.handle_key(KeyEvent::plain(Key::Enter)) {
+            Some(Answer::EffortSelected { level: Some(level) }) => assert_eq!(level, "high"),
+            other => panic!("expected an effort selection: {other:?}"),
+        }
+        // Without provider levels the picker collapses to off (None).
+        let mut dialog = EffortPickerDialog::new(None, &[]);
+        assert_eq!(dialog.levels, vec!["off"]);
+        match dialog.handle_key(KeyEvent::plain(Key::Enter)) {
+            Some(Answer::EffortSelected { level: None }) => {}
+            other => panic!("expected off: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_dialog_edits_prefilled_text_and_resolves() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = PromptDialog::new(
+            "Session title",
+            PromptPurpose::SessionTitle,
+            "old name",
+            "hint",
+        );
+        // Render shows the prefilled value under the framed title.
+        let lines = dialog.render(70);
+        let joined: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("old name"), "{joined}");
+        // Backspace edits, typed characters append, Enter submits.
+        dialog.handle_key(KeyEvent::plain(Key::Backspace));
+        for c in "re".chars() {
+            dialog.handle_key(KeyEvent::plain(Key::Char(c)));
+        }
+        match dialog.handle_key(KeyEvent::plain(Key::Enter)) {
+            Some(Answer::Prompt { purpose, value }) => {
+                assert_eq!(purpose, PromptPurpose::SessionTitle);
+                assert_eq!(value, "old namre");
+            }
+            other => panic!("expected a prompt answer: {other:?}"),
+        }
+        // Esc dismisses.
+        assert_eq!(
+            dialog.handle_key(KeyEvent::plain(Key::Esc)),
+            Some(Answer::Dismissed)
+        );
     }
 }
 
@@ -1421,8 +1577,14 @@ impl HelpPanel {
         }
     }
 
+    /// Deepest scroll offset: the window pins to the last `HELP_WINDOW`
+    /// rows, so scrolling stops once the footer reads `N/N`.
+    fn max_scroll(&self) -> usize {
+        self.lines.len().saturating_sub(HELP_WINDOW)
+    }
+
     fn page_down(&mut self) {
-        self.scroll = (self.scroll + HELP_WINDOW).min(self.lines.len().saturating_sub(1));
+        self.scroll = (self.scroll + HELP_WINDOW).min(self.max_scroll());
     }
 
     fn page_up(&mut self) {
@@ -1437,7 +1599,7 @@ impl HelpPanel {
                 None
             }
             Key::Down => {
-                self.scroll = (self.scroll + 1).min(self.lines.len().saturating_sub(1));
+                self.scroll = (self.scroll + 1).min(self.max_scroll());
                 None
             }
             Key::PageUp => {
@@ -1730,6 +1892,306 @@ impl UndoPickerDialog {
                 body.push(theme.paint(Token::Text, &head));
             }
         }
+        border::frame(
+            body,
+            columns,
+            theme.style(Token::BorderFocus),
+            Some(self.title.clone()),
+        )
+    }
+}
+
+/// One selectable row of the theme picker: the theme name plus a
+/// one-line description.
+struct ThemeRow {
+    name: String,
+    description: String,
+}
+
+/// The theme selector (`/theme` with no args): the built-in themes
+/// first, then the user themes from `~/.wavecode/themes/`, the live
+/// theme marked. Enter applies, Esc cancels.
+pub struct ThemePickerDialog {
+    title: String,
+    rows: Vec<ThemeRow>,
+    /// Name of the live theme (drives the `current` marker).
+    current: String,
+    selected: usize,
+}
+
+impl ThemePickerDialog {
+    /// Build the picker over the built-ins plus `custom` names paired
+    /// with their file descriptions; the live theme is marked when its
+    /// name matches a row.
+    pub fn new(current: &str, custom: Vec<(String, Option<String>)>) -> Self {
+        let builtin_row = |name: &str, fallback: &str| ThemeRow {
+            name: name.to_string(),
+            description: crate::theme::builtin::description(name)
+                .unwrap_or(fallback)
+                .to_string(),
+        };
+        let mut rows = vec![
+            ThemeRow {
+                name: "auto".to_string(),
+                description: "follow the terminal background".to_string(),
+            },
+            builtin_row("dark", "the default dark identity"),
+            builtin_row("deepwave", "the teal ocean identity"),
+            builtin_row("light", "the light identity"),
+        ];
+        rows.extend(custom.into_iter().map(|(name, description)| ThemeRow {
+            name,
+            description: description.unwrap_or_else(|| "custom theme".to_string()),
+        }));
+        let selected = rows.iter().position(|row| row.name == current).unwrap_or(0);
+        Self {
+            title: "Select a theme".to_string(),
+            rows,
+            current: current.to_string(),
+            selected,
+        }
+    }
+
+    fn resolve(&self) -> Answer {
+        Answer::ThemeSelected {
+            name: self.rows[self.selected].name.clone(),
+        }
+    }
+
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        match event.key {
+            Key::Esc => Some(Answer::Dismissed),
+            Key::Up => {
+                self.selected = if self.selected == 0 {
+                    self.rows.len() - 1
+                } else {
+                    self.selected - 1
+                };
+                None
+            }
+            Key::Down => {
+                self.selected = (self.selected + 1) % self.rows.len();
+                None
+            }
+            Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
+                if let Ok(digit) = c.to_string().parse::<usize>()
+                    && digit >= 1
+                    && digit <= self.rows.len()
+                {
+                    self.selected = digit - 1;
+                    return Some(self.resolve());
+                }
+                None
+            }
+            Key::Enter => Some(self.resolve()),
+            _ => None,
+        }
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let mut body = Vec::new();
+        for (index, row) in self.rows.iter().enumerate() {
+            let number = index + 1;
+            let marker = if row.name == self.current {
+                theme.paint(Token::Success, "  ← current")
+            } else {
+                String::new()
+            };
+            if index == self.selected {
+                body.push(format!(
+                    "{} {}{marker}",
+                    theme.bold(Token::Accent, &format!("▶ {number}.")),
+                    theme.bold(Token::TextStrong, &row.name)
+                ));
+                body.push(theme.paint(
+                    Token::TextDim,
+                    &format!(
+                        "     {}",
+                        width::truncate_to_width(&row.description, columns.saturating_sub(10))
+                    ),
+                ));
+            } else {
+                body.push(format!(
+                    "  {} {}{marker}",
+                    theme.paint(Token::TextDim, &format!("{number}.")),
+                    theme.paint(Token::Text, &row.name)
+                ));
+            }
+        }
+        body.push(String::new());
+        body.push(theme.paint(
+            Token::TextDim,
+            "↑/↓ select · 1-9 choose · ↵ apply · esc cancel",
+        ));
+        border::frame(
+            body,
+            columns,
+            theme.style(Token::BorderFocus),
+            Some(self.title.clone()),
+        )
+    }
+}
+
+/// The reasoning-effort selector (`/effort` with no args): the
+/// provider's thinking levels (or the standard ramp), the live level
+/// marked. Enter applies, Esc cancels.
+pub struct EffortPickerDialog {
+    title: String,
+    levels: Vec<String>,
+    /// The live level (`off` when unset; drives the marker).
+    current: String,
+    selected: usize,
+}
+
+impl EffortPickerDialog {
+    /// Build the picker over `levels`, seeding `off` at the front when
+    /// the provider list omits it (off is always available).
+    pub fn new(current: Option<&str>, levels: &[String]) -> Self {
+        let mut levels = levels.to_vec();
+        if !levels.iter().any(|level| level == "off") {
+            levels.insert(0, "off".to_string());
+        }
+        let current = current.unwrap_or("off").to_lowercase();
+        let selected = levels
+            .iter()
+            .position(|level| *level == current)
+            .unwrap_or(0);
+        Self {
+            title: "Select a reasoning effort".to_string(),
+            levels,
+            current,
+            selected,
+        }
+    }
+
+    fn resolve(&self) -> Answer {
+        let level = &self.levels[self.selected];
+        Answer::EffortSelected {
+            level: (level != "off").then(|| level.clone()),
+        }
+    }
+
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        match event.key {
+            Key::Esc => Some(Answer::Dismissed),
+            Key::Up => {
+                self.selected = if self.selected == 0 {
+                    self.levels.len() - 1
+                } else {
+                    self.selected - 1
+                };
+                None
+            }
+            Key::Down => {
+                self.selected = (self.selected + 1) % self.levels.len();
+                None
+            }
+            Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
+                if let Ok(digit) = c.to_string().parse::<usize>()
+                    && digit >= 1
+                    && digit <= self.levels.len()
+                {
+                    self.selected = digit - 1;
+                    return Some(self.resolve());
+                }
+                None
+            }
+            Key::Enter => Some(self.resolve()),
+            _ => None,
+        }
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let mut body = Vec::new();
+        for (index, level) in self.levels.iter().enumerate() {
+            let number = index + 1;
+            let marker = if *level == self.current {
+                theme.paint(Token::Success, "  ← current")
+            } else {
+                String::new()
+            };
+            if index == self.selected {
+                body.push(format!(
+                    "{} {}{marker}",
+                    theme.bold(Token::Accent, &format!("▶ {number}.")),
+                    theme.bold(Token::TextStrong, level)
+                ));
+            } else {
+                body.push(format!(
+                    "  {} {}{marker}",
+                    theme.paint(Token::TextDim, &format!("{number}.")),
+                    theme.paint(Token::Text, level)
+                ));
+            }
+        }
+        body.push(String::new());
+        body.push(theme.paint(
+            Token::TextDim,
+            "↑/↓ select · 1-9 choose · ↵ apply · esc cancel",
+        ));
+        border::frame(
+            body,
+            columns,
+            theme.style(Token::BorderFocus),
+            Some(self.title.clone()),
+        )
+    }
+}
+
+/// The bare-command free-text prompt: one prefilled editable line.
+/// Enter submits (trimmed; empty allowed where the command treats it
+/// as "use the default"), Esc cancels.
+pub struct PromptDialog {
+    title: String,
+    /// Where the answer routes back to.
+    purpose: PromptPurpose,
+    /// The editable line, prefilled by the caller.
+    value: String,
+    hint: &'static str,
+}
+
+impl PromptDialog {
+    /// Build the prompt over `initial` text.
+    pub fn new(title: &str, purpose: PromptPurpose, initial: &str, hint: &'static str) -> Self {
+        Self {
+            title: title.to_string(),
+            purpose,
+            value: initial.to_string(),
+            hint,
+        }
+    }
+
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        match event.key {
+            Key::Esc => Some(Answer::Dismissed),
+            Key::Backspace => {
+                self.value.pop();
+                None
+            }
+            Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
+                self.value.push(c);
+                None
+            }
+            Key::Enter => Some(Answer::Prompt {
+                purpose: self.purpose.clone(),
+                value: self.value.trim().to_string(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let body = vec![
+            theme.paint(
+                Token::Text,
+                &width::truncate_to_width(&self.value, columns.saturating_sub(6)),
+            ),
+            String::new(),
+            theme.paint(Token::TextDim, self.hint),
+        ];
         border::frame(
             body,
             columns,

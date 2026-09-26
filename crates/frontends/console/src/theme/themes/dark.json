@@ -1,0 +1,30 @@
+{
+  "dark": true,
+  "description": "graphite ramp, one azure accent",
+  "syntax_theme": "synthwave-84",
+  "colors": {
+    "primary": "#4DA5FF",
+    "accent": "#8FC7FF",
+    "text": "#DEE2E7",
+    "text_strong": "#FFFFFF",
+    "text_dim": "#99A2AC",
+    "text_muted": "#75808B",
+    "code_span": "#4DA5FF",
+    "border": "#39414B",
+    "border_focus": "#4DA5FF",
+    "success": "#3FB950",
+    "warning": "#D29922",
+    "error": "#F85149",
+    "diff_added": "#3FB950",
+    "diff_removed": "#F85149",
+    "diff_added_strong": "#56D364",
+    "diff_removed_strong": "#FF7B72",
+    "diff_gutter": "#39414B",
+    "diff_meta": "#75808B",
+    "role_user": "#4DA5FF",
+    "shell_mode": "#D29922",
+    "neutral": "#A8ADB2",
+    "input_bg": "#252A32",
+    "background": "#1A1D23"
+  }
+}

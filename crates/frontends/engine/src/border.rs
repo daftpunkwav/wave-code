@@ -49,17 +49,25 @@ pub fn frame(
 }
 
 /// A centered scroll indicator row for a box border: `── ↑ N more ──`.
-pub fn scroll_label(total_width: usize, marker: &str, count: usize) -> String {
+/// The row rides `style` (the caller's dim hint tone): unpainted text
+/// would inherit the terminal's default foreground, which a recolored
+/// (light) background leaves unreadable.
+pub fn scroll_label(total_width: usize, marker: &str, count: usize, style: Style) -> String {
     let inner = total_width.saturating_sub(2);
     if inner < 8 {
-        return "─".repeat(inner);
+        return style.paint(&"\u{2500}".repeat(inner));
     }
     let text = format!("{} {} more", marker, count);
     let text = width::truncate_to_width(&text, inner.saturating_sub(4));
     let pad = inner.saturating_sub(2 + width::width(&text));
     let left = (pad / 2).max(1);
     let right = pad.saturating_sub(left).max(1);
-    format!("{} {} {}", "─".repeat(left), text, "─".repeat(right))
+    style.paint(&format!(
+        "{} {} {}",
+        "\u{2500}".repeat(left),
+        text,
+        "\u{2500}".repeat(right)
+    ))
 }
 
 #[cfg(test)]
@@ -102,7 +110,7 @@ mod tests {
 
     #[test]
     fn scroll_label_centers_marker() {
-        let label = scroll_label(20, "↑", 7);
+        let label = scroll_label(20, "↑", 7, Style::new());
         assert_eq!(strip_ansi(&label), "──── ↑ 7 more ────");
     }
 }

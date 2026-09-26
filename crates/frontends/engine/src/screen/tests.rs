@@ -220,7 +220,10 @@ fn removed_segment_erases_stale_rows() {
         10,
     );
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("\x1b[J"), "stale row erased: {text:?}");
+    assert!(
+        text.contains("\x1b[3;1H\x1b[K"),
+        "stale row erased by the viewport repaint: {text:?}"
+    );
     assert!(!text.contains("c\x1b[0m"), "no ghost: {text:?}");
 }
 
@@ -352,6 +355,28 @@ fn invalidate_draw_clears_and_homes_first() {
     assert_eq!(text.matches("alpha").count(), 1, "single copy: {text:?}");
 }
 
+/// Theme switches repaint via `invalidate`: with the default
+/// options the repaint must also erase the scrollback, so rows
+/// drawn under the previous palette cannot survive above the
+/// viewport.
+#[test]
+fn invalidate_clears_the_scrollback_when_enabled() {
+    let mut screen = Screen::with_options(ScreenOptions {
+        synchronized: false,
+        clear_scrollback: true,
+    });
+    let mut out = Vec::new();
+    draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+    screen.invalidate();
+    out.clear();
+    draw(&mut screen, &mut out, &["alpha", "beta"], 40, 10);
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("\x1b[3J"),
+        "scrollback erased on the repaint: {text:?}"
+    );
+}
+
 #[test]
 fn synchronized_markers_wrap_frames() {
     let mut screen = Screen::with_options(ScreenOptions {
@@ -398,7 +423,56 @@ fn shrinking_content_clears_stale_rows() {
     out.clear();
     draw(&mut screen, &mut out, &["alpha"], 40, 10);
     let text = String::from_utf8(out).unwrap();
-    assert!(text.contains("\x1b[J"), "erase-to-end present: {text:?}");
+    // A shrink repaints the viewport with per-row absolute erases: the
+    // stale second row is gone and nothing below the frame survives.
+    assert!(
+        text.contains("\x1b[1;1H\x1b[K"),
+        "viewport repaint from the top: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[2;1H\x1b[K"),
+        "stale row erased: {text:?}"
+    );
+    assert!(!text.contains("beta"), "ghost content gone: {text:?}");
+}
+
+/// A frame shrinking while a tail is pinned: the previous frame's
+/// bottom-anchored tail copy must not survive as a second input box
+/// (the dialog-close artifact). The whole-viewport repaint erases it.
+#[test]
+fn shrunken_frame_repaints_the_viewport_without_stranding_the_tail() {
+    let mut screen = Screen::with_options(ScreenOptions {
+        synchronized: false,
+        clear_scrollback: false,
+    });
+    screen.set_pinned_tail(2);
+    let mut out = Vec::new();
+    let tall: Vec<String> = [
+        "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "DIALOG", "editor", "footer",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    screen.draw(&mut out, &frame_owned(tall), 40, 6);
+    out.clear();
+    let short: Vec<String> = [
+        "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "editor", "footer",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    screen.draw(&mut out, &frame_owned(short), 40, 6);
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        !text.contains("DIALOG"),
+        "the closed dialog leaves no copy: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[6;1H\x1b[K"),
+        "viewport rows past the frame erase: {text:?}"
+    );
+    // The tail stays anchored at the physical bottom rows (5 and 6).
+    assert!(text.contains("\x1b[5;1H"), "pin rewrote row 5: {text:?}");
 }
 
 /// A frame shrinking exactly onto the rewrite base has no
@@ -495,9 +569,11 @@ fn shrink_then_grow_stays_aligned() {
         !text.contains("\x1b[1B"),
         "no downward travel expected: {text:?}"
     );
+    // The shrink repaint left the physical cursor at the bottom row;
+    // the grow diff travels up from there to the changed row.
     assert!(
-        text.starts_with("\x1b[?25l\r\x1b[1A\x1b[Kx"),
-        "one row up, rewrite in the erased row: {text:?}"
+        text.starts_with("\x1b[?25l\r\x1b[8A\x1b[Kx"),
+        "up from the bottom row, rewrite: {text:?}"
     );
     assert!(text.contains("x\x1b[0m"), "{text:?}");
 }

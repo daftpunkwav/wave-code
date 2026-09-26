@@ -2,14 +2,17 @@
 //!
 //! Installed once at startup via [`set`]; readers clone (themes are tiny).
 //! A theme pairs a chrome palette with the syntax theme that colors
-//! code blocks, so one selection drives both.
+//! code blocks, so one selection drives both. The named constructors
+//! resolve through the bundled theme data files (`builtin.rs`); no
+//! color values live in this module.
 
 use std::sync::RwLock;
 
 use tui_engine::color::{Color, Style};
 
-use super::colors::{Palette, Token, deepwave_palette, light_palette, synthwave_palette};
+use super::builtin;
 use super::syntax::SyntaxTheme;
+use super::tokens::{Palette, Token};
 
 /// The resolved theme: base kind + palette + syntax theme. `Copy` so
 /// readers clone it cheaply per render.
@@ -21,35 +24,23 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// The default theme: the synthwave identity.
-    pub fn synthwave() -> Self {
-        Self {
-            dark: true,
-            palette: synthwave_palette(),
-            syntax_theme: SyntaxTheme::Synthwave84,
-        }
+    /// The default theme (the bundled `dark` identity).
+    pub fn dark() -> Self {
+        builtin::get("dark").expect("the bundled dark theme must resolve")
     }
 
-    /// The deepwave identity (kept selectable).
+    /// The `deepwave` identity (kept selectable).
     pub fn deepwave() -> Self {
-        Self {
-            dark: true,
-            palette: deepwave_palette(),
-            syntax_theme: SyntaxTheme::OceanDark,
-        }
+        builtin::get("deepwave").expect("the bundled deepwave theme must resolve")
     }
 
     /// The light theme.
     pub fn light() -> Self {
-        Self {
-            dark: false,
-            palette: light_palette(),
-            syntax_theme: SyntaxTheme::OceanLight,
-        }
+        builtin::get("light").expect("the bundled light theme must resolve")
     }
 
     /// Build a theme over an explicit palette and syntax choice
-    /// (custom-theme support).
+    /// (resolved theme files compose through here).
     pub fn from_parts(dark: bool, palette: Palette, syntax_theme: SyntaxTheme) -> Self {
         Self {
             dark,
@@ -106,30 +97,7 @@ impl Theme {
 
 static ACTIVE: RwLock<Theme> = RwLock::new(Theme {
     dark: true,
-    palette: Palette {
-        primary: Color { r: 0, g: 0, b: 0 },
-        accent: Color { r: 0, g: 0, b: 0 },
-        text: Color { r: 0, g: 0, b: 0 },
-        text_strong: Color { r: 0, g: 0, b: 0 },
-        text_dim: Color { r: 0, g: 0, b: 0 },
-        text_muted: Color { r: 0, g: 0, b: 0 },
-        code_span: Color { r: 0, g: 0, b: 0 },
-        border: Color { r: 0, g: 0, b: 0 },
-        border_focus: Color { r: 0, g: 0, b: 0 },
-        success: Color { r: 0, g: 0, b: 0 },
-        warning: Color { r: 0, g: 0, b: 0 },
-        error: Color { r: 0, g: 0, b: 0 },
-        diff_added: Color { r: 0, g: 0, b: 0 },
-        diff_removed: Color { r: 0, g: 0, b: 0 },
-        diff_added_strong: Color { r: 0, g: 0, b: 0 },
-        diff_removed_strong: Color { r: 0, g: 0, b: 0 },
-        diff_gutter: Color { r: 0, g: 0, b: 0 },
-        diff_meta: Color { r: 0, g: 0, b: 0 },
-        role_user: Color { r: 0, g: 0, b: 0 },
-        shell_mode: Color { r: 0, g: 0, b: 0 },
-        neutral: Color { r: 0, g: 0, b: 0 },
-        input_bg: Color { r: 0, g: 0, b: 0 },
-    },
+    palette: Palette::black(),
     syntax_theme: SyntaxTheme::Synthwave84,
 });
 
@@ -151,33 +119,33 @@ mod tests {
     fn current_defaults_and_set_roundtrips() {
         set(Theme::light());
         assert!(!current().is_dark());
-        set(Theme::synthwave());
+        set(Theme::dark());
         assert!(current().is_dark());
         assert_eq!(
             current().color(Token::Primary),
-            Color::rgb(0x36, 0xF9, 0xF6)
+            Color::rgb(0x4D, 0xA5, 0xFF)
         );
     }
 
     #[test]
     fn paint_uses_active_palette() {
-        set(Theme::synthwave());
+        set(Theme::dark());
         assert_eq!(
             current().paint(Token::Primary, "x"),
-            "\x1b[38;2;54;249;246mx\x1b[0m"
+            "\x1b[38;2;77;165;255mx\x1b[0m"
         );
     }
 
     #[test]
     fn each_named_theme_carries_its_syntax_counterpart() {
-        assert_eq!(Theme::synthwave().syntax_theme(), SyntaxTheme::Synthwave84);
+        assert_eq!(Theme::dark().syntax_theme(), SyntaxTheme::Synthwave84);
         assert_eq!(Theme::deepwave().syntax_theme(), SyntaxTheme::OceanDark);
         assert_eq!(Theme::light().syntax_theme(), SyntaxTheme::OceanLight);
     }
 
     #[test]
-    fn from_parts_composes_custom_themes() {
-        let theme = Theme::from_parts(false, light_palette(), SyntaxTheme::Synthwave84);
+    fn from_parts_composes_resolved_files() {
+        let theme = Theme::from_parts(false, Palette::black(), SyntaxTheme::Synthwave84);
         assert!(!theme.is_dark());
         assert_eq!(theme.syntax_theme(), SyntaxTheme::Synthwave84);
     }

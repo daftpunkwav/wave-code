@@ -37,6 +37,16 @@ impl SyntaxTheme {
         }
     }
 
+    /// The default code theme for a chrome kind (files may override
+    /// with an explicit `syntax_theme` alias).
+    pub fn default_for(dark: bool) -> Self {
+        if dark {
+            SyntaxTheme::Synthwave84
+        } else {
+            SyntaxTheme::OceanLight
+        }
+    }
+
     /// The `syntax_theme` alias (the inverse of [`Self::from_alias`]).
     pub fn alias(self) -> &'static str {
         match self {

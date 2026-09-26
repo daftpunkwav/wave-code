@@ -14,7 +14,7 @@ use wavecode_config::ModelCatalog;
 
 /// A console over a throwaway home directory.
 fn ui_with_home(name: &str) -> (ConsoleUi, PathBuf) {
-    theme::set(theme::Theme::synthwave());
+    theme::set(theme::Theme::dark());
     let home = std::env::temp_dir().join(format!("wavecode-ui-catalog-{name}"));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join(".wavecode")).unwrap();

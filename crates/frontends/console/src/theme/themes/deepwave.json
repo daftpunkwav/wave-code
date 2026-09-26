@@ -1,0 +1,30 @@
+{
+  "dark": true,
+  "description": "the teal ocean identity",
+  "syntax_theme": "ocean-dark",
+  "colors": {
+    "primary": "#2DD4BF",
+    "accent": "#5EEAD4",
+    "text": "#D5DEE5",
+    "text_strong": "#FFFFFF",
+    "text_dim": "#93A4B4",
+    "text_muted": "#7E8FA0",
+    "code_span": "#2DD4BF",
+    "border": "#31424A",
+    "border_focus": "#2DD4BF",
+    "success": "#5FB878",
+    "warning": "#E5C07B",
+    "error": "#E06C75",
+    "diff_added": "#5FB878",
+    "diff_removed": "#E06C75",
+    "diff_added_strong": "#7FD79A",
+    "diff_removed_strong": "#F0939A",
+    "diff_gutter": "#31424A",
+    "diff_meta": "#7E8FA0",
+    "role_user": "#2DD4BF",
+    "shell_mode": "#E5C07B",
+    "neutral": "#B4BAC0",
+    "input_bg": "#22303A",
+    "background": "#182126"
+  }
+}

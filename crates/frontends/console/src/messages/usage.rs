@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn panel_renders_rows_and_total() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut panel = UsagePanel::new(
             Some(84_000),
             Some(200_000),
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn panel_without_samples_says_so() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut panel = UsagePanel::new(None, None, TokenUsage::default());
         let lines: Vec<String> = panel.render(80).iter().map(|l| strip_ansi(l)).collect();
         assert!(lines.join("\n").contains("no samples yet"));

@@ -226,22 +226,29 @@ impl AssistantMessage {
     }
 
     fn markdown(highlighter: Box<dyn SyntaxHighlighter>) -> Markdown {
+        Self::markdown_styles().into_markdown(highlighter)
+    }
+
+    /// The assistant styles from the live theme. Rebuilt on theme
+    /// switches: the renderer bakes colors in, so a stale style would
+    /// keep painting old-theme text over the new background.
+    fn markdown_styles() -> MarkdownStyle {
+        let theme = theme::current();
         MarkdownStyle {
             // Agent speech renders in the neutral band: body prose
             // near-white, lines (frames, table borders, rules) in a
             // true near-white gray — color stays with the user input.
-            text: theme::current().style(Token::Text),
-            heading: theme::current().style(Token::TextStrong),
-            code: theme::current().style(Token::TextStrong),
-            link: theme::current().style(Token::TextDim).underline(),
-            fence: theme::current().style(Token::Neutral),
-            quote: theme::current().style(Token::TextDim).italic(),
-            rule: theme::current().style(Token::Neutral),
-            diff_added: theme::current().style(Token::DiffAdded),
-            diff_removed: theme::current().style(Token::DiffRemoved),
-            diff_meta: theme::current().style(Token::DiffMeta),
+            text: theme.style(Token::Text),
+            heading: theme.style(Token::TextStrong),
+            code: theme.style(Token::TextStrong),
+            link: theme.style(Token::TextDim).underline(),
+            fence: theme.style(Token::Neutral),
+            quote: theme.style(Token::TextDim).italic(),
+            rule: theme.style(Token::Neutral),
+            diff_added: theme.style(Token::DiffAdded),
+            diff_removed: theme.style(Token::DiffRemoved),
+            diff_meta: theme.style(Token::DiffMeta),
         }
-        .into_markdown(highlighter)
     }
 
     /// Settle a live message into its final static form.
@@ -301,7 +308,10 @@ impl Component for AssistantMessage {
 
     fn invalidate(&mut self) {
         self.lines = None;
-        self.markdown.clear_cache();
+        // The renderer bakes the theme into its styles at construction:
+        // restyle in place so the next render repaints under the new
+        // theme instead of the one this message was built with.
+        self.markdown.set_style(Self::markdown_styles());
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -403,7 +413,7 @@ mod tests {
 
     #[test]
     fn user_message_has_bullet_and_wraps() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = UserMessage::new("hello world", false);
         let lines = message.render(20);
         assert!(strip_ansi(&lines[0]).starts_with("❯ hello"));
@@ -417,11 +427,11 @@ mod tests {
     /// reset).
     #[test]
     fn user_input_background_survives_inner_resets() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = UserMessage::new("run `cargo test` now", true);
         let lines = message.render(60);
         let line = &lines[0];
-        let band = "48;2;50;44;66";
+        let band = "48;2;37;42;50";
         assert!(line.contains(band), "band opened: {line:?}");
         for (index, part) in line.split("\x1b[0m").enumerate() {
             if !part.is_empty() {
@@ -447,7 +457,7 @@ mod tests {
     /// right edge.
     #[test]
     fn user_band_spans_the_full_terminal_width() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let long = "a wrapped input line that exceeds the width ".repeat(3);
         let mut message = UserMessage::new(long, true);
         for columns in [30, 61] {
@@ -468,20 +478,52 @@ mod tests {
     /// the settled phase restores it.
     #[test]
     fn pending_lightens_then_restores_the_role_color() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = UserMessage::new("hello", true);
         message.set_pending(true);
         let lines = message.render(60);
         assert!(
-            lines[0].contains("38;2;255;216;174"),
+            lines[0].contains("38;2;157;206;255"),
             "lightened while pending: {:?}",
             lines[0]
         );
         message.set_pending(false);
         let lines = message.render(60);
         assert!(
-            lines[0].contains("38;2;255;184;108"),
+            lines[0].contains("38;2;77;165;255"),
             "role color restored: {:?}",
+            lines[0]
+        );
+    }
+
+    /// A message rendered under one theme repaints under the new theme
+    /// after invalidate: the markdown renderer is restyled, not just the
+    /// line cache — dark near-white body text must not survive a switch
+    /// onto the light paper (and light ink onto a dark ground).
+    #[test]
+    fn theme_switch_repaints_assistant_markdown() {
+        theme::set(theme::Theme::dark());
+        let mut message = AssistantMessage::new(
+            "hello world",
+            Box::new(tui_engine::markdown::PlainHighlighter),
+        );
+        let lines = message.render(60);
+        assert!(
+            lines[0].contains("\x1b[38;2;222;226;231m"),
+            "dark body: {:?}",
+            lines[0]
+        );
+        theme::set(theme::Theme::light());
+        message.invalidate();
+        let lines = message.render(60);
+        assert!(
+            lines[0].contains("\x1b[38;2;31;35;40m"),
+            "light body: {:?}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("\x1b[38;2;222;226;231m"),
+            "dark body gone: {:?}",
             lines[0]
         );
     }
@@ -493,26 +535,26 @@ mod tests {
     /// transcript invalidates.
     #[test]
     fn theme_switch_repaints_the_user_band() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = UserMessage::new("hello", true);
         message.render(60);
         theme::set(theme::Theme::light());
         message.invalidate();
         let lines = message.render(60);
-        // Light input_bg #E3EAEE; the synthwave band must be gone.
+        // Light input_bg #DCE1E7; the dark band must be gone.
         assert!(
-            lines[0].contains("48;2;227;234;238"),
+            lines[0].contains("48;2;220;225;231"),
             "new band: {:?}",
             lines[0]
         );
         assert!(
-            !lines[0].contains("48;2;50;44;66"),
+            !lines[0].contains("48;2;37;42;50"),
             "old band gone: {:?}",
             lines[0]
         );
         // The role color follows the theme too (light role_user).
         assert!(
-            lines[0].contains("38;2;21;94;117"),
+            lines[0].contains("38;2;9;105;218"),
             "light role color: {:?}",
             lines[0]
         );
@@ -521,7 +563,7 @@ mod tests {
     /// The assistant bullet carries exactly one space before the body.
     #[test]
     fn assistant_bullet_has_single_space() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = AssistantMessage::new(
             "hello world",
             Box::new(tui_engine::markdown::PlainHighlighter),
@@ -532,7 +574,7 @@ mod tests {
 
     #[test]
     fn status_line_uses_bullet() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut line = StatusLine::new("compacting");
         let lines = line.render(60);
         assert_eq!(strip_ansi(&lines[0]), "  ● compacting");
@@ -540,21 +582,21 @@ mod tests {
 
     #[test]
     fn error_status_colors_text() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut line = StatusLine::error("boom");
         let lines = line.render(60);
-        assert!(lines[0].contains("\x1b[38;2;254;68;80m"), "{:?}", lines[0]);
+        assert!(lines[0].contains("\x1b[38;2;248;81;73m"), "{:?}", lines[0]);
     }
 
     /// Warnings and loop notices ride the amber Warning role, not the
     /// dim body tone.
     #[test]
     fn warning_status_lines_render_amber() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut line = StatusLine::warning("warning: tool round limit reached (256)");
         let lines = line.render(60);
         assert!(
-            lines[0].contains("\x1b[38;2;249;126;114m"),
+            lines[0].contains("\x1b[38;2;210;153;34m"),
             "amber warning: {:?}",
             lines[0]
         );
@@ -562,7 +604,7 @@ mod tests {
         let mut line = StatusLine::new("compacting");
         let lines = line.render(60);
         assert!(
-            !lines[0].contains("\x1b[38;2;249;126;114m"),
+            !lines[0].contains("\x1b[38;2;224;175;104m"),
             "{:?}",
             lines[0]
         );
@@ -572,7 +614,7 @@ mod tests {
     /// the dim body tone.
     #[test]
     fn assistant_inline_code_uses_the_bright_code_span() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = AssistantMessage::new(
             "run `cargo test` now",
             Box::new(tui_engine::markdown::PlainHighlighter),
@@ -590,7 +632,7 @@ mod tests {
     /// user input.
     #[test]
     fn assistant_headings_ride_the_strong_white() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         let mut message = AssistantMessage::new(
             "## 执行环境",
             Box::new(tui_engine::markdown::PlainHighlighter),
@@ -605,7 +647,7 @@ mod tests {
 
     /// Deepwave keeps its neutral identity when selected.
     #[test]
-    fn deepwave_keeps_teal_headings_and_sand_code_spans() {
+    fn deepwave_keeps_strong_headings_and_teal_code_spans() {
         theme::set(theme::Theme::deepwave());
         let mut message = AssistantMessage::new(
             "## 执行环境\nrun `cargo test`",
@@ -613,7 +655,7 @@ mod tests {
         );
         let lines = message.render(60);
         assert!(
-            lines[0].contains("\x1b[38;2;240;246;249;1m执行环境"),
+            lines[0].contains("\x1b[38;2;255;255;255;1m执行环境"),
             "heading painted bold strong-white: {:?}",
             lines[0]
         );
@@ -629,7 +671,7 @@ mod tests {
     /// regression where every flush reset it to the first frame).
     #[test]
     fn streamed_draft_bullet_keeps_animating_across_updates() {
-        theme::set(theme::Theme::synthwave());
+        theme::set(theme::Theme::dark());
         // The blink itself: dot on, then blank, on a fixed cadence
         // (pure function of elapsed — no timing races).
         assert_eq!(stream_bullet(Duration::ZERO), "●");

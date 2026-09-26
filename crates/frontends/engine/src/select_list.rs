@@ -53,6 +53,11 @@ impl SelectList {
         }
     }
 
+    /// Swap the styling (theme switches rebuild it).
+    pub fn set_style(&mut self, style: SelectListStyle) {
+        self.style = style;
+    }
+
     /// Replace the item set, preserving the selection when possible.
     pub fn set_items(&mut self, items: Vec<SelectItem>) {
         self.selected = self.selected.min(items.len().saturating_sub(1));

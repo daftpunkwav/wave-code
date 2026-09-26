@@ -36,12 +36,12 @@ pub mod loader;
 pub mod markdown;
 pub mod math;
 pub mod mermaid;
-pub mod paste_burst;
 pub mod sanitize;
 pub mod screen;
 pub mod select_list;
 pub mod terminal;
 pub mod text;
+pub mod typing_burst;
 pub mod width;
 
 pub use autocomplete::{Completion, CompletionProvider};

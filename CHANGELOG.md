@@ -20,7 +20,7 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   approval channel, ACP mode negotiation, app server (REST + SSE),
   TypeScript SDK.
 - Console UI: wave-themed rendering, syntax highlighting, window
-  title and tab progress, kill-ring/yank-pop, paste-burst protection,
+  title and tab progress, kill-ring/yank-pop, typing-burst paste protection,
   external status-line command (Claude Code contract), custom JSON
   themes, `/undo` rewind picker, `/editor` (Ctrl+G), `/reload`,
   `/btw` side questions, and a model catalog (`~/.wavecode/models.json`)

@@ -3134,7 +3134,7 @@ pub async fn run_with_factory(
     let mut events = EventStream::new();
     // Paste-burst only matters when the terminal does not bracket
     // pastes itself: there, fast keystreams need the Enter rewrite.
-    let mut paste_burst = tui_engine::paste_burst::PasteBurst::new(!guard.bracketed_paste());
+    let mut typing_burst = tui_engine::typing_burst::TypingBurst::new(!guard.bracketed_paste());
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut flow = Flow::Continue;
@@ -3172,7 +3172,7 @@ pub async fn run_with_factory(
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(CEvent::Key(key))) => {
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
-                        let key = paste_burst.observe(KeyEvent::from(key), Instant::now());
+                        let key = typing_burst.observe(KeyEvent::from(key), Instant::now());
                         flow = ui.handle_key(key);
                         if let Err(e) = ui.render(&mut stdout.lock(), columns, rows) {
                             abort_reason = Some(format!("terminal render error: {e}"));

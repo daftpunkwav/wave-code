@@ -1,4 +1,4 @@
-//! Paste-burst detection for terminals without bracketed paste.
+//! Typing-burst detection for terminals without bracketed paste.
 //!
 //! A run of printable characters arriving a few milliseconds apart is
 //! a paste flowing through a slow pipe, not a human typing: at human
@@ -22,7 +22,7 @@ const ENTER_TAIL: Duration = Duration::from_millis(120);
 
 /// Rewrites Enter inside a detected paste burst.
 #[derive(Debug)]
-pub struct PasteBurst {
+pub struct TypingBurst {
     enabled: bool,
     /// Printable keys in the current fast run.
     run: usize,
@@ -33,7 +33,7 @@ pub struct PasteBurst {
     enter_until: Option<Instant>,
 }
 
-impl PasteBurst {
+impl TypingBurst {
     /// A detector; `enabled` should be false when the terminal does
     /// bracketed paste itself.
     pub fn new(enabled: bool) -> Self {
@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn disabled_detector_passes_everything_through() {
-        let mut burst = PasteBurst::new(false);
+        let mut burst = TypingBurst::new(false);
         let t = at(0);
         for ms in 0..20 {
             let _ = burst.observe(
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn short_fast_run_does_not_suppress_enter() {
-        let mut burst = PasteBurst::new(true);
+        let mut burst = TypingBurst::new(true);
         let t = at(0);
         for ms in 0..6 {
             let _ = burst.observe(
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn confirmed_burst_rewrites_enter_to_shift_enter() {
-        let mut burst = PasteBurst::new(true);
+        let mut burst = TypingBurst::new(true);
         let t = at(0);
         for ms in 0..10 {
             let _ = burst.observe(
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn human_speed_typing_never_confirms_a_burst() {
-        let mut burst = PasteBurst::new(true);
+        let mut burst = TypingBurst::new(true);
         let t = at(0);
         for ms in 0..30 {
             let _ = burst.observe(
@@ -151,7 +151,7 @@ mod tests {
 
     #[test]
     fn enter_tail_expires_after_the_burst_goes_quiet() {
-        let mut burst = PasteBurst::new(true);
+        let mut burst = TypingBurst::new(true);
         let t = at(0);
         for ms in 0..10 {
             let _ = burst.observe(
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn non_printable_keys_break_the_run() {
-        let mut burst = PasteBurst::new(true);
+        let mut burst = TypingBurst::new(true);
         let t = at(0);
         for ms in 0..7 {
             let _ = burst.observe(

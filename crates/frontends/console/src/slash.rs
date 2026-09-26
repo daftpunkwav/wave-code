@@ -136,7 +136,8 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
             };
             Effect::Ops(vec![Op::SetPermissionMode { mode }])
         }
-        // Direct mode shortcuts (kimi parity: /yolo, /auto).
+        // Direct mode shortcuts: one-line aliases of /permissions
+        // modes, so a mode flip never costs a picker round trip.
         "auto" => Effect::Ops(vec![Op::SetPermissionMode {
             mode: "auto".to_string(),
         }]),

@@ -59,9 +59,9 @@ pub struct Config {
     pub models: HashMap<String, ModelEntry>,
     /// Alias into the `[models]` table naming the cheap model used for
     /// routine side sessions: `/btw` answers sample through it instead of
-    /// the primary model (subagent-style cost steering, kimi's
-    /// `secondary_model`). An unknown alias degrades with a doctor
-    /// finding; unset means side sessions inherit the primary model.
+    /// the primary model (cheap side-session cost steering). An unknown
+    /// alias degrades with a doctor finding; unset means side sessions
+    /// inherit the primary model.
     #[serde(default)]
     pub secondary_model: Option<String>,
     /// Tool-round ceiling per turn (`max_tool_rounds`): a turn that

@@ -1366,8 +1366,8 @@ async fn run_tui_new(
         }
         Err(_) => (Vec::new(), Vec::new()),
     };
-    // Resume seed: an explicit --session errors hard; --continue
-    // degrades to a fresh session with a warning (kimi semantics).
+    // Resume seed: an explicit --session errors hard on a missing
+    // record; --continue degrades to a fresh session with a warning.
     let seed = match (&session, continue_last) {
         (Some(_), _) => resolve_tui_seed(&session, false, &cwd, &home)?,
         (None, true) => match resolve_tui_seed(&None, true, &cwd, &home) {
@@ -2318,7 +2318,7 @@ struct ExecSession {
 }
 
 impl ExecSession {
-    /// The leading JSON-mode control line, kimi-style: it identifies the
+    /// The leading JSON-mode control line: it identifies the session
     /// session before any event so consumers can persist the handle.
     fn meta_line(&self) -> serde_json::Value {
         serde_json::json!({

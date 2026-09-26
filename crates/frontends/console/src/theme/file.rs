@@ -22,8 +22,9 @@
 //! - `base` names a built-in theme to start from (default `dark`);
 //!   built-in files are complete and never use it.
 //! - `dark` tags the theme's kind (drives terminal color sync and
-//!   picker behavior). It defaults to the base's kind, then to the
-//!   `background` luminance, then to `true`.
+//!   picker behavior). It defaults to the `background` override's
+//!   luminance when one is set, otherwise to the base's kind, then to
+//!   `true`.
 //! - `syntax_theme` selects the code-highlighting theme by alias.
 //! - `description` is free text shown in the theme picker.
 //!
@@ -107,6 +108,8 @@ pub enum ThemeError {
     Json(serde_json::Error),
     /// A color override was not a valid `#rrggbb` hex string.
     Color(&'static str, String),
+    /// A theme name failed the file-stem whitelist.
+    Name(&'static str, String),
     /// A `syntax_theme` alias named no registered theme.
     SyntaxTheme(String),
     /// A `base` named no built-in theme.
@@ -121,6 +124,7 @@ impl std::fmt::Display for ThemeError {
             ThemeError::Io(error) => write!(f, "theme IO failed: {error}"),
             ThemeError::Json(error) => write!(f, "theme JSON failed: {error}"),
             ThemeError::Color(name, value) => write!(f, "invalid color for {name}: {value}"),
+            ThemeError::Name(what, value) => write!(f, "invalid theme {what}: {value}"),
             ThemeError::SyntaxTheme(value) => write!(f, "unknown syntax theme: {value}"),
             ThemeError::Base(value) => write!(f, "unknown base theme: {value}"),
             ThemeError::Incomplete(what) => {
@@ -273,7 +277,7 @@ pub fn token_name(token: super::tokens::Token) -> &'static str {
 /// Load and resolve one user theme by name (the file stem).
 pub fn load(home: &Path, name: &str) -> Result<Theme, ThemeError> {
     if !is_valid_theme_name(name) {
-        return Err(ThemeError::Color("name", name.to_string()));
+        return Err(ThemeError::Name("name", name.to_string()));
     }
     let path = themes_dir(home).join(format!("{name}.json"));
     let text = std::fs::read_to_string(path)?;

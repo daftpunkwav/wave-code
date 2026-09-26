@@ -1547,6 +1547,43 @@ where
                 break;
             }
 
+            // A response cut off at the output limit can end mid-tool-call:
+            // the streamed argument JSON is finalized by a best-effort parse,
+            // so a call can look well-formed while carrying incomplete
+            // arguments — and a half-specified command must not execute. Fail
+            // the whole batch with an explanatory result so the model re-issues
+            // complete calls; the continuation budget bounds the retry loop.
+            if response.truncated {
+                let results: Vec<ToolResult> = calls
+                    .iter()
+                    .map(|call| ToolResult {
+                        call_id: call.call_id.clone(),
+                        content: "the response hit the output limit before this tool call was \
+                                  fully transmitted; its arguments may be truncated, so it was \
+                                  not executed. Re-issue the tool call with complete arguments."
+                            .to_string(),
+                        is_error: true,
+                    })
+                    .collect();
+                conv.push_blocks(
+                    Role::User,
+                    result_blocks(&results, std::time::SystemTime::now()),
+                );
+                if continuations < self.cfg.max_continuations {
+                    continuations += 1;
+                    emit_msg(EventMsg::Warning {
+                        message: format!(
+                            "output truncated mid-tool-call; failing the batch and continuing ({continuations}/{})",
+                            self.cfg.max_continuations
+                        ),
+                    });
+                    continue;
+                }
+                settle(conv, &last_input, &state, window, &emit_msg);
+                emit_msg(EventMsg::TurnCompleted { interrupted: false });
+                return StopReason::Completed;
+            }
+
             // Checkpoint 3: pre-tool interrupt preserves pairing with
             // synthesized results instead of executing anything.
             if interrupt.is_triggered() {
@@ -3483,6 +3520,88 @@ mod run_loop_tests {
             .filter(|e| e.text() == CONTINUATION_PROMPT)
             .count();
         assert_eq!(reminders, 2);
+    }
+
+    /// A truncated response that also carries tool calls must not execute
+    /// them: streamed arguments finalize through a best-effort parse, so a
+    /// cut-off call can hold incomplete arguments. The batch fails with an
+    /// explanatory result and the model re-issues within the same turn.
+    #[tokio::test]
+    async fn truncated_batch_fails_calls_instead_of_executing() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: true,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c2".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let kinds = fx.event_kinds();
+        // The first (truncated) batch never starts; the re-issued one does.
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| k.as_str() == "tool_call_begin")
+                .count(),
+            1
+        );
+        assert!(kinds.iter().any(|k| k == "warning"));
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("arguments may be truncated"));
     }
 
     #[tokio::test]

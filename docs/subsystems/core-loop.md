@@ -34,6 +34,7 @@ Actors never name these eight types; they drive a `TurnDriver` (blanket-impl'd f
 9. `PromptTooLong` → reactive compaction (`CompactTrigger::Reactive`). A successful sample resets the counter; `MAX_REACTIVE_COMPACTS = 3` consecutive failures melt the turn with an error. Transport/timeout errors fail the turn after settle.
 10. Emit `AgentMessageComplete`, then:
     - no calls + `truncated` → push `CONTINUATION_PROMPT` and continue (`MAX_CONTINUATIONS = 2`);
+    - calls present + `truncated` → fail the whole batch with an explanatory result and continue within the same continuation budget: streamed argument JSON is finalized by a best-effort parse, so a call cut off at the output limit may hold incomplete arguments, and a half-specified command must not execute;
     - unfinished plan items → nudge (`MAX_PLAN_NUDGES = 3`);
     - open session goal (`Active` with a non-empty objective) → continue with the goal's own status render plus the loop's live **budget line** (context used / tool round of the ceiling / continuation of cap), `MAX_GOAL_CONTINUATIONS = 8` per turn, then stop anyway. This is what removes the human "continue" from a long task; a `Blocked` / `Paused` / `Completed` goal never steers, because those are statements that work should stop. Child runs and sessions without a goal store use `NoGoal` (no continuation, as before);
     - `Stop` hook block → feed the reason back and continue (`MAX_STOP_BLOCKS = 3`, then proceed anyway);

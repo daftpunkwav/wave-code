@@ -34,6 +34,7 @@ Actor 从不引用这八个类型；它们驱动 `TurnDriver`（对每个 `RunLo
 9. `PromptTooLong` → 反应式压缩（`CompactTrigger::Reactive`）。一次成功采样会重置计数器；`MAX_REACTIVE_COMPACTS = 3` 次连续失败会以错误终结回合。传输/超时错误在结算后使回合失败。
 10. 发出 `AgentMessageComplete`，然后：
     - 无调用 + `truncated` → 推入 `CONTINUATION_PROMPT` 并继续（`MAX_CONTINUATIONS = 2`）；
+    - 有调用 + `truncated` → 让整批调用以说明性结果失败并在同一续跑预算内继续：流式参数 JSON 由尽力而为的解析收尾，在输出上限处被截断的调用可能携带不完整参数，而半成品的命令绝不能执行；
     - 有未完成的计划项 → 提醒（`MAX_PLAN_NUDGES = 3`）；
     - 有开放的会话目标（`Active` 且目标非空）→ 以 goal 自身的状态渲染加循环的实时**预算行**（上下文用量 / 上限内的工具轮次 / 续跑计数）继续，每回合 `MAX_GOAL_CONTINUATIONS = 8` 次后照停。这正是把人的"继续"从长任务中移除的机制；`Blocked` / `Paused` / `Completed` 的 goal 永不推进，因为那些是"工作应当停止"的声明。子 agent 运行与没有 goal store 的会话用 `NoGoal`（不续跑，和以前一样）；
     - `Stop` 钩子阻止 → 把原因喂回并继续（`MAX_STOP_BLOCKS = 3`，之后照常进行）；

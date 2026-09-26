@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-/// Name prefix for MCP tools injected into the registry (SPEC section 10):
+/// Name prefix for MCP tools injected into the registry:
 /// the full tool name is `mcp__{server}__{tool}`, which never collides with
 /// builtin tools.
 pub const MCP_TOOL_PREFIX: &str = "mcp__";
@@ -125,7 +125,7 @@ pub struct McpPromptArgument {
 /// A prompt definition exposed by an MCP server (mirrors a protocol
 /// `prompts/list` result item).
 ///
-/// SPEC section 10 requires prompts to auto-convert into inline skills: the
+/// The protocol requires prompts to auto-convert into inline skills: the
 /// conversion needs `prompts/get` content fetches, which depend on a real
 /// transport and wire up on the core side in a later iteration (the skills
 /// crate already carries the `SkillSource::Mcp` source placeholder).
@@ -247,7 +247,7 @@ pub trait McpClient: Send + Sync {
     }
 }
 
-/// MCP server config (the two shapes of the SPEC section 13
+/// MCP server config (the two shapes of the
 /// `[mcp_servers.<name>]` section).
 ///
 /// Conversion from the config crate's raw tables happens on the connect
@@ -268,7 +268,7 @@ pub enum McpServerConfig {
         /// (overriding the inherited environment).
         env: HashMap<String, String>,
     },
-    /// streamable-http transport (incl. OAuth 2.0 client-credentials, SPEC section 10).
+    /// streamable-http transport (incl. OAuth 2.0 client-credentials).
     Http {
         /// Server endpoint URL.
         url: String,
@@ -358,9 +358,7 @@ impl McpServerConfig {
     }
 }
 
-/// MCP server-side placeholder trait (SPEC section 10 server: `wavecode mcp
-/// serve` exposes WaveCode's tool set and session capabilities over stdio for
-/// IDEs / other agents to call).
+/// MCP server-side placeholder trait.
 ///
 /// **Implementation status**: the shipped serve surface is
 /// `operations-gateway`'s `mcp_serve` loop, which serves a `wavecode_tools`

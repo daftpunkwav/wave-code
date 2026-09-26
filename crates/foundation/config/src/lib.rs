@@ -6,7 +6,7 @@
 //!
 //! The planned layered merge (CLI args > project-level `.wavecode/config.toml` > user-level >
 //! built-in defaults) and capabilities like `profiles` land in later milestones; raw
-//! parsing of `mcp_servers` landed in P9 (SPEC sections 10/13) and of
+//! parsing of `mcp_servers`  and of
 //! `[permissions]` in the approval-de-fatigue slice. `[permissions]` is the
 //! deliberate exception to that plan: widened authority is only ever read
 //! from the user-level file, never from a repo-local one (the agent can
@@ -33,7 +33,7 @@ pub struct Config {
     /// default / acceptEdits / bypassPermissions / yolo still load and map
     /// onto their successor). None by default; the assembly layer falls
     /// back to auto.
-    /// P2 lands only this single field; layered merges like profiles / projects overrides stay for later milestones.
+    /// layered merges like profiles / projects overrides stay for later milestones.
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// Authored permission rules (`[permissions] allow` / `deny`, sandbox
@@ -41,12 +41,12 @@ pub struct Config {
     /// is checked by the assembly layer through the sandbox crate.
     #[serde(default)]
     pub permissions: PermissionsConfig,
-    /// hooks config (SPEC section 9): a `[hooks.<EventPoint>]` table or array of tables.
-    /// The config layer only does raw parsing (config has no in-workspace dependencies, SPEC section 3 matrix);
+    /// hooks config: a `[hooks.<EventPoint>]` table or array of tables.
+    /// The config layer only does raw parsing (config has no in-workspace dependencies);
     /// event-point validity checks and execution semantics land in core via the hooks crate.
     #[serde(default)]
     pub hooks: HashMap<String, HookRuleSet>,
-    /// MCP server config (SPEC sections 10/13, P9): `[mcp_servers.<name>]` tables.
+    /// MCP server config: `[mcp_servers.<name>]` tables.
     /// The config layer only does raw parsing; the either-or (stdio `command` vs http `url`)
     /// validity check happens in core during conversion via the mcp crate.
     #[serde(default)]
@@ -302,7 +302,7 @@ reasoning_effort = "high"
         assert_eq!(prov.reasoning_effort.as_deref(), Some("low"));
     }
 
-    /// permission_mode (P2): optional field - missing means None, a configured value is kept as-is
+    /// permission_mode optional field - missing means None, a configured value is kept as-is
     /// (validity is checked by the assembly layer with fallback to default; the config layer does not reject unknown strings).
     #[test]
     fn permission_mode_is_optional() {
@@ -339,7 +339,7 @@ deny = ["Bash(rm -rf *)"]
         assert_eq!(cfg.permissions.deny, vec!["Bash(rm -rf *)".to_string()]);
     }
 
-    /// hooks config (P7, SPEC section 9): single-table and array-of-tables forms; empty map by default.
+    /// hooks config: single-table and array-of-tables forms; empty map by default.
     /// Event-point validity is not checked in the config layer (no in-workspace deps; core checks during conversion).
     #[test]
     fn hooks_parse_single_and_array_forms() {
@@ -375,7 +375,7 @@ command = "cargo clippy"
         assert!(cfg.hooks.is_empty());
     }
 
-    /// mcp_servers config (P9, SPEC section 13): stdio (command+args+env) and
+    /// mcp_servers config: stdio (command+args+env) and
     /// http (url+headers) forms; empty map by default; the either-or check is not in this layer.
     #[test]
     fn mcp_servers_parse_stdio_and_http_forms() {

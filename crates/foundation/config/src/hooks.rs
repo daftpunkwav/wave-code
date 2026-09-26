@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// A single hook rule (fields of the `[hooks.<EventPoint>]` table, SPEC section 9 config example).
+/// A single hook rule (fields of the `[hooks.<EventPoint>]` table).
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct HookRule {
     /// Tool name matcher (optional; semantics defined by the hooks crate).

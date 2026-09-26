@@ -1,4 +1,4 @@
-//! Auto-extract output parsing (SPEC section 7.2, simplified first version).
+//! Auto-extract output parsing (simplified first version).
 //!
 //! Extracting subagents are asked to emit candidate entries in the line format
 //! below (see the core-side extraction preamble); this module parses that

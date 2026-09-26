@@ -1,12 +1,12 @@
-//! wavecode-skills — skills system (SPEC section 8, landed in P7).
+//! wavecode-skills — skills system.
 //!
 //! SKILL.md (YAML frontmatter + Markdown body) discovery, parsing, and catalog
 //! injection:
 //! - Discovery: `<root>/skills/<name>/SKILL.md`, with sources in ascending
 //!   priority (same names overridden) builtin < `~/.wavecode/skills` <
-//!   `.wavecode/skills` (skills exposed over MCP are the fourth SPEC section
-//!   8.1 source, landing with P9 MCP — a placeholder in this version);
-//! - Frontmatter fields take the SPEC section 8.1 table intersection:
+//!   `.wavecode/skills` (skills exposed over MCP are the fourth source — a
+//!   placeholder in this version);
+//! - Frontmatter fields take the frontmatter table intersection:
 //!   `description` (required) / `when_to_use` / `allowed-tools` /
 //!   `context: inline | fork` / `user-invocable` / `argument-hint` / `paths`;
 //! - Catalog injection: [`SkillSet::catalog`] renders the name + description +
@@ -24,7 +24,7 @@
 //! multi-line strings), and a hand-rolled parser's edge cases (quotes,
 //! indented lists) would silently degrade; serde_yaml is already in the
 //! workspace-root `[workspace.dependencies]` at a unified version (SPEC
-//! section 3 discipline). The SPEC section 8.1 table mixes kebab-case
+//! discipline). The frontmatter table mixes kebab-case
 //! (`allowed-tools`) with snake_case (`when_to_use`) field names, so the
 //! parsing surface accepts both spellings (serde aliases) and constrains
 //! neither on the write side.
@@ -52,9 +52,8 @@ pub enum SkillSource {
     User,
     /// Project-level `<cwd>/.wavecode/skills`.
     Project,
-    /// Inline skills converted from prompts an MCP server exposes (SPEC
-    /// section 8.1 fourth source / section 10, highest priority). P9 lands
-    /// only the enum placeholder; real conversion fetches content via
+    /// Inline skills converted from prompts an MCP server exposes (the
+    /// highest-priority source). The enum is a placeholder; real conversion fetches content via
     /// `prompts/get` and wires up on the core side with the real MCP
     /// transport.
     Mcp,
@@ -72,7 +71,7 @@ impl SkillSource {
     }
 }
 
-/// Execution mode (the frontmatter `context` field, SPEC section 8.1): inline
+/// Execution mode (the frontmatter `context` field): inline
 /// expands into the current session; fork runs in a dedicated subagent.
 /// Defaults to inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -85,7 +84,7 @@ pub enum SkillContext {
     Fork,
 }
 
-/// SKILL.md frontmatter (the SPEC section 8.1 field intersection).
+/// SKILL.md frontmatter (the field intersection).
 ///
 /// Field names mix kebab / snake spellings (as in the SPEC table verbatim);
 /// both spellings are accepted; unknown fields are ignored (forward
@@ -181,7 +180,7 @@ impl Skill {
         })
     }
 
-    /// Inline expansion (SPEC section 8.2): `$ARGUMENTS` is replaced with the
+    /// Inline expansion: `$ARGUMENTS` is replaced with the
     /// call arguments, `${WAVECODE_SKILL_DIR}` with the skill directory path.
     ///
     /// When the body has no `$ARGUMENTS` placeholder but the caller passed
@@ -272,7 +271,7 @@ pub struct SkillRoot {
     pub dir: PathBuf,
 }
 
-/// Standard discovery roots (SPEC section 8.1 priority, low to high): builtin
+/// Standard discovery roots: builtin
 /// (if any) < `~/.wavecode/skills` < `<cwd>/.wavecode/skills`.
 pub fn standard_roots(builtin: Option<PathBuf>, home: Option<&Path>, cwd: &Path) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
@@ -326,7 +325,7 @@ impl Discovery {
 
 /// Discover every skill in priority order: `roots` must arrive low-priority
 /// first, and same-named skills from later (higher-priority) roots override
-/// earlier ones (SPEC section 8.1). Missing / unreadable root dirs are skipped
+/// earlier ones. Missing / unreadable root dirs are skipped
 /// silently (a missing source is a normal shape); individual bad skill files
 /// warn and continue.
 pub fn discover(roots: &[SkillRoot]) -> Discovery {
@@ -372,7 +371,7 @@ pub struct SkillSet {
 impl SkillSet {
     /// Insert one skill directly (same names override). The injection point
     /// outside the discovery pipeline: unit-test construction, and merging
-    /// MCP-exposed skills later (P9).
+    /// MCP-exposed skills later.
     pub fn add(&mut self, skill: Skill) {
         self.skills.insert(skill.name.clone(), skill);
     }
@@ -403,7 +402,7 @@ impl SkillSet {
         self.skills.is_empty()
     }
 
-    /// Render the catalog injection text (SPEC section 8.2: name +
+    /// Render the catalog injection text (name +
     /// description + when_to_use; `max_chars` is a character quota — the
     /// budget = 1% of the context window, converted by core).
     ///
@@ -608,7 +607,7 @@ paths:
 
     // —— source priority ——
 
-    /// SPEC section 8 acceptance: same-name override, builtin < user < project.
+    /// same-name override, builtin < user < project.
     #[test]
     fn higher_priority_source_overrides_same_name() {
         let builtin = tempfile::tempdir().unwrap();
@@ -663,7 +662,7 @@ paths:
 
     // —— inline expansion ——
 
-    /// SPEC section 8 acceptance: $ARGUMENTS substitution and the
+    /// $ARGUMENTS substitution and the
     /// ${WAVECODE_SKILL_DIR} variable.
     #[test]
     fn expand_replaces_arguments_and_skill_dir() {
@@ -753,7 +752,7 @@ paths:
         assert!(set.catalog(0).is_empty());
     }
 
-    /// SPEC section 8 acceptance: over-budget truncation — when_to_use goes
+    /// over-budget truncation — when_to_use goes
     /// first, then descriptions; the result never exceeds any quota.
     #[test]
     fn catalog_truncates_to_budget() {

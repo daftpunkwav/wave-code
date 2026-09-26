@@ -1,4 +1,4 @@
-//! Persistent memory storage (SPEC section 7.2): a `MEMORY.md` index plus
+//! Persistent memory storage: a `MEMORY.md` index plus
 //! four category entry files under `~/.wavecode/memories/`, in Markdown
 //! bullet form (`- ` list items).
 //!
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 /// Index filename (at the memory root).
 pub const INDEX_FILE: &str = "MEMORY.md";
 
-/// Memory category (SPEC section 7.2, four kinds).
+/// Memory category (four kinds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryCategory {
     /// User profile (preferences, habits, role).

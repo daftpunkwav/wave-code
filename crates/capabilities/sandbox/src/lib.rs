@@ -1,5 +1,4 @@
-//! wavecode-sandbox — permission and execution-safety layer (SPEC section 12;
-//! P2 lands the policy layer).
+//! wavecode-sandbox — permission and execution-safety layer.
 //!
 //! Pure logic, 100% unit-testable:
 //! - [`PermissionMode`] three modes (a protocol type): plan / guarded / auto
@@ -533,7 +532,7 @@ impl Sandbox {
     }
 
     /// Approval verdict: deny rules first (no mode exempts them) -> allow
-    /// rule exemptions -> in-session state tool exemptions (P4, `todowrite`
+    /// rule exemptions -> in-session state tool exemptions (`todowrite`
     /// needs no approval in any mode) -> the mode's default policy.
     ///
     /// `tool` / `input` feed rule matching and Ask details; `read_only` /
@@ -600,7 +599,7 @@ impl Sandbox {
         {
             return Verdict::Allow;
         }
-        // 2.45 In-session state tool exemption (P4): todowrite only mutates
+        // 2.45 In-session state tool exemption: todowrite only mutates
         // the in-session todo list — no filesystem changes, no spawned
         // processes — so it allows directly in every mode (matching
         // deepagents' auto-allowed write_todos; maintaining the list in plan
@@ -668,7 +667,7 @@ fn is_file_edit(tool: &str) -> bool {
     matches!(tool, "write" | "edit")
 }
 
-/// In-session state tools (P4): only mutate in-session memory state with no
+/// In-session state tools only mutate in-session memory state with no
 /// external side effects; need no approval in any mode. The merged
 /// `goal` / `plan` tools write only harness-owned coordination files
 /// under the home directory (never the repo), so they ride the same
@@ -889,7 +888,7 @@ mod tests {
             "Bash",
             "Bash()",
             "Nope(x)",
-            "bash(git *)", // Scope is case-sensitive, matching the SPEC section 12 examples.
+            "bash(git *)", // Scope is case-sensitive, matching the reference examples.
             "Bash(git *",
             "git *",
         ] {
@@ -1060,7 +1059,7 @@ mod tests {
         ));
     }
 
-    /// P4: in-session state tools (todowrite, plus the merged goal / plan
+    /// In-session state tools (todowrite, plus the merged goal / plan
     /// coordination tools) need no approval in default /
     /// plan mode either (deny judging still runs before the exemption — todo
     /// input carries no command/path candidate keys, so rules cannot hit it in

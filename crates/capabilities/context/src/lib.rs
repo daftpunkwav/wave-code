@@ -1,12 +1,12 @@
 //! wavecode-context — context-management pipeline (one implementation, pluggable policy).
 //!
-//! One pipeline in three stages (SPEC section 6):
+//! One pipeline in three stages:
 //! 1. **Accounting**: prefer the provider-returned usage (`input_tokens`
 //!    already authoritatively covers the full history); with no usage (first
 //!    turn / not yet re-sampled after compaction) fall back to the
 //!    [`estimate_tokens`] character estimate.
 //! 2. **Three-level thresholds** ([`Thresholds`], parameterized by window
-//!    proportion, defaults aligned with SPEC section 6): warn line at
+//!    proportion, defaults aligned with measured Claude Code values): warn line at
 //!    window-20k / auto-compact line at window-13k / blocking line at
 //!    window-3k.
 //! 3. **Compaction**: abstracted behind the [`CompactionStrategy`] trait
@@ -15,7 +15,7 @@
 //!    summary message + the most recent N verbatim messages, with
 //!    [`normalize_history`] guaranteeing pairing integrity.
 //!
-//! This crate depends only on `wavecode-llm` (SPEC section 3 matrix); trigger
+//! This crate depends only on `wavecode-llm`; trigger
 //! timing is orchestrated by core.
 //!
 //! Two auxiliary passes share the same history model: the cache-preserving
@@ -45,8 +45,7 @@ pub use spill::{
 /// Default value of the character-estimate ratio (chars/token).
 pub const DEFAULT_CHARS_PER_TOKEN: usize = 4;
 
-/// Fixed overhead quota for the system prompt and tool manifest (SPEC section 6
-/// "expected system overhead").
+/// Fixed overhead quota for the system prompt and tool manifest.
 /// Rough quota: the system-prompt template runs ~hundreds of tokens plus the
 /// builtin tool schemas at ~1-2k tokens; it only participates on the estimate
 /// path (no usage) — the usage path's input_tokens already includes all
@@ -154,8 +153,8 @@ pub enum BudgetLevel {
     Blocking,
 }
 
-/// Three-level thresholds (SPEC section 6, defaults aligned with measured
-/// Claude Code values).
+/// Three-level thresholds (defaults aligned with measured Claude Code
+/// values).
 ///
 /// Parameterized as "margins below the top of the window" rather than ratio
 /// floats: 20k/13k/3k are measured token-scale experience values that shift
@@ -286,8 +285,8 @@ pub enum ContextError {
 /// Crate-wide Result alias.
 pub type Result<T> = std::result::Result<T, ContextError>;
 
-/// Compaction strategy abstraction (SPEC section 6:
-/// `summarize(history, budget) -> summary`).
+/// Compaction strategy abstraction
+/// (`summarize(history, budget) -> summary`).
 ///
 /// Strategies are replaceable (local summary / stronger-model summary, …),
 /// but there is exactly one trigger pipeline (core orchestration: the
@@ -306,7 +305,7 @@ const SUMMARY_SYSTEM: &str =
 
 /// Summary instruction (a user message appended at the end of history): the
 /// five element titles are pinned verbatim — Goal / Progress / Key decisions /
-/// File inventory / Todo (SPEC section 6 / DEV-PLAN P3 acceptance anchor).
+/// File inventory / Todo.
 const SUMMARY_INSTRUCTION: &str = "\
 The above is the conversation history between a coding agent and the user. Compress it into a structured summary that contains the following five section titles verbatim:
 ## Goal — the user's overall objective and current task
@@ -336,7 +335,7 @@ pub struct ModelSummary {
 
 impl ModelSummary {
     /// `model` reuses the main session's model channel (compaction uses the
-    /// same model as the main session, SPEC section 6 first version).
+    /// same model as the main session, first version).
     pub fn new(model: Arc<dyn ChatModel>, model_name: String) -> Self {
         Self {
             model,
@@ -1328,7 +1327,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         h
     }
 
-    /// P3 acceptance anchor: compaction retention — the summary carries each
+    /// Compaction retention invariant: the summary carries each
     /// of the five elements, and the most recent N verbatim messages survive.
     #[tokio::test]
     async fn compact_retains_five_elements_and_recent_tail() {

@@ -1,5 +1,5 @@
 //! The `todowrite` tool: session-level task list (deepagents `write_todos` semantics,
-//! SPEC §11.2).
+//! (see `sandbox`).
 //!
 //! Semantics: **full rewrite** (not an incremental patch) -- the model passes the complete list on every call,
 //! replacing the session-level shared state wholesale. `id`s are auto-generated from list position (`"1"..="n"`),
@@ -77,7 +77,7 @@ impl TodoStore {
         crate::read(&self.inner).clone()
     }
 
-    /// Unfinished-item counts `(pending, in_progress)` (stop-steering criterion, P4).
+    /// Unfinished-item counts `(pending, in_progress)` (stop-steering criterion).
     pub fn unfinished(&self) -> (usize, usize) {
         let items = crate::read(&self.inner);
         let pending = items

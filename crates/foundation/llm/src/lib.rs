@@ -247,7 +247,7 @@ pub enum StreamEvent {
 pub struct ChatRequest {
     pub model: String,
     pub system: String,
-    /// History snapshots are shared via `Arc` (P3, SPEC section 17.5 M4): callers freeze
+    /// History snapshots are shared via `Arc`: callers freeze
     /// the current round of history with an O(1) pointer clone instead of a per-round
     /// O(n²) deep copy; provider implementations serialize inside `stream()`,
     /// never holding the snapshot long-term.
@@ -311,7 +311,7 @@ pub enum LlmError {
         message: String,
         retry_after: Option<std::time::Duration>,
     },
-    /// Overlong-context error (the trigger for core reactive compact, SPEC section 5.2):
+    /// Overlong-context error (the trigger for core reactive compact):
     /// the provider explicitly reports an oversized prompt / request (e.g. Anthropic 400
     /// "prompt is too long", 413 request_too_large). Split out from the generic Api error
     /// as its own variant so upper layers can match on the enum instead of sniffing strings.

@@ -1,4 +1,4 @@
-//! wavecode-memory — memory system (P6, SPEC section 7).
+//! wavecode-memory — memory system.
 //!
 //! - Instruction memory ([`instructions`]): layered `WAVECODE.md` discovery
 //!   (user level -> project root -> cwd) with `@path` recursive references
@@ -12,12 +12,12 @@
 //!   merge run at session end — near-duplicate entries (Jaccard >= 0.6 on
 //!   lowercased word sets) within a category fold into their newest wording.
 //!
-//! This crate has no workspace-internal dependencies (SPEC section 3 matrix):
+//! This crate has no workspace-internal dependencies:
 //! the `memory_write` tool, approval wiring, prompt injection, and extraction
 //! orchestration all live on the core side (the core->memory edge is allowed).
 //!
 //! Consolidation is heuristic v1 (see [`consolidate`] for the exact limits).
-//! Still unimplemented from SPEC section 7.2: the 24h + 5-session gate
+//! Still unimplemented: the 24h + 5-session gate
 //! (consolidation currently runs after every extraction), stale-entry pruning,
 //! and LLM/embedding-based similarity; `WAVECODE.override.md` overrides and
 //! fallback filenames (CLAUDE.md/AGENTS.md) are likewise later work.

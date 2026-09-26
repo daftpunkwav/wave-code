@@ -172,13 +172,12 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> serde_json::Value;
     /// Read-only tools may run in parallel; writing tools must run serially.
     fn is_read_only(&self) -> bool;
-    /// Destructive tools (deleting or irreversibly overwriting state, etc.) require approval by default (SPEC §11.1;
-    /// P2 sandbox/HITL wiring, P1 only lands the trait surface). Non-destructive by default.
+    /// Destructive tools (deleting or irreversibly overwriting state, etc.) require approval by default. Non-destructive by default.
     fn is_destructive(&self) -> bool {
         false
     }
-    /// Pre-execution semantic check (validation beyond JSON Schema, one stage of the SPEC §11.1 execution pipeline;
-    /// invoked by core orchestration from P2 on). The default implementation passes everything through.
+    /// Pre-execution semantic check (validation beyond JSON Schema, one stage of the
+    /// execution pipeline; invoked by core orchestration). The default implementation passes everything through.
     async fn validate(&self, _input: &serde_json::Value) -> Result<()> {
         Ok(())
     }
@@ -187,7 +186,7 @@ pub trait Tool: Send + Sync {
     ///
     /// All built-in tools are truly async: file tools use `tokio::fs`, shell uses
     /// `tokio::process`; grep/glob directory traversal is the `glob` crate's sync API,
-    /// wrapped in `spawn_blocking` inside each tool (SPEC §19.3).
+    /// wrapped in `spawn_blocking` inside each tool.
     async fn execute(&self, input: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput>;
 }
 
@@ -208,7 +207,7 @@ pub enum ToolsError {
 /// Crate-wide Result alias.
 pub type Result<T> = std::result::Result<T, ToolsError>;
 
-/// Shared handle for the tool-surface allowlist (P7 skills `allowed-tools`, SPEC §8.2):
+/// Shared handle for the tool-surface allowlist (skills `allowed-tools`):
 /// with `Some(set)` only tools in the set may execute, `None` allows all.
 ///
 /// Same shape as [`TodoStore`] -- held by the **session config** (per-session), not by
@@ -293,7 +292,7 @@ impl Registry {
         (Self::builtin().with_todo_write(todos.clone()), todos)
     }
 
-    /// Derive a by-name allowlist subset registry (the `allowed-tools` tool surface of a P7 skill fork):
+    /// Derive a by-name allowlist subset registry (the `allowed-tools` tool surface of a skill fork):
     /// keep only listed tools (unknown names are silently skipped -- the list comes from user frontmatter,
     /// so a typo only costs that tool's availability, scoped to that skill).
     pub fn name_subset(&self, names: &[String]) -> Self {
@@ -353,7 +352,7 @@ impl Registry {
 mod tests {
     use super::*;
 
-    /// P7: the allowlist is unrestricted by default; after set() only listed tools run; clearing restores access.
+    /// The allowlist is unrestricted by default; after set() only listed tools run; clearing restores access.
     #[test]
     fn allowlist_gating() {
         let allowlist = ToolAllowlist::default();
@@ -365,7 +364,7 @@ mod tests {
         assert!(allowlist.is_allowed("shell"));
     }
 
-    /// P7: name_subset filters by name; unknown names are silently skipped; read/write tools are kept per the list.
+    /// name_subset filters by name; unknown names are silently skipped; read/write tools are kept per the list.
     #[test]
     fn name_subset_filters_by_name() {
         let (reg, _todos) = Registry::builtin_with_todos();

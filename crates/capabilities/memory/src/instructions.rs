@@ -1,5 +1,5 @@
 //! Instruction memory (`WAVECODE.md`) discovery, concatenation, and `@path`
-//! reference expansion (SPEC section 7.1).
+//! reference expansion.
 //!
 //! Pure logic with sync IO: collection is a one-shot startup action (cli
 //! bootstrap), off the turn loop's hot path, so it uses `std::fs` directly
@@ -52,7 +52,7 @@ fn resolve_instruction_file(dir: &Path) -> PathBuf {
     primary
 }
 
-/// Depth cap for recursive `@path` reference expansion (SPEC section 7.1):
+/// Depth cap for recursive `@path` reference expansion:
 /// WAVECODE.md itself is depth 0, files it references are depth 1, and so on;
 /// references inside files past the cap are kept as literal text, unexpanded.
 pub const MAX_INCLUDE_DEPTH: usize = 5;
@@ -269,7 +269,7 @@ mod tests {
         std::fs::write(path, content).unwrap();
     }
 
-    /// Concat order (P6 acceptance): user level -> project root -> cwd,
+    /// Concat order: user level -> project root -> cwd,
     /// global first.
     #[test]
     fn concat_order_global_first() {
@@ -405,7 +405,7 @@ mod tests {
         );
     }
 
-    /// @-reference depth cap (P6 acceptance): a chained f0->f1->…->f7 leaves
+    /// @-reference depth cap: a chained f0->f1->…->f7 leaves
     /// references past depth 5 unexpanded, kept literal.
     #[test]
     fn at_ref_expansion_depth_limit() {
@@ -443,7 +443,7 @@ mod tests {
         );
     }
 
-    /// @-reference cycle guard (P6 acceptance): mutual a <-> b references must
+    /// @-reference cycle guard: mutual a <-> b references must
     /// terminate; re-references to already-expanded files stay literal (visited
     /// dedup).
     #[test]
@@ -462,7 +462,7 @@ mod tests {
         assert!(mem.combined.contains("@a.md"));
     }
 
-    /// Rules-dir merge (P6 acceptance): `.wavecode/rules/*.md` concatenated
+    /// Rules-dir merge `.wavecode/rules/*.md` concatenated
     /// sorted by filename.
     #[test]
     fn rules_dir_merged_in_order() {

@@ -1,8 +1,8 @@
-//! wavecode-hooks — lifecycle hooks system (SPEC section 9; P7 lands the command type).
+//! wavecode-hooks — lifecycle hooks system.
 //!
 //! Event points: PreToolUse / PostToolUse / UserPromptSubmit / SessionStart /
-//! SessionEnd / Stop / PreCompact / PostCompact (the SPEC section 9 table; the
-//! Notification point is not implemented in this version, left as a placeholder).
+//! SessionEnd / Stop / PreCompact / PostCompact; the
+//! Notification point is not implemented in this version (placeholder).
 //!
 //! Hook types:
 //! - `command` (implemented in this version): a `[hooks.<EventPoint>]` table
@@ -21,7 +21,7 @@
 //!   model-ruling flavor (post-M4) stays future work; see the [`HookDef`]
 //!   notes.
 //!
-//! Blocking semantics (SPEC section 9): exit code 0 allows; 2 blocks with
+//! Blocking semantics: exit code 0 allows; 2 blocks with
 //! stderr fed back to the model (only on blockable points: PreToolUse /
 //! UserPromptSubmit / Stop; exit code 2 on other points degrades to an
 //! allow-with-warning); any other nonzero code allows with a warning; timeouts
@@ -53,7 +53,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Default timeout (SPEC section 9 config example): 10s.
+/// Default timeout: 10s.
 pub const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 
 /// Per-hook capture cap for prompt-type hooks: stdout beyond this many bytes
@@ -65,8 +65,8 @@ pub const PROMPT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
 /// [`PROMPT_CONTEXT_MAX_BYTES`].
 pub const PROMPT_CONTEXT_TRUNCATED: &str = "\n[...prompt hook output truncated]";
 
-/// Event point (SPEC section 9 table; the config `[hooks.<EventPoint>]` table
-/// names match the legal values of [`HookEventPoint::parse`]).
+/// Event point: the config `[hooks.<EventPoint>]` table names match
+    /// the legal values of [`HookEventPoint::parse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookEventPoint {
     /// Before tool execution (blockable): command audit, pre-flight checks.
@@ -88,8 +88,8 @@ pub enum HookEventPoint {
     PreCompact,
     /// After compaction (not blockable): archival.
     PostCompact,
-    // TODO(SPEC section 9, off-table): the Notification point (system
-    // notification forwarding) is not implemented in this version.
+    // TODO: the Notification point (system notification forwarding) is
+    // not implemented in this version.
 }
 
 impl HookEventPoint {
@@ -125,7 +125,7 @@ impl HookEventPoint {
         }
     }
 
-    /// Whether blockable (SPEC section 9 table): exit code 2 on a blockable
+    /// Whether blockable: exit code 2 on a blockable
     /// point blocks and feeds back stderr; on a non-blockable point it
     /// degrades to an allow-with-warning.
     pub fn blockable(self) -> bool {
@@ -711,7 +711,7 @@ mod tests {
 
     // —— matcher ——
 
-    /// SPEC section 9 acceptance: matcher matching (exact / multi-value /
+    /// matcher matching (exact / multi-value /
     /// wildcard / misses skipped).
     #[test]
     fn matcher_semantics() {
@@ -749,7 +749,7 @@ mod tests {
 
     // —— blocking semantics ——
 
-    /// SPEC section 9 acceptance: exit code 0 allows; 2 blocks with stderr in
+    /// exit code 0 allows; 2 blocks with stderr in
     /// the Block payload; other nonzero codes allow with a warning.
     #[tokio::test]
     async fn exit_code_semantics() {
@@ -790,7 +790,7 @@ mod tests {
     }
 
     /// Exit code 2 on a non-blockable point: degrades to allow-with-warning
-    /// (the SPEC section 9 table's "blockable" column).
+    /// (the "blockable" column).
     #[tokio::test]
     async fn exit_2_on_non_blockable_point_degrades_to_warning() {
         let e = engine(&[(HookEventPoint::PostToolUse, def(&exit_cmd(2, "ignored")))]);
@@ -821,7 +821,7 @@ mod tests {
 
     // —— timeouts ——
 
-    /// SPEC section 9 acceptance: a timeout force-kills and logs a warning
+    /// a timeout force-kills and logs a warning
     /// (kill_on_drop kills the process).
     #[tokio::test]
     async fn timeout_kills_and_warns() {

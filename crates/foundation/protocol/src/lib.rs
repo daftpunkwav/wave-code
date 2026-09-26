@@ -24,7 +24,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Permission mode (SPEC section 12; wire strings match config's `permission_mode`).
+/// Permission mode (wire strings match config's `permission_mode`).
 ///
 /// Lives in protocol rather than sandbox: it is the wire type of
 /// `SetPermissionMode`, same as `StopReason`; sandbox only holds the

@@ -5,7 +5,7 @@
 //! crate (sync API), and each hit path is re-checked after canonicalize to still be inside cwd's real
 //! path, guarding against symlink/junction escapes.
 //! Traversal and file reads are blocking IO, wrapped in `spawn_blocking` off the executor thread
-//! (SPEC §19.3); business failures (invalid regex, path escape, missing path, ...) return
+//! ); business failures (invalid regex, path escape, missing path, ...) return
 //! `Ok(is_error=true)` to the model, and `Err` is only for implementation-level failures.
 
 use std::path::{Path, PathBuf};

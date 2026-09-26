@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// Raw config of a single MCP server (SPEC section 13 `[mcp_servers.<name>]` fields,
-/// P9). The stdio form fills `command` (plus optional `args` / `env`); the http
+/// Raw config of a single MCP server. The stdio form fills `command` (plus optional `args` / `env`); the http
 /// form fills `url` (plus optional `headers`). The either-or validation of the
 /// two forms does not live in this layer (config has no in-workspace
 /// dependencies, same raw-parse discipline as hooks).

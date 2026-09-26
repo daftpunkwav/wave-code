@@ -12,7 +12,7 @@
  * outside the memory crate's own store.
  */
 
-//! Heuristic memory consolidation (SPEC section 7.2, first version): a
+//! Heuristic memory consolidation (first version): a
 //! "dream"-style background merge run at session end, after auto-extraction
 //! appended new entries. Near-duplicate entries within one category fold into
 //! their newest occurrence, so re-extraction of the same fact across sessions

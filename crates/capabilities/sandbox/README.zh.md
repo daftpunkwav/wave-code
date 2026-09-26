@@ -4,8 +4,9 @@
 
 | 条目 | 职责 |
 |---|---|
-| `src/lib.rs` | 策略核心：`Rule` 解析与匹配（`Bash(...)` / `File(...)` 两种作用域，配置用通配规则、会话规则用精确匹配）、`wildcard_match`、`Verdict` 枚举（Allow / Ask / Deny）与 `Sandbox::decide`（deny 优先；敏感凭证路径一律 Ask）、审批详情的长度上限 |
+| `src/lib.rs` | 策略核心：`Rule` 解析与匹配（`Bash(...)` / `File(...)` 两种作用域，配置用通配规则、会话规则用精确匹配）、`wildcard_match`、`Verdict` 枚举（Allow / Ask / Deny）与 `Sandbox::decide`（deny 优先；敏感凭证路径与危险命令一律 Ask）、审批详情的长度上限 |
 | `src/bash.rs` | 基于 tree-sitter-bash AST 的命令切分，用于权限匹配——每条解析出的命令产出全文与去掉环境变量前缀的"裸"变体两段；解析失败时保守回退到字符串切分 |
+| `src/risk.rs` | 供 `Sandbox::decide` 使用的危险构造检测：块设备写入、文件系统破坏、电源控制、对系统根的递归强删、下载直通 shell——基于 AST（能看穿引号与 `sudo`/`env` 包装），解析失败时降级为原始 token 文本筛查 |
 | `src/os.rs` | 后端接缝：`ConfinementProfile`（可写/只读根、网络开关）、基于 `tokio::process::Command` 的 `SandboxBackend` trait、`EnforcementLevel`、Linux `LinuxLandlockBackend`、`UnavailableBackend`、`detect_backend` |
 | `src/bwrap.rs` | Linux bubblewrap 后端：探测 `bwrap --version` 加一次 user-namespace 往返（缺失则 fail-closed），把 spawn 改写为 `bwrap` 隔离前缀；报告 Full 级强制 |
 | `src/seatbelt.rs` | macOS `sandbox-exec` 后端：按 cwd 生成 deny-by-default 的 profile；Partial 级强制——网络访问不做按进程限制 |

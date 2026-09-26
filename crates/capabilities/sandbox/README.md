@@ -4,8 +4,9 @@ English | [中文](README.zh.md)
 
 | Item | Role |
 |---|---|
-| `src/lib.rs` | Policy core: `Rule` parsing and matching (`Bash(...)` / `File(...)` scopes, wildcard config rules vs exact-match session rules), `wildcard_match`, the `Verdict` enum (Allow / Ask / Deny) and `Sandbox::decide` (deny-first; sensitive credential paths always ask), approval-detail capping |
+| `src/lib.rs` | Policy core: `Rule` parsing and matching (`Bash(...)` / `File(...)` scopes, wildcard config rules vs exact-match session rules), `wildcard_match`, the `Verdict` enum (Allow / Ask / Deny) and `Sandbox::decide` (deny-first; sensitive credential paths and dangerous commands always ask), approval-detail capping |
 | `src/bash.rs` | tree-sitter-bash AST command segmentation for permission matching — each parsed command yields its full text plus a "bare" variant with env prefixes dropped; parse errors fall back conservatively to string segmentation |
+| `src/risk.rs` | Dangerous-construct detection for `Sandbox::decide`: block-device writes, filesystem destruction, power control, recursive forced deletes of system roots, downloads piped into shells — AST-based (sees through quoting and `sudo`/`env` wrappers), degrading to a raw-text token screen when the parse fails |
 | `src/os.rs` | The backend seam: `ConfinementProfile` (writable/readonly roots, network flag), the `SandboxBackend` trait over `tokio::process::Command`, `EnforcementLevel`, Linux `LinuxLandlockBackend`, `UnavailableBackend`, `detect_backend` |
 | `src/bwrap.rs` | Linux bubblewrap backend: probes `bwrap --version` plus a user-namespace round-trip (fails closed without it) and rewrites the spawn into a `bwrap` isolation prefix; reports Full enforcement |
 | `src/seatbelt.rs` | macOS `sandbox-exec` backend: generates a deny-by-default profile per cwd; Partial enforcement — network access is not restricted per-process |

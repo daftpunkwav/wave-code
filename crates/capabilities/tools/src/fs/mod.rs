@@ -65,7 +65,7 @@ impl FileLedger {
             return None;
         }
         Some(err_output(format!(
-            "{} changed on disk since it was last read (modified outside this session); re-read it before writing",
+            "{} changed on disk since it was last read; re-read it before writing",
             path.display()
         )))
     }

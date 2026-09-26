@@ -1547,6 +1547,21 @@ where
                 break;
             }
 
+            // Checkpoint 3: pre-tool interrupt preserves pairing with
+            // synthesized results instead of executing anything. It sits
+            // ahead of the truncation guard so a stop that lands during a
+            // truncated sample can never be swallowed by the settle below.
+            if interrupt.is_triggered() {
+                let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
+                conv.push_blocks(
+                    Role::User,
+                    result_blocks(&results, std::time::SystemTime::now()),
+                );
+                settle(conv, &last_input, &state, window, &emit_msg);
+                emit_msg(EventMsg::TurnCompleted { interrupted: true });
+                return StopReason::Interrupted;
+            }
+
             // A response cut off at the output limit can end mid-tool-call:
             // the streamed argument JSON is finalized by a best-effort parse,
             // so a call can look well-formed while carrying incomplete
@@ -1582,19 +1597,6 @@ where
                 settle(conv, &last_input, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });
                 return StopReason::Completed;
-            }
-
-            // Checkpoint 3: pre-tool interrupt preserves pairing with
-            // synthesized results instead of executing anything.
-            if interrupt.is_triggered() {
-                let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
-                conv.push_blocks(
-                    Role::User,
-                    result_blocks(&results, std::time::SystemTime::now()),
-                );
-                settle(conv, &last_input, &state, window, &emit_msg);
-                emit_msg(EventMsg::TurnCompleted { interrupted: true });
-                return StopReason::Interrupted;
             }
 
             // Repeat breaker: the same call issued round after round is the
@@ -2703,6 +2705,24 @@ mod run_loop_tests {
         }
     }
 
+    /// Model wrapper that trips an interrupt handle inside `sample`:
+    /// [`FakeModel`] never awaits, so a spawned trigger task can only run at
+    /// tool-execution awaits, never between the sample and the guards below
+    /// it. Firing here is the deterministic way to land a stop "during" a
+    /// sample.
+    struct InterruptingModel {
+        inner: FakeModel,
+        trigger: InterruptHandle,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelGateway for InterruptingModel {
+        async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError> {
+            self.trigger.trigger();
+            self.inner.sample(request).await
+        }
+    }
+
     struct FakeApprovals {
         resolutions: HashMap<String, ApprovalResolution>,
         answers: HashMap<String, QuestionResolution>,
@@ -3602,6 +3622,85 @@ mod run_loop_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(history.contains("arguments may be truncated"));
+    }
+
+    /// A stop that lands during a truncated sample wins over the truncation
+    /// guard: with the continuation budget exhausted, the pre-tool interrupt
+    /// checkpoint must end the turn as Interrupted — the truncation path's
+    /// settle must not swallow the stop into a clean Completed.
+    #[tokio::test]
+    async fn interrupt_wins_over_truncated_batch_at_budget_exhaustion() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: true,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let model = InterruptingModel {
+            inner: model,
+            trigger: fx.interrupt.clone(),
+        };
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let run = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                // Zero: the truncated batch exhausts the budget immediately,
+                // reaching the settle the checkpoint must preempt.
+                max_continuations: 0,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+                session_date: None,
+            },
+            fx.interrupt.clone(),
+        );
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Interrupted);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            history.contains("interrupted by user"),
+            "calls synthesize interrupt results: {history}"
+        );
+        assert!(
+            !history.contains("arguments may be truncated"),
+            "the truncation refusal must not run: {history}"
+        );
     }
 
     #[tokio::test]

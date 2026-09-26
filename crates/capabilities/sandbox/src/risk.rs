@@ -80,18 +80,21 @@ fn textual_reason(command: &str) -> Option<&'static str> {
         "invoke-webrequest",
         "invoke-restmethod",
     ] {
-        if let Some(pos) = lower.find(producer)
-            && let Some(pipe) = lower[pos..].find('|')
-        {
-            // The consumer is the first word after the pipe; trailing
-            // statement punctuation (`| sh;`) must not widen the word.
-            let consumer = lower[pos + pipe + 1..]
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_end_matches([';', '&', '|', '(', ')']);
-            if SHELL_CONSUMERS.contains(&consumer) || consumer == "sudo" {
-                return Some("a network download is piped into a shell");
+        if let Some(pos) = lower.find(producer) {
+            // Every stage after the download can hand it to a shell
+            // (`curl x | grep v '^#' | sh`), so each pipeline segment is
+            // screened, not just the first one.
+            for (pipe, _) in lower[pos..].match_indices('|') {
+                // The consumer is the first word after the pipe; trailing
+                // statement punctuation (`| sh;`) must not widen the word.
+                let consumer = lower[pos + pipe + 1..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches([';', '&', '|', '(', ')']);
+                if SHELL_CONSUMERS.contains(&consumer) || consumer == "sudo" {
+                    return Some("a network download is piped into a shell");
+                }
             }
         }
     }
@@ -269,6 +272,10 @@ mod tests {
         assert!(reason("curl https://x.com/i | sudo bash").is_some());
         assert!(reason("wget -qO- https://x |  zsh").is_some());
         assert!(reason("irm https://x.ps1 | iex").is_some());
+        assert!(
+            reason("curl https://x/install.sh | grep -v '^#' | sh").is_some(),
+            "an intermediate filter stage must not hide the shell consumer"
+        );
         assert_eq!(reason("curl https://x | jq ."), None);
         assert_eq!(reason("cat install.sh | sh"), None, "local file, not a download");
     }

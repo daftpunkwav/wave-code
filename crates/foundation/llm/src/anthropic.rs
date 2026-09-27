@@ -40,7 +40,8 @@ pub enum CacheTtl {
     /// Provider default: five minutes, refreshed on every hit.
     #[default]
     FiveMinutes,
-    /// One hour, via the provider's extended-TTL beta.
+    /// One hour. No longer a beta on the current API (GA 2025-08); the
+    /// historical flag still rides the request, see [`Self::beta_flag`].
     OneHour,
 }
 
@@ -54,7 +55,11 @@ impl CacheTtl {
         }
     }
 
-    /// Beta flag the wire value requires on `anthropic-beta`.
+    /// `anthropic-beta` value the one-hour lifetime historically required.
+    /// The provider graduated the feature (no header needed since
+    /// 2025-08-13), but older Anthropic-protocol gateways may still gate
+    /// `ttl: "1h"` behind the flag, so it keeps riding the request; the
+    /// five-minute default needs no header.
     pub fn beta_flag(self) -> Option<&'static str> {
         match self {
             Self::FiveMinutes => None,
@@ -156,8 +161,9 @@ impl ChatModel for AnthropicClient {
                     .header("x-api-key", &self.api_key)
                     .header("anthropic-version", "2023-06-01")
                     .header("content-type", "application/json");
-                // The extended cache lifetime ships behind a beta flag; the
-                // default five-minute entries need no header.
+                // The one-hour lifetime needs no beta header on the current
+                // API; the historical flag still rides along for gateways
+                // that predate its GA. The five-minute default sends none.
                 let request = match self.cache_ttl.beta_flag() {
                     Some(flag) => request.header("anthropic-beta", flag),
                     None => request,
@@ -211,8 +217,9 @@ const MAX_ERROR_BODY_CHARS: usize = crate::MAX_ERROR_BODY_CHARS;
 /// `prompt_caching` injects up to three `cache_control: ephemeral` breakpoints
 /// (system block, last tool, last message content block) so stable prefixes
 /// (system prompt, tool schemas, older history) hit the provider cache on
-/// every turn after the first; `ttl` sets the entries' lifetime (one hour
-/// carries the beta flag on the request, see [`CacheTtl`]); `thinking_budget`
+/// every turn after the first; `ttl` sets the entries' lifetime (the
+/// one-hour choice also sends a beta header, see [`CacheTtl::beta_flag`]);
+/// `thinking_budget`
 /// enables extended thinking (see [`thinking_body`]). All are
 /// serialization-only: the caller's `ChatRequest` is never mutated.
 pub(crate) fn build_request_body(
@@ -744,6 +751,71 @@ mod tests {
         assert!(v["messages"][0]["content"][0]["cache_control"]
             .get("ttl")
             .is_none());
+    }
+
+    /// The one-hour lifetime carries the historical beta header on the wire
+    /// (the body-side ttl is pinned by [`one_hour_ttl_marks_every_breakpoint`]);
+    /// the provider default sends no `anthropic-beta` at all.
+    #[tokio::test]
+    async fn one_hour_ttl_sends_beta_header_and_default_sends_none() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let req = ChatRequest {
+            model: "m1".into(),
+            system: "sys".into(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hi".into(),
+                }],
+            }]),
+            tools: vec![],
+            max_tokens: 8192,
+        };
+        // Local endpoint that records the request head; the response status
+        // is irrelevant, only the head is under test.
+        let capture_head = |listener: TcpListener| {
+            let (tx, rx) = mpsc::channel::<String>();
+            std::thread::spawn(move || {
+                if let Ok((mut s, _)) = listener.accept() {
+                    let head = read_http_request_head(&mut s);
+                    let _ = tx.send(head);
+                    let _ = s.write_all(
+                        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            });
+            rx
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let head_rx = capture_head(listener);
+        let client = AnthropicClient::new(url, "k".into()).with_cache_ttl(CacheTtl::OneHour);
+        let _ = client.stream(req.clone()).await;
+        let head = head_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            head.contains("anthropic-beta: extended-cache-ttl-2025-04-11"),
+            "the one-hour lifetime should carry the historical beta flag: {head}"
+        );
+
+        // Default lifetime: no beta header at all.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let head_rx = capture_head(listener);
+        let client = AnthropicClient::new(url, "k".into());
+        let _ = client.stream(req).await;
+        let head = head_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            !head.contains("anthropic-beta"),
+            "the five-minute default should send no beta header: {head}"
+        );
     }
 
     /// Empty system + caching keeps the empty-string shape (some gateways

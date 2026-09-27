@@ -38,7 +38,7 @@
 
 ## 断点生命周期（适配器侧）
 
-应用层保证请求前缀字节级稳定；Anthropic 适配器（`crates/foundation/llm/src/anthropic.rs`）决定提供方把它记多久。断点（`system` 块 / 最后一个工具 / 最后一条消息）默认是提供方的五分钟条目，每次命中即刷新。在 provider 配置上设置 `prompt_cache_ttl = "1h"` 可切换为一小时条目（beta 头 `anthropic-beta: extended-cache-ttl-2025-04-11`，`cache_control.ttl: "1h"`）：写入按基础输入价的两倍计费（而非 1.25 倍），换来超过五分钟的一段安静——一次长构建、多日运行里的一夜停顿——不再把整个前缀过期成一次全价重读。长时运行会话正是它回本的场景；突发式交互用默认值即可。配置了未知值时告警并回落默认。
+应用层保证请求前缀字节级稳定；Anthropic 适配器（`crates/foundation/llm/src/anthropic.rs`）决定提供方把它记多久。断点（`system` 块 / 最后一个工具 / 最后一条消息）默认是提供方的五分钟条目，每次命中即刷新。在 provider 配置上设置 `prompt_cache_ttl = "1h"` 可切换为一小时条目（`cache_control.ttl: "1h"`；适配器还会附带历史上的 beta 头 `anthropic-beta: extended-cache-ttl-2025-04-11`——现行 API 自 2025 年 8 月起已不再要求，保留是为兼容 beta 时期的 Anthropic 协议网关）：写入按基础输入价的两倍计费（而非 1.25 倍），换来超过五分钟的一段安静——一次长构建、多日运行里的一夜停顿——不再把整个前缀过期成一次全价重读。长时运行会话正是它回本的场景；突发式交互用默认值即可。配置了未知值时告警并回落默认。
 
 ## `<system-reminder>` 通道
 

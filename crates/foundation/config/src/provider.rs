@@ -101,6 +101,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("max_output_tokens", &self.max_output_tokens)
             .field("fallback_providers", &self.fallback_providers)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("prompt_cache_ttl", &self.prompt_cache_ttl)
             .finish()
     }
 }

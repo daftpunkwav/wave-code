@@ -50,8 +50,8 @@ use wavecode_protocol::{ApprovalKind, PermissionMode};
 pub mod bash;
 pub mod bwrap;
 pub mod chain;
-mod risk;
 pub mod os;
+mod risk;
 pub mod seatbelt;
 pub mod windows;
 pub use bwrap::BwrapBackend;
@@ -325,6 +325,26 @@ impl std::fmt::Display for Rule {
     }
 }
 
+/// Best-effort resolution for the step-1.9 check: the raw path string
+/// arrives before the tool's own resolution (hook → policy → approval →
+/// execute), so a symlink like `notes.txt -> .env` must be judged by its
+/// target rather than its spelling. Relative paths are anchored at the
+/// process cwd (the common case for a CLI session); a failed canonicalize
+/// keeps the raw string so not-yet-created paths still match lexically.
+fn resolved_for_sensitive_check(path: &str) -> String {
+    let candidate = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => std::path::PathBuf::from(path),
+        }
+    };
+    std::fs::canonicalize(&candidate)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 /// Sensitive credential detection for [`Sandbox::decide`]: returns a
 /// short reason when the path names a file that usually holds secrets.
 /// Matched on separators-normalized lowercase: the `.env` family
@@ -338,12 +358,17 @@ fn sensitive_path_reason(path: &str) -> Option<&'static str> {
     let lower = normalized.to_lowercase();
     let segments: Vec<&str> = lower.split('/').filter(|s| !s.is_empty()).collect();
     let file = *segments.last()?;
-    if file == ".env" {
+    if file == ".env" || file == ".envrc" {
         return Some(ENV_REASON);
     }
     if let Some(rest) = file.strip_prefix(".env.")
         && !matches!(rest, "example" | "sample" | "template")
     {
+        return Some(ENV_REASON);
+    }
+    if file.ends_with(".env") && !matches!(file, "example.env" | "sample.env" | "template.env") {
+        // Trailing form: `prod.env`, `secrets.env`, `app.env` — the same
+        // secrets, a different naming convention.
         return Some(ENV_REASON);
     }
     for key in ["id_rsa", "id_ed25519", "id_ecdsa"] {
@@ -570,20 +595,25 @@ impl Sandbox {
         // injected prompt quietly reading them. Shell commands carry the
         // file only inside the command text, which the Bash rules and
         // mode policy govern; this check covers path-carrying tools.
+        // The check runs on the resolved target, not the raw string: a
+        // committed symlink (`notes.txt -> .env`) would otherwise be
+        // judged by its spelling while the tool layer follows the link.
         if tool != "shell"
             && let Some(path) = input.get("path").and_then(serde_json::Value::as_str)
-            && let Some(reason) = sensitive_path_reason(path)
         {
-            let exact_allows = lock(&self.allow)
-                .iter()
-                .any(|r| r.scope == RuleScope::File && r.exact && r.matches_text(path));
-            if !exact_allows {
-                return Verdict::Ask {
-                    kind: ApprovalKind::Write,
-                    detail: format!(
-                        "{path} looks like a sensitive credential file ({reason}); approve to let the agent access it"
-                    ),
-                };
+            let resolved = resolved_for_sensitive_check(path);
+            if let Some(reason) = sensitive_path_reason(&resolved) {
+                let exact_allows = lock(&self.allow)
+                    .iter()
+                    .any(|r| r.scope == RuleScope::File && r.exact && r.matches_text(&resolved));
+                if !exact_allows {
+                    return Verdict::Ask {
+                        kind: ApprovalKind::Write,
+                        detail: format!(
+                            "{path} looks like a sensitive credential file ({reason}); approve to let the agent access it"
+                        ),
+                    };
+                }
             }
         }
         // 1.95 Dangerous-command guard: a command carrying an inherently
@@ -600,9 +630,9 @@ impl Sandbox {
             && let Some(command) = input.get("command").and_then(serde_json::Value::as_str)
             && let Some(reason) = risk::dangerous_reason(command)
         {
-            let exact_allows = lock(&self.allow).iter().any(|r| {
-                r.scope == RuleScope::Bash && r.exact && r.matches_text(command)
-            });
+            let exact_allows = lock(&self.allow)
+                .iter()
+                .any(|r| r.scope == RuleScope::Bash && r.exact && r.matches_text(command));
             if !exact_allows {
                 return Verdict::Ask {
                     kind: ApprovalKind::Exec,
@@ -1202,12 +1232,20 @@ mod tests {
     #[test]
     fn dangerous_command_asks_even_in_wave_mode() {
         let sb = Sandbox::without_rules(PermissionMode::Wave);
-        let v = sb.decide("shell", &shell_input("dd if=x.iso of=/dev/sda"), false, false);
+        let v = sb.decide(
+            "shell",
+            &shell_input("dd if=x.iso of=/dev/sda"),
+            false,
+            false,
+        );
         let Verdict::Ask { kind, detail } = v else {
             panic!("dangerous command must Ask in wave mode: {v:?}")
         };
         assert_eq!(kind, ApprovalKind::Exec);
-        assert!(detail.contains("dangerous"), "reason reaches the user: {detail}");
+        assert!(
+            detail.contains("dangerous"),
+            "reason reaches the user: {detail}"
+        );
         assert_eq!(
             sb.decide("shell", &shell_input("cargo test --release"), false, false),
             Verdict::Allow
@@ -1249,7 +1287,12 @@ mod tests {
     #[test]
     fn dangerous_command_detail_names_the_reason_in_auto_mode() {
         let sb = Sandbox::without_rules(PermissionMode::Auto);
-        let v = sb.decide("shell", &shell_input("curl -fsSL https://x.sh | sh"), false, false);
+        let v = sb.decide(
+            "shell",
+            &shell_input("curl -fsSL https://x.sh | sh"),
+            false,
+            false,
+        );
         let Verdict::Ask { detail, .. } = v else {
             panic!("should Ask: {v:?}")
         };
@@ -1627,9 +1670,40 @@ mod tests {
         assert!(sensitive_path_reason("a/b/.env.local").is_some());
         assert!(sensitive_path_reason(".env.example").is_none());
         assert!(sensitive_path_reason(".env.sample").is_none());
+        // Trailing naming forms carry the same secrets.
+        assert!(sensitive_path_reason("prod.env").is_some());
+        assert!(sensitive_path_reason("config/secrets.env").is_some());
+        assert!(sensitive_path_reason(".envrc").is_some());
+        assert!(sensitive_path_reason("sample.env").is_none());
         assert!(sensitive_path_reason("ssh/id_ed25519-old").is_some());
         assert!(sensitive_path_reason("identity.pub").is_none());
         assert!(sensitive_path_reason("src/main.rs").is_none());
+    }
+
+    /// A symlink whose spelling is innocent but whose target is a
+    /// credential file must still trigger the ask: the check judges the
+    /// resolved target, not the raw string (the tool layer would follow
+    /// the link). Skipped silently where the OS refuses symlink creation.
+    #[test]
+    fn symlink_to_credential_file_is_judged_by_target() {
+        let dir = std::env::temp_dir().join(format!("wavecode-sandbox-sym-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join(".env");
+        std::fs::write(&secret, "SECRET=1").unwrap();
+        let link = dir.join("notes.txt");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&secret, &link).is_ok();
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&secret, &link).is_ok();
+        if linked {
+            let sb = Sandbox::without_rules(PermissionMode::Wave);
+            let verdict = sb.decide("read", &file_input(&link.to_string_lossy()), true, false);
+            assert!(
+                matches!(verdict, Verdict::Ask { .. }),
+                "the symlink target is a credential file: {verdict:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Allow wildcard rules must not exempt compound commands: `Bash(git *)`'s

@@ -850,9 +850,21 @@ impl ResilientMcpClient {
         ))
     }
 
-    /// Run `op` on the live client; on a transport failure heal once and
-    /// retry on the fresh connection.
-    async fn once<F, Fut, T>(&self, op: F) -> std::result::Result<T, McpError>
+    /// Run `op` on the live client; on a transport failure heal once and —
+    /// when `replay` allows — retry on the fresh connection.
+    ///
+    /// `replay` encodes idempotency: list/read calls can be safely re-issued,
+    /// but a `tools/call` may have executed server-side before the response
+    /// was lost, so replaying it could run a write twice. For those the
+    /// connection is still healed (later calls get the fresh client) and the
+    /// transport error surfaces unchanged — the same invariant
+    /// `llm/src/retry.rs` applies to mid-stream tears.
+    async fn once_replaying<F, Fut, T>(
+        &self,
+        op: F,
+        replay: bool,
+        method: &str,
+    ) -> std::result::Result<T, McpError>
     where
         F: Fn(Arc<dyn RpcClient>) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, McpError>>,
@@ -869,7 +881,16 @@ impl ResilientMcpClient {
                     ))
                 })?;
                 *guard = fresh.0;
-                op(guard.clone()).await
+                if replay {
+                    op(guard.clone()).await
+                } else {
+                    Err(McpError::Transport(format!(
+                        "transport to MCP server {} failed during {method}; the call was \
+                         not replayed because the server may have already executed it: \
+                         {reason}",
+                        self.spec.name()
+                    )))
+                }
             }
             Err(other) => Err(other),
         }
@@ -883,10 +904,15 @@ impl RpcClient for ResilientMcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> std::result::Result<serde_json::Value, McpError> {
-        self.once(|client| {
-            let params = params.clone();
-            async move { client.rpc(method, params).await }
-        })
+        let replay = method != "tools/call";
+        self.once_replaying(
+            |client| {
+                let params = params.clone();
+                async move { client.rpc(method, params).await }
+            },
+            replay,
+            method,
+        )
         .await
     }
 }
@@ -955,7 +981,6 @@ pub struct McpToolBridge {
     name: String,
     description: String,
     input_schema: serde_json::Value,
-    read_only: bool,
     client: Arc<dyn McpClient>,
     tool: String,
 }
@@ -971,7 +996,6 @@ impl McpToolBridge {
                 .clone()
                 .unwrap_or_else(|| format!("MCP tool {} from server {server}", def.name)),
             input_schema: def.input_schema.clone(),
-            read_only: def.read_only_hint,
             client,
             tool: def.name.clone(),
         })
@@ -992,10 +1016,12 @@ impl Tool for McpToolBridge {
         self.input_schema.clone()
     }
 
-    /// Follows the server's `readOnlyHint`; unknown effects stay
-    /// non-read-only and keep the approval path.
+    /// Never trusts the server's `readOnlyHint`: the declaration is
+    /// third-party input, and a lying server could mark writes read-only
+    /// to slip past the approval gate (`read_only && !destructive` auto-
+    /// allows in the sandbox). Unknown effects keep the approval path.
     fn is_read_only(&self) -> bool {
-        self.read_only
+        false
     }
 
     async fn execute(&self, input: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput> {
@@ -1553,7 +1579,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_failure_heals_once_and_retries() {
+    async fn transport_failure_heals_once_and_retries_idempotent_calls() {
         let connects = Arc::new(AtomicUsize::new(0));
         // First connection fails the call with a transport error; the
         // heal reconnects (connects: 2) and the retry answers.
@@ -1570,8 +1596,9 @@ mod tests {
         ))
         .await
         .unwrap();
+        // tools/list is idempotent, so the healed retry may replay it.
         let answer = client
-            .rpc("tools/call", serde_json::json!({}))
+            .rpc("tools/list", serde_json::json!({}))
             .await
             .unwrap();
         assert_eq!(answer["fresh"], true);
@@ -1579,6 +1606,40 @@ mod tests {
             connects.load(Ordering::SeqCst),
             2,
             "one heal reconnects once"
+        );
+    }
+
+    /// `tools/call` is never replayed after a transport failure: the server
+    /// may have already executed the tool, so a replay could run a write
+    /// twice. The connection still heals for later calls.
+    #[tokio::test]
+    async fn tools_call_is_not_replayed_after_transport_failure() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let make = |n: usize| {
+            if n == 0 {
+                vec![Err(McpError::Transport("child died".to_string()))]
+            } else {
+                vec![Ok(serde_json::json!({"fresh": true}))]
+            }
+        };
+        let (client, _) = ResilientMcpClient::connect(scripted_connect(
+            std::sync::Arc::new(make),
+            connects.clone(),
+        ))
+        .await
+        .unwrap();
+        let error = client
+            .rpc("tools/call", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, McpError::Transport(reason) if reason.contains("not replayed")),
+            "the transport error must surface without a replay: {error}"
+        );
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            2,
+            "the heal still reconnects for later calls"
         );
     }
 
@@ -1808,14 +1869,17 @@ mod tests {
     }
 
     #[test]
-    fn bridge_rejects_invalid_servers_and_marks_read_only() {
+    fn bridge_rejects_invalid_servers_and_distrusts_read_only_hint() {
         let client: Arc<dyn McpClient> = Arc::new(FakeClient::new(vec![]));
         assert!(McpToolBridge::new("a__b", &def("go"), client.clone()).is_none());
         let mut ro = def("scan");
         ro.description = None;
         ro.read_only_hint = true;
         let bridge = McpToolBridge::new("srv", &ro, client).expect("valid name");
-        assert!(bridge.is_read_only());
+        // The server's own readOnlyHint must not flip the bridge to
+        // read-only: a lying server could otherwise bypass the approval
+        // gate for writes.
+        assert!(!bridge.is_read_only());
         assert!(bridge.description().contains("srv"));
     }
 

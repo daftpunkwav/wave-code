@@ -892,4 +892,74 @@ mod tests {
         );
         let _ = done;
     }
+    /// A full submission queue answers 429 with a Retry-After hint —
+    /// the prompt is retryable once the pump drains. Only a dead pump
+    /// (409) means the session is closing.
+    #[tokio::test]
+    async fn full_submission_queue_answers_429_with_retry_after() {
+        let (commands, _pending) = tokio::sync::mpsc::channel(32);
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let session = AppSession {
+            commands,
+            submissions: 0,
+            events,
+            approvals: Arc::new(safety_gate::ApprovalGate::new()),
+            questions: Arc::new(safety_gate::QuestionGate::new()),
+            interrupt: infrastructure_base::InterruptHandle::new(),
+        };
+        let state = AppState {
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::from([(
+                "s-full".to_string(),
+                session,
+            )]))),
+            token: String::new(),
+            base: ServeOptions {
+                config_path: None,
+                model_override: None,
+                cwd: std::env::temp_dir(),
+                home: None,
+                port: 0,
+                token: String::new(),
+            },
+            next_session: Arc::new(tokio::sync::Mutex::new(1)),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
+            assemble: Arc::new(|_| -> Result<Box<dyn SessionSurface>, SessionError> {
+                unreachable!("no assembly in this test")
+            }),
+        };
+        // Fill the queue with no pump consuming: the queued replies are
+        // dropped, so those submissions would hang — the point is that
+        // the thirty-third arrives at a channel already at capacity.
+        for i in 0..32 {
+            let (reply, _rx) = tokio::sync::oneshot::channel();
+            state
+                .sessions
+                .lock()
+                .await
+                .get("s-full")
+                .unwrap()
+                .commands
+                .try_send(SessionCommand::Submit {
+                    submission_id: format!("fill-{i}"),
+                    op: Op::Interrupt,
+                    reply,
+                })
+                .expect("filler must fit");
+        }
+        let response = submit(
+            state,
+            "s-full",
+            Op::UserInput {
+                text: "one too many".to_string(),
+                images: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "backpressure is retryable, not a closing session"
+        );
+        assert!(response.headers().get("Retry-After").is_some());
+    }
 }

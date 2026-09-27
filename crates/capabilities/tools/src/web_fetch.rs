@@ -806,4 +806,18 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("404"));
     }
+    /// Windows-1252 keeps its distinct C1-range glyphs (the euro sign,
+    /// curly quotes): decoding it as plain latin-1 would turn those
+    /// bytes into invisible control characters.
+    #[test]
+    fn windows_1252_decodes_the_c1_range_as_printable_glyphs() {
+        // 0x80 = euro sign, 0x91/0x92 = single curly quotes,
+        // 0x93/0x94 = double curly quotes, 0x96 = en dash.
+        assert_eq!(
+            decode_windows1252(&[0x80, 0x91, 0x61, 0x92, 0x93, 0x62, 0x94, 0x96]),
+            "\u{20AC}\u{2018}a\u{2019}\u{201C}b\u{201D}\u{2013}"
+        );
+        // ASCII and the 0xA0+ range are byte-identical to latin-1.
+        assert_eq!(decode_windows1252(b"caf\xe9"), "caf\u{e9}");
+    }
 }

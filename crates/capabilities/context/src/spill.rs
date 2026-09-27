@@ -142,6 +142,9 @@ pub fn default_spill_store_root() -> PathBuf {
 /// Home-scoped side-store for oversized tool outputs with oldest-eviction.
 #[derive(Debug)]
 pub struct SpillStore {
+    /// Total-bytes budget; defaults to [`SPILL_TOTAL_CAP_BYTES`] and is
+    /// injectable so eviction behaves the same under test-sized caps.
+    total_cap: u64,
     /// Serializes manifest read-modify-write cycles within this process.
     /// (Cross-process writers share the root and stay racy; the atomic
     /// save bounds that damage to a lost update, never a truncated
@@ -155,9 +158,17 @@ impl SpillStore {
     /// [`default_spill_store_root`]).
     pub fn new(root: PathBuf) -> Self {
         Self {
+            total_cap: SPILL_TOTAL_CAP_BYTES,
             lock: std::sync::Mutex::new(()),
             root,
         }
+    }
+
+    /// Override the total-bytes budget (tests use small caps so the
+    /// oldest-first eviction is observable without megabyte payloads).
+    pub fn with_total_cap(mut self, total_cap: u64) -> Self {
+        self.total_cap = total_cap;
+        self
     }
 
     /// Store root.
@@ -182,7 +193,7 @@ impl SpillStore {
         std::fs::create_dir_all(&self.root)?;
         // The manifest is the sole ledger for the 32MB cap: a truncated
         // write would read back as "0 bytes used" and disable eviction
-        // forever, so it lands temp+rename (per docs/defensive-patterns.md).
+        // forever, so the write lands temp+rename: the manifest on disk
         let staging = self.root.join("manifest.txt.staging-tmp");
         std::fs::write(&staging, render_manifest(entries))?;
         if let Err(e) = std::fs::rename(&staging, self.manifest_path()) {
@@ -193,7 +204,8 @@ impl SpillStore {
     }
 
     /// Spill `content` into the store, returning its `spill://` URI.
-    /// Enforces [`SPILL_TOTAL_CAP_BYTES`] with oldest-first eviction.
+    /// Enforces the total cap (default [`SPILL_TOTAL_CAP_BYTES`]) with
+    /// oldest-first eviction.
     pub fn spill(&self, content: &str) -> std::result::Result<String, SpillError> {
         std::fs::create_dir_all(&self.root)?;
         let id = Self::new_id();
@@ -233,7 +245,7 @@ impl SpillStore {
     /// pruned together; a missing file counts its manifest bytes anyway).
     fn evict_to_cap(&self, entries: &mut Vec<ManifestEntry>) {
         let mut total: u64 = entries.iter().map(|e| e.bytes).sum();
-        while total > SPILL_TOTAL_CAP_BYTES && !entries.is_empty() {
+        while total > self.total_cap && !entries.is_empty() {
             let oldest = entries.remove(0);
             total = total.saturating_sub(oldest.bytes);
             let _ = std::fs::remove_file(self.entry_path(&oldest.id));
@@ -330,5 +342,25 @@ mod tests {
         std::fs::write(dir.path().join("manifest.txt"), "{corrupt").unwrap();
         let uri = store.spill("still works").unwrap();
         assert_eq!(store.read(&uri).unwrap(), "still works");
+    }
+    /// Spilling past the total cap evicts the oldest entries first —
+    /// their payload files go with the manifest rows — and the newest
+    /// spill stays readable.
+    #[test]
+    fn oldest_entries_evict_first_under_the_total_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SpillStore::new(dir.path().to_path_buf()).with_total_cap(100);
+        let first = store.spill(&"a".repeat(80)).unwrap();
+        let second = store.spill(&"b".repeat(80)).unwrap();
+        // Both entries together exceed the 100-byte cap: the oldest is
+        // evicted, its file removed, and only the newest remains.
+        assert!(store.read(&first).is_err(), "oldest spill evicted");
+        assert_eq!(store.read(&second).unwrap(), "b".repeat(80));
+        let first_id = parse_spill_uri(&first).unwrap();
+        let manifest = std::fs::read_to_string(dir.path().join("manifest.txt")).unwrap();
+        assert!(
+            !manifest.contains(&first_id),
+            "evicted entries leave the manifest, not orphan rows"
+        );
     }
 }

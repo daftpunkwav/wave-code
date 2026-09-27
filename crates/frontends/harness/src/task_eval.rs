@@ -1033,4 +1033,30 @@ mod tests {
             "tasks with no oracle solution: {oracle_free:?}"
         );
     }
+    /// The output reader stops retaining bytes at the cap: a child that
+    /// keeps producing past [`MAX_OUTPUT_BYTES`] cannot grow the harness
+    /// without bound (the pipe itself keeps draining).
+    #[test]
+    fn output_reader_caps_retained_bytes() {
+        struct Burst {
+            remaining: usize,
+        }
+        impl std::io::Read for Burst {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.remaining == 0 {
+                    return Ok(0);
+                }
+                let n = buf.len().min(64 * 1024).min(self.remaining);
+                buf[..n].fill(b'x');
+                self.remaining -= n;
+                Ok(n)
+            }
+        }
+        let buf = spawn_reader(Burst {
+            remaining: MAX_OUTPUT_BYTES + 4096,
+        })
+        .join()
+        .unwrap();
+        assert_eq!(buf.len(), MAX_OUTPUT_BYTES);
+    }
 }

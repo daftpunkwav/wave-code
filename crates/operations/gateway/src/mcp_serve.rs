@@ -532,4 +532,56 @@ mod tests {
         server.await.unwrap().unwrap();
         let _ = client.read;
     }
+    /// An over-cap NDJSON line is answered with a protocol error instead
+    /// of being buffered, and the loop stays in sync for the next line.
+    #[tokio::test]
+    async fn oversized_line_gets_a_protocol_error_and_resyncs() {
+        let (client, server) = TestClient::start().await;
+        let TestClient {
+            mut write,
+            mut read,
+        } = client;
+        let writer_task = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let junk = vec![b'x'; crate::jsonrpc::MAX_LINE_BYTES + 1];
+            write.write_all(&junk).await.unwrap();
+            write
+                .write_all(
+                    b"
+",
+                )
+                .await
+                .unwrap();
+            write
+                .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}")
+                .await
+                .unwrap();
+            write
+                .write_all(
+                    b"
+",
+                )
+                .await
+                .unwrap();
+        });
+        let first = read.next_line().await.unwrap().unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(first["id"], serde_json::Value::Null);
+        assert_eq!(first["error"]["code"], INVALID_REQUEST);
+        assert!(
+            first["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("size cap"),
+            "{first}"
+        );
+        // The reader discarded only the over-cap line: the next request
+        // is answered normally.
+        let second = read.next_line().await.unwrap().unwrap();
+        let second: serde_json::Value = serde_json::from_str(&second).unwrap();
+        assert_eq!(second["id"], 7);
+        assert!(second.get("result").is_some());
+        writer_task.await.unwrap();
+        drop(server);
+    }
 }

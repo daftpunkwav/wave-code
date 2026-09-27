@@ -4906,6 +4906,132 @@ mod run_loop_tests {
         assert_eq!(kinds.last().unwrap(), "turn_completed");
     }
 
+    /// The resident-context estimate counts the last prompt plus that
+    /// sample's own output only. Earlier samples' outputs are already
+    /// folded into the next prompt the provider bills, so a second settle
+    /// must report `input2 + output2` — the old formula re-added every
+    /// prior sample's output and grew linearly with the round count.
+    #[tokio::test]
+    async fn context_used_stops_double_counting_history_output() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::Value::Null,
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(100),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::Text("done".to_string())],
+                input_tokens: Some(200),
+                output_tokens: Some(100),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            2,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let context_used: Vec<Option<u64>> = fx
+            .lock_events()
+            .iter()
+            .filter_map(|e| match &e.msg {
+                EventMsg::TokenCount { context_used, .. } => Some(*context_used),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            context_used,
+            vec![Some(300)],
+            "the turn-exit settle bills input 200 plus this sample's own 100; the old formula re-added sample 1's 100 output tokens (400)"
+        );
+    }
+
+    /// A successful sample that reports no input billing skips the settle
+    /// (the usage carry stays at its previous value) and makes the gap
+    /// visible with a warning instead of settling silently.
+    #[tokio::test]
+    async fn missing_usage_warns_and_skips_the_settle() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::Text("done".to_string())],
+                input_tokens: None,
+                output_tokens: Some(5),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            1,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let kinds = fx.event_kinds();
+        assert!(
+            !kinds.contains(&"token_count".to_string()),
+            "no billing data means no settle: {kinds:?}"
+        );
+        let binding = fx.lock_events();
+        let warnings: Vec<&Event> = binding
+            .iter()
+            .filter(|e| matches!(e.msg, EventMsg::Warning { .. }))
+            .collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|e| matches!(&e.msg, EventMsg::Warning { message }
+                    if message.contains("no token usage"))),
+            "the missing-usage gap must be visible: {warnings:?}"
+        );
+    }
+
     /// Executor counting peak in-flight concurrency, for the capped
     /// read-only batch. Counters are shared so the test can read them
     /// after the loop consumes the executor.

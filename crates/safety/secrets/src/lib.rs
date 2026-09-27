@@ -29,7 +29,7 @@ pub struct SecretsStore {
 
 impl std::fmt::Debug for SecretsStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Redacted Debug (per docs/defensive-patterns.md): key names only —
+        // Redacted Debug: key names only —
         // a derived Debug on an outer struct must never print values.
         f.debug_struct("SecretsStore")
             .field("names", &self.values.keys().collect::<Vec<_>>())
@@ -117,5 +117,15 @@ mod tests {
     fn missing_names_stay_missing() {
         let store = SecretsStore::from_env(&["WAVECODE_TEST_DEFINITELY_MISSING"]);
         assert!(store.names().is_empty());
+    }
+    /// The redacted Debug prints key names only: a derived Debug on an
+    /// outer struct would otherwise carry every secret value into logs.
+    #[test]
+    fn debug_output_never_carries_values() {
+        let mut store = SecretsStore::default();
+        store.insert("OPENAI_API_KEY", "sk-super-secret-value");
+        let rendered = format!("{store:?}");
+        assert!(rendered.contains("OPENAI_API_KEY"), "{rendered}");
+        assert!(!rendered.contains("sk-super-secret-value"), "{rendered}");
     }
 }

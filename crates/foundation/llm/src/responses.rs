@@ -892,4 +892,46 @@ mod tests {
         let error = too_long.into_iter().next().expect("one event");
         assert!(matches!(error, Err(LlmError::PromptTooLong { .. })));
     }
+    /// A provider-side `output_index` beyond the slot cap must fail the
+    /// stream instead of growing the slot table (allocation bomb).
+    #[tokio::test]
+    async fn oversized_output_index_is_an_error() {
+        let results = run_decode(vec![
+            b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":100000000,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\"}}\n\n",
+        ])
+        .await;
+        assert!(
+            matches!(&results[0], Err(LlmError::Sse(msg)) if msg.contains("cap")),
+            "a huge output_index must fail the stream: {:?}",
+            results[0]
+        );
+    }
+
+    /// One function call rides `output_item.added` (begin), argument
+    /// deltas, and `output_item.done` (BlockEnd), then the response-level
+    /// completion closes the turn.
+    #[tokio::test]
+    async fn tool_call_stream_pairs_begin_delta_and_end() {
+        let results = run_decode(vec![
+            b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"output_index\":0,\"call_id\":\"c1\",\"name\":\"shell\"}}\n\n",
+            b"event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\"}\n\n",
+            b"event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"output_index\":0}}\n\n",
+            b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert!(
+            matches!(events[0], StreamEvent::ToolUseBegin { ref name, .. } if name == "shell"),
+            "{events:?}"
+        );
+        assert!(
+            matches!(events[1], StreamEvent::ToolUseInputDelta { .. }),
+            "{events:?}"
+        );
+        assert!(matches!(events[2], StreamEvent::BlockEnd), "{events:?}");
+        assert!(
+            matches!(events.last(), Some(StreamEvent::MessageComplete { .. })),
+            "{events:?}"
+        );
+    }
 }

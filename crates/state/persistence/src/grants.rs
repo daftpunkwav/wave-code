@@ -262,6 +262,30 @@ mod tests {
         assert_eq!(read.malformed, 1);
     }
 
+    /// A wildcard entry found on disk is dropped on load (and counted as
+    /// malformed): re-parsing it as a config rule would silently widen the
+    /// allow surface, which is exactly what the write path refuses.
+    #[test]
+    fn stored_wildcards_are_dropped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        add_grant(dir.path(), &grant("Bash(git status)")).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(grants_path(dir.path()))
+            .and_then(|mut f| writeln!(f, "{{\"rule\": \"Bash(git *)\"}}"))
+            .unwrap();
+        let read = load_grants(dir.path());
+        assert_eq!(
+            read.grants
+                .iter()
+                .map(|g| g.rule.as_str())
+                .collect::<Vec<_>>(),
+            ["Bash(git status)"],
+            "the wildcard entry must not come back as a live grant"
+        );
+        assert_eq!(read.malformed, 1);
+    }
+
     #[test]
     fn remove_and_clear_rewrite_the_table() {
         let dir = tempfile::tempdir().unwrap();

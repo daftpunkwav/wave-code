@@ -79,6 +79,14 @@ pub struct ProviderConfig {
     /// the `cache_control` field.
     #[serde(default)]
     pub prompt_caching: Option<bool>,
+    /// Lifetime of the Anthropic prompt-cache entries: `"5m"` (the provider
+    /// default, refreshed on every hit) or `"1h"` (writes cost twice the
+    /// base input rate instead of 1.25x, but the prefix survives hour-scale
+    /// quiet stretches — long builds, pauses — that would otherwise expire
+    /// it and force a full-price re-read; the choice long-running sessions
+    /// want). Unset keeps `"5m"`; other values warn and fall back to `"5m"`.
+    #[serde(default)]
+    pub prompt_cache_ttl: Option<String>,
 }
 
 impl std::fmt::Debug for ProviderConfig {

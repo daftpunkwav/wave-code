@@ -192,6 +192,20 @@ pub fn build_chat_model(
                 Some(false) => client.with_prompt_caching(false),
                 _ => client,
             };
+            // Cache-entry lifetime: "1h" survives hour-scale quiet stretches
+            // that would expire the default five-minute prefix (the trade is
+            // 2x-base writes instead of 1.25x); unknown values warn and keep
+            // the default rather than guessing.
+            let client = match provider.prompt_cache_ttl.as_deref() {
+                Some("1h") => client.with_cache_ttl(wavecode_llm::CacheTtl::OneHour),
+                Some(other) if other != "5m" => {
+                    tracing::warn!(
+                        "prompt_cache_ttl {other:?} is not \"5m\" or \"1h\"; keeping the 5m default"
+                    );
+                    client
+                }
+                _ => client,
+            };
             match provider.thinking_budget_tokens {
                 Some(budget) => Arc::new(client.with_thinking_budget(budget)),
                 None => Arc::new(client),

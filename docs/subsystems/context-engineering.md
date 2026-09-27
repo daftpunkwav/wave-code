@@ -36,6 +36,10 @@ Cache-preserving micro-compaction, also in `crates/capabilities/context/src/lib.
 - Measured on synthetic growth (one `grep` with a ~1k-token result per turn, 159 request transitions): a per-message boundary diverged **62** times, the batched boundary **16**. Every divergence re-reads everything behind it at full input price, so this is a bill, not a nicety. Pinned by `crates/operations/bootstrap/tests/cache_prefix_stability.rs`, which also asserts zero divergence below the threshold and idempotency.
 - Overlapping prefix/window on short histories leaves the evictable range empty, so the history passes through unchanged (saturating arithmetic, never panics).
 
+## Breakpoint lifetime (adapter side)
+
+The application layer keeps the request prefix byte-stable; the Anthropic adapter (`crates/foundation/llm/src/anthropic.rs`) decides how long the provider remembers it. Breakpoints (`system` block / last tool / last message) default to the provider's five-minute entries, refreshed on every hit. `prompt_cache_ttl = "1h"` on the provider config switches them to one-hour entries (beta header `anthropic-beta: extended-cache-ttl-2025-04-11`, `cache_control.ttl: "1h"`): writes bill at twice the base input rate instead of 1.25x, and one quiet stretch longer than five minutes — a long build, an overnight pause in a multi-day run — stops expiring the whole prefix into a full-price re-read. Long-running sessions are the case it pays for; bursty interactive use is fine on the default. Unknown configured values warn and fall back to the default.
+
 ## The `<system-reminder>` channel
 
 `wrap_system_reminder` wraps text in the canonical `<system-reminder>` … `</system-reminder>` block — the single injection format for compaction notices, plan nudges, and similar meta text. `ReminderChannel` is a bounded FIFO (`DEFAULT_MAX_PENDING_REMINDERS = 8`; at the cap new reminders are dropped, never queued into unbounded growth). `enqueue` deduplicates against pending items and against a reminder still sitting in the trailing user entry; `flush` merges everything into the trailing user entry (or pushes a fresh one) right before the next user-role entry lands.

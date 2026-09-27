@@ -25,6 +25,44 @@ use crate::{
     StreamEvent, ToolSpec, validate_image,
 };
 
+/// Prompt-cache entry lifetime for the injected breakpoints.
+///
+/// The provider default keeps an entry alive five minutes, refreshed on
+/// every hit — fine for back-to-back turns, but one quiet stretch longer
+/// than the TTL (a long build, an overnight pause in a multi-day run)
+/// expires the whole cached prefix and the next request re-reads it at
+/// full input price. The one-hour lifetime writes entries at twice the
+/// base input rate instead of 1.25x, trading a small premium per write
+/// for prefixes that survive hour-scale gaps; long-running sessions are
+/// the case it pays for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheTtl {
+    /// Provider default: five minutes, refreshed on every hit.
+    #[default]
+    FiveMinutes,
+    /// One hour, via the provider's extended-TTL beta.
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Wire value for `cache_control.ttl`; `None` keeps the provider
+    /// default (the field must stay absent for the five-minute lifetime).
+    pub fn wire(self) -> Option<&'static str> {
+        match self {
+            Self::FiveMinutes => None,
+            Self::OneHour => Some("1h"),
+        }
+    }
+
+    /// Beta flag the wire value requires on `anthropic-beta`.
+    pub fn beta_flag(self) -> Option<&'static str> {
+        match self {
+            Self::FiveMinutes => None,
+            Self::OneHour => Some("extended-cache-ttl-2025-04-11"),
+        }
+    }
+}
+
 /// Anthropic Messages API streaming client.
 pub struct AnthropicClient {
     base_url: String,
@@ -36,6 +74,8 @@ pub struct AnthropicClient {
     /// fraction of fresh input — but disableable for Anthropic-protocol
     /// gateways that reject the `cache_control` field.
     prompt_caching: bool,
+    /// Lifetime of the injected cache entries (see [`CacheTtl`]).
+    cache_ttl: CacheTtl,
     /// Extended-thinking budget in tokens (`thinking.budget_tokens`); `None`
     /// keeps thinking off so providers/agents that never asked for it are
     /// unchanged. The budget is clamped into the API-satisfiable range at
@@ -51,6 +91,7 @@ impl AnthropicClient {
             api_key,
             http: build_http_client()?,
             prompt_caching: true,
+            cache_ttl: CacheTtl::default(),
             thinking_budget: None,
         })
     }
@@ -74,6 +115,12 @@ impl AnthropicClient {
     /// `cache_control`).
     pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
         self.prompt_caching = enabled;
+        self
+    }
+
+    /// Set the lifetime of the injected cache entries (see [`CacheTtl`]).
+    pub fn with_cache_ttl(mut self, ttl: CacheTtl) -> Self {
+        self.cache_ttl = ttl;
         self
     }
 }
@@ -102,17 +149,27 @@ impl ChatModel for AnthropicClient {
         // never answers would otherwise hang `.send()` forever (see
         // [`sse::send_with_idle_bound`]).
         let response = crate::sse::send_with_idle_bound(
-            self.http
-                .post(url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&build_request_body(
+            {
+                let request = self
+                    .http
+                    .post(url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json");
+                // The extended cache lifetime ships behind a beta flag; the
+                // default five-minute entries need no header.
+                let request = match self.cache_ttl.beta_flag() {
+                    Some(flag) => request.header("anthropic-beta", flag),
+                    None => request,
+                };
+                request.json(&build_request_body(
                     &req,
                     self.prompt_caching,
+                    self.cache_ttl,
                     self.thinking_budget,
                 ))
-                .send(),
+            }
+            .send(),
         )
         .await?;
 
@@ -154,12 +211,14 @@ const MAX_ERROR_BODY_CHARS: usize = crate::MAX_ERROR_BODY_CHARS;
 /// `prompt_caching` injects up to three `cache_control: ephemeral` breakpoints
 /// (system block, last tool, last message content block) so stable prefixes
 /// (system prompt, tool schemas, older history) hit the provider cache on
-/// every turn after the first; `thinking_budget` enables extended thinking
-/// (see [`thinking_body`]). Both are serialization-only: the caller's
-/// `ChatRequest` is never mutated.
+/// every turn after the first; `ttl` sets the entries' lifetime (one hour
+/// carries the beta flag on the request, see [`CacheTtl`]); `thinking_budget`
+/// enables extended thinking (see [`thinking_body`]). All are
+/// serialization-only: the caller's `ChatRequest` is never mutated.
 pub(crate) fn build_request_body(
     req: &ChatRequest,
     prompt_caching: bool,
+    ttl: CacheTtl,
     thinking_budget: Option<u32>,
 ) -> serde_json::Value {
     let merged = merge_adjacent_same_role(&req.messages);
@@ -174,10 +233,7 @@ pub(crate) fn build_request_body(
         // The tail breakpoint caches each turn's prefix for the next turn
         // (incremental caching); the marker sits on the final content block.
         if let Some(obj) = last_block.as_object_mut() {
-            obj.insert(
-                "cache_control".into(),
-                serde_json::json!({"type": "ephemeral"}),
-            );
+            obj.insert("cache_control".into(), cache_control(ttl));
         }
     }
     let mut body = serde_json::json!({
@@ -186,8 +242,8 @@ pub(crate) fn build_request_body(
         "max_tokens": req.max_tokens,
         "stream": true,
     });
-    body["system"] = system_body(&req.system, prompt_caching);
-    body["tools"] = tools_body(&req.tools, prompt_caching);
+    body["system"] = system_body(&req.system, prompt_caching, ttl);
+    body["tools"] = tools_body(&req.tools, prompt_caching, ttl);
     if let Some(budget) = thinking_budget
         && let Some(thinking) = thinking_body(budget, req.max_tokens)
     {
@@ -196,10 +252,19 @@ pub(crate) fn build_request_body(
     body
 }
 
+/// One `cache_control` breakpoint value: `ephemeral` with the configured
+/// lifetime attached (the field stays absent for the provider default).
+fn cache_control(ttl: CacheTtl) -> serde_json::Value {
+    match ttl.wire() {
+        Some(wire) => serde_json::json!({"type": "ephemeral", "ttl": wire}),
+        None => serde_json::json!({"type": "ephemeral"}),
+    }
+}
+
 /// Builds the `system` field: a single cached text block when caching is on
 /// and the system prompt is non-empty; an empty system stays the empty string
 /// (some gateways reject `[]`), and caching-off keeps the plain-string shape.
-fn system_body(system: &str, prompt_caching: bool) -> serde_json::Value {
+fn system_body(system: &str, prompt_caching: bool, ttl: CacheTtl) -> serde_json::Value {
     if system.is_empty() {
         return serde_json::Value::String(String::new());
     }
@@ -207,7 +272,7 @@ fn system_body(system: &str, prompt_caching: bool) -> serde_json::Value {
         serde_json::json!([{
             "type": "text",
             "text": system,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": cache_control(ttl),
         }])
     } else {
         serde_json::Value::String(system.to_owned())
@@ -217,7 +282,7 @@ fn system_body(system: &str, prompt_caching: bool) -> serde_json::Value {
 /// Builds the `tools` array: when caching is on the last tool carries the
 /// cache breakpoint (tool schemas sit at the front of the cacheable prefix;
 /// only one breakpoint is needed for the whole array).
-fn tools_body(tools: &[ToolSpec], prompt_caching: bool) -> serde_json::Value {
+fn tools_body(tools: &[ToolSpec], prompt_caching: bool, ttl: CacheTtl) -> serde_json::Value {
     let mut specs: Vec<serde_json::Value> = tools
         .iter()
         .map(serde_json::to_value)
@@ -227,10 +292,7 @@ fn tools_body(tools: &[ToolSpec], prompt_caching: bool) -> serde_json::Value {
         && let Some(last) = specs.last_mut()
         && let Some(obj) = last.as_object_mut()
     {
-        obj.insert(
-            "cache_control".into(),
-            serde_json::json!({"type": "ephemeral"}),
-        );
+        obj.insert("cache_control".into(), cache_control(ttl));
     }
     serde_json::Value::Array(specs)
 }
@@ -548,7 +610,7 @@ mod tests {
             }],
             max_tokens: 8192,
         };
-        let v = build_request_body(&req, false, None);
+        let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
         assert_eq!(v["model"], "MiniMax-M3");
         assert_eq!(v["system"], "sys");
         assert_eq!(v["stream"], true);
@@ -577,7 +639,7 @@ mod tests {
             tools: vec![],
             max_tokens: 8192,
         };
-        let v = build_request_body(&req, false, None);
+        let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
         assert_eq!(
             v["messages"][0]["content"][0]["input"],
             serde_json::json!({"_raw": "just a string"})
@@ -622,7 +684,7 @@ mod tests {
             ],
             max_tokens: 8192,
         };
-        let v = build_request_body(&req, true, None);
+        let v = build_request_body(&req, true, CacheTtl::FiveMinutes, None);
         // System becomes a single cached text block.
         let system = v["system"].as_array().unwrap();
         assert_eq!(system.len(), 1);
@@ -643,9 +705,45 @@ mod tests {
         // The caller's request is untouched.
         assert_eq!(req.tools.len(), 2);
         // Caching off keeps the plain-string system and marker-free tools.
-        let plain = build_request_body(&req, false, None);
+        let plain = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
         assert_eq!(plain["system"], "sys");
         assert!(plain["tools"][1].get("cache_control").is_none());
+    }
+
+    /// The one-hour lifetime stamps every breakpoint with `ttl: "1h"`; the
+    /// provider default must keep the field absent (the beta flag rides the
+    /// request header, see [`AnthropicClient::stream`]).
+    #[test]
+    fn one_hour_ttl_marks_every_breakpoint() {
+        let req = ChatRequest {
+            model: "m1".into(),
+            system: "sys".into(),
+            messages: std::sync::Arc::new(vec![Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: "hi".into(),
+                }],
+            }]),
+            tools: vec![ToolSpec {
+                name: "a".into(),
+                description: "da".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }],
+            max_tokens: 8192,
+        };
+        assert_eq!(CacheTtl::FiveMinutes.wire(), None);
+        assert_eq!(CacheTtl::OneHour.wire(), Some("1h"));
+        let v = build_request_body(&req, true, CacheTtl::OneHour, None);
+        assert_eq!(v["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(v["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(v["messages"][0]["content"][0]["cache_control"]["ttl"], "1h");
+        // Default lifetime: no ttl field at all.
+        let v = build_request_body(&req, true, CacheTtl::FiveMinutes, None);
+        assert!(v["system"][0]["cache_control"].get("ttl").is_none());
+        assert!(v["tools"][0]["cache_control"].get("ttl").is_none());
+        assert!(v["messages"][0]["content"][0]["cache_control"]
+            .get("ttl")
+            .is_none());
     }
 
     /// Empty system + caching keeps the empty-string shape (some gateways
@@ -659,15 +757,15 @@ mod tests {
             tools: vec![],
             max_tokens: 8192,
         };
-        let v = build_request_body(&req, true, Some(4096));
+        let v = build_request_body(&req, true, CacheTtl::FiveMinutes, Some(4096));
         assert_eq!(v["system"], "");
         assert_eq!(v["thinking"]["type"], "enabled");
         assert_eq!(v["thinking"]["budget_tokens"], 4096);
 
         // Budget below the 1024 minimum is clamped up; above max_tokens-1 clamped down.
-        let v = build_request_body(&req, true, Some(8));
+        let v = build_request_body(&req, true, CacheTtl::FiveMinutes, Some(8));
         assert_eq!(v["thinking"]["budget_tokens"], 1024);
-        let v = build_request_body(&req, true, Some(u32::MAX));
+        let v = build_request_body(&req, true, CacheTtl::FiveMinutes, Some(u32::MAX));
         assert_eq!(v["thinking"]["budget_tokens"], 8191);
 
         // A max_tokens that cannot satisfy the minimum keeps thinking off.
@@ -675,7 +773,7 @@ mod tests {
             max_tokens: 1024,
             ..req.clone()
         };
-        let v = build_request_body(&tiny, true, Some(4096));
+        let v = build_request_body(&tiny, true, CacheTtl::FiveMinutes, Some(4096));
         assert!(v.get("thinking").is_none());
     }
 
@@ -709,7 +807,7 @@ mod tests {
             tools: vec![],
             max_tokens: 8,
         };
-        let v = build_request_body(&req, false, None);
+        let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
         let messages = v["messages"].as_array().unwrap();
         assert_eq!(
             messages.len(),

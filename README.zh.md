@@ -63,6 +63,9 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
 # fallback_providers = ["backup-provider"]  # ordered failover: each provider
 # retries transient errors (429/5xx, honoring Retry-After) before the next
 # one takes over; auth and quota errors fail fast
+# prompt_cache_ttl = "1h"      # Anthropic 缓存条目存活 1 小时而非 5 分钟：
+# 写入按基础输入价 2 倍计费（而非 1.25 倍），但一段安静期（长构建、停顿）
+# 不再把整个提示前缀过期成全价重读
 
 # Wire dialect per provider, set with `type`:
 #   "anthropic"         -> Anthropic Messages   (POST {base_url}/v1/messages)

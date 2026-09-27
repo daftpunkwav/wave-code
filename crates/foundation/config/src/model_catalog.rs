@@ -165,6 +165,7 @@ impl ModelSpec {
             reasoning_effort: self.default_effort(),
             thinking_budget_tokens: None,
             prompt_caching: None,
+            prompt_cache_ttl: None,
         }
     }
 

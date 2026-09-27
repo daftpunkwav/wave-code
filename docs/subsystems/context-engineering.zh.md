@@ -36,6 +36,10 @@
 - 在合成增长上的实测（每回合一个 `grep`、约 1k token 结果，159 次请求转移）：按消息的边界发散 **62** 次，批次化边界 **16** 次。每一次发散都会让它背后的所有内容按全价重新读取，所以这是一笔账单，不是锦上添花。由 `crates/operations/bootstrap/tests/cache_prefix_stability.rs` 钉住，它还断言阈值以下零发散与幂等性。
 - 短历史上前缀/窗口重叠会使可逐出区间为空，历史原样通过（饱和算术，绝不 panic）。
 
+## 断点生命周期（适配器侧）
+
+应用层保证请求前缀字节级稳定；Anthropic 适配器（`crates/foundation/llm/src/anthropic.rs`）决定提供方把它记多久。断点（`system` 块 / 最后一个工具 / 最后一条消息）默认是提供方的五分钟条目，每次命中即刷新。在 provider 配置上设置 `prompt_cache_ttl = "1h"` 可切换为一小时条目（beta 头 `anthropic-beta: extended-cache-ttl-2025-04-11`，`cache_control.ttl: "1h"`）：写入按基础输入价的两倍计费（而非 1.25 倍），换来超过五分钟的一段安静——一次长构建、多日运行里的一夜停顿——不再把整个前缀过期成一次全价重读。长时运行会话正是它回本的场景；突发式交互用默认值即可。配置了未知值时告警并回落默认。
+
 ## `<system-reminder>` 通道
 
 `wrap_system_reminder` 把文本包进规范的 `<system-reminder>` … `</system-reminder>` 块——压缩通知、plan 提醒与类似元文本的唯一注入格式。`ReminderChannel` 是有界 FIFO（`DEFAULT_MAX_PENDING_REMINDERS = 8`；达到上限时新 reminder 被丢弃，绝不排入无界增长）。`enqueue` 对待处理项、以及仍停留在尾部用户条目中的 reminder 去重；`flush` 在下一条 user 角色条目落位之前，把一切合并进尾部用户条目（或推入新的一条）。

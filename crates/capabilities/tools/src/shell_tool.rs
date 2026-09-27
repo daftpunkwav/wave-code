@@ -354,7 +354,9 @@ impl Tool for Shell {
         };
 
         // Timeout: report the partial streams alongside the reason — a
-        // long build's log head is exactly what diagnosing the timeout needs.
+        // long build's log head is exactly what diagnosing the timeout needs
+        // — and name the background path, so work that must outlive the
+        // foreground limit continues as a job instead of being re-run.
         let Some(status) = output.status else {
             let mut content = format!(
                 "timeout after {timeout_ms}ms, the process was killed: {command}\npartial output before the kill:"
@@ -367,6 +369,11 @@ impl Tool for Shell {
             if !stderr.is_empty() {
                 content.push_str(&format!("\n--- stderr ---\n{stderr}"));
             }
+            content.push_str(
+                "\nfor commands expected to run longer than the limit, start them with \
+                 job_spawn instead: the job keeps running and job_wait / job_output collect \
+                 its result without blocking the turn",
+            );
             return Ok(err_output(content));
         };
 

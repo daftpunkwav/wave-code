@@ -34,7 +34,7 @@ pub mod responses;
 pub mod retry;
 mod sse;
 
-pub use anthropic::AnthropicClient;
+pub use anthropic::{AnthropicClient, CacheTtl};
 pub use openai::{ModelCapabilities, OpenAIClient};
 pub use responses::ResponsesClient;
 pub use sse::SseParser;

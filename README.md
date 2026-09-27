@@ -62,6 +62,9 @@ env_key = "YOUR_API_KEY_ENV"  # key read from this env var (wins over inline api
 # fallback_providers = ["backup-provider"]  # ordered failover: each provider
 # retries transient errors (429/5xx, honoring Retry-After) before the next
 # one takes over; auth and quota errors fail fast
+# prompt_cache_ttl = "1h"      # Anthropic cache entries live 1h instead of
+# 5m: writes cost 2x base input instead of 1.25x, but quiet stretches
+# (long builds, pauses) stop expiring the whole prompt prefix
 
 # Wire dialect per provider, set with `type`:
 #   "anthropic"         -> Anthropic Messages   (POST {base_url}/v1/messages)

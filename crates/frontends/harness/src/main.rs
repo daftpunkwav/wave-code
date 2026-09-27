@@ -3677,6 +3677,7 @@ model = "m2"
             reasoning_effort: None,
             thinking_budget_tokens: None,
             prompt_caching: None,
+            prompt_cache_ttl: None,
         };
         let mut model_providers = std::collections::HashMap::new();
         model_providers.insert(

@@ -212,6 +212,10 @@ async fn missing_file_message(path: &std::path::Path) -> String {
     // the budget can never pass, so candidates skip the DP outright.
     let budget = (file_name.len() / 3).clamp(1, 4);
     let lowered = file_name.to_lowercase();
+    // The gap filter compares char counts, not byte counts: edit_distance
+    // counts chars and a char-count gap lower-bounds it, while a byte gap
+    // does not (multibyte names diverge) and would wrongly drop neighbors.
+    let lowered_chars = lowered.chars().count();
     let mut candidates: Vec<(usize, String)> = Vec::new();
     let mut scanned = 0usize;
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -227,7 +231,7 @@ async fn missing_file_message(path: &std::path::Path) -> String {
             continue;
         }
         let lowered_name = name.to_lowercase();
-        if lowered_name.len().abs_diff(lowered.len()) > budget {
+        if lowered_name.chars().count().abs_diff(lowered_chars) > budget {
             continue;
         }
         let distance = edit_distance(&lowered, &lowered_name, budget);
@@ -373,6 +377,22 @@ mod tests {
         assert!(out.is_error);
         assert!(!out.content.contains("did you mean"), "{}", out.content);
         assert!(out.content.starts_with("file not found:"));
+    }
+
+    /// The gap filter must compare char counts, not byte counts: a sibling
+    /// two CJK chars longer is 6 bytes longer (past the byte-derived budget)
+    /// yet only 2 edits away, so a byte gap would wrongly drop the suggestion.
+    #[tokio::test]
+    async fn missing_file_suggests_multibyte_siblings() {
+        let (_d, c) = ctx();
+        std::fs::write(c.cwd.join("报告文档.txt"), "x").unwrap();
+        let out = ReadFile::default()
+            .execute(serde_json::json!({"path": "报告.txt"}), &c)
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.content.contains("did you mean"), "{}", out.content);
+        assert!(out.content.contains("报告文档.txt"), "{}", out.content);
     }
 
     #[test]

@@ -1,25 +1,24 @@
 //! wavecode-hooks — lifecycle hooks system.
 //!
 //! Event points: PreToolUse / PostToolUse / UserPromptSubmit / SessionStart /
-//! SessionEnd / Stop / PreCompact / PostCompact; the
-//! Notification point is not implemented in this version (placeholder).
+//! SessionEnd / Stop / PreCompact / PostCompact. There is no
+//! Notification point: [`HookEventPoint`] has no such variant and
+//! [`HookEventPoint::parse`] rejects the name.
 //!
 //! Hook types:
-//! - `command` (implemented in this version): a `[hooks.<EventPoint>]` table
+//! - `command`: a `[hooks.<EventPoint>]` table
 //!   (or table array) config with matcher / command / timeout_ms / once
 //!   fields, executed via the platform shell (Windows `cmd /C`, Unix `sh -c`,
 //!   overridable with `WAVECODE_SHELL` — the shared `shell_invocation`
 //!   resolution in infrastructure-base), with the event payload written to
 //!   stdin as JSON;
-//! - `prompt` (this version, registered programmatically via
+//! - `prompt` (registered programmatically via
 //!   [`HookEngine::register_prompt_hook`]): the same execution shape as
 //!   `command` (matcher / shell / stdin payload / timeout), but exit code 0
 //!   captures stdout (capped at [`PROMPT_CONTEXT_MAX_BYTES`] with a
 //!   truncation marker) into [`HookReport::context`] as injected context, and
 //!   no outcome ever blocks — exit code 2 and every other failure degrade to
-//!   a warning so a broken prompt hook cannot veto the turn. The SPEC's
-//!   model-ruling flavor (post-M4) stays future work; see the [`HookDef`]
-//!   notes.
+//!   a warning so a broken prompt hook cannot veto the turn.
 //!
 //! Blocking semantics: exit code 0 allows; 2 blocks with
 //! stderr fed back to the model (only on blockable points: PreToolUse /

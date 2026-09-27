@@ -1,18 +1,19 @@
 /*!
  * @file WorkspaceLayers
- * @description Mechanical enforcement of the layer rules in
- * docs/architecture.md: read the real graph via `cargo metadata`, then
- * fail on any normal dependency pointing strictly upward against the
- * documented tier order, any frontend reaching outside its allowlist, or
- * anything outside the frontends depending on the composition root. The
- * tier table must stay exhaustive, so a new crate fails until it is
- * placed deliberately.
+ * @description Mechanical enforcement of the workspace layer rules:
+ * read the real graph via `cargo metadata`, then fail on any normal
+ * dependency pointing strictly upward against the tier order below,
+ * any frontend reaching outside its allowlist, or anything outside
+ * the frontends depending on the composition root. The tier table
+ * must stay exhaustive, so a new crate fails until it is placed
+ * deliberately.
  */
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
-/// Tiers bottom-up, mirroring the layer map in docs/architecture.md.
+/// Tiers bottom-up: a dependency may only point from a higher tier to
+/// a lower one.
 const TIERS: &[&str] = &[
     "infrastructure",
     "vocabulary (shared DTOs and passive mechanisms)",

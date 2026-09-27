@@ -6,8 +6,9 @@
 //! cwd, convenient for callers to display and compare.
 //!
 //! TOCTOU assumption: symlinks on the path may be swapped between the check and the actual
-//! use (read/write), and this module cannot guard that race; the M1 threat model accepts
-//! this window, with stronger measures such as fd-anchored (openat-style) access left to later milestones.
+//! use (read/write), and this module cannot guard that race. The window is
+//! accepted; stronger measures such as fd-anchored (openat-style) access are
+//! not implemented.
 
 use std::path::{Component, Path, PathBuf};
 

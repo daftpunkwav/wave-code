@@ -10,9 +10,10 @@
 //!   (read-only / destructive) -> [`Verdict::Allow`] / [`Verdict::Ask`] /
 //!   [`Verdict::Deny`].
 //!
-//! OS-level sandboxing (Linux landlock / macOS seatbelt / Windows ACL) is
-//! orthogonal to permission modes (mechanism separated from policy) and waits
-//! for a later milestone, see docs/project/SPEC.md section 17.
+//! OS-level sandboxing is orthogonal to permission modes: mechanism
+//! separated from policy. The platform backend is picked by probing in
+//! a fixed order (bwrap, landlock, seatbelt, Windows job object; see
+//! [`chain`]), and a missing backend degrades rather than fails.
 //!
 //! ## Threat model: what this crate enforces (and what it does not)
 //!
@@ -703,7 +704,7 @@ impl Sandbox {
         }
         // 3. Mode default policy (the ask-free phrasing below describes
         //    only this branch; step 1.9's sensitive-file ask happens
-        //    earlier — see docs/subsystems/safety.md for the order).
+        //    earlier — before the mode default policy branch below).
         //    plan: read-only only; everything else denies outright (no
         //    approval requests). auto: read-only tools, file edits, and
         //    other non-exec writes flow through; command execution

@@ -4,13 +4,12 @@
 //! `model_provider` / `model_providers` sections, and resolves the current provider's
 //! api key (priority: the env var pointed to by `env_key` > inline `api_key`).
 //!
-//! The planned layered merge (CLI args > project-level `.wavecode/config.toml` > user-level >
-//! built-in defaults) and capabilities like `profiles` land in later milestones; raw
-//! parsing of `mcp_servers`  and of
-//! `[permissions]` in the approval-de-fatigue slice. `[permissions]` is the
-//! deliberate exception to that plan: widened authority is only ever read
-//! from the user-level file, never from a repo-local one (the agent can
-//! write the repo-local file, see the module doc in `permissions.rs`).
+//! Resolution is single-file: one config over built-in defaults. There are
+//! no layered merges (no CLI-arg layer, no project-level config, no
+//! profiles). `[permissions]` is only ever read from the user-level file,
+//! never from a repo-local one: the agent can write a repo-local file, so
+//! widened authority never loads from it (see the module doc in
+//! `permissions.rs`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,7 +32,6 @@ pub struct Config {
     /// default / acceptEdits / bypassPermissions / yolo still load and map
     /// onto their successor). None by default; the assembly layer falls
     /// back to auto.
-    /// layered merges like profiles / projects overrides stay for later milestones.
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// Authored permission rules (`[permissions] allow` / `deny`, sandbox

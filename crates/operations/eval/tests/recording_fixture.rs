@@ -5,8 +5,7 @@
 //! two deltas bursts, a paired tool call, and two settles. The contract
 //! validator used to carry once-only rules that false-positived on
 //! precisely this shape; the fixture keeps that regression pinned and
-//! gives tier-2 validation a standing input (see
-//! `docs/subsystems/evals.md` and `docs/cookbook/recording-and-replaying.md`).
+//! gives contract validation a standing input.
 
 use operations_eval::{RecordedCase, evaluate_recorded, read_events_jsonl, validate_contract};
 

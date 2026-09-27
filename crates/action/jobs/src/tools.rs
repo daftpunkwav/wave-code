@@ -428,7 +428,16 @@ impl wavecode_tools::RunHandoff for ForegroundRuns {
     }
 
     async fn wait(&self, id: &str, timeout_ms: u64) -> Option<wavecode_tools::RunSnapshot> {
-        self.jobs.wait(id, timeout_ms).await.map(snapshot_of)
+        let snapshot = self.jobs.wait(id, timeout_ms).await?;
+        // Seam contract: `None` means still running (the shell promotes on
+        // it), so only a terminal state surfaces as `Some`; the service's
+        // wait returns a live snapshot after its window, which maps to
+        // `None` here.
+        if snapshot.state == crate::JobState::Finished {
+            Some(snapshot_of(snapshot))
+        } else {
+            None
+        }
     }
 
     fn snapshot(&self, id: &str) -> Option<wavecode_tools::RunSnapshot> {
@@ -454,6 +463,7 @@ fn snapshot_of(snap: crate::JobSnapshot) -> wavecode_tools::RunSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wavecode_tools::RunHandoff;
 
     #[test]
     fn deny_env_gains_secret_shaped_names_without_duplicates() {
@@ -631,5 +641,40 @@ mod tests {
             );
             tokio::task::yield_now().await;
         }
+    }
+
+    /// The seam contract the shell promotes on: `wait` maps a live run to
+    /// `None` (not a running snapshot — the service's wait returns one
+    /// after its window) and surfaces only terminal states, so a timed-out
+    /// foreground run promotes instead of reporting a bogus exit code.
+    #[tokio::test]
+    async fn handoff_wait_is_none_while_running_and_snapshots_when_finished() {
+        let jobs = jobs();
+        let handoff = ForegroundRuns::new(jobs.clone());
+        let live = if cfg!(windows) {
+            "for /l %i in (1,1,1000000000) do @rem"
+        } else {
+            "sleep 30"
+        };
+        let held = ctx();
+        let id = handoff.start(live, &held.ctx.cwd, &[]).unwrap();
+        assert!(
+            handoff.wait(&id, 200).await.is_none(),
+            "a live run must map to None, not a running snapshot"
+        );
+        assert!(jobs.cancel(&id));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let end = loop {
+            if let Some(snapshot) = handoff.wait(&id, 1_000).await {
+                break snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job {id} did not finish in time"
+            );
+            tokio::task::yield_now().await;
+        };
+        assert!(end.finished, "a terminal state surfaces as Some");
+        assert!(end.cancelled);
     }
 }

@@ -235,6 +235,15 @@ impl ToolAllowlist {
     }
 }
 
+/// Serializes tests that touch environment variables or spawn child
+/// processes: the OS-sandbox watcher pairs this process' new direct
+/// children with pending jobs, so such tests must run mutually exclusive —
+/// otherwise the watcher can pair another test's child with the sandbox
+/// test's job and leave the confined child suspended forever. One lock for
+/// the whole crate: separate per-module mutexes would not exclude each other.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Tool registry: indexed by name, used by the execution pipeline for lookup and for building the request-side `ToolSpec` list.
 ///
 /// Holds **no** session-level planning / skills state ([`TodoStore`] / [`ToolAllowlist`])

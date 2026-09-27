@@ -387,7 +387,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+    #[allow(clippy::await_holding_lock)]
     async fn python_runs_and_sees_extra_args() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if discover(python_candidates()).is_none() {
             eprintln!("skipping: no Python interpreter on PATH");
             return;
@@ -405,7 +408,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+    #[allow(clippy::await_holding_lock)]
     async fn python_nonzero_exit_is_error_output() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if discover(python_candidates()).is_none() {
             eprintln!("skipping: no Python interpreter on PATH");
             return;
@@ -420,7 +426,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+    #[allow(clippy::await_holding_lock)]
     async fn python_timeout_kills_script() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if discover(python_candidates()).is_none() {
             eprintln!("skipping: no Python interpreter on PATH");
             return;
@@ -438,7 +447,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+    #[allow(clippy::await_holding_lock)]
     async fn node_runs_when_available() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if discover(node_candidates()).is_none() {
             eprintln!("skipping: no Node interpreter on PATH");
             return;
@@ -456,7 +468,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+    #[allow(clippy::await_holding_lock)]
     async fn node_timeout_kills_script() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if discover(node_candidates()).is_none() {
             eprintln!("skipping: no Node interpreter on PATH");
             return;
@@ -493,7 +508,10 @@ mod tests {
     }
 
     #[tokio::test]
+    // Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+    #[allow(clippy::await_holding_lock)]
     async fn chatty_output_is_capped_not_buffered_unbounded() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if discover(python_candidates()).is_none() {
             eprintln!("skipping: no Python interpreter on PATH");
             return;

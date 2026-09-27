@@ -529,7 +529,7 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Tool, ToolCtx};
+    use crate::{ENV_LOCK, Tool, ToolCtx};
 
     fn ctx() -> (tempfile::TempDir, ToolCtx) {
         let dir = tempfile::tempdir().unwrap();
@@ -824,12 +824,8 @@ mod tests {
         }
     }
 
-    // Environment variables are process-global state, and the OS-sandbox
-    // watcher pairs this process' new direct children with pending jobs —
-    // tests that touch env or spawn shells must therefore run mutually
-    // exclusive, or the watcher can pair another test's child with the
-    // sandbox test's job and leave the confined child suspended forever.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // The crate-wide ENV_LOCK (see its docs in lib.rs) serializes every
+    // env-touching or child-spawning test, including the sandbox tests.
 
     #[tokio::test]
     // Touches env and spawns a child: held under ENV_LOCK (see its docs).

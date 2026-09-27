@@ -286,14 +286,29 @@ impl JobService {
     /// promotion, when the waiting caller reports the run as still going
     /// and hands it to the model as background work. From here on the run
     /// notifies like any `job_spawn`-started job. `false` for unknown ids.
+    ///
+    /// If the run already reached a terminal state while still quiet (the
+    /// caller's wait snapshot predated the exit), the suppressed notice is
+    /// filed retroactively here, so a promoted run's completion can never
+    /// be lost to that race.
     pub fn mark_notified(&self, id: &str) -> bool {
-        match self.lock_jobs().get(id).cloned() {
-            Some(slot) => {
-                slot.foreground.store(false, Ordering::SeqCst);
-                true
-            }
-            None => false,
+        let slot = match self.lock_jobs().get(id).cloned() {
+            Some(slot) => slot,
+            None => return false,
+        };
+        // Serialize with `finish` on the state lock so exactly one side
+        // files the notice: arming first lets `finish` announce later;
+        // finding the terminal state first announces here.
+        let ended_quiet = {
+            let state = slot.lock_state();
+            slot.foreground.store(false, Ordering::SeqCst);
+            *state == JobState::Finished
+        };
+        if ended_quiet {
+            self.notifications
+                .notify_completion(format!("{id} finished"));
         }
+        true
     }
 
     /// Request cancellation; true when a tracked job accepted the signal.
@@ -454,7 +469,8 @@ async fn drive_job(
 
 /// Record the terminal status, wake waiters, and file the shared notice —
 /// except for a still-foreground run, whose result the caller delivers
-/// inline (promotion via `mark_notified` re-arms the notice).
+/// inline (promotion via `mark_notified` re-arms the notice; a quiet run
+/// that ended before the arming landed is announced retroactively there).
 fn finish(
     id: &str,
     slot: &Arc<JobSlot>,
@@ -462,9 +478,16 @@ fn finish(
     exit_code: Option<i32>,
 ) {
     *slot.exit_code.lock().unwrap_or_else(|e| e.into_inner()) = exit_code;
-    *slot.lock_state() = JobState::Finished;
+    // Read `foreground` under the state lock so the decision pairs
+    // atomically with `mark_notified`'s arming: whichever takes the lock
+    // first decides who files the notice, and exactly one is filed.
+    let notify = {
+        let mut state = slot.lock_state();
+        *state = JobState::Finished;
+        !slot.foreground.load(Ordering::SeqCst)
+    };
     slot.done.notify_waiters();
-    if !slot.foreground.load(Ordering::SeqCst) {
+    if notify {
         notifications.notify_completion(format!("{id} finished"));
     }
 }
@@ -709,9 +732,8 @@ mod tests {
             runtime.drain_notifications().is_empty(),
             "an inline-delivered foreground run stays quiet"
         );
-        // Promotion on a finished job is a no-op for the past (the notice
-        // was already suppressed), but a fresh promoted-while-running job
-        // notifies on completion.
+        // A promoted-while-running job notifies on completion like any
+        // spawned job once `mark_notified` has armed it.
         let mut slow = request("t1", LONG_CMD);
         slow.foreground = true;
         let slow_id = jobs.spawn(slow).unwrap();
@@ -725,5 +747,28 @@ mod tests {
             "a promoted run notifies on completion: {notes:?}"
         );
         assert!(!jobs.mark_notified("job-999"));
+    }
+
+    /// A foreground run that quietly finished before the caller armed the
+    /// notice (the wait snapshot predated the exit) must still announce:
+    /// `mark_notified` finds the terminal state and files the notice
+    /// retroactively, so a promoted run's completion is never lost.
+    #[tokio::test]
+    async fn mark_notified_after_a_quiet_finish_announces_retroactively() {
+        let (runtime, jobs) = harness();
+        let mut quiet = request("t1", "echo foreground");
+        quiet.foreground = true;
+        let id = jobs.spawn(quiet).unwrap();
+        let _ = poll_finished(&jobs, &id).await;
+        assert!(
+            runtime.drain_notifications().is_empty(),
+            "the inline-delivered run stays quiet"
+        );
+        assert!(jobs.mark_notified(&id));
+        let notes = runtime.drain_notifications();
+        assert!(
+            notes.iter().any(|n| n == &format!("{id} finished")),
+            "the retroactive notice must fire: {notes:?}"
+        );
     }
 }

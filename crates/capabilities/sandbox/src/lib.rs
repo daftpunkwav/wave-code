@@ -605,9 +605,16 @@ impl Sandbox {
         {
             let resolved = resolved_for_sensitive_check(path);
             if let Some(reason) = sensitive_path_reason(&resolved) {
-                let exact_allows = lock(&self.allow)
-                    .iter()
-                    .any(|r| r.scope == RuleScope::File && r.exact && r.matches_text(&resolved));
+                // `allow_always` records the raw input string, so the
+                // exemption must match that spelling too: on an existing
+                // file the resolved path is canonical (on Windows even
+                // `\\?\`-prefixed) and would never equal the approved
+                // text, turning every "always allow" back into an ask.
+                let exact_allows = lock(&self.allow).iter().any(|r| {
+                    r.scope == RuleScope::File
+                        && r.exact
+                        && (r.matches_text(path) || r.matches_text(&resolved))
+                });
                 if !exact_allows {
                     return Verdict::Ask {
                         kind: ApprovalKind::Write,
@@ -868,7 +875,7 @@ mod tests {
     #[test]
     fn builtin_tool_names_match_classification_table() {
         let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
-        // (tool name, is_file_edit, is_session_state, approval_kind)
+        // (tool name, declared ToolKind, approval kind)
         let expected: [(&str, ToolKind, ApprovalKind); 18] = [
             ("read", ToolKind::Other, ApprovalKind::Write),
             ("write", ToolKind::FileEdit, ApprovalKind::Write),
@@ -1855,6 +1862,33 @@ mod tests {
             denied.decide("read", &file_input(".env"), true, false, ToolKind::Other),
             Verdict::Deny { .. }
         ));
+    }
+
+    /// The exact allow exemption survives the resolution step:
+    /// `allow_always` records the raw input string, so an existing
+    /// credential file — whose resolved path is canonical, on Windows
+    /// even `\\?\`-prefixed — must still match the approved rule by its
+    /// raw spelling. Regression: matching only the resolved string made
+    /// every "always allow" of an existing file ask again.
+    #[test]
+    fn exact_allow_for_sensitive_path_survives_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+        std::fs::write(&env_path, "KEY=1").unwrap();
+        let raw = env_path.to_string_lossy().into_owned();
+        let sb = Sandbox::without_rules(PermissionMode::Wave);
+        assert!(matches!(
+            sb.decide("read", &file_input(&raw), true, false, ToolKind::Other),
+            Verdict::Ask { .. }
+        ));
+        sb.allow_always("read", &file_input(&raw));
+        assert!(
+            matches!(
+                sb.decide("read", &file_input(&raw), true, false, ToolKind::Other),
+                Verdict::Allow
+            ),
+            "the approved exact rule must exempt the existing file"
+        );
     }
 
     #[test]

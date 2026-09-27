@@ -176,29 +176,46 @@ impl JsonlJournal {
     /// header, and [`JOURNAL_FORMAT_V0`] for headerless v0 journals
     /// (including ones whose first line is corrupt: they predate headers).
     pub fn format_version(&self) -> Result<u32, JournalError> {
-        let text = match self.read_repaired() {
-            Ok(Some(text)) => text,
+        // Only the first non-empty line decides the version: read that
+        // line directly instead of materializing (and possibly
+        // rewriting) the whole journal.
+        let first = match self.first_non_empty_line() {
+            Ok(Some(line)) => line,
             Ok(None) => return Ok(JOURNAL_FORMAT_VERSION),
-            Err(e) => return Err(JournalError::Io(e)),
+            // A torn first line predates headers.
+            Err(_) => return Ok(JOURNAL_FORMAT_V0),
         };
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value: serde_json::Value = match serde_json::from_str(line) {
-                Ok(value) => value,
-                Err(_) => return Ok(JOURNAL_FORMAT_V0),
-            };
-            if is_header_value(&value) {
-                return Ok(value
-                    .get("format")
-                    .and_then(|v| v.as_u64())
-                    .and_then(|v| u32::try_from(v).ok())
-                    .unwrap_or(JOURNAL_FORMAT_V0));
-            }
-            return Ok(JOURNAL_FORMAT_V0);
+        let value: serde_json::Value = match serde_json::from_str(&first) {
+            Ok(value) => value,
+            Err(_) => return Ok(JOURNAL_FORMAT_V0),
+        };
+        if is_header_value(&value) {
+            return Ok(value
+                .get("format")
+                .and_then(|v| v.as_u64())
+                .and_then(|v| u32::try_from(v).ok())
+                .unwrap_or(JOURNAL_FORMAT_V0));
         }
-        Ok(JOURNAL_FORMAT_VERSION)
+        Ok(JOURNAL_FORMAT_V0)
+    }
+
+    /// First non-empty line of the file, if any. `Ok(None)` covers a missing
+    /// and an empty file; `Err` means a line could not be read (torn UTF-8).
+    fn first_non_empty_line(&self) -> std::io::Result<Option<String>> {
+        use std::io::{BufRead, BufReader};
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        for line in BufReader::new(file).lines() {
+            match line {
+                Ok(line) if line.trim().is_empty() => continue,
+                Ok(line) => return Ok(Some(line)),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(None)
     }
 
     /// Read the journal after repairing a torn final write, returning
@@ -306,10 +323,47 @@ impl JsonlJournal {
     }
 
     /// Reload at most the last `n` records for resume previews.
+    ///
+    /// Streams the journal line by line, keeping only the newest `n`
+    /// records in memory — the full history is never materialized just
+    /// to preview a tail.
     pub fn last_n(&self, n: usize) -> Result<Vec<TurnRecord>, JournalError> {
-        let all = self.load_all()?;
-        let skip = all.len().saturating_sub(n);
-        Ok(all.into_iter().skip(skip).collect())
+        use std::io::BufRead;
+        let file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(JournalError::Io(e)),
+        };
+        let mut tail: std::collections::VecDeque<TurnRecord> =
+            std::collections::VecDeque::with_capacity(n.min(1024));
+        let mut first_line = true;
+        for line in std::io::BufReader::new(file).lines() {
+            // A torn final line carries no complete record.
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(_) => {
+                    first_line = false;
+                    continue;
+                }
+            };
+            if first_line && is_header_value(&value) {
+                first_line = false;
+                continue;
+            }
+            first_line = false;
+            if n == 0 {
+                continue;
+            }
+            if tail.len() == n {
+                tail.pop_front();
+            }
+            tail.push_back(migrate_record(&value));
+        }
+        Ok(tail.into_iter().collect())
     }
 }
 

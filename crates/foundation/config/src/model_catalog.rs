@@ -15,6 +15,12 @@ use std::path::{Path, PathBuf};
 
 use crate::provider::{ProviderConfig, ProviderKind};
 
+/// Per-process staging sequence: concurrent writers in this process
+/// never share one temp file, and the process id separates processes
+/// (a fixed staging name lets two writers clobber each other's bytes
+/// mid-write and rename half a file into place).
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// The API dialect a catalog model speaks. The spellings match the
 /// official protocol names; the config-TOML aliases resolve through
 /// [`ProviderKind`] separately.
@@ -238,7 +244,11 @@ impl ModelCatalog {
         }
         let content =
             serde_json::to_string_pretty(self).map_err(|e| CatalogError::Parse(e.to_string()))?;
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!(
+            "json.staging-{}-{}",
+            std::process::id(),
+            STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         #[cfg(unix)]
         {
             use std::io::Write as _;

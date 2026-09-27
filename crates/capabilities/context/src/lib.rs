@@ -731,18 +731,16 @@ fn evicted_result_stub(tool_use_id: &str, tool_name: Option<&str>) -> String {
 /// history), the evictable range is empty and the history passes through
 /// unchanged (saturating arithmetic, never panics).
 /// Estimated tokens of one text, using the same split accounting as
-/// [`estimate_tokens`]. Wrapping in a single-block message makes the flat
-/// per-message overhead cancel out of any difference of two such values.
+/// [`estimate_tokens`] without its per-message overhead. Only ever used
+/// as a difference of two such values, so dropping the flat +4 framing
+/// cost is semantics-preserving — and it allocates nothing, which
+/// matters: this runs per tool result on every budget check.
 fn text_tokens(text: &str) -> u64 {
-    estimate_tokens(
-        &[Message {
-            role: Role::User,
-            content: vec![ContentBlock::Text {
-                text: text.to_string(),
-            }],
-        }],
-        DEFAULT_CHARS_PER_TOKEN,
-    )
+    let mut ascii = 0u64;
+    let mut non_ascii = 0u64;
+    count_ascii_split(text, &mut ascii, &mut non_ascii);
+    let ratio = DEFAULT_CHARS_PER_TOKEN.max(1) as u64;
+    ascii / ratio + non_ascii
 }
 
 /// Tokens freed by stubbing every tool result in one message: payload cost

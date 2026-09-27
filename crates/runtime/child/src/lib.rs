@@ -48,6 +48,10 @@ use tokio::sync::Notify;
 /// oldest entry on overflow loses no result.
 pub const MAX_NOTIFICATIONS: usize = 64;
 
+/// Finished tasks kept queryable per runtime; older ones are reaped
+/// at spawn time so a long-lived process cannot grow the table forever.
+pub const MAX_FINISHED_TASKS: usize = 64;
+
 /// Maximum accepted child depth.
 ///
 /// Depth 0 is a top-level child spawned by the parent loop; each follow-up
@@ -220,10 +224,17 @@ struct TaskSlot {
     stop_requested: std::sync::atomic::AtomicBool,
     /// Interrupt handle observed by the running child work.
     stop: InterruptHandle,
-    /// Current lifecycle state.
-    state: Mutex<TaskState>,
-    /// Terminal result once finished.
-    result: Mutex<Option<TaskResult>>,
+    /// Lifecycle state plus terminal result under one lock, so a
+    /// query can never observe `Finished` with a missing result (or
+    /// a result ahead of its state) mid-transition.
+    inner: Mutex<SlotInner>,
+}
+
+/// The state/result pair a [`TaskView`] snapshot reads atomically.
+#[derive(Debug)]
+struct SlotInner {
+    state: TaskState,
+    result: Option<TaskResult>,
 }
 
 impl TaskSlot {
@@ -233,25 +244,24 @@ impl TaskSlot {
             parent,
             stop_requested: std::sync::atomic::AtomicBool::new(false),
             stop: InterruptHandle::new(),
-            state: Mutex::new(TaskState::Running),
-            result: Mutex::new(None),
+            inner: Mutex::new(SlotInner {
+                state: TaskState::Running,
+                result: None,
+            }),
         }
     }
 
     /// Recover guards after a poison; critical sections are single short
     /// writes that leave no half-written invariant behind.
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, TaskState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn lock_result(&self) -> std::sync::MutexGuard<'_, Option<TaskResult>> {
-        self.result.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, SlotInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Record the terminal result; the driver files the notification next.
     fn finish(&self, result: TaskResult) {
-        *self.lock_result() = Some(result);
-        *self.lock_state() = TaskState::Finished;
+        let mut inner = self.lock_inner();
+        inner.result = Some(result);
+        inner.state = TaskState::Finished;
     }
 
     fn stop_was_requested(&self) -> bool {
@@ -281,6 +291,33 @@ impl ChildRuntime {
         self.tasks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Keep the table bounded: finished tasks beyond the newest
+    /// [`MAX_FINISHED_TASKS`] are reaped oldest-first at spawn time,
+    /// mirroring the bounded notification queue. Running tasks are never
+    /// reaped, and a reaped id simply queries as unknown afterwards.
+    fn reap_finished_tasks(&self) {
+        let mut tasks = self.lock_tasks();
+        let finished: Vec<(usize, String)> = tasks
+            .iter()
+            .filter(|(_, slot)| matches!(slot.lock_inner().state, TaskState::Finished))
+            .filter_map(|(id, _)| {
+                id.strip_prefix("child-")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .map(|n| (n, id.clone()))
+            })
+            .collect();
+        // Leave one slot for the spawn that triggered this reap.
+        let bound = MAX_FINISHED_TASKS.saturating_sub(1);
+        if finished.len() <= bound {
+            return;
+        }
+        let mut finished = finished;
+        finished.sort();
+        for (_, id) in finished.iter().take(finished.len() - bound) {
+            tasks.remove(id);
+        }
+    }
+
     fn alloc_id(&self) -> String {
         let n = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         format!("child-{n}")
@@ -303,6 +340,7 @@ impl ChildRuntime {
         F: Future<Output = TaskResult> + Send + 'static,
         MakeWork: FnOnce(ChildTicket) -> F + Send + 'static,
     {
+        self.reap_finished_tasks();
         let id = self.alloc_id();
         if spec.depth > MAX_CHILD_DEPTH {
             let slot = Arc::new(TaskSlot::new(spec.depth, spec.parent));
@@ -371,9 +409,13 @@ impl ChildRuntime {
     /// the walk, so the chain is best-effort rather than exact.
     pub fn query(&self, task_id: &str) -> Option<TaskView> {
         let slot = self.lock_tasks().get(task_id).cloned()?;
+        let (state, result) = {
+            let inner = slot.lock_inner();
+            (inner.state, inner.result.clone())
+        };
         Some(TaskView {
-            state: *slot.lock_state(),
-            result: slot.lock_result().clone(),
+            state,
+            result,
             lineage: self.lineage_of(task_id),
         })
     }
@@ -653,5 +695,27 @@ mod tests {
         assert!(notes.iter().any(|n| n.contains("child-68")));
         assert!(!notes.iter().any(|n| n.contains("child-0")));
         assert!(rt.drain_notifications().is_empty());
+    }
+    /// Finished tasks beyond the newest bound are reaped oldest-first at
+    /// spawn time; running tasks are never touched.
+    #[tokio::test]
+    async fn finished_tasks_are_reaped_oldest_first() {
+        let rt = ChildRuntime::new();
+        let total = MAX_FINISHED_TASKS + 16;
+        for i in 0..total {
+            let id = rt.spawn_background(spec(&format!("task {i}")), |_| async {
+                TaskResult::completed("done", 1)
+            });
+            wait_until_finished(&rt, &id).await;
+        }
+        let map = rt.lock_tasks();
+        assert_eq!(
+            map.len(),
+            MAX_FINISHED_TASKS,
+            "the finished table stays at the bound"
+        );
+        // The reaped ids are the oldest: child-1 is gone, child-{total} remains.
+        assert!(!map.contains_key("child-1"));
+        assert!(map.contains_key(&format!("child-{total}")));
     }
 }

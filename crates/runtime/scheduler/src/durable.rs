@@ -4,7 +4,8 @@
  *
  * Responsibilities:
  * - Persist schedule entries to `<home>/.wavecode/schedule.json`.
- * - Reload entries on construct with fire-once missed-fire catch-up.
+ * - Reload entries on construct; missed fires are NOT replayed.
+ * - Refuse writes over an unreadable store so user schedules survive.
  * - Report running work as interrupted, never as resumed.
  *
  * This module must not depend on: any other workspace crate besides the
@@ -14,17 +15,19 @@
 //! Durable schedules: cron entries that survive restarts.
 //!
 //! Entries persist as one JSON file under `<home>/.wavecode/`. Loading an
-//! existing file restores every entry and marks each as one pending
-//! immediate fire: while the process was away at least the missed window
-//! is covered by firing once, then the normal cadence resumes. The host
-//! drains [`Scheduler::take_pending_fires`] and surfaces the returned
-//! count as a startup warning.
+//! existing file restores every entry; **missed fires during downtime are
+//! not replayed** — each entry simply fires at its next cron occurrence
+//! (the same default as cron and systemd timers). A store that cannot be
+//! read or parsed marks the scheduler [`Scheduler::degraded`]: adds and
+//! removals then fail instead of overwriting a schedule the host could
+//! not see.
 //!
 //! Running jobs are NOT persisted on purpose: OS processes cannot survive
 //! a restart, so any work in flight when the previous process died reads
 //! back as interrupted ([`Scheduler::interrupted`]), never as resumed.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::CronSpec;
 
@@ -64,6 +67,10 @@ pub enum SchedulePersistError {
     /// The store file is present but not valid JSON.
     #[error("schedule store corrupt: {0}")]
     Corrupt(String),
+    /// The store could not be read, so writes are refused: an add or
+    /// remove must never overwrite a schedule the host could not see.
+    #[error("schedule store unreadable; remove the file to start fresh")]
+    Degraded,
     /// Filesystem failure reading or writing the store.
     #[error("schedule store io: {0}")]
     Io(#[from] std::io::Error),
@@ -81,8 +88,9 @@ pub struct Scheduler {
     entries: Vec<ScheduleEntry>,
     /// Monotonic id allocator.
     next_id: u64,
-    /// Restored entry ids owed one immediate fire after a restart.
-    pending_fire_ids: Vec<String>,
+    /// The store exists but could not be read or parsed, so writes are
+    /// refused rather than risk overwriting schedules nobody has seen.
+    degraded: bool,
     /// True when a previous store existed, so its in-flight work died.
     interrupted: bool,
 }
@@ -94,10 +102,17 @@ impl Default for Scheduler {
             file: None,
             entries: Vec::new(),
             next_id: 1,
-            pending_fire_ids: Vec::new(),
+            degraded: false,
             interrupted: false,
         }
     }
+}
+
+/// Per-process staging sequence: two writers in this process never share
+/// a temp file (and the process id separates the processes).
+fn staging_seq() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Scheduler {
@@ -108,66 +123,45 @@ impl Scheduler {
 
     /// Load the persisted schedule or start empty.
     ///
-    /// Returns the scheduler plus the missed-fire catch-up count: one per
-    /// restored entry, each owed a single immediate fire before the normal
-    /// cadence resumes. A missing file loads empty with count zero and no
-    /// interruption; an unreadable or corrupt file loads empty, counts
-    /// zero, and still reports interrupted so the host warns that prior
-    /// state was lost.
-    pub fn load_or_default(home: &Path) -> (Self, u64) {
+    /// A missing file loads empty and clean; an unreadable or corrupt file
+    /// loads empty but [`Scheduler::degraded`] — the scheduler then refuses
+    /// writes so a schedule the host could not see is never overwritten.
+    pub fn load_or_default(home: &Path) -> Self {
         let file = Self::schedule_file_for_home(home);
         let text = match std::fs::read_to_string(&file) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return (
-                    Self {
-                        file: Some(file),
-                        ..Self::default()
-                    },
-                    0,
-                );
+                return Self {
+                    file: Some(file),
+                    ..Self::default()
+                };
             }
             Err(_) => {
-                return (
-                    Self {
-                        file: Some(file),
-                        interrupted: true,
-                        ..Self::default()
-                    },
-                    0,
-                );
+                return Self {
+                    file: Some(file),
+                    degraded: true,
+                    // A file on disk means a previous process may have held
+                    // running jobs; processes cannot survive the restart, so
+                    // they read as interrupted, never resumed.
+                    interrupted: true,
+                    ..Self::default()
+                };
             }
         };
         match serde_json::from_str::<ScheduleFile>(&text) {
-            Ok(stored) => {
-                let pending_fire_ids = stored
-                    .entries
-                    .iter()
-                    .map(|entry| entry.id.clone())
-                    .collect::<Vec<_>>();
-                let catchup = pending_fire_ids.len() as u64;
-                (
-                    Self {
-                        file: Some(file),
-                        entries: stored.entries,
-                        next_id: stored.next_id.max(1),
-                        pending_fire_ids,
-                        // A file on disk means a previous process may have
-                        // held running jobs; processes cannot survive the
-                        // restart, so they read as interrupted, never resumed.
-                        interrupted: true,
-                    },
-                    catchup,
-                )
-            }
-            Err(_) => (
-                Self {
-                    file: Some(file),
-                    interrupted: true,
-                    ..Self::default()
-                },
-                0,
-            ),
+            Ok(stored) => Self {
+                file: Some(file),
+                entries: stored.entries,
+                next_id: stored.next_id.max(1),
+                degraded: false,
+                interrupted: true,
+            },
+            Err(_) => Self {
+                file: Some(file),
+                degraded: true,
+                interrupted: true,
+                ..Self::default()
+            },
         }
     }
 
@@ -176,9 +170,11 @@ impl Scheduler {
         &self.entries
     }
 
-    /// Restored entries still owed their one immediate post-restart fire.
-    pub fn catchup_pending(&self) -> usize {
-        self.pending_fire_ids.len()
+    /// True when the store exists but could not be read or parsed: writes
+    /// are refused so the user's schedule on disk is never overwritten by
+    /// a view of it that failed to load.
+    pub fn degraded(&self) -> bool {
+        self.degraded
     }
 
     /// True when a previous store existed, so its in-flight work died with
@@ -187,16 +183,9 @@ impl Scheduler {
         self.interrupted
     }
 
-    /// Drain entries owed one immediate fire; the host fires each once,
-    /// then resumes the normal cadence.
-    pub fn take_pending_fires(&mut self) -> Vec<ScheduleEntry> {
-        let ids = std::mem::take(&mut self.pending_fire_ids);
-        ids.into_iter()
-            .filter_map(|id| self.entries.iter().find(|entry| entry.id == id).cloned())
-            .collect()
-    }
-
-    /// Add one entry, validating the cron expression, and persist.
+    /// Add one entry, validating the cron expression, and persist. The
+    /// write lands before the in-memory commit: a failed persist leaves
+    /// the scheduler exactly as it was.
     pub fn add(&mut self, cron: &str, input: &str) -> Result<ScheduleEntry, SchedulePersistError> {
         if CronSpec::parse(cron).is_err() {
             return Err(SchedulePersistError::InvalidCron(cron.to_string()));
@@ -206,43 +195,64 @@ impl Scheduler {
             cron: cron.to_string(),
             input: input.to_string(),
         };
+        let mut entries = self.entries.clone();
+        entries.push(entry.clone());
+        self.persist_snapshot(&entries, self.next_id + 1)?;
         self.next_id += 1;
-        self.entries.push(entry.clone());
-        self.persist()?;
+        self.entries = entries;
         Ok(entry)
     }
 
-    /// Remove one entry by id, persisting; false for unknown ids.
+    /// Remove one entry by id, persisting; false for unknown ids. The
+    /// write lands before the in-memory commit, so a failed persist keeps
+    /// the entry.
     pub fn remove(&mut self, id: &str) -> Result<bool, SchedulePersistError> {
-        let before = self.entries.len();
-        self.entries.retain(|entry| entry.id != id);
-        self.pending_fire_ids.retain(|pending| pending != id);
-        if self.entries.len() == before {
+        let mut entries = self.entries.clone();
+        let before = entries.len();
+        entries.retain(|entry| entry.id != id);
+        if entries.len() == before {
             return Ok(false);
         }
-        self.persist()?;
+        self.persist_snapshot(&entries, self.next_id)?;
+        self.entries = entries;
         Ok(true)
     }
 
-    /// Write the store atomically: sibling temp file plus rename, so a
-    /// crash never leaves a half-written schedule behind. Memory-only
-    /// schedulers (no file) skip the write.
-    fn persist(&self) -> Result<(), SchedulePersistError> {
+    /// Write the store atomically: a unique sibling staging file plus
+    /// rename, so a crash never leaves a half-written schedule behind and
+    /// concurrent writers never clobber each other's staging file.
+    /// Degraded schedulers refuse to write at all. Memory-only schedulers
+    /// (no file) skip the write.
+    fn persist_snapshot(
+        &self,
+        entries: &[ScheduleEntry],
+        next_id: u64,
+    ) -> Result<(), SchedulePersistError> {
         let Some(path) = self.file.as_deref() else {
             return Ok(());
         };
+        if self.degraded {
+            return Err(SchedulePersistError::Degraded);
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let stored = ScheduleFile {
-            entries: self.entries.clone(),
-            next_id: self.next_id,
+            entries: entries.to_vec(),
+            next_id,
         };
         let text = serde_json::to_string_pretty(&stored)
             .map_err(|e| SchedulePersistError::Corrupt(e.to_string()))?;
-        let staging = path.with_extension("json.staging-tmp");
+        let staging = path.with_extension(format!(
+            "json.staging-{}-{}",
+            std::process::id(),
+            staging_seq()
+        ));
         std::fs::write(&staging, text)?;
-        std::fs::rename(&staging, path)?;
+        if let Err(e) = std::fs::rename(&staging, path) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(e.into());
+        }
         Ok(())
     }
 }
@@ -258,9 +268,9 @@ mod tests {
     #[test]
     fn persist_reload_round_trip_keeps_entries_and_ids() {
         let dir = home();
-        let (mut scheduler, catchup) = Scheduler::load_or_default(dir.path());
-        assert_eq!(catchup, 0);
+        let mut scheduler = Scheduler::load_or_default(dir.path());
         assert!(!scheduler.interrupted());
+        assert!(!scheduler.degraded());
         assert!(scheduler.entries().is_empty());
 
         let first = scheduler.add("0 9 * * *", "morning sync").expect("add");
@@ -268,69 +278,77 @@ mod tests {
         assert_eq!(first.id, "sched-1");
         assert_eq!(second.id, "sched-2");
 
-        let (reloaded, catchup) = Scheduler::load_or_default(dir.path());
-        assert_eq!(catchup, 2);
+        let mut reloaded = Scheduler::load_or_default(dir.path());
         assert!(reloaded.interrupted());
         assert_eq!(reloaded.entries(), scheduler.entries());
 
         // Ids stay monotonic across the restart, never reused.
-        let mut reloaded = reloaded;
         let third = reloaded.add("30 12 * * *", "noon").expect("add");
         assert_eq!(third.id, "sched-3");
     }
 
+    /// Missed fires during downtime are NOT replayed: a restart restores
+    /// the entries and nothing more, and the next cron occurrence fires.
     #[test]
-    fn missed_fire_catch_up_fires_each_entry_once() {
+    fn restart_replays_no_missed_fires() {
         let dir = home();
-        let (mut scheduler, _) = Scheduler::load_or_default(dir.path());
+        let mut scheduler = Scheduler::load_or_default(dir.path());
         scheduler.add("0 9 * * *", "a").expect("add");
         scheduler.add("0 10 * * *", "b").expect("add");
-        scheduler.add("0 11 * * *", "c").expect("add");
 
-        let (mut reloaded, catchup) = Scheduler::load_or_default(dir.path());
-        assert_eq!(catchup, 3);
-        assert_eq!(reloaded.catchup_pending(), 3);
-        let fires = reloaded.take_pending_fires();
-        assert_eq!(fires.len(), 3);
-        assert_eq!(reloaded.catchup_pending(), 0);
-        // Draining is one-shot: the cadence resumes with no backlog.
-        assert!(reloaded.take_pending_fires().is_empty());
+        let reloaded = Scheduler::load_or_default(dir.path());
+        assert_eq!(reloaded.entries().len(), 2);
+        assert!(
+            reloaded.interrupted(),
+            "in-flight work reads as interrupted"
+        );
+        // There is no catch-up backlog to drain by construction.
+        assert!(!reloaded.degraded());
     }
 
     #[test]
     fn invalid_cron_rejects_without_persisting() {
         let dir = home();
-        let (mut scheduler, _) = Scheduler::load_or_default(dir.path());
+        let mut scheduler = Scheduler::load_or_default(dir.path());
         assert!(matches!(
             scheduler.add("not a cron", "x"),
             Err(SchedulePersistError::InvalidCron(_))
         ));
         assert!(scheduler.entries().is_empty());
-        let (reloaded, _) = Scheduler::load_or_default(dir.path());
+        let reloaded = Scheduler::load_or_default(dir.path());
         assert!(reloaded.entries().is_empty());
     }
 
     #[test]
     fn remove_persists_and_reports_unknown_ids() {
         let dir = home();
-        let (mut scheduler, _) = Scheduler::load_or_default(dir.path());
+        let mut scheduler = Scheduler::load_or_default(dir.path());
         let entry = scheduler.add("0 9 * * *", "a").expect("add");
         assert!(!scheduler.remove("sched-999").expect("remove unknown"));
         assert!(scheduler.remove(&entry.id).expect("remove known"));
-        let (reloaded, _) = Scheduler::load_or_default(dir.path());
+        let reloaded = Scheduler::load_or_default(dir.path());
         assert!(reloaded.entries().is_empty());
     }
 
     #[test]
-    fn corrupt_store_loads_empty_but_interrupted() {
+    fn corrupt_store_loads_degraded_and_refuses_writes() {
         let dir = home();
         let path = Scheduler::schedule_file_for_home(dir.path());
         std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&path, "{not json").expect("write corrupt");
-        let (scheduler, catchup) = Scheduler::load_or_default(dir.path());
-        assert_eq!(catchup, 0);
+        let mut scheduler = Scheduler::load_or_default(dir.path());
         assert!(scheduler.entries().is_empty());
         assert!(scheduler.interrupted());
+        assert!(scheduler.degraded());
+        // Writes are refused: a schedule the host could not see must never
+        // be overwritten by a view of it that failed to load.
+        assert!(matches!(
+            scheduler.add("0 9 * * *", "a"),
+            Err(SchedulePersistError::Degraded)
+        ));
+        assert!(scheduler.entries().is_empty(), "nothing was committed");
+        let reloaded = Scheduler::load_or_default(dir.path());
+        assert!(reloaded.degraded(), "the corrupt file is untouched");
     }
 
     #[test]

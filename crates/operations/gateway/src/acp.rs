@@ -334,6 +334,9 @@ async fn dispatch_line<W, F, S>(
         "session/set_mode" => {
             set_mode(&id, &params, sessions, writer).await;
         }
+        "session/release" => {
+            release_session(&id, &params, sessions, writer).await;
+        }
         _ => {
             write_error(
                 writer,
@@ -656,6 +659,45 @@ async fn set_mode<W>(
             write_success(writer, id, serde_json::Value::Null).await;
         }
     }
+}
+
+/// Drop a session and free its task: the entry (and its job sender)
+/// leaves the map, so the session task sees the channel close and runs
+/// its bounded shutdown. Long-running hosts (editor integrations) call
+/// this per closed conversation; without it every session would stay
+/// parked in the map until process exit.
+async fn release_session<W>(
+    id: &serde_json::Value,
+    params: &serde_json::Value,
+    sessions: &mut HashMap<String, SessionEntry>,
+    writer: &Arc<Mutex<W>>,
+) where
+    W: AsyncWrite + Unpin,
+{
+    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+        Some(session_id) => session_id,
+        None => {
+            write_error(
+                writer,
+                id,
+                INVALID_PARAMS,
+                "invalid params: session/release requires a string sessionId",
+            )
+            .await;
+            return;
+        }
+    };
+    if sessions.remove(session_id).is_none() {
+        write_error(
+            writer,
+            id,
+            INVALID_PARAMS,
+            format!("invalid params: unknown sessionId {session_id:?}"),
+        )
+        .await;
+        return;
+    }
+    write_success(writer, id, serde_json::Value::Null).await;
 }
 
 /// Answer a deferred prompt once its turn ends.
@@ -1697,5 +1739,30 @@ mod tests {
             )
             .await;
         assert!(init.get("result").is_some());
+    }
+    /// `session/release` drops the session: the reply acknowledges, and
+    /// later prompts on the released id fail as unknown sessions — a
+    /// long-running host must be able to reclaim sessions.
+    #[tokio::test]
+    async fn release_drops_the_session_and_frees_the_id() {
+        let (mut h, _server) = spawn_server(vec![]).await;
+        let session = h.new_session(serde_json::json!({})).await;
+        let reply = h
+            .request("session/release", serde_json::json!({"sessionId": session}))
+            .await;
+        assert_eq!(reply.pointer("/result"), Some(&serde_json::Value::Null));
+        let late = h
+            .request(
+                "session/prompt",
+                serde_json::json!({"sessionId": session, "prompt": "hi"}),
+            )
+            .await;
+        assert!(
+            late.pointer("/error/message")
+                .and_then(|m| m.as_str())
+                .unwrap_or_default()
+                .contains("unknown sessionId"),
+            "the released session must be gone: {late:?}"
+        );
     }
 }

@@ -60,6 +60,12 @@ pub struct GrantsRead {
 }
 
 /// Where the table lives, for status and doctor output.
+/// Per-process staging sequence: concurrent writers in this process
+/// never share one temp file, and the process id separates processes
+/// (a fixed staging name lets two writers clobber each other's bytes
+/// mid-write and rename half a file into place).
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn grants_path(home: &Path) -> PathBuf {
     home.join(".wavecode").join(GRANTS_FILE)
 }
@@ -83,6 +89,10 @@ pub fn load_grants(home: &Path) -> GrantsRead {
             continue;
         }
         match serde_json::from_str::<Grant>(line) {
+            // A stored wildcard would re-parse as a wildcard rule and
+            // silently widen the allow surface; the write path refuses
+            // them, and the load path drops them for the same reason.
+            Ok(grant) if grant.rule.contains(['*', '?']) => malformed += 1,
             Ok(grant) if !grants.iter().any(|seen: &Grant| seen.rule == grant.rule) => {
                 grants.push(grant)
             }
@@ -173,7 +183,11 @@ fn rewrite(home: &Path, grants: &[Grant]) -> Result<(), GrantError> {
         text.push_str(&line);
         text.push('\n');
     }
-    let tmp = path.with_extension("jsonl.tmp");
+    let tmp = path.with_extension(format!(
+        "jsonl.staging-{}-{}",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, &path)?;
     Ok(())

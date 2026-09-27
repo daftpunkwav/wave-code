@@ -1,0 +1,10 @@
+{"id":"s1","type":"turn_started","model":"m"}
+{"id":"s1","type":"agent_message_delta","text":"running"}
+{"id":"s1","type":"agent_message_complete","text":"running the check"}
+{"id":"s1","type":"tool_call_begin","call_id":"c1","name":"shell","input":{"command":"ls"}}
+{"id":"s1","type":"tool_call_end","call_id":"c1","is_error":false,"output":null,"outcome":"executed","duration_ms":3}
+{"id":"s1","type":"agent_message_delta","text":"again"}
+{"id":"s1","type":"agent_message_complete","text":"all done"}
+{"id":"s1","type":"token_count","input_tokens":10,"output_tokens":4,"cache_read_tokens":0,"cache_creation_tokens":0,"context_window":null,"context_used":null}
+{"id":"s1","type":"token_count","input_tokens":20,"output_tokens":6,"cache_read_tokens":0,"cache_creation_tokens":0,"context_window":null,"context_used":null}
+{"id":"s1","type":"turn_completed","interrupted":false}

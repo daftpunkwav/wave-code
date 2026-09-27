@@ -21,6 +21,18 @@
 /// Maximum characters kept from the skill catalog by default.
 pub const DEFAULT_CATALOG_BUDGET: usize = 4_000;
 
+/// Section titles shared by both assemblers: a rename updates one
+/// table, never a scattered set of literals.
+mod titles {
+    pub const IDENTITY: &str = "Identity";
+    pub const INSTRUCTIONS: &str = "Project Instructions";
+    pub const MEMORY: &str = "Memory Index";
+    pub const SKILLS: &str = "Skills";
+    pub const TOOLS: &str = "Tools";
+    pub const ENVIRONMENT: &str = "Environment";
+    pub const SUMMARY: &str = "Conversation Summary";
+}
+
 /// Named content slots assembled into one system prompt.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PromptSlots {
@@ -75,25 +87,6 @@ impl Budget {
     }
 }
 
-/// All candidate slots before budgeting.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SourceBundle {
-    /// Agent identity and operating rules.
-    pub identity: String,
-    /// Project instructions.
-    pub instructions: String,
-    /// Persistent memory index snapshot.
-    pub memory_index: String,
-    /// Full skill catalog before truncation.
-    pub skill_catalog: String,
-    /// Tool availability note.
-    pub tool_note: String,
-    /// Environment facts (OS, shell, working directory, session date).
-    pub environment: String,
-    /// Compaction summary carried from the previous window.
-    pub summary: String,
-}
-
 /// Budgeted assembly result with honest accounting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assembled {
@@ -113,16 +106,16 @@ pub struct Assembled {
 /// instructions, memory); the skill catalog fills whatever remains.
 /// Over-budget fixed sections drop lowest-priority first and report
 /// every drop — callers never silently lose instructions.
-pub fn assemble_budgeted(bundle: &SourceBundle, budget: &Budget) -> Assembled {
+pub fn assemble_budgeted(slots: &PromptSlots, budget: &Budget) -> Assembled {
     let mut available = budget.system_chars();
     // Fixed sections in keep-priority order with their slot titles.
     let fixed: &[(&str, &str)] = &[
-        ("Identity", &bundle.identity),
-        ("Conversation Summary", &bundle.summary),
-        ("Environment", &bundle.environment),
-        ("Tools", &bundle.tool_note),
-        ("Project Instructions", &bundle.instructions),
-        ("Memory Index", &bundle.memory_index),
+        (titles::IDENTITY, &slots.identity),
+        (titles::SUMMARY, &slots.summary),
+        (titles::ENVIRONMENT, &slots.environment),
+        (titles::TOOLS, &slots.tool_note),
+        (titles::INSTRUCTIONS, &slots.instructions),
+        (titles::MEMORY, &slots.memory_index),
     ];
     let mut kept: Vec<(&str, String)> = Vec::new();
     let mut dropped = Vec::new();
@@ -142,16 +135,16 @@ pub fn assemble_budgeted(bundle: &SourceBundle, budget: &Budget) -> Assembled {
         }
     }
     // The catalog takes the leftovers, truncated with a marker.
-    let catalog = bundle.skill_catalog.trim();
+    let catalog = slots.skill_catalog.trim();
     let mut catalog_truncated = false;
     if !catalog.is_empty() {
         if catalog.chars().count() + 10 <= available {
-            kept.push(("Skills", catalog.to_string()));
+            kept.push((titles::SKILLS, catalog.to_string()));
         } else if available > 20 {
-            kept.push(("Skills", truncate_to_budget(catalog, available - 20)));
+            kept.push((titles::SKILLS, truncate_to_budget(catalog, available - 20)));
             catalog_truncated = true;
         } else {
-            dropped.push("Skills");
+            dropped.push(titles::SKILLS);
         }
     }
     let mut system = String::new();
@@ -180,13 +173,13 @@ pub fn assemble_budgeted(bundle: &SourceBundle, budget: &Budget) -> Assembled {
 /// golden tests stay stable across refactors.
 pub fn build_system(slots: &PromptSlots) -> String {
     let sections = [
-        ("Identity", &slots.identity),
-        ("Project Instructions", &slots.instructions),
-        ("Memory Index", &slots.memory_index),
-        ("Skills", &slots.skill_catalog),
-        ("Tools", &slots.tool_note),
-        ("Environment", &slots.environment),
-        ("Conversation Summary", &slots.summary),
+        (titles::IDENTITY, &slots.identity),
+        (titles::INSTRUCTIONS, &slots.instructions),
+        (titles::MEMORY, &slots.memory_index),
+        (titles::SKILLS, &slots.skill_catalog),
+        (titles::TOOLS, &slots.tool_note),
+        (titles::ENVIRONMENT, &slots.environment),
+        (titles::SUMMARY, &slots.summary),
     ];
     let mut out = String::new();
     for (title, body) in sections {
@@ -261,8 +254,8 @@ mod tests {
         assert_eq!(truncate_to_budget("short", 10), "short");
     }
 
-    fn bundle() -> SourceBundle {
-        SourceBundle {
+    fn bundle() -> PromptSlots {
+        PromptSlots {
             identity: "i".to_string(),
             instructions: "do good".to_string(),
             memory_index: "m".to_string(),

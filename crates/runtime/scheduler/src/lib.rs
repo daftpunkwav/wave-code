@@ -171,6 +171,10 @@ impl CronField {
 /// Civil time for cron matching, supplied by the caller clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CivilTime {
+    /// Year, for the fire edge key only: two matching minutes one year
+    /// apart must not share one dedup slot. Cron expressions carry no
+    /// year, so matching itself ignores this field.
+    pub year: u16,
     /// Minute of hour, 0-59.
     pub minute: u8,
     /// Hour of day, 0-23.
@@ -364,6 +368,7 @@ mod tests {
         let any = CronSpec::parse("* * * * *").unwrap();
         let nine = CronSpec::parse("0 9 * * *").unwrap();
         let morning = CivilTime {
+            year: 2026,
             minute: 0,
             hour: 9,
             day: 1,
@@ -371,6 +376,7 @@ mod tests {
             weekday: 1,
         };
         let evening = CivilTime {
+            year: 2026,
             minute: 0,
             hour: 21,
             day: 1,
@@ -408,6 +414,7 @@ mod tests {
     fn cron_daemon_fires_once_per_matching_minute() {
         let mut daemon = CronDaemon::new(CronSpec::parse("0 9 * * *").unwrap());
         let morning = CivilTime {
+            year: 2026,
             minute: 0,
             hour: 9,
             day: 1,
@@ -417,6 +424,7 @@ mod tests {
         assert!(daemon.tick(morning));
         assert!(!daemon.tick(morning));
         let evening = CivilTime {
+            year: 2026,
             minute: 0,
             hour: 21,
             day: 1,
@@ -430,6 +438,7 @@ mod tests {
     fn cron_daemon_fires_matching_minutes_across_months() {
         let mut daemon = CronDaemon::new(CronSpec::parse("0 9 1 * *").unwrap());
         let january = CivilTime {
+            year: 2026,
             minute: 0,
             hour: 9,
             day: 1,
@@ -437,6 +446,7 @@ mod tests {
             weekday: 3,
         };
         let february = CivilTime {
+            year: 2026,
             month: 2,
             weekday: 6,
             ..january
@@ -455,6 +465,33 @@ mod tests {
         assert_eq!(gate.available(), 0);
         drop(_first);
         assert_eq!(gate.available(), 1);
+    }
+
+    /// Matching minutes one year apart fire independently: the dedup
+    /// key includes the year even though cron has no year field.
+    #[test]
+    fn same_minute_next_year_fires_again() {
+        let spec = CronSpec::parse("0 9 * * *").expect("cron");
+        let mut daemon = CronDaemon::new(spec);
+        let a = CivilTime {
+            year: 2026,
+            minute: 0,
+            hour: 9,
+            day: 1,
+            month: 6,
+            weekday: 1,
+        };
+        let b = CivilTime {
+            year: 2027,
+            minute: 0,
+            hour: 9,
+            day: 1,
+            month: 6,
+            weekday: 2,
+        };
+        assert!(daemon.tick(a));
+        assert!(!daemon.tick(a));
+        assert!(daemon.tick(b), "the 2027 occurrence must fire");
     }
 }
 

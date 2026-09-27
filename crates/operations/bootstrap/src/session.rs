@@ -859,17 +859,18 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // Workflow engine (fan-out DAG runs plus Ralph loops) and durable
     // schedules ride the same child handle: schedules persist under
     // `<home>/.wavecode/schedule.json` so cron entries survive restarts.
-    // Restored entries each owe one immediate fire covering the missed
-    // window before the cadence resumes; running jobs are never persisted,
-    // so a previous process's in-flight work reads as interrupted.
-    let (scheduler_state, schedule_catchup) = match home.as_deref() {
+    // Missed fires during downtime are not replayed — each entry fires at
+    // its next cron occurrence; running jobs are never persisted, so a
+    // previous process's in-flight work reads as interrupted.
+    let scheduler_state = match home.as_deref() {
         Some(home_dir) => runtime_scheduler::Scheduler::load_or_default(home_dir),
-        None => (runtime_scheduler::Scheduler::default(), 0),
+        None => runtime_scheduler::Scheduler::default(),
     };
-    if schedule_catchup > 0 {
-        warnings.push(format!(
-            "schedule missed {schedule_catchup} fire(s) while away; each restored entry fires once, then the cadence resumes"
-        ));
+    if scheduler_state.degraded() {
+        warnings.push(
+            "schedule store is unreadable; schedule changes are disabled until the file is removed"
+                .to_string(),
+        );
     }
     let scheduler = Arc::new(Mutex::new(scheduler_state));
     registry.register(Arc::new(action_workflow::tools::WorkflowRunTool::new(

@@ -39,6 +39,10 @@ pub enum PluginError {
     /// A plugin name is blank after trimming.
     #[error("plugin name is blank")]
     BlankName,
+    /// A plugin panicked during `on_load`; the partial start was rolled
+    /// back before this error returned.
+    #[error("plugin {plugin} panicked during on_load; the partial start was rolled back")]
+    Panicked { plugin: String },
     /// A plugin depends on a name that was never registered.
     #[error("plugin {plugin} depends on missing plugin {dep}")]
     MissingDep { plugin: String, dep: String },
@@ -199,14 +203,32 @@ impl Registry {
             return Ok(());
         }
         let order = self.resolve_order()?;
-        for name in &order {
+        for (index, name) in order.iter().enumerate() {
             let entry = &self.entries[name.as_str()];
-            entry.plugin.on_load();
-            let mut owned = Vec::new();
-            for service in entry.plugin.services() {
-                owned.push(service.service_id());
-                self.services.insert_erased(service);
-            }
+            // A panicking `on_load` must not strand the plugins already
+            // loaded: the unwind is caught, the partial start rolls back
+            // in reverse (so `on_unload` runs and services are withdrawn),
+            // and the registry stays unstarted.
+            let loaded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                entry.plugin.on_load();
+                let mut owned = Vec::new();
+                for service in entry.plugin.services() {
+                    owned.push(service.service_id());
+                    self.services.insert_erased(service);
+                }
+                owned
+            }));
+            let owned = match loaded {
+                Ok(owned) => owned,
+                Err(_) => {
+                    for earlier in order[..index].iter().rev() {
+                        self.unload(earlier);
+                    }
+                    return Err(PluginError::Panicked {
+                        plugin: name.clone(),
+                    });
+                }
+            };
             self.owners.insert(name.clone(), owned);
         }
         self.order = order;
@@ -493,6 +515,33 @@ mod tests {
         }
     }
 
+    /// A probe whose `on_load` panics once `panic_on_load` is set.
+    struct PanickyProbe {
+        inner: Probe,
+        panic_on_load: bool,
+    }
+
+    impl Plugin for PanickyProbe {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn version(&self) -> &str {
+            self.inner.version()
+        }
+        fn services(&self) -> Vec<Arc<dyn AnyService>> {
+            self.inner.services()
+        }
+        fn on_load(&self) {
+            if self.panic_on_load {
+                panic!("on_load exploded");
+            }
+            self.inner.on_load();
+        }
+        fn on_unload(&self) {
+            self.inner.on_unload();
+        }
+    }
+
     impl Plugin for Probe {
         fn name(&self) -> &str {
             &self.name
@@ -654,5 +703,42 @@ mod tests {
         let registry = load_and_start(None, &mut warnings);
         assert!(registry.is_empty());
         assert!(warnings.is_empty());
+    }
+    /// A panicking `on_load` rolls back the already-started plugins in
+    /// reverse (their `on_unload` runs, services withdrawn) and leaves
+    /// the registry unstarted — a half-started registry must not lose
+    /// its teardown bookkeeping.
+    #[test]
+    fn panicking_on_load_rolls_back_the_partial_start() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = Registry::new();
+        registry
+            .register(Arc::new(Probe::named("first", &log)), vec![])
+            .unwrap();
+        registry
+            .register(
+                Arc::new(PanickyProbe {
+                    inner: Probe::named("second", &log),
+                    panic_on_load: true,
+                }),
+                vec!["first".to_string()],
+            )
+            .unwrap();
+        let error = registry.start().unwrap_err();
+        assert!(
+            matches!(error, PluginError::Panicked { ref plugin } if plugin == "second"),
+            "{error}"
+        );
+        // Reverse-order rollback: the started plugin unloaded again,
+        // and the registry is clean for a fresh `start` after a fix.
+        assert_eq!(
+            logged(&log),
+            // The panicking plugin never logs its load; the started one unloads.
+            vec!["load:first", "unload:first"],
+            "{:?}",
+            logged(&log)
+        );
+        assert!(registry.load_order().is_empty());
+        assert!(registry.services().get::<ServiceA>().is_none());
     }
 }

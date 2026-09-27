@@ -62,6 +62,12 @@ pub enum SessionError {
 }
 
 /// Sessions root: `~/.wavecode/sessions/`.
+/// Per-process staging sequence: concurrent writers in this process
+/// never share one temp file, and the process id separates processes
+/// (a fixed staging name lets two writers clobber each other's bytes
+/// mid-write and rename half a file into place).
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn sessions_dir(home: &Path) -> PathBuf {
     home.join(".wavecode").join(SESSIONS_DIR)
 }
@@ -106,7 +112,10 @@ pub fn child_journal_file(home: &Path, parent: &str, child: &str) -> Option<Path
 }
 
 /// Directory holding one session's child-task journals.
-pub fn child_journal_dir(home: &Path, parent: &str) -> PathBuf {
+/// Crate-private: callers must go through the validating entry points
+/// (`record_child_turn` / `child_journal_path`) so an unvalidated id
+/// can never reach the path.
+pub(crate) fn child_journal_dir(home: &Path, parent: &str) -> PathBuf {
     sessions_dir(home).join(CHILDREN_DIR).join(parent)
 }
 
@@ -215,7 +224,11 @@ fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     // Write-then-rename keeps a crash mid-write from truncating the
     // index: a truncated index reads as empty, and the next write would
     // then drop every other session's entry for good.
-    let tmp = index_path(home).with_extension("json.tmp");
+    let tmp = index_path(home).with_extension(format!(
+        "json.staging-{}-{}",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, index_path(home))?;
     Ok(())

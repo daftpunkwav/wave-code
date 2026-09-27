@@ -343,7 +343,7 @@ mod tests {
     }
 
     fn scheduler_in(home: &std::path::Path) -> Arc<Mutex<Scheduler>> {
-        let (scheduler, _) = Scheduler::load_or_default(home);
+        let scheduler = Scheduler::load_or_default(home);
         Arc::new(Mutex::new(scheduler))
     }
 
@@ -477,7 +477,7 @@ mod tests {
         assert!(unknown.is_error);
 
         // Removal persisted: a fresh load in the same home stays empty.
-        let (reloaded, _) = Scheduler::load_or_default(home.path());
+        let reloaded = Scheduler::load_or_default(home.path());
         assert!(reloaded.entries().is_empty());
     }
 }

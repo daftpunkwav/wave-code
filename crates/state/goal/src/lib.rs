@@ -26,6 +26,12 @@
 //! stays the single writer. State survives resume because the file path
 //! derives from the home directory.
 
+/// Per-process staging sequence: concurrent writers in this process
+/// never share one temp file, and the process id separates processes
+/// (a fixed staging name lets two writers clobber each other's bytes
+/// mid-write and rename half a file into place).
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub mod tool;
 
 use std::path::{Path, PathBuf};
@@ -470,7 +476,11 @@ pub fn save_to_path(state: &GoalState, path: &Path) -> Result<(), GoalError> {
     let text = serde_json::to_string_pretty(state).map_err(|e| GoalError::Corrupt {
         message: e.to_string(),
     })?;
-    let staging = path.with_extension("json.staging-tmp");
+    let staging = path.with_extension(format!(
+        "json.staging-{}-{}",
+        std::process::id(),
+        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&staging, text)?;
     std::fs::rename(&staging, path)?;
     Ok(())

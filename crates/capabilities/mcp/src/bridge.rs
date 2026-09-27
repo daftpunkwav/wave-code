@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::{
     McpClient, McpError, McpPromptDef, McpPromptMessage, McpResourceContent, McpResourceDef,
@@ -829,10 +830,31 @@ impl ServerSpec {
 /// connection. Protocol errors (bad frames, JSON-RPC errors) never
 /// heal: the server is reachable and the problem is not the connection.
 /// Capability gates use the first handshake's snapshot (`connect`).
+/// Cooldown base for the reconnect backoff: the first heal is immediate,
+/// each consecutive transport failure doubles the wait (capped at 8s).
+const RECONNECT_COOLDOWN_BASE_MS: u64 = 250;
+const RECONNECT_COOLDOWN_MAX_SHIFTS: u32 = 5;
+
+/// Exponential cooldown: `250ms << min(streak, 5)`.
+fn reconnect_cooldown(streak: u32) -> Duration {
+    Duration::from_millis(
+        RECONNECT_COOLDOWN_BASE_MS
+            .saturating_mul(1u64 << streak.min(RECONNECT_COOLDOWN_MAX_SHIFTS)),
+    )
+}
+
+/// Consecutive-failure bookkeeping behind the reconnect cooldown.
+#[derive(Default)]
+struct HealState {
+    streak: u32,
+    last_heal: Option<Instant>,
+}
+
 struct ResilientMcpClient {
     live: tokio::sync::Mutex<Arc<dyn RpcClient>>,
     spec: ServerSpec,
     initial_caps: ServerCaps,
+    heal_state: tokio::sync::Mutex<HealState>,
 }
 
 impl ResilientMcpClient {
@@ -845,6 +867,7 @@ impl ResilientMcpClient {
                 live: tokio::sync::Mutex::new(client),
                 spec,
                 initial_caps: caps,
+                heal_state: tokio::sync::Mutex::new(HealState::default()),
             },
             caps,
         ))
@@ -871,8 +894,25 @@ impl ResilientMcpClient {
     {
         let client = self.live.lock().await.clone();
         match op(client).await {
-            Ok(value) => Ok(value),
+            Ok(value) => {
+                *self.heal_state.lock().await = HealState::default();
+                Ok(value)
+            }
             Err(McpError::Transport(reason)) => {
+                // Back the heal off: a dead server must not cost a
+                // full spawn + `initialize` handshake on every call.
+                {
+                    let mut state = self.heal_state.lock().await;
+                    let cooldown = reconnect_cooldown(state.streak);
+                    if state.last_heal.is_some_and(|t| t.elapsed() < cooldown) {
+                        return Err(McpError::Transport(format!(
+                            "reconnect to MCP server {} is cooling down for another {cooldown:?}: {reason}",
+                            self.spec.name()
+                        )));
+                    }
+                    state.streak = state.streak.saturating_add(1);
+                    state.last_heal = Some(Instant::now());
+                }
                 let mut guard = self.live.lock().await;
                 let fresh = self.spec.connect().await.map_err(|e| {
                     McpError::Transport(format!(
@@ -1609,6 +1649,82 @@ mod tests {
         );
     }
 
+    /// Consecutive transport failures back the heal off: inside the
+    /// cooldown window the second call refuses to reconnect; once the
+    /// window passes, the heal happens again.
+    #[tokio::test]
+    async fn reconnect_backs_off_while_the_cooldown_runs() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        // Every connection fails its first three calls, so a call that
+        // lands on the same connection keeps the failure streak alive;
+        // the third connection finally answers.
+        let make = move |n: usize| {
+            if n <= 1 {
+                vec![
+                    Err(McpError::Transport("down".to_string())),
+                    Err(McpError::Transport("down".to_string())),
+                    Err(McpError::Transport("down".to_string())),
+                ]
+            } else {
+                vec![]
+            }
+        };
+        let (client, _) = ResilientMcpClient::connect(scripted_connect(
+            std::sync::Arc::new(make),
+            connects.clone(),
+        ))
+        .await
+        .unwrap();
+        // First call: immediate heal (connects: 2), whose retry also fails.
+        assert!(
+            client
+                .rpc("tools/list", serde_json::json!({}))
+                .await
+                .is_err()
+        );
+        assert_eq!(connects.load(Ordering::SeqCst), 2);
+        // Second call inside the cooldown: refused without a reconnect.
+        let error = client
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, McpError::Transport(reason) if reason.contains("cooling down")),
+            "the cooldown must gate the heal: {error}"
+        );
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            2,
+            "no reconnect inside the cooldown window"
+        );
+        // Once the window passes the heal happens again (connects: 3) and
+        // the fresh connection answers.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        let answer = client
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(answer, serde_json::json!({}));
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            3,
+            "the expired cooldown allows the heal"
+        );
+    }
+
+    /// Cooldown doubles per consecutive failure and caps at the shift
+    /// bound (250ms base, 8s ceiling).
+    #[test]
+    fn reconnect_cooldown_doubles_and_caps() {
+        assert_eq!(reconnect_cooldown(0), Duration::from_millis(250));
+        assert_eq!(reconnect_cooldown(1), Duration::from_millis(500));
+        assert_eq!(reconnect_cooldown(2), Duration::from_millis(1_000));
+        assert_eq!(
+            reconnect_cooldown(50),
+            Duration::from_millis(250 * (1 << RECONNECT_COOLDOWN_MAX_SHIFTS))
+        );
+    }
+
     /// `tools/call` is never replayed after a transport failure: the server
     /// may have already executed the tool, so a replay could run a write
     /// twice. The connection still heals for later calls.
@@ -2231,6 +2347,21 @@ mod tests {
         let server = transport_mcp::test_support::StubServer::spawn(Arc::new(move |request| {
             let session = request.headers.get("mcp-session-id").map(String::as_str);
             let (status, extra, body) = handler(&request.rpc_method(), session);
+            // Echo the request's own id into any JSON-RPC body: the client
+            // correlates responses by id, so a handler's hardcoded id never
+            // matches once the client's id counter has moved past it.
+            let request_id = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|value| value.get("id").cloned());
+            let mut body = body;
+            if let (Some(request_id), Ok(mut value)) =
+                (request_id, serde_json::from_str::<serde_json::Value>(&body))
+                && let Some(object) = value.as_object_mut()
+                && object.contains_key("id")
+            {
+                object.insert("id".to_string(), request_id);
+                body = value.to_string();
+            }
             (status, extra, body.into_bytes())
         }))
         .await;

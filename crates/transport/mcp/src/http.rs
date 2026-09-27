@@ -168,7 +168,7 @@ impl HttpMcp {
         let body =
             serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         match self.post(&body).await? {
-            Some(response) => into_result(response, method),
+            Some(response) => into_result(response, method, Some(id)),
             None => Err(TransportError::Protocol(format!(
                 "MCP method {method:?} got an empty response"
             ))),
@@ -190,6 +190,7 @@ impl HttpMcp {
         &self,
         body: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, TransportError> {
+        let expected_id = body.get("id").and_then(serde_json::Value::as_u64);
         let raw = serde_json::to_vec(body).map_err(|e| {
             TransportError::Protocol(format!("failed to encode JSON-RPC request: {e}"))
         })?;
@@ -262,7 +263,7 @@ impl HttpMcp {
         let bytes = tokio::time::timeout(recall, read_capped(response, MAX_BODY_BYTES))
             .await
             .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
-        parse_response_body(&bytes)
+        parse_response_body_for(&bytes, expected_id)
     }
 
     /// Persist the `mcp-session-id` response header for later requests.
@@ -452,6 +453,16 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>,
 /// Parse one response body: empty means "no content" (e.g. 202 for a
 /// notification); otherwise try single-JSON first, then the SSE-stream path.
 pub fn parse_response_body(body: &[u8]) -> Result<Option<serde_json::Value>, TransportError> {
+    parse_response_body_for(body, None)
+}
+
+/// [`parse_response_body`] narrowed to one request id (see
+/// [`parse_sse_stream_for`]): the single-JSON path is the whole body, so
+/// correlation happens on the SSE branch.
+fn parse_response_body_for(
+    body: &[u8],
+    expected_id: Option<u64>,
+) -> Result<Option<serde_json::Value>, TransportError> {
     if body.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Ok(None);
     }
@@ -461,7 +472,7 @@ pub fn parse_response_body(body: &[u8]) -> Result<Option<serde_json::Value>, Tra
     let text = std::str::from_utf8(body).map_err(|e| {
         TransportError::Protocol(format!("MCP response is neither JSON nor UTF-8 SSE: {e}"))
     })?;
-    match parse_sse_stream(text) {
+    match parse_sse_stream_for(text, expected_id) {
         Some(value) => Ok(Some(value)),
         None => Err(TransportError::Protocol(format!(
             "MCP response is neither a JSON-RPC object nor an SSE stream: {:?}",
@@ -470,11 +481,11 @@ pub fn parse_response_body(body: &[u8]) -> Result<Option<serde_json::Value>, Tra
     }
 }
 
-/// Parse an SSE stream (`event:` / `data:` / comment lines): every `data:`
-/// payload that parses as JSON is a candidate and the last candidate wins, so
-/// interleaved progress events never shadow the final JSON-RPC message.
-pub fn parse_sse_stream(text: &str) -> Option<serde_json::Value> {
-    let mut last = None;
+/// JSON-RPC candidates from one SSE stream: every `data:` payload that
+/// parses as JSON, in stream order. `event:` / `id:` / `retry:` control
+/// lines carry no payload.
+fn sse_candidates(text: &str) -> Vec<serde_json::Value> {
+    let mut candidates = Vec::new();
     for line in text.lines() {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() || line.starts_with(':') {
@@ -484,19 +495,55 @@ pub fn parse_sse_stream(text: &str) -> Option<serde_json::Value> {
             // The SSE spec strips a single leading space after `data:`.
             let payload = rest.strip_prefix(' ').unwrap_or(rest);
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
-                last = Some(value);
+                candidates.push(value);
             }
         }
-        // `event:`, `id:`, `retry:` control lines carry no payload.
     }
-    last
+    candidates
+}
+
+/// Parse an SSE stream (`event:` / `data:` / comment lines): every `data:`
+/// payload that parses as JSON is a candidate and the last candidate wins, so
+/// interleaved progress events never shadow the final JSON-RPC message.
+pub fn parse_sse_stream(text: &str) -> Option<serde_json::Value> {
+    sse_candidates(text).pop()
+}
+
+/// [`parse_sse_stream`] narrowed to one request id: when `expected` is
+/// known, only a frame carrying exactly that id counts — null-id frames
+/// are server-initiated notifications, never responses, and a stale or
+/// interleaved id can never be mistaken for this response. `None` means
+/// the stream held no frame for this request.
+fn parse_sse_stream_for(text: &str, expected: Option<u64>) -> Option<serde_json::Value> {
+    sse_candidates(text)
+        .into_iter()
+        .rev()
+        .find(|value| match expected {
+            // A notification (null id) is never a response.
+            Some(expected) => value.get("id").and_then(serde_json::Value::as_u64) == Some(expected),
+            None => true,
+        })
 }
 
 /// Unwrap one JSON-RPC response object into its `result`, raising `error`.
 fn into_result(
     response: serde_json::Value,
     method: &str,
+    expected_id: Option<u64>,
 ) -> Result<serde_json::Value, TransportError> {
+    // Correlate the response with the request: a mismatched non-null id
+    // means a stale or interleaved frame (the stdio side correlates by
+    // id by construction). Null ids stay accepted — servers answer
+    // protocol-level errors with a null id.
+    if let Some(expected) = expected_id
+        && let Some(actual) = response.get("id")
+        && !actual.is_null()
+        && actual.as_u64() != Some(expected)
+    {
+        return Err(TransportError::Protocol(format!(
+            "MCP method {method:?} response id {actual} does not match request id {expected}"
+        )));
+    }
     if let Some(error) = response.get("error") {
         let code = error
             .get("code")
@@ -527,12 +574,55 @@ mod tests {
     // The shared stub's handler type, under the local name the tests use.
     use crate::test_support::StubHandler as Handler;
 
+    /// The id-narrowed SSE parse skips frames for other requests (and
+    /// notifications pass), and a stream with no matching frame is None.
+    #[test]
+    fn sse_parse_skips_frames_for_other_request_ids() {
+        let text = concat!(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"stale\":true}}
+
+",
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notify\"}
+
+",
+            "data: {\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"ok\":true}}
+
+",
+        );
+        let value = parse_sse_stream_for(text, Some(9)).unwrap();
+        assert_eq!(value["id"], 9, "the stale id-7 frame must be skipped");
+        assert!(
+            parse_sse_stream_for(text, Some(8)).is_none(),
+            "no frame matches request 8"
+        );
+    }
+
     fn json_headers() -> Vec<(String, String)> {
         vec![("content-type".to_owned(), "application/json".to_owned())]
     }
 
-    fn json_rpc(result: serde_json::Value) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": result}))
+    /// One JSON-RPC **error** body echoing the request's own id.
+    fn json_rpc_error(request: &RecordedRequest, code: i32, message: &str) -> Vec<u8> {
+        let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|value| value.get("id").cloned())
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": code, "message": message},
+        }))
+        .unwrap()
+    }
+
+    /// One JSON-RPC response body echoing the request's own id: the
+    /// client correlates responses by id, so a hardcoded one never matches.
+    fn json_rpc(request: &RecordedRequest, result: serde_json::Value) -> Vec<u8> {
+        let id = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|value| value.get("id").cloned())
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}))
             .unwrap()
     }
 
@@ -546,11 +636,14 @@ mod tests {
                     ("mcp-session-id".to_owned(), "sess-1".to_owned()),
                     ("content-type".to_owned(), "application/json".to_owned()),
                 ],
-                json_rpc(serde_json::json!({
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "serverInfo": {"name": "stub", "version": "0"},
-                })),
+                json_rpc(
+                    request,
+                    serde_json::json!({
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "serverInfo": {"name": "stub", "version": "0"},
+                    }),
+                ),
             ),
             "notifications/initialized" => (202, vec![], vec![]),
             "tools/list" => {
@@ -566,7 +659,8 @@ mod tests {
                     ], "nextCursor": "c1"});
                     let sse = format!(
                         "event: message\ndata: {}\n\n",
-                        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": page})
+                        // Echo the request id: the client correlates responses by id.
+                        serde_json::json!({"jsonrpc": "2.0", "id": body.get("id").cloned().unwrap_or(serde_json::Value::Null), "result": page})
                     );
                     (
                         200,
@@ -577,9 +671,12 @@ mod tests {
                     (
                         200,
                         json_headers(),
-                        json_rpc(serde_json::json!({"tools": [
-                            {"name": "gamma", "description": "third", "inputSchema": {"type": "object"}},
-                        ]})),
+                        json_rpc(
+                            request,
+                            serde_json::json!({"tools": [
+                                {"name": "gamma", "description": "third", "inputSchema": {"type": "object"}},
+                            ]}),
+                        ),
                     )
                 }
             }
@@ -594,17 +691,19 @@ mod tests {
                     (
                         200,
                         json_headers(),
-                        br#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"bad args"}}"#
-                            .to_vec(),
+                        json_rpc_error(request, -32602, "bad args"),
                     )
                 } else {
                     (
                         200,
                         json_headers(),
-                        json_rpc(serde_json::json!({
-                            "content": [{"type": "text", "text": format!("echo:{name}")}],
-                            "isError": false,
-                        })),
+                        json_rpc(
+                            request,
+                            serde_json::json!({
+                                "content": [{"type": "text", "text": format!("echo:{name}")}],
+                                "isError": false,
+                            }),
+                        ),
                     )
                 }
             }
@@ -738,7 +837,7 @@ mod tests {
                 (
                     200,
                     headers,
-                    json_rpc(serde_json::json!({"capabilities": {}})),
+                    json_rpc(request, serde_json::json!({"capabilities": {}})),
                 )
             } else if request.rpc_method() == "notifications/initialized" && authed {
                 (202, vec![], vec![])
@@ -973,7 +1072,7 @@ mod tests {
                         (
                             200,
                             headers,
-                            json_rpc(serde_json::json!({"capabilities": {}})),
+                            json_rpc(request, serde_json::json!({"capabilities": {}})),
                         )
                     }
                     "notifications/initialized" => (202, vec![], vec![]),
@@ -984,7 +1083,7 @@ mod tests {
                             (
                                 200,
                                 json_headers(),
-                                json_rpc(serde_json::json!({"ok": true})),
+                                json_rpc(request, serde_json::json!({"ok": true})),
                             )
                         } else {
                             (404, vec![], b"session expired".to_vec())

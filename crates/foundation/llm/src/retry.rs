@@ -77,6 +77,23 @@ impl RetryPolicy {
         Duration::from_millis(doubled.min(self.max_delay_ms))
     }
 
+    /// De-synchronize retries: multiplicative jitter over the deterministic
+    /// backoff so N clients of one provider do not all re-hit at the same
+    /// tick. Seeded from the clock (no rng dependency); statistical spread
+    /// of ±25%, never below zero.
+    pub fn jittered(&self, delay: Duration, failed_attempt: usize) -> Duration {
+        if delay.is_zero() {
+            return delay;
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|t| t.subsec_nanos() as u64 ^ ((failed_attempt as u64) << 32))
+            .unwrap_or(0);
+        let half = delay.as_nanos() as u64 / 2;
+        let offset = if half == 0 { 0 } else { nanos % half };
+        Duration::from_nanos(delay.as_nanos() as u64 - half + offset)
+    }
+
     /// True when `error` may be retried under this policy.
     ///
     /// Auth failures and quota exhaustion always return false, even when
@@ -267,7 +284,9 @@ impl<M: ChatModel + 'static> ChatModel for RetryingModel<M> {
                     if exhausted || !self.policy.is_retryable(&error) {
                         return Err(error);
                     }
-                    let delay = self.policy.delay_for_error(&error, attempt);
+                    let delay = self
+                        .policy
+                        .jittered(self.policy.delay_for_error(&error, attempt), attempt);
                     let overrun = self.policy.deadline_ms.is_some_and(|budget| {
                         start.elapsed() + delay > Duration::from_millis(budget)
                     });
@@ -312,7 +331,7 @@ fn retrying_items<M: ChatModel + 'static>(
                     match model.stream(req.clone()).await {
                         Ok(stream) => break stream,
                         Err(error) => {
-                            let delay = policy.delay_for_error(&error, attempt);
+                            let delay = policy.jittered(policy.delay_for_error(&error, attempt), attempt);
                             if attempt >= policy.max_attempts
                                 || !policy.is_retryable(&error)
                                 || overruns(delay)
@@ -352,7 +371,10 @@ fn retrying_items<M: ChatModel + 'static>(
             match torn {
                 // The tear is retried wholesale: nothing reached the
                 // consumer, so the half response is simply dropped.
-                Some(error) => tokio::time::sleep(policy.delay_for_error(&error, attempt)).await,
+                Some(error) => {
+                    let delay = policy.jittered(policy.delay_for_error(&error, attempt), attempt);
+                    tokio::time::sleep(delay).await;
+                }
                 None => return,
             }
         }
@@ -515,6 +537,27 @@ mod tests {
         assert_eq!(policy.delay_for_attempt(2), Duration::from_millis(200));
         assert_eq!(policy.delay_for_attempt(3), Duration::from_millis(250));
         assert_eq!(policy.delay_for_attempt(30), Duration::from_millis(250));
+    }
+
+    /// Jitter stays within +0..50% above/below the deterministic delay
+    /// (zero stays zero): retries de-synchronize without ever out-waiting
+    /// the cap.
+    #[test]
+    fn jitter_spreads_but_never_inverts() {
+        let policy = RetryPolicy {
+            base_delay_ms: 100,
+            max_delay_ms: 250,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(policy.jittered(Duration::ZERO, 1), Duration::ZERO);
+        let delay = policy.delay_for_attempt(1);
+        for attempt in 1..=20 {
+            let j = policy.jittered(delay, attempt);
+            assert!(
+                j >= delay / 2 && j < delay + delay / 2,
+                "attempt {attempt}: {j:?} out of range"
+            );
+        }
     }
 
     #[test]

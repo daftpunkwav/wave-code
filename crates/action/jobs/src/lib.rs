@@ -61,6 +61,11 @@ pub struct JobRequest {
     pub deny_env: Vec<String>,
     /// Run deadline; `None` runs until it exits or is cancelled.
     pub timeout_ms: Option<u64>,
+    /// Foreground run: the caller waits inline and delivers the result
+    /// itself, so the completion notice stays off unless promotion
+    /// (`mark_notified`) turns it on. `false` (the `job_spawn` case)
+    /// notifies on completion as usual.
+    pub foreground: bool,
 }
 
 /// Spawn rejection: the owner already holds the maximum running jobs.
@@ -139,6 +144,11 @@ struct JobSlot {
     cancelled: AtomicBool,
     /// Run deadline fired, observed in the snapshot.
     timed_out: AtomicBool,
+    /// Started as a foreground run whose result is delivered inline, so
+    /// `finish` keeps the completion notice off unless promotion flips
+    /// this off (`mark_notified`) — otherwise every ordinary shell command
+    /// would file a duplicate notice for output the model already has.
+    foreground: AtomicBool,
     /// Captured stdout/stderr bytes, head-dropped past the cap.
     log: Mutex<Vec<u8>>,
     /// Leader pid for tree kills; `None` before a successful spawn.
@@ -218,6 +228,7 @@ impl JobService {
             exit_code: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             timed_out: AtomicBool::new(false),
+            foreground: AtomicBool::new(request.foreground),
             log: Mutex::new(Vec::new()),
             pid: Mutex::new(None),
             done: tokio::sync::Notify::new(),
@@ -269,6 +280,20 @@ impl JobService {
         let clamped = Duration::from_millis(timeout_ms.min(MAX_WAIT_MS));
         let _ = tokio::time::timeout(clamped, notified).await;
         Some(snapshot(id, &slot))
+    }
+
+    /// Re-arm the completion notice for a foreground run: called once at
+    /// promotion, when the waiting caller reports the run as still going
+    /// and hands it to the model as background work. From here on the run
+    /// notifies like any `job_spawn`-started job. `false` for unknown ids.
+    pub fn mark_notified(&self, id: &str) -> bool {
+        match self.lock_jobs().get(id).cloned() {
+            Some(slot) => {
+                slot.foreground.store(false, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Request cancellation; true when a tracked job accepted the signal.
@@ -427,7 +452,9 @@ async fn drive_job(
     finish(&id, &slot, &notifications, status.and_then(|s| s.code()));
 }
 
-/// Record the terminal status, wake waiters, and file the shared notice.
+/// Record the terminal status, wake waiters, and file the shared notice —
+/// except for a still-foreground run, whose result the caller delivers
+/// inline (promotion via `mark_notified` re-arms the notice).
 fn finish(
     id: &str,
     slot: &Arc<JobSlot>,
@@ -437,7 +464,9 @@ fn finish(
     *slot.exit_code.lock().unwrap_or_else(|e| e.into_inner()) = exit_code;
     *slot.lock_state() = JobState::Finished;
     slot.done.notify_waiters();
-    notifications.notify_completion(format!("{id} finished"));
+    if !slot.foreground.load(Ordering::SeqCst) {
+        notifications.notify_completion(format!("{id} finished"));
+    }
 }
 
 /// Drain one pipe into the bounded log until EOF or error.
@@ -507,6 +536,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
             timeout_ms: None,
+            foreground: false,
         }
     }
 
@@ -661,5 +691,39 @@ mod tests {
         unsafe {
             std::env::remove_var(NAME);
         }
+    }
+
+    /// A foreground run delivers its result inline, so `finish` keeps the
+    /// completion notice off; promotion (`mark_notified`) re-arms it, and
+    /// from then on the run notifies like any spawned job.
+    #[tokio::test]
+    async fn foreground_job_stays_quiet_until_promoted() {
+        let (runtime, jobs) = harness();
+        let mut foreground_request = request("t1", "echo foreground");
+        foreground_request.foreground = true;
+        let id = jobs.spawn(foreground_request).unwrap();
+        let snap = poll_finished(&jobs, &id).await;
+        assert_eq!(snap.exit_code, Some(0));
+        // Inline delivery: no notice for output the caller already has.
+        assert!(
+            runtime.drain_notifications().is_empty(),
+            "an inline-delivered foreground run stays quiet"
+        );
+        // Promotion on a finished job is a no-op for the past (the notice
+        // was already suppressed), but a fresh promoted-while-running job
+        // notifies on completion.
+        let mut slow = request("t1", LONG_CMD);
+        slow.foreground = true;
+        let slow_id = jobs.spawn(slow).unwrap();
+        assert!(jobs.mark_notified(&slow_id), "promotion lands on a live id");
+        assert!(jobs.cancel(&slow_id));
+        let end = poll_finished(&jobs, &slow_id).await;
+        assert!(end.cancelled);
+        let notes = runtime.drain_notifications();
+        assert!(
+            notes.iter().any(|n| n == &format!("{slow_id} finished")),
+            "a promoted run notifies on completion: {notes:?}"
+        );
+        assert!(!jobs.mark_notified("job-999"));
     }
 }

@@ -894,7 +894,15 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     registry.register(Arc::new(action_jobs::tools::JobCancelTool::new(
         jobs.clone(),
     )));
-    registry.register(Arc::new(action_jobs::tools::JobOutputTool::new(jobs)));
+    registry.register(Arc::new(action_jobs::tools::JobOutputTool::new(
+        jobs.clone(),
+    )));
+    // With the job service live, the shell tool promotes a foreground
+    // command that outlives its timeout into a background job instead of
+    // killing it (the builtin registration carries no handoff).
+    registry.register(wavecode_tools::shell_with_handoff(Arc::new(
+        action_jobs::tools::ForegroundRuns::new(jobs),
+    )));
     // File-content snapshots ride the same late handle: the store root
     // derives from the session memory root (`<home>/.wavecode/memories`
     // -> `<home>/.wavecode/snapshots`) so injected roots stay hermetic.

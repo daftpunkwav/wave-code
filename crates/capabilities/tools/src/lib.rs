@@ -31,6 +31,8 @@ mod todo_tool;
 mod web_fetch;
 mod websearch;
 
+pub use shell_tool::{RunHandoff, RunSnapshot, shell_with_handoff};
+
 pub use agent_task_tool::{AgentDef, TaskTool, discover_agent_defs};
 pub use ask_user_tool::{AskUserTool, MAX_QUESTION_OPTIONS};
 pub use fs::{Present, PresentStore, ReadImage};
@@ -266,9 +268,11 @@ impl Registry {
         reg.register(Arc::new(search::Glob));
         // The shell tool spills the full text of truncated outputs to the
         // same store the `spill` tool reads back (and the context prune
-        // uses), so a capped run's middle is still reachable.
+        // uses), so a capped run's middle is still reachable. No handoff
+        // here: session assembly re-registers this entry with the job
+        // service wired, so timeouts promote instead of kill.
         let spill = wavecode_context::SpillStore::new(wavecode_context::default_spill_store_root());
-        reg.register(Arc::new(shell_tool::Shell::new(Some(spill))));
+        reg.register(Arc::new(shell_tool::Shell::new(Some(spill), None)));
         reg.register(Arc::new(script::PythonTool));
         reg.register(Arc::new(script::NodeTool));
         reg.register(Arc::new(lsp::DocumentSymbols::new()));

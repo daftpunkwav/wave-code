@@ -169,6 +169,7 @@ impl Tool for JobSpawnTool {
                 std::env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()),
             ),
             timeout_ms,
+            foreground: false,
         };
         match self.jobs.spawn(request) {
             Ok(id) => Ok(ToolOutput {
@@ -374,6 +375,79 @@ impl Tool for JobOutputTool {
             Ok(snapshot) => Ok(render(&snapshot)),
             Err(output) => Ok(output),
         }
+    }
+}
+
+/// The shell tool's background-run seam over [`JobService`]: foreground
+/// shell commands that outlive their timeout are promoted into jobs
+/// instead of being killed, so long work never has to be re-executed.
+///
+/// Runs started here are `foreground` (their completion notice stays off
+/// while the shell call delivers the result inline); promotion flips the
+/// notice on via [`JobService::mark_notified`]. Environment scrubbing
+/// mirrors `job_spawn`: the caller's `deny_env` plus every
+/// sensitive-shape variable name in the current environment.
+pub struct ForegroundRuns {
+    jobs: Arc<JobService>,
+}
+
+impl ForegroundRuns {
+    /// Wrap the session's job service.
+    pub fn new(jobs: Arc<JobService>) -> Self {
+        Self { jobs }
+    }
+}
+
+#[async_trait::async_trait]
+impl wavecode_tools::RunHandoff for ForegroundRuns {
+    fn start(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        deny_env: &[String],
+    ) -> std::result::Result<String, String> {
+        let request = JobRequest {
+            owner: JOB_OWNER.to_string(),
+            command: command.to_string(),
+            cwd: cwd.to_path_buf(),
+            deny_env: effective_deny_env(
+                deny_env,
+                std::env::vars_os().map(|(key, _)| key.to_string_lossy().into_owned()),
+            ),
+            timeout_ms: None,
+            foreground: true,
+        };
+        self.jobs
+            .spawn(request)
+            .map_err(|crate::JobError::AtCapacity| {
+                format!(
+                    "job capacity reached ({} per owner); cancel or await a job, then retry",
+                    crate::MAX_JOBS_PER_OWNER
+                )
+            })
+    }
+
+    async fn wait(&self, id: &str, timeout_ms: u64) -> Option<wavecode_tools::RunSnapshot> {
+        self.jobs.wait(id, timeout_ms).await.map(snapshot_of)
+    }
+
+    fn snapshot(&self, id: &str) -> Option<wavecode_tools::RunSnapshot> {
+        self.jobs.read(id).map(snapshot_of)
+    }
+
+    fn notify_on_completion(&self, id: &str) {
+        self.jobs.mark_notified(id);
+    }
+}
+
+/// Project a service snapshot onto the seam's vocabulary.
+fn snapshot_of(snap: crate::JobSnapshot) -> wavecode_tools::RunSnapshot {
+    wavecode_tools::RunSnapshot {
+        id: snap.id,
+        finished: snap.state == crate::JobState::Finished,
+        exit_code: snap.exit_code,
+        cancelled: snap.cancelled,
+        log_tail: snap.log_tail,
     }
 }
 

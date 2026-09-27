@@ -221,27 +221,90 @@ pub(crate) async fn spawn_collect_bounded(
     })
 }
 
+/// Point-in-time view of one background run, rendered into shell output.
+#[derive(Debug, Clone)]
+pub struct RunSnapshot {
+    /// Run id (`job-N`).
+    pub id: String,
+    /// True when the run reached a terminal state.
+    pub finished: bool,
+    /// Process exit code; `None` when signal-killed or never ran.
+    pub exit_code: Option<i32>,
+    /// True when the run was cancelled.
+    pub cancelled: bool,
+    /// Combined output tail (what a terminal would show).
+    pub log_tail: String,
+}
+
+/// Background-run seam for the shell tool, implemented over the
+/// action-jobs service in production and scripted in tests.
+///
+/// When the seam is present, a foreground command that outlives its
+/// timeout is **promoted** instead of killed: the process keeps running
+/// under the seam's management and the model collects it later, so a long
+/// build never loses its work to a deadline (and a non-idempotent command
+/// is never re-executed). Runs started through the seam stay quiet while
+/// their result is delivered inline; [`RunHandoff::notify_on_completion`]
+/// at promotion time is what turns the completion notice on.
+#[async_trait::async_trait]
+pub trait RunHandoff: Send + Sync {
+    /// Start `command` in `cwd` (names in `deny_env` stripped from the
+    /// child environment, sensitive-shape names added by the impl) with no
+    /// run deadline. `Err` carries the user-facing reason (capacity, spawn
+    /// setup).
+    fn start(
+        &self,
+        command: &str,
+        cwd: &std::path::Path,
+        deny_env: &[String],
+    ) -> std::result::Result<String, String>;
+    /// Wait up to `timeout_ms` for the run to finish; `None` means still
+    /// running (never kills).
+    async fn wait(&self, id: &str, timeout_ms: u64) -> Option<RunSnapshot>;
+    /// Point-in-time view; `None` for unknown ids.
+    fn snapshot(&self, id: &str) -> Option<RunSnapshot>;
+    /// File the completion notice from now on (called once at promotion).
+    fn notify_on_completion(&self, id: &str);
+}
+
 /// Execute a shell command (a writing tool: may modify files or spawn processes, needs serial scheduling).
 ///
 /// The optional `spill` store receives the *full* text of any output that
 /// had to be truncated, so the model can page the middle back through the
 /// `spill` tool; `None` (tests, hermetic registries) degrades to plain
-/// truncation.
+/// truncation. The optional `handoff` turns the timeout from a kill into a
+/// promotion (see [`RunHandoff`]); `None` keeps the bounded kill path, as
+/// does OS-confinement mode, whose spawn rewriting the handoff cannot
+/// reproduce.
 pub struct Shell {
     spill: Option<wavecode_context::SpillStore>,
+    handoff: Option<std::sync::Arc<dyn RunHandoff>>,
 }
 
 impl Shell {
-    /// Configure the spill store for truncated full outputs.
-    pub(crate) fn new(spill: Option<wavecode_context::SpillStore>) -> Self {
-        Self { spill }
+    /// Configure the spill store and the background-run handoff.
+    pub(crate) fn new(
+        spill: Option<wavecode_context::SpillStore>,
+        handoff: Option<std::sync::Arc<dyn RunHandoff>>,
+    ) -> Self {
+        Self { spill, handoff }
     }
 }
 
 impl Default for Shell {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, None)
     }
+}
+
+/// The shell tool with the background-run handoff wired: session assembly
+/// re-registers the builtin entry with this after the job service exists,
+/// so a foreground command that outlives its timeout is promoted into a
+/// background run instead of being killed. The spill store rides the same
+/// default root the builtin registration used.
+pub fn shell_with_handoff(handoff: std::sync::Arc<dyn RunHandoff>) -> Arc<dyn Tool> {
+    let spill = wavecode_context::SpillStore::new(wavecode_context::default_spill_store_root());
+    Arc::new(Shell::new(Some(spill), Some(handoff)))
 }
 
 #[async_trait::async_trait]
@@ -253,11 +316,12 @@ impl Tool for Shell {
     fn description(&self) -> &str {
         "Run a shell command in the working directory. The default shell is platform-dependent \
          (cmd /C on Windows, sh -c on Unix; override with the WAVECODE_SHELL env var). \
-         Use timeout_ms to bound execution (default 60000 ms, clamped to 300000 ms); on timeout \
-         the process is killed and the output produced so far is reported. stdout and stderr are \
-         captured separately, each truncated at 30KB; truncated completed runs also save the \
-         full output to a spill:// URI the spill tool can read back. The command runs \
-         non-interactive (stdin is closed)."
+         Use timeout_ms to bound execution (default 60000 ms, clamped to 300000 ms). When the \
+         session's job service is wired, a command that outlives the timeout is promoted to a \
+         background job (it keeps running; job_wait / job_output collect it); otherwise the \
+         process is killed and the output produced so far is reported. Output is captured with \
+         per-run caps and truncated completed runs also save the full text to a spill:// URI \
+         the spill tool can read back. The command runs non-interactive (stdin is closed)."
     }
 
     fn input_schema(&self) -> Value {
@@ -301,6 +365,16 @@ impl Tool for Shell {
                 }
             },
         };
+
+        // Promotion path: with a handoff wired (and confinement off — its
+        // spawn rewriting cannot apply to a service-owned child), the run
+        // is service-owned from the start, so the timeout promotes instead
+        // of kills and the work never has to be re-executed.
+        if let Some(handoff) = &self.handoff
+            && !os_sandbox_enabled()
+        {
+            return self.execute_promoted(command, timeout_ms, ctx, handoff).await;
+        }
 
         let (program, flag) = shell_invocation();
         let mut cmd = tokio::process::Command::new(program);
@@ -387,6 +461,63 @@ impl Tool for Shell {
         }
         if !stderr.is_empty() {
             content.push_str(&format!("\n--- stderr ---\n{stderr}"));
+        }
+        Ok(ToolOutput {
+            content,
+            is_error: code != 0,
+        })
+    }
+}
+
+impl Shell {
+    /// Handoff-backed run: the service owns the process from the start, so
+    /// outliving the deadline promotes the run (it keeps going, the turn
+    /// moves on) instead of killing it — a long build never loses its work
+    /// and a non-idempotent command is never re-executed.
+    async fn execute_promoted(
+        &self,
+        command: &str,
+        timeout_ms: u64,
+        ctx: &ToolCtx,
+        handoff: &std::sync::Arc<dyn RunHandoff>,
+    ) -> Result<ToolOutput> {
+        let id = match handoff.start(command, &ctx.cwd, &ctx.deny_env) {
+            Ok(id) => id,
+            Err(reason) => return Ok(err_output(reason)),
+        };
+        if handoff.wait(&id, timeout_ms).await.is_none() {
+            // Still running: flip the completion notice on (the result was
+            // NOT delivered inline) and report the promotion. The job keeps
+            // running; its notice re-enters the session when it lands.
+            handoff.notify_on_completion(&id);
+            let tail = handoff
+                .snapshot(&id)
+                .map(|s| s.log_tail)
+                .unwrap_or_default();
+            let mut content = format!(
+                "still running after {timeout_ms}ms: promoted to background {id}\n\
+                 the process keeps running; collect with job_wait / job_output, \
+                 stop with job_cancel"
+            );
+            if !tail.is_empty() {
+                content.push_str(&format!("\n--- output so far ---\n{tail}"));
+            }
+            return Ok(err_output(content));
+        }
+        let Some(snap) = handoff.snapshot(&id) else {
+            return Ok(err_output(format!(
+                "background run {id} vanished from the tracker; re-run the command"
+            )));
+        };
+        // On Unix, code() is None when killed by a signal; record -1 (still non-zero, so is_error holds).
+        let code = if snap.cancelled {
+            -1
+        } else {
+            snap.exit_code.unwrap_or(-1)
+        };
+        let mut content = format!("exit code: {code}");
+        if !snap.log_tail.is_empty() {
+            content.push_str(&format!("\n--- output ---\n{}", snap.log_tail));
         }
         Ok(ToolOutput {
             content,
@@ -800,5 +931,159 @@ mod tests {
                 out.content
             );
         }
+    }
+
+    /// Scripted handoff: records starts/promotions, returns canned waits.
+    struct ScriptedHandoff {
+        wait_result: Option<RunSnapshot>,
+        notified: std::sync::Mutex<Vec<String>>,
+        started: std::sync::Mutex<Vec<String>>,
+        start_error: Option<String>,
+    }
+
+    impl ScriptedHandoff {
+        fn still_running() -> Self {
+            Self {
+                wait_result: None,
+                notified: std::sync::Mutex::new(Vec::new()),
+                started: std::sync::Mutex::new(Vec::new()),
+                start_error: None,
+            }
+        }
+
+        fn finished(exit_code: Option<i32>, log: &str) -> Self {
+            Self {
+                wait_result: Some(RunSnapshot {
+                    id: "job-1".into(),
+                    finished: true,
+                    exit_code,
+                    cancelled: false,
+                    log_tail: log.into(),
+                }),
+                notified: std::sync::Mutex::new(Vec::new()),
+                started: std::sync::Mutex::new(Vec::new()),
+                start_error: None,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RunHandoff for ScriptedHandoff {
+        fn start(
+            &self,
+            command: &str,
+            _cwd: &std::path::Path,
+            _deny_env: &[String],
+        ) -> std::result::Result<String, String> {
+            if let Some(err) = &self.start_error {
+                return Err(err.clone());
+            }
+            self.started
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(command.to_string());
+            Ok("job-1".to_string())
+        }
+
+        async fn wait(&self, _id: &str, _timeout_ms: u64) -> Option<RunSnapshot> {
+            self.wait_result.clone()
+        }
+
+        fn snapshot(&self, id: &str) -> Option<RunSnapshot> {
+            self.wait_result.clone().map(|mut s| {
+                s.id = id.to_string();
+                s
+            })
+        }
+
+        fn notify_on_completion(&self, id: &str) {
+            self.notified
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(id.to_string());
+        }
+    }
+
+    /// A run that outlives the deadline is promoted, not killed: the
+    /// result names the background id, points at the collection tools,
+    /// and turns the completion notice on.
+    #[tokio::test]
+    // Reads WAVECODE_SANDBOX_OS in the routing check: held under ENV_LOCK (see its docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn promoted_run_reports_id_and_arms_the_notice() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_d, c) = ctx();
+        let handoff = Arc::new(ScriptedHandoff::still_running());
+        let out = Shell::new(None, Some(handoff.clone()))
+            .execute(
+                serde_json::json!({"command": "cargo build", "timeout_ms": 60000}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("promoted to background job-1"), "{}", out.content);
+        assert!(out.content.contains("job_wait"), "{}", out.content);
+        assert_eq!(
+            *handoff.notified.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["job-1".to_string()],
+            "promotion arms the completion notice"
+        );
+        assert_eq!(
+            *handoff.started.lock().unwrap_or_else(|e| e.into_inner()),
+            vec!["cargo build".to_string()]
+        );
+    }
+
+    /// A run finishing inside the deadline delivers inline, with the
+    /// notice kept quiet (the model already has the result) and the
+    /// nonzero exit mapping to the usual error result.
+    #[tokio::test]
+    // Reads WAVECODE_SANDBOX_OS in the routing check: held under ENV_LOCK (see its docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn inline_completion_delivers_quietly() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_d, c) = ctx();
+        let handoff = Arc::new(ScriptedHandoff::finished(Some(2), "build log tail"));
+        let out = Shell::new(None, Some(handoff.clone()))
+            .execute(serde_json::json!({"command": "make"}), &c)
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("exit code: 2"), "{}", out.content);
+        assert!(out.content.contains("build log tail"), "{}", out.content);
+        assert!(
+            handoff.notified.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "inline delivery stays quiet"
+        );
+        // A clean exit stays a success.
+        let handoff = Arc::new(ScriptedHandoff::finished(Some(0), ""));
+        let out = Shell::new(None, Some(handoff))
+            .execute(serde_json::json!({"command": "make"}), &c)
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+    }
+
+    /// A handoff that cannot start (capacity) surfaces its reason as a
+    /// business error instead of falling back to the kill path.
+    #[tokio::test]
+    // Reads WAVECODE_SANDBOX_OS in the routing check: held under ENV_LOCK (see its docs).
+    #[allow(clippy::await_holding_lock)]
+    async fn start_failure_is_business_output() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_d, c) = ctx();
+        let handoff = Arc::new(ScriptedHandoff {
+            wait_result: None,
+            notified: std::sync::Mutex::new(Vec::new()),
+            started: std::sync::Mutex::new(Vec::new()),
+            start_error: Some("job capacity reached (10 per owner)".into()),
+        });
+        let out = Shell::new(None, Some(handoff))
+            .execute(serde_json::json!({"command": "make"}), &c)
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("capacity"), "{}", out.content);
     }
 }

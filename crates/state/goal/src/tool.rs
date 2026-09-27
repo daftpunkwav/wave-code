@@ -203,6 +203,10 @@ impl Tool for GoalTool {
         "goal"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::SessionState
+    }
+
     fn description(&self) -> &str {
         "Durable per-session goal: a main objective plus intermediate \
          sub-goals that survives restarts. Actions: 'set' replaces the \
@@ -728,5 +732,22 @@ mod tests {
         let (state, warning) = load_for_session(Some(home.path()), "bad");
         assert_eq!(state, GoalState::default());
         assert!(warning.unwrap().contains("unreadable"));
+    }
+
+    /// The policy layer keys on the declared class (architecture rule 4):
+    /// the goal tool must keep claiming the coordination-state class, or
+    /// its session-state exemption silently changes meaning.
+    #[test]
+    fn goal_claims_the_session_state_class() {
+        let home = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(GoalStore::new(
+            GoalState::default(),
+            Some(home.path()),
+            "kind-lock",
+        ));
+        assert_eq!(
+            Tool::kind(&GoalTool::new(store)),
+            wavecode_protocol::ToolKind::SessionState
+        );
     }
 }

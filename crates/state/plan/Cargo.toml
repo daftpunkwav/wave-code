@@ -13,6 +13,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# ToolKind: the declarative policy class the plan tool claims.
+wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-tools = { path = "../../capabilities/tools" }
 
 [dev-dependencies]

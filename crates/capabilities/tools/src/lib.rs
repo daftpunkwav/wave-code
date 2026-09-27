@@ -174,6 +174,13 @@ pub trait Tool: Send + Sync {
     fn input_schema(&self) -> serde_json::Value;
     /// Read-only tools may run in parallel; writing tools must run serially.
     fn is_read_only(&self) -> bool;
+    /// Declarative capability class the policy layer keys on; the default
+    /// is the cautious [`ToolKind::Other`], which keeps the approval path.
+    /// Builtin tools classify themselves so the sandbox never matches on
+    /// names (architecture rule 4).
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Other
+    }
     /// Destructive tools (deleting or irreversibly overwriting state, etc.) require approval by default. Non-destructive by default.
     fn is_destructive(&self) -> bool {
         false

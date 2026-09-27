@@ -11,7 +11,7 @@ The workspace is a flat crate DAG at `crates/<group>/<crate>`. Dependencies poin
 1. **Everything may depend on `infrastructure/`.** These crates are leaf primitives with zero internal dependencies.
 2. **`runtime/runner` depends only on trait seams and data transfer objects** (`state-store`, `wavecode-wire`, `infrastructure-base`). It must not depend on tools, sandbox, hooks, memory, skills, MCP, or transport; concrete implementations are injected from above.
 3. **`operations/bootstrap` is the composition root.** It is the only crate allowed to adapt concrete capabilities to the runner's trait seams. Policy lives in the capability crates; only wiring and mapping live in bootstrap. Nothing depends on bootstrap except the frontends (its tests excepted: the gateway's server tests use its hermetic assembly seam as a dev-dependency). The gateway's MCP-serve module is a serving skin that names `wavecode_tools` registry types only; executor construction stays in bootstrap. The one recorded exception to bootstrap-only capability consumption: the model tools live with their engines — `state-goal`, `state-plan`, `action-jobs`, `action-workflow`, `wavecode-skills`, and `wavecode-memory` name `wavecode_tools` directly to host their tools over the shared `Tool` abstraction (bootstrap still registers every one of them), and `wavecode-tools` consumes the vocabulary-tier `action-tasks` seam for the delegation tools.
-4. **Policy never matches tool names.** Tools carry declarative attributes (`wavecode_tools::Tool::is_read_only` / `is_destructive`), and policy decisions consume those attributes (`operations_bootstrap::policy_adapter`), so adding a tool cannot silently drift the policy layer.
+4. **Policy never matches tool names.** Tools carry declarative attributes (`wavecode_tools::Tool::is_read_only` / `is_destructive` / `kind`, the [`ToolKind`] class in `wavecode-protocol`), and policy decisions consume those attributes (`operations_bootstrap::policy_adapter`), so adding a tool cannot silently drift the policy layer.
 5. **New behavior lands on extension points, not loop changes.** Changing `runtime/runner` requires updating this document.
 
 ## Layer map
@@ -186,7 +186,7 @@ either wired, a documented reserved seed, or the composition root itself.
 1. A frontend (`harness-cli`, TUI, or an HTTP/SSE client through `wavecode serve`) submits a prompt as a wire submission.
 2. `operations-actor` serializes submissions per session and drives `runtime-runner`.
 3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
-4. Tool executions pass the `safety-gate` approval flow; verdicts combine permission modes with the tool's declarative attributes (`is_read_only` / `is_destructive`), and OS-level isolation comes from `wavecode-sandbox`.
+4. Tool executions pass the `safety-gate` approval flow; verdicts combine permission modes with the tool's declarative attributes (`is_read_only` / `is_destructive` / `kind`), and OS-level isolation comes from `wavecode-sandbox`.
 5. Every step emits `wavecode-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
 6. History mutations append to `state-persistence`'s block-level write-ahead journal (`<id>.history.jsonl`), which `resume` replays; completed turns additionally append a text snapshot to `<id>.jsonl` for the picker and for sessions written before the journal existed.
 

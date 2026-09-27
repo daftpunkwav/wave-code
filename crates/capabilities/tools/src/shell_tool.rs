@@ -86,9 +86,7 @@ pub(crate) fn truncate_output_spilled(
     match store.spill(&full) {
         // The URI sits whitespace-delimited with no glued punctuation, so
         // both the model and the spill tool can lift it out verbatim.
-        Ok(uri) => format!(
-            "{text}\nfull output saved to {uri} (read it back with the spill tool)"
-        ),
+        Ok(uri) => format!("{text}\nfull output saved to {uri} (read it back with the spill tool)"),
         Err(_) => text,
     }
 }
@@ -313,6 +311,10 @@ impl Tool for Shell {
         "shell"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Shell
+    }
+
     fn description(&self) -> &str {
         "Run a shell command in the working directory. The default shell is platform-dependent \
          (cmd /C on Windows, sh -c on Unix; override with the WAVECODE_SHELL env var). \
@@ -373,7 +375,9 @@ impl Tool for Shell {
         if let Some(handoff) = &self.handoff
             && !os_sandbox_enabled()
         {
-            return self.execute_promoted(command, timeout_ms, ctx, handoff).await;
+            return self
+                .execute_promoted(command, timeout_ms, ctx, handoff)
+                .await;
         }
 
         let (program, flag) = shell_invocation();
@@ -639,7 +643,10 @@ mod tests {
     #[tokio::test]
     async fn missing_command_is_error_output() {
         let (_d, c) = ctx();
-        let out = Shell::default().execute(serde_json::json!({}), &c).await.unwrap();
+        let out = Shell::default()
+            .execute(serde_json::json!({}), &c)
+            .await
+            .unwrap();
         assert!(out.is_error);
     }
 
@@ -706,14 +713,15 @@ mod tests {
             "echo started; exec sleep 30"
         };
         let out = Shell::default()
-            .execute(
-                serde_json::json!({"command": cmd, "timeout_ms": 800}),
-                &c,
-            )
+            .execute(serde_json::json!({"command": cmd, "timeout_ms": 800}), &c)
             .await
             .unwrap();
         assert!(out.is_error, "{}", out.content);
-        assert!(out.content.contains("timeout after 800ms"), "{}", out.content);
+        assert!(
+            out.content.contains("timeout after 800ms"),
+            "{}",
+            out.content
+        );
         assert!(
             out.content.contains("started"),
             "pre-kill output survives the kill: {}",
@@ -774,7 +782,9 @@ mod tests {
 
         let out = truncate_output_spilled(bytes.as_bytes(), Some(&store));
         assert!(out.contains("[truncated]"));
-        let uri_pos = out.find("full output saved to spill://").expect("pointer present");
+        let uri_pos = out
+            .find("full output saved to spill://")
+            .expect("pointer present");
         let uri: String = out[uri_pos..]
             .lines()
             .next()
@@ -1018,7 +1028,11 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error, "{}", out.content);
-        assert!(out.content.contains("promoted to background job-1"), "{}", out.content);
+        assert!(
+            out.content.contains("promoted to background job-1"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("job_wait"), "{}", out.content);
         assert_eq!(
             *handoff.notified.lock().unwrap_or_else(|e| e.into_inner()),
@@ -1049,7 +1063,11 @@ mod tests {
         assert!(out.content.contains("exit code: 2"), "{}", out.content);
         assert!(out.content.contains("build log tail"), "{}", out.content);
         assert!(
-            handoff.notified.lock().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            handoff
+                .notified
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
             "inline delivery stays quiet"
         );
         // A clean exit stays a success.

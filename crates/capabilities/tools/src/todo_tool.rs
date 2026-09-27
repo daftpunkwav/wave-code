@@ -123,6 +123,10 @@ impl Tool for TodoWrite {
         "todowrite"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::SessionState
+    }
+
     fn description(&self) -> &str {
         "Replace the session task list (full rewrite, not a patch). Use it to break down \
          complex or multi-step tasks before starting, and to update item status \

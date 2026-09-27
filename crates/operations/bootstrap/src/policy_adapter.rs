@@ -68,15 +68,15 @@ impl PolicyDecider for PolicyAdapter {
         }
     }
     async fn decide(&self, call: &ToolCall) -> PolicyVerdict {
-        let (read_only, destructive) = match self.registry.get(&call.name) {
-            Some(tool) => (tool.is_read_only(), tool.is_destructive()),
-            // Unknown names stay serial and destructive so dispatch and
-            // policy both take the cautious path.
-            None => (false, true),
+        let (read_only, destructive, kind) = match self.registry.get(&call.name) {
+            Some(tool) => (tool.is_read_only(), tool.is_destructive(), tool.kind()),
+            // Unknown names stay serial, destructive, and unclassified so
+            // dispatch and policy both take the cautious path.
+            None => (false, true, wavecode_protocol::ToolKind::Other),
         };
         match self
             .sandbox
-            .decide(&call.name, &call.input, read_only, destructive)
+            .decide(&call.name, &call.input, read_only, destructive, kind)
         {
             wavecode_sandbox::Verdict::Allow => PolicyVerdict::Allow,
             wavecode_sandbox::Verdict::Ask { kind, detail } => PolicyVerdict::Ask {

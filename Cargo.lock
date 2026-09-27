@@ -23,6 +23,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "wavecode-protocol",
  "wavecode-tools",
 ]
 
@@ -2016,6 +2017,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "wavecode-protocol",
  "wavecode-tools",
 ]
 
@@ -2040,6 +2042,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "wavecode-protocol",
  "wavecode-tools",
 ]
 
@@ -2833,6 +2836,7 @@ dependencies = [
  "tokio",
  "wavecode-context",
  "wavecode-llm",
+ "wavecode-protocol",
  "wavecode-sandbox",
 ]
 

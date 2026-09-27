@@ -272,6 +272,10 @@ pub struct SampleRequest {
     pub messages: Vec<HistoryEntry>,
     /// Tools available in this sample.
     pub tools: Vec<ToolRef>,
+    /// Per-sample output cap handed to the provider; `0` means the
+    /// gateway's own default. The runner wires `RunConfig::max_output_tokens`
+    /// through so the config knob actually reaches the wire.
+    pub output_cap: u32,
 }
 
 /// Response of one model sample.
@@ -1364,6 +1368,7 @@ where
                     .into_iter()
                     .filter(|tool| self.run_allowlist.is_allowed(&ctx.run_id, &tool.name))
                     .collect(),
+                output_cap: self.cfg.max_output_tokens,
             };
             // Live deltas stream to frontends ahead of the assembled
             // message; ordering (deltas before AgentMessageComplete) is

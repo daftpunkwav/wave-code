@@ -24,6 +24,10 @@ impl Tool for EditFile {
         "edit"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::FileEdit
+    }
+
     fn description(&self) -> &str {
         "Replace an exact string in a file inside the working directory. \
          old_string must match exactly one location; include more context to make it unique."

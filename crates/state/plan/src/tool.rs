@@ -169,6 +169,10 @@ impl Tool for PlanTool {
         "plan"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::SessionState
+    }
+
     fn description(&self) -> &str {
         "Reviewed plan workflow. Actions: 'propose' presents the plan \
          text for the user to approve (Draft -> Proposed; explore first, \
@@ -349,5 +353,15 @@ mod tests {
         let (state, warning) = load_for_session(Some(home.path()), "bad");
         assert_eq!(state, PlanState::default());
         assert!(warning.unwrap().contains("unreadable"));
+    }
+
+    /// The policy layer keys on the declared class (architecture rule 4):
+    /// the plan tool must keep claiming the coordination-state class.
+    #[test]
+    fn plan_claims_the_session_state_class() {
+        assert_eq!(
+            Tool::kind(&PlanTool::new(store_in(Path::new("unused")))),
+            wavecode_protocol::ToolKind::SessionState
+        );
     }
 }

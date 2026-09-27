@@ -80,6 +80,10 @@ impl Tool for Present {
         "present"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Present
+    }
+
     fn description(&self) -> &str {
         "Declare deliverables as presented to the user (e.g. files created or \
          fixed). Paths are resolved inside the working directory and recorded \

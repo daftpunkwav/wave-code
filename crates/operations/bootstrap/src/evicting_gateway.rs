@@ -247,6 +247,7 @@ mod tests {
             system: String::new(),
             messages: vec![user_entry("hello")],
             tools: vec![],
+            output_cap: 0,
         };
         gateway.sample(request.clone()).await.unwrap();
         assert_eq!(gateway.inner.requests(), vec![request]);
@@ -270,6 +271,7 @@ mod tests {
             system: String::new(),
             messages: entries,
             tools: vec![],
+            output_cap: 0,
         };
         gateway.sample(request.clone()).await.unwrap();
         let seen = gateway.inner.requests();
@@ -300,6 +302,7 @@ mod tests {
             system: String::new(),
             messages: entries,
             tools: vec![],
+            output_cap: 0,
         };
         gateway.sample(request.clone()).await.unwrap();
         gateway.sample(request).await.unwrap();

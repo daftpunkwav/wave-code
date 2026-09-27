@@ -121,6 +121,10 @@ impl Tool for JobSpawnTool {
         "job_spawn"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Shell
+    }
+
     fn description(&self) -> &str {
         "Start a shell command as a background job and return its id \
          (job-N) immediately; long work stops blocking the turn. Poll with \

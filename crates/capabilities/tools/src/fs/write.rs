@@ -24,6 +24,10 @@ impl Tool for WriteFile {
         "write"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::FileEdit
+    }
+
     fn description(&self) -> &str {
         "Write a file inside the working directory, creating parent directories as needed. \
          Overwrites the whole file; use edit for partial changes."

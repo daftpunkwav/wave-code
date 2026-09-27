@@ -81,6 +81,30 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
+/// Declarative capability class a tool claims; the policy layer keys on
+/// this, never on tool names (architecture rule 4: adding a tool cannot
+/// silently drift the policy). Lives in protocol next to
+/// [`ApprovalKind`] because both are policy vocabulary shared by the
+/// tool trait, the sandbox, and the bootstrap adapter. The default is
+/// the cautious [`ToolKind::Other`]: an unclassified tool keeps the
+/// approval path instead of riding a builtin's exemption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolKind {
+    /// Runs commands in a shell or script runtime (`shell`, `python`,
+    /// `node`, `job_spawn`): approval kind `Exec`.
+    Shell,
+    /// Creates or overwrites workspace files (`write`, `edit`).
+    FileEdit,
+    /// Mutates in-session coordination state only (`todowrite`, `goal`,
+    /// `plan`).
+    SessionState,
+    /// Records deliverables in the session manifest (`present`).
+    Present,
+    /// Reads and everything else — the cautious default.
+    #[default]
+    Other,
+}
+
 /// Approval kind (the approval request's `kind`), letting the frontend pick a display shape.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

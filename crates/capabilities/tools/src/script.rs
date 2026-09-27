@@ -128,19 +128,18 @@ async fn run_script(
         .kill_on_drop(true);
     // Same scrubbing as Shell: deny_env list plus sensitive-suffix fallback.
     crate::shell_tool::sanitize_env(&mut cmd, ctx);
-    let output =
-        match crate::shell_tool::spawn_collect_bounded(
-            &mut cmd,
-            crate::shell_tool::STREAM_CAPTURE_CAP,
-            Duration::from_millis(timeout_ms),
-        )
-        .await
-        {
-            Ok(output) => output,
-            Err(e) => {
-                return Ok(err_output(format!("failed to spawn {program}: {e}")));
-            }
-        };
+    let output = match crate::shell_tool::spawn_collect_bounded(
+        &mut cmd,
+        crate::shell_tool::STREAM_CAPTURE_CAP,
+        Duration::from_millis(timeout_ms),
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(e) => {
+            return Ok(err_output(format!("failed to spawn {program}: {e}")));
+        }
+    };
     // Timeout: report the partial streams alongside the reason, matching
     // the shell tool.
     let Some(status) = output.status else {
@@ -182,6 +181,10 @@ pub struct PythonTool;
 impl Tool for PythonTool {
     fn name(&self) -> &str {
         "python"
+    }
+
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Shell
     }
 
     fn description(&self) -> &str {
@@ -257,6 +260,10 @@ pub struct NodeTool;
 impl Tool for NodeTool {
     fn name(&self) -> &str {
         "node"
+    }
+
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Shell
     }
 
     fn description(&self) -> &str {

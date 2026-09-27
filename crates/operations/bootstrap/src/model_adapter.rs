@@ -318,7 +318,13 @@ impl ModelGateway for ModelAdapter {
             system: request.system.clone(),
             messages: Arc::new(Self::messages(&request)),
             tools: self.tools(&request),
-            max_tokens: self.max_tokens,
+            // The runner's per-sample cap wins when set; `0` keeps the
+            // gateway default so old callers behave unchanged.
+            max_tokens: if request.output_cap > 0 {
+                request.output_cap
+            } else {
+                self.max_tokens
+            },
         };
         let mut stream = self.model.stream(req).await.map_err(|e| map_error(&e))?;
         let mut blocks = Vec::new();
@@ -497,14 +503,19 @@ mod tests {
     use state_store::{Block, HistoryEntry};
     use wavecode_llm::{ChatModel, EventStream, Usage};
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     struct ScriptedModel {
         events: Vec<StreamEvent>,
+        last_max_tokens: Arc<std::sync::Mutex<u32>>,
     }
 
     #[async_trait::async_trait]
     impl ChatModel for ScriptedModel {
-        async fn stream(&self, _req: ChatRequest) -> wavecode_llm::Result<EventStream> {
+        async fn stream(&self, req: ChatRequest) -> wavecode_llm::Result<EventStream> {
+            *self
+                .last_max_tokens
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = req.max_tokens;
             let events: Vec<wavecode_llm::Result<StreamEvent>> =
                 self.events.iter().cloned().map(Ok).collect();
             Ok(Box::pin(futures::stream::iter(events)))
@@ -513,7 +524,10 @@ mod tests {
 
     fn adapter(events: Vec<StreamEvent>) -> ModelAdapter {
         ModelAdapter::new(
-            Arc::new(ScriptedModel { events }),
+            Arc::new(ScriptedModel {
+                events,
+                last_max_tokens: Arc::new(std::sync::Mutex::new(0)),
+            }),
             "test-model".to_string(),
             100,
             Arc::new(wavecode_tools::Registry::builtin()),
@@ -528,6 +542,7 @@ mod tests {
                 blocks: vec![Block::Text("hello".to_string())],
             }],
             tools: vec![],
+            output_cap: 0,
         }
     }
 
@@ -714,6 +729,7 @@ mod tests {
                 },
             ],
             tools: vec![],
+            output_cap: 0,
         };
         let messages = __test_messages(&req);
         // Empty assistant entries are dropped; user entries and tool
@@ -747,6 +763,7 @@ mod tests {
                 },
             ],
             tools: vec![],
+            output_cap: 0,
         };
         let messages = __test_messages(&req);
         assert_eq!(
@@ -904,5 +921,44 @@ mod tests {
             Err(LlmError::PromptTooLong { .. })
         ));
         assert_eq!(fallback.attempts(), 0);
+    }
+    /// The runner's per-sample output cap must reach the provider wire;
+    /// `0` keeps the adapter default so the knob is additive, not breaking.
+    #[tokio::test]
+    async fn output_cap_overrides_the_adapter_default() {
+        let model = Arc::new(ScriptedModel {
+            events: vec![StreamEvent::MessageComplete {
+                stop_reason: "end_turn".to_string(),
+                usage: Usage::default(),
+            }],
+            last_max_tokens: Arc::new(std::sync::Mutex::new(0)),
+        });
+        let adapter = ModelAdapter::new(
+            model.clone(),
+            "m".to_string(),
+            100,
+            Arc::new(wavecode_tools::Registry::builtin()),
+        );
+        let mut capped = request();
+        capped.output_cap = 55;
+        adapter.sample(capped).await.unwrap();
+        assert_eq!(
+            *model
+                .last_max_tokens
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            55,
+            "the runner cap must override the adapter default"
+        );
+        let baseline = request();
+        adapter.sample(baseline).await.unwrap();
+        assert_eq!(
+            *model
+                .last_max_tokens
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+            100,
+            "cap 0 falls back to the adapter default"
+        );
     }
 }

@@ -11,6 +11,9 @@ infrastructure-base = { path = "../../infrastructure/base" }
 # The delegation tools (`task*`) spawn children through this
 # capability-neutral seam (a zero-dependency vocabulary-tier crate).
 action-tasks = { path = "../../action/tasks" }
+# `ToolKind`: the declarative policy class the `Tool` trait carries so
+# the sandbox never matches on tool names (architecture rule 4).
+wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-sandbox = { path = "../sandbox" }
 wavecode-llm = { path = "../../foundation/llm" }
 wavecode-context = { path = "../context" }

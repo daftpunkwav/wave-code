@@ -1360,7 +1360,8 @@ where
 
             let request = SampleRequest {
                 system: system.to_string(),
-                messages: project_images(&history_messages(conv), self.cfg.max_wire_images), // Restricted runs never see denied tools: the model plans
+                messages: project_images(&history_messages(conv), self.cfg.max_wire_images),
+                // Restricted runs never see denied tools: the model plans
                 // within its surface instead of hitting refusals.
                 tools: self
                     .executor

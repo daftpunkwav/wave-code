@@ -79,8 +79,9 @@ impl RetryPolicy {
 
     /// De-synchronize retries: multiplicative jitter over the deterministic
     /// backoff so N clients of one provider do not all re-hit at the same
-    /// tick. Seeded from the clock (no rng dependency); statistical spread
-    /// of ±25%, never below zero.
+    /// tick. Seeded from the clock (no rng dependency); the result lands in
+    /// `[delay / 2, delay)`, never below zero and never above the cap the
+    /// deterministic delay already respects.
     pub fn jittered(&self, delay: Duration, failed_attempt: usize) -> Duration {
         if delay.is_zero() {
             return delay;
@@ -539,9 +540,8 @@ mod tests {
         assert_eq!(policy.delay_for_attempt(30), Duration::from_millis(250));
     }
 
-    /// Jitter stays within +0..50% above/below the deterministic delay
-    /// (zero stays zero): retries de-synchronize without ever out-waiting
-    /// the cap.
+    /// Jitter lands in `[delay / 2, delay)` and zero stays zero: retries
+    /// de-synchronize without ever out-waiting the deterministic cap.
     #[test]
     fn jitter_spreads_but_never_inverts() {
         let policy = RetryPolicy {

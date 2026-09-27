@@ -164,8 +164,8 @@ impl Tool for TodoWrite {
 
     fn is_read_only(&self) -> bool {
         // Mutates session state (the real non-read-only semantics): runs in the serial section so concurrent
-        // todowrite calls within one batch cannot race. Approval-wise it passes via the sandbox's session-state
-        // exemption (no filesystem writes, no spawned processes); see wavecode-sandbox's is_session_state.
+        // todowrite calls within one batch cannot race. Approval-wise it passes via the sandbox's
+        // session-state exemption (no filesystem writes, no spawned processes); see `ToolKind::SessionState`.
         false
     }
 

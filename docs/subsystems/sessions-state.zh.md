@@ -12,7 +12,7 @@
 - 没有头行的文件按 v0（`JOURNAL_FORMAT_V0`）读回；`is_header_value` 区分它们（数值 `format`，无 `run_id`）。
 - `migrate_record` 在**读取时**把 v0 值抬升为当前形状——加载器从不改写用户的日志；未知或缺失字段降级为默认值。
 
-加载器对损坏行计数而不是失败：`load_all` / `load_reported`（为严格的调用者返回跳过数）/ `load_all_checked` / `last_n` 供 resume 预览。日志在正常运行中是追加式的;唯一的例外是 `read_repaired`——当它切掉损坏尾部时会持久化这次截断——用户看到的文件可能缩小,但绝不静默(截断点处有文档说明缘由)。
+加载器对损坏行计数而不是失败：`load_all` / `load_reported`（为严格的调用者返回跳过数）/ `load_all_checked` / `last_n` 供 resume 预览。日志在正常运行中是追加式的；唯一的例外是 `read_repaired`——当它切掉损坏尾部时会持久化这次截断——用户看到的文件可能缩小，但绝不静默（截断点处有文档说明缘由）。
 
 ## 会话注册表（`crates/state/persistence/src/sessions.rs`）
 

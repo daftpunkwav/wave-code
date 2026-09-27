@@ -61,13 +61,13 @@ pub enum SessionError {
     InvalidId(String),
 }
 
-/// Sessions root: `~/.wavecode/sessions/`.
 /// Per-process staging sequence: concurrent writers in this process
 /// never share one temp file, and the process id separates processes
 /// (a fixed staging name lets two writers clobber each other's bytes
 /// mid-write and rename half a file into place).
 static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Sessions root: `~/.wavecode/sessions/`.
 pub fn sessions_dir(home: &Path) -> PathBuf {
     home.join(".wavecode").join(SESSIONS_DIR)
 }

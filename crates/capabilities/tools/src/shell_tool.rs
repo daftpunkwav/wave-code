@@ -9,6 +9,7 @@
 //! (e.g. when a grandchild is a dev server). The proper fix is process-group-level reaping (Windows Job
 //! Object / Unix killpg); it is not implemented yet.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use infrastructure_base::shell_invocation;
@@ -16,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::is_sensitive_env_name;
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output, lock};
 
 /// Default timeout: 60 s.
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
@@ -24,6 +25,15 @@ const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Per-stream stdout / stderr output cap: 30 KB.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 30 * 1024;
+
+/// Post-run drain grace: how long the reader tasks may take to reach EOF
+/// after the child exited or was killed, before the capture-so-far is
+/// returned anyway. Death normally closes the pipe write ends and EOF lands
+/// within milliseconds; a grandchild that inherited the write ends and
+/// outlives the shell (see the module limitation note) must not extend the
+/// run past its own bound — the detached readers keep draining (buffering
+/// stays capped) until real EOF.
+const KILL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 /// Whether OS-level confinement applies to shell spawns.
 ///
@@ -50,21 +60,30 @@ pub(crate) fn truncate_output(bytes: &[u8]) -> String {
 }
 
 /// [`truncate_output`], plus a pointer to the full text when truncation
-/// fired and a spill store is configured: the complete stream (lossily
-/// decoded, capped by the store's own eviction) lands in the store and the
-/// result names its `spill://` URI so the model can page the middle back
-/// through the `spill` tool instead of never seeing it. Store failures
-/// degrade to plain truncation — the pointer is an addition, never a
-/// replacement for the capped text.
-pub(crate) fn truncate_output_spilled(bytes: &[u8], store: Option<&wavecode_context::SpillStore>) -> String {
+/// fired and a spill store is configured: the full captured stream (lossily
+/// decoded; output past the capture cap was already drained, and the store
+/// caps its own total size) lands in the store and the result names its
+/// `spill://` URI so the model can page the middle back through the `spill`
+/// tool instead of never seeing it. Store failures degrade to plain
+/// truncation — the pointer is an addition, never a replacement for the
+/// capped text.
+pub(crate) fn truncate_output_spilled(
+    bytes: &[u8],
+    store: Option<&wavecode_context::SpillStore>,
+) -> String {
+    // Truncation is decided on the captured length, not the marker: a
+    // stream that itself ends with the literal `[truncated]` line must not
+    // spill as if it had been cut.
+    let full = String::from_utf8_lossy(bytes);
+    let truncated = full.len() > MAX_OUTPUT_BYTES;
     let text = truncate_output(bytes);
-    if !text.ends_with("\n[truncated]") {
+    if !truncated {
         return text;
     }
     let Some(store) = store else {
         return text;
     };
-    match store.spill(&String::from_utf8_lossy(bytes)) {
+    match store.spill(&full) {
         // The URI sits whitespace-delimited with no glued punctuation, so
         // both the model and the spill tool can lift it out verbatim.
         Ok(uri) => format!(
@@ -102,25 +121,33 @@ pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
 /// rest is drained and discarded.
 pub(crate) const STREAM_CAPTURE_CAP: usize = MAX_OUTPUT_BYTES + 1024 * 1024;
 
-/// Collect one child output stream into at most `cap` bytes.
-///
-/// Reads run to EOF so the child never blocks on a full pipe; bytes past
-/// the cap are discarded. Read errors degrade to a truncated capture (the
-/// exit code still surfaces) instead of failing the whole call.
-async fn collect_capped<R: tokio::io::AsyncRead + Unpin>(mut stream: R, cap: usize) -> Vec<u8> {
+/// Collect one child output stream into the shared buffer, at most `cap`
+/// bytes. Reads run to EOF so the child never blocks on a full pipe; bytes
+/// past the cap are discarded. Read errors degrade to a truncated capture
+/// (the exit code still surfaces) instead of failing the whole call. The
+/// buffer is shared so the bounded wait can snapshot the capture-so-far
+/// without depending on the readers reaching EOF; the lock is never held
+/// across the read await.
+async fn collect_capped<R: tokio::io::AsyncRead + Unpin>(
+    stream: Option<R>,
+    cap: usize,
+    sink: Arc<Mutex<Vec<u8>>>,
+) {
     use tokio::io::AsyncReadExt;
-    let mut buf = Vec::with_capacity(64 * 1024);
+    let Some(mut stream) = stream else {
+        return;
+    };
     let mut chunk = [0u8; 8192];
     loop {
         match stream.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
+                let mut buf = lock(&sink);
                 let take = n.min(cap.saturating_sub(buf.len()));
                 buf.extend_from_slice(&chunk[..take]);
             }
         }
     }
-    buf
 }
 
 /// One child run's captured output.
@@ -142,57 +169,56 @@ pub(crate) struct Collected {
 /// the cap are drained and discarded. Read errors degrade to a truncated
 /// capture (the exit code still surfaces) instead of failing the call.
 /// On timeout the child is killed and [`Collected::status`] comes back
-/// `None` with the partial streams attached. Shared by `Shell` and the
-/// script tools so no child-output path buffers unbounded or leaks a
-/// killed process's captured output.
+/// `None` with the partial streams attached. The post-run reader join is
+/// grace-bounded ([`KILL_DRAIN_GRACE`]) so a pipe-inheriting grandchild
+/// that outlives the shell cannot stretch the run past its bound. Shared
+/// by `Shell` and the script tools so no child-output path buffers
+/// unbounded or leaks a killed process's captured output.
 pub(crate) async fn spawn_collect_bounded(
     cmd: &mut tokio::process::Command,
     cap: usize,
     timeout: Duration,
 ) -> std::io::Result<Collected> {
     let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    // The readers are owned tasks: on timeout an explicit kill closes the
-    // pipes, the tasks drain to EOF promptly (read errors degrade), and the
-    // buffers collected so far survive the kill.
-    let out_task = tokio::spawn(async move {
-        match stdout {
-            Some(s) => collect_capped(s, cap).await,
-            None => Vec::new(),
-        }
-    });
-    let err_task = tokio::spawn(async move {
-        match stderr {
-            Some(s) => collect_capped(s, cap).await,
-            None => Vec::new(),
-        }
-    });
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => {
-            let (stdout, stderr) = tokio::join!(out_task, err_task);
-            Ok(Collected {
-                status: Some(status),
-                // A reader task can only fail by panicking; degrade to an
-                // empty capture (the exit code still surfaces) like a read
-                // error does.
-                stdout: stdout.unwrap_or_default(),
-                stderr: stderr.unwrap_or_default(),
-            })
-        }
-        Ok(Err(e)) => Err(e),
-        // Elapsed: kill closes the child's pipe ends, so the readers see
-        // EOF right after; kill_on_drop remains as the drop-path backstop.
+    // The capture buffers live outside the reader tasks so the bounded
+    // wait below can return the partial streams without depending on the
+    // readers reaching EOF (a grandchild holding the write ends open can
+    // delay that indefinitely).
+    let stdout = Arc::new(Mutex::new(Vec::new()));
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let out_task = tokio::spawn(collect_capped(child.stdout.take(), cap, stdout.clone()));
+    let err_task = tokio::spawn(collect_capped(child.stderr.take(), cap, stderr.clone()));
+    // Tokio's kill awaits the child's exit (reaping it); killing an
+    // already-exited child degrades to Err here, which changes nothing —
+    // its pipe ends are closed either way.
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
             let _ = child.kill().await;
-            let (stdout, stderr) = tokio::join!(out_task, err_task);
-            Ok(Collected {
-                status: None,
-                stdout: stdout.unwrap_or_default(),
-                stderr: stderr.unwrap_or_default(),
-            })
+            None
         }
-    }
+    };
+    // Grace-bounded reader join: the run's exit (or the kill) closes the
+    // shell's pipe ends, so EOF normally lands within milliseconds and the
+    // grace never binds. A grandchild that inherited the write ends and
+    // outlives the shell gets exactly the grace, then the partial capture
+    // is returned and the detached readers (still capped) drain to EOF on
+    // their own. kill_on_drop remains the drop-path backstop.
+    //
+    // `tokio::join!` expands to an immediately-awaited expression, so it
+    // wraps in an async block to become a future the grace can bound.
+    let _ = tokio::time::timeout(KILL_DRAIN_GRACE, async {
+        // Join results are irrelevant: the capture lives in the shared
+        // buffers (a panicking reader leaves its partial capture there).
+        let _ = tokio::join!(out_task, err_task);
+    })
+    .await;
+    Ok(Collected {
+        status,
+        stdout: lock(&stdout).clone(),
+        stderr: lock(&stderr).clone(),
+    })
 }
 
 /// Execute a shell command (a writing tool: may modify files or spawn processes, needs serial scheduling).
@@ -229,8 +255,9 @@ impl Tool for Shell {
          (cmd /C on Windows, sh -c on Unix; override with the WAVECODE_SHELL env var). \
          Use timeout_ms to bound execution (default 60000 ms, clamped to 300000 ms); on timeout \
          the process is killed and the output produced so far is reported. stdout and stderr are \
-         captured separately, each truncated at 30KB with the full output saved to a spill:// URI \
-         the spill tool can read back. The command runs non-interactive (stdin is closed)."
+         captured separately, each truncated at 30KB; truncated completed runs also save the \
+         full output to a spill:// URI the spill tool can read back. The command runs \
+         non-interactive (stdin is closed)."
     }
 
     fn input_schema(&self) -> Value {
@@ -535,7 +562,10 @@ mod tests {
             // nothing is orphaned after the kill.
             "echo started& for /l %i in (1,1,1000000000) do @rem"
         } else {
-            "echo started; sleep 30"
+            // `exec` folds sleep into the shell itself: the kill closes
+            // every pipe write end at once (the orphaned-grandchild shape
+            // is covered by the test below).
+            "echo started; exec sleep 30"
         };
         let out = Shell::default()
             .execute(
@@ -550,6 +580,45 @@ mod tests {
             out.content.contains("started"),
             "pre-kill output survives the kill: {}",
             out.content
+        );
+    }
+
+    /// A grandchild that inherits the pipes and outlives the killed shell
+    /// must not extend the run past the post-kill drain grace: the partial
+    /// capture comes back instead of waiting on the orphan. Unix-only: the
+    /// orphan shape needs real grandchild pipe inheritance, which cmd's
+    /// `start` does not model deterministically.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn timeout_does_not_wait_for_orphaned_grandchildren() {
+        if cfg!(windows) {
+            return;
+        }
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_d, c) = ctx();
+        // sleep is a grandchild holding the pipe write ends; killing the
+        // shell cannot close them until it exits (30s) — the grace must
+        // bound the run first.
+        let started = std::time::Instant::now();
+        let out = Shell::default()
+            .execute(
+                serde_json::json!({"command": "echo started; sleep 30", "timeout_ms": 300}),
+                &c,
+            )
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("started"),
+            "partial capture survives the orphaned grandchild: {}",
+            out.content
+        );
+        // Bounded by timeout + drain grace, not by the 30s orphan.
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "the run waited on the orphaned grandchild: {elapsed:?}"
         );
     }
 

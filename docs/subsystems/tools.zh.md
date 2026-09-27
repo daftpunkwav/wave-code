@@ -52,7 +52,7 @@ async fn execute(&self, input, ctx: &ToolCtx) -> Result<ToolOutput>;
 
 - `read`、`write`、`edit` — `src/fs/mod.rs`（外加 `fs/read.rs`、`fs/write.rs`、`fs/edit.rs`）；写入是原子的（临时文件+改名），带大小上限与 edit 的精确匹配唯一性检查。`read` 把每个文件的 (mtime, len) 指纹记入会话共享的 `FileLedger`，`write` / `edit` 在落盘指纹偏离会话最近一次所见时拒绝改写，外部变更由此强制先重读，而不是被悄悄覆盖。
 - `grep`、`glob` — `src/search/`；同步遍历包在 `spawn_blocking` 里。
-- `shell` — `src/shell_tool.rs`；经 `sanitize_env`（剥离 `deny_env` 名单及 `*_KEY`、`*_PAT`、`AWS_SECRET_ACCESS_KEY` 等敏感形态变量）与 OS sandbox 后端生成子进程。超时会杀死进程并报告杀死前已产生的输出；单流在 30 KB 上限处被截断时会把全文落入 context 的 `SpillStore`，给出 `spill` 工具可读回的 `spill://` URI。
+- `shell` — `src/shell_tool.rs`；经 `sanitize_env`（剥离 `deny_env` 名单及 `*_KEY`、`*_PAT`、`AWS_SECRET_ACCESS_KEY` 等敏感形态变量）与 OS sandbox 后端生成子进程。超时会杀死进程并报告杀死前已产生的输出；完成运行的单流在 30 KB 上限处被截断时会把全文落入 context 的 `SpillStore`，给出 `spill` 工具可读回的 `spill://` URI。
 - `python`、`node` — `src/script.rs`（非只读）。
 - `lsp_symbols`、`lsp_definition`、`lsp_hover`、`lsp_references` — `src/lsp.rs`；导航工具只读。
 - `web_fetch` — `src/web_fetch.rs`；`web_search` — `src/websearch.rs`（DuckDuckGo 后端）；两者只读。

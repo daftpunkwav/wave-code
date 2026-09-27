@@ -66,7 +66,7 @@ pub const PROMPT_CONTEXT_MAX_BYTES: usize = 64 * 1024;
 pub const PROMPT_CONTEXT_TRUNCATED: &str = "\n[...prompt hook output truncated]";
 
 /// Event point: the config `[hooks.<EventPoint>]` table names match
-    /// the legal values of [`HookEventPoint::parse`].
+/// the legal values of [`HookEventPoint::parse`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HookEventPoint {
     /// Before tool execution (blockable): command audit, pre-flight checks.
@@ -88,8 +88,8 @@ pub enum HookEventPoint {
     PreCompact,
     /// After compaction (not blockable): archival.
     PostCompact,
-    // TODO: the Notification point (system notification forwarding) is
-    // not implemented in this version.
+    // The Notification point (system notification forwarding) is not
+    // wired in this version.
 }
 
 impl HookEventPoint {

@@ -160,6 +160,33 @@ fn split_tag(inner: &str) -> (String, String) {
     (name, attrs)
 }
 
+/// Markdown-safe link targets only. The fetched page fully controls
+/// `href`, and the raw value lands in the model context, so: any explicit
+/// scheme other than http/https/mailto (`javascript:`, `data:`, vendor
+/// schemes) degrades the anchor to plain text, scheme-less relative
+/// targets stay links, and whitespace/parenthesis characters that would
+/// break `](target)` syntax degrade too.
+fn markdown_link_target(href: &str) -> Option<String> {
+    if let Some(colon) = href.find(':') {
+        let head = &href[..colon];
+        let lower = head.to_ascii_lowercase();
+        let scheme_shaped = !head.is_empty()
+            && head
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if !scheme_shaped || !(lower == "http" || lower == "https" || lower == "mailto") {
+            return None;
+        }
+    }
+    if href
+        .chars()
+        .any(|c| c.is_whitespace() || matches!(c, '(' | ')' | '<' | '>'))
+    {
+        return None;
+    }
+    Some(href.to_string())
+}
+
 /// Pull an attribute value out of a raw attribute string (first match,
 /// double / single quotes or unquoted).
 fn attr_value(attrs: &str, name: &str) -> Option<String> {
@@ -264,7 +291,7 @@ pub fn html_to_markdown(html: &str) -> String {
     let mut out = String::with_capacity(html.len() / 2);
     let mut drop_depth = 0usize; // >0 while inside script/style/head/...
     let mut list_stack: Vec<(bool, u32)> = Vec::new(); // (ordered, next index)
-    let mut link_stack: Vec<String> = Vec::new(); // open <a href> targets
+    let mut link_stack: Vec<Option<String>> = Vec::new(); // open <a href> targets
     let mut in_pre = false;
     let mut quote_depth = 0usize;
 
@@ -327,12 +354,17 @@ pub fn html_to_markdown(html: &str) -> String {
                     }
                     "a" => {
                         // Only real links become Markdown links; `#anchor`
-                        // jumps carry no meaning in a fetched snapshot.
+                        // jumps carry no meaning in a fetched snapshot. The
+                        // fetched page fully controls `href`, so only a
+                        // well-known scheme with no Markdown-breaking
+                        // characters opens a link (everything else
+                        // degrades to plain text).
                         if let Some(href) = attr_value(&attrs, "href")
                             && !href.starts_with('#')
+                            && let Some(target) = markdown_link_target(&href)
                         {
                             out.push('[');
-                            link_stack.push(href);
+                            link_stack.push(Some(target));
                         }
                     }
                     "strong" | "b" => out.push_str("**"),
@@ -364,7 +396,7 @@ pub fn html_to_markdown(html: &str) -> String {
                     }
                     "blockquote" => quote_depth = quote_depth.saturating_sub(1),
                     "a" => {
-                        if let Some(href) = link_stack.pop() {
+                        if let Some(Some(href)) = link_stack.pop() {
                             out.push_str(&format!("]({href})"));
                         }
                     }
@@ -455,6 +487,24 @@ mod tests {
         assert!(md.contains("keep") && md.contains("after"), "{md}");
         assert!(!md.contains("evil") && !md.contains("color"), "{md}");
         assert!(!md.contains("comment"), "{md}");
+    }
+
+    /// The fetched page fully controls `href`: only well-known schemes
+    /// with Markdown-safe characters stay links, everything else degrades
+    /// to plain text (no `javascript:` targets, no broken `](...)` syntax).
+    #[test]
+    fn unsafe_or_unshaped_hrefs_degrade_to_plain_text() {
+        let md = html_to_markdown(
+            "<p><a href=\"javascript:alert(1)\">evil</a>\
+             <a href=\"https://e.com/a(b)\">parens</a>\
+             <a href=\"https://e.com/ok\">ok</a>\
+             <a href=\"/relative\">rel</a></p>",
+        );
+        assert!(!md.contains("](javascript"), "{md}");
+        assert!(md.contains("evil"), "{md}");
+        assert!(!md.contains("](https://e.com/a(b"), "{md}");
+        assert!(md.contains("[rel](/relative"), "{md}");
+        assert!(md.contains("[ok](https://e.com/ok)"), "{md}");
     }
 
     #[test]

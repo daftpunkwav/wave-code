@@ -145,9 +145,28 @@ mod tests {
 
     #[tokio::test]
     async fn control_sequences_are_stripped() {
-        let line = run_once("printf '\\033[31mred-line\\033[0m'", snapshot())
-            .await
-            .unwrap();
+        // The escape bytes ride a temp file: `echo` cannot emit ESC under
+        // cmd, and `printf` is not a Windows command — only `type`/`cat`
+        // print it identically on both platforms. The path must ride
+        // unquoted: std's command-line escaping rewrites inner `"` into
+        // `\"`, which `cmd /C` mangles into a syntax error. Windows skips
+        // the test when the temp directory itself contains a space.
+        let dir =
+            std::env::temp_dir().join(format!("wavecode-statusline-esc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("red-line.txt");
+        std::fs::write(&file, b"\x1b[31mred-line\x1b[0m\n").unwrap();
+        #[cfg(windows)]
+        if dir.to_string_lossy().contains(' ') {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        #[cfg(windows)]
+        let cmd = format!("type {}", file.display());
+        #[cfg(not(windows))]
+        let cmd = format!("cat '{}'", file.display());
+        let line = run_once(&cmd, snapshot()).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(line, "red-line");
     }
 

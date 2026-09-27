@@ -6,7 +6,7 @@
  * commit as the wire change.
  */
 
-/** A tool call finished with a business failure. */
+/** The approval kind a gate request carries: exec (command execution) or write. */
 export type ApprovalKind = "exec" | "write";
 
 /** The decision line dialect accepted on stdin with `--approvals`. */

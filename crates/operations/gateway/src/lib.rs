@@ -22,6 +22,7 @@
 //! a session was assembled.
 pub mod acp;
 pub mod app_server;
+mod jsonrpc;
 pub mod mcp_serve;
 
 /// Shared stubs for this crate's server tests; never compiled into a

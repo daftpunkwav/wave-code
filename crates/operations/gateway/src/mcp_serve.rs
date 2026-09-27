@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use runtime_runner::{ToolCall, ToolExecutor};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 
 // The composition root's executor converts implementation faults into
 // error results prefixed with `wavecode_tools::TOOL_FAULT_PREFIX` (so
@@ -45,9 +45,9 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 /// Server name reported in `serverInfo`.
 pub const SERVER_NAME: &str = "wavecode";
 
-/// JSON-RPC error codes served by this loop.
+/// JSON-RPC error codes served by this loop (`INVALID_REQUEST` is the
+/// shared one from [`crate::jsonrpc`]).
 const PARSE_ERROR: i32 = -32700;
-const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
@@ -79,14 +79,30 @@ where
 {
     let mut reader = reader;
     let mut writer = writer;
-    let mut line = String::new();
     loop {
-        line.clear();
-        let read = reader.read_line(&mut line).await?;
-        if read == 0 {
-            // EOF (or stdio close): clean shutdown, no sentinel needed.
-            return Ok(());
-        }
+        let line = match read_line_capped(&mut reader).await? {
+            IncomingLine::Eof => {
+                // EOF (or stdio close): clean shutdown, no sentinel needed.
+                return Ok(());
+            }
+            IncomingLine::TooLong => {
+                writer
+                    .write_all(
+                        error_response(
+                            serde_json::Value::Null,
+                            INVALID_REQUEST,
+                            "invalid request: line exceeds the size cap",
+                        )
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+                continue;
+            }
+            IncomingLine::Line(line) => line,
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -166,24 +182,9 @@ async fn handle_line<E: ToolExecutor>(
     }
 }
 
-/// Request id echoed back, or null when absent (notifications/errors).
-fn id_or_null(object: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
-    object.get("id").cloned().unwrap_or(serde_json::Value::Null)
-}
-
-/// Success envelope for one request id.
-fn success_response(id: serde_json::Value, result: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-/// Error envelope for one request id (null when no id can be echoed).
-fn error_response(
-    id: serde_json::Value,
-    code: i32,
-    message: impl Into<String>,
-) -> serde_json::Value {
-    serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
-}
+use crate::jsonrpc::{
+    INVALID_REQUEST, IncomingLine, error_response, id_or_null, read_line_capped, success_response,
+};
 
 /// `initialize` result: negotiated version plus server identity.
 fn initialize_result() -> serde_json::Value {
@@ -278,6 +279,7 @@ async fn call_tool<E: ToolExecutor>(
 mod tests {
     use super::*;
     use operations_bootstrap::ToolAdapter;
+    use tokio::io::AsyncBufReadExt as _;
     use wavecode_tools::{Result as ToolResultAlias, Tool, ToolCtx, ToolOutput};
 
     struct EchoTool;

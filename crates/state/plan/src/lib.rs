@@ -240,8 +240,10 @@ pub fn plans_root_for_home(home: &Path) -> PathBuf {
 /// Validate a session id: it becomes a single file name, so path
 /// separators and traversal sequences are rejected outright.
 pub fn validate_session_id(id: &str) -> Result<(), PlanError> {
+    // Same cap as the session registry (sessions.rs): one id must be
+    // valid everywhere, not legal in one store and rejected in another.
     if id.is_empty()
-        || id.len() > 64
+        || id.len() > 128
         || !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -437,7 +439,9 @@ mod tests {
     fn session_ids_reject_path_traversal() {
         assert!(validate_session_id("default").is_ok());
         assert!(validate_session_id("thread-1_2").is_ok());
-        for bad in ["", "../evil", "a/b", "a.json", "x".repeat(65).as_str()] {
+        // The 128-char cap matches the session registry (sessions.rs).
+        assert!(validate_session_id(&"x".repeat(128)).is_ok());
+        for bad in ["", "../evil", "a/b", "a.json", "x".repeat(129).as_str()] {
             assert!(validate_session_id(bad).is_err(), "{bad:?}");
         }
     }

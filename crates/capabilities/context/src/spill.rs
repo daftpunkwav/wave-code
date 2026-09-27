@@ -140,8 +140,13 @@ pub fn default_spill_store_root() -> PathBuf {
 }
 
 /// Home-scoped side-store for oversized tool outputs with oldest-eviction.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SpillStore {
+    /// Serializes manifest read-modify-write cycles within this process.
+    /// (Cross-process writers share the root and stay racy; the atomic
+    /// save bounds that damage to a lost update, never a truncated
+    /// ledger.)
+    lock: std::sync::Mutex<()>,
     root: PathBuf,
 }
 
@@ -149,7 +154,10 @@ impl SpillStore {
     /// Build with an explicit root (tests inject a tempdir; production uses
     /// [`default_spill_store_root`]).
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            lock: std::sync::Mutex::new(()),
+            root,
+        }
     }
 
     /// Store root.
@@ -172,7 +180,16 @@ impl SpillStore {
 
     fn save_manifest(&self, entries: &[ManifestEntry]) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
-        std::fs::write(self.manifest_path(), render_manifest(entries))
+        // The manifest is the sole ledger for the 32MB cap: a truncated
+        // write would read back as "0 bytes used" and disable eviction
+        // forever, so it lands temp+rename (per docs/defensive-patterns.md).
+        let staging = self.root.join("manifest.txt.staging-tmp");
+        std::fs::write(&staging, render_manifest(entries))?;
+        if let Err(e) = std::fs::rename(&staging, self.manifest_path()) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Spill `content` into the store, returning its `spill://` URI.
@@ -182,6 +199,9 @@ impl SpillStore {
         let id = Self::new_id();
         validate_spill_id(&id).map_err(SpillError::Unknown)?;
         let bytes = content.as_bytes();
+        // The lock spans the whole read-modify-write so concurrent spills
+        // (parallel tool rounds) cannot lose entries.
+        let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::write(self.entry_path(&id), bytes)?;
         let mut entries = self.load_manifest();
         entries.push(ManifestEntry {

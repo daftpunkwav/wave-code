@@ -36,16 +36,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use operations_actor::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionSurface};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use wavecode_wire::{EventMsg, Op, Submission};
 
 /// Protocol version advertised at `initialize` (subset pin, not negotiated).
 const ACP_PROTOCOL_VERSION: &str = "0.1.0";
 
-/// JSON-RPC error codes served by this loop.
+/// JSON-RPC error codes served by this loop (`INVALID_REQUEST` is the
+/// shared one from [`crate::jsonrpc`]).
 const PARSE_ERROR: i32 = -32700;
-const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
@@ -170,17 +170,27 @@ where
     let mut sessions: HashMap<String, SessionEntry> = HashMap::new();
     let mut next_session: u64 = 1;
     let mut reader = reader;
-    let mut line = String::new();
     loop {
         tokio::select! {
-            read = reader.read_line(&mut line) => {
-                let n = read?;
-                if n == 0 {
-                    // EOF (or stdio close): clean shutdown, no sentinel needed.
-                    break;
-                }
+            incoming = read_line_capped(&mut reader) => {
+                let line = match incoming? {
+                    IncomingLine::Eof => {
+                        // EOF (or stdio close): clean shutdown, no sentinel needed.
+                        break;
+                    }
+                    IncomingLine::TooLong => {
+                        write_error(
+                            &writer,
+                            &serde_json::Value::Null,
+                            INVALID_REQUEST,
+                            "invalid request: line exceeds the size cap",
+                        )
+                        .await;
+                        continue;
+                    }
+                    IncomingLine::Line(line) => line,
+                };
                 if line.trim().is_empty() {
-                    line.clear();
                     continue;
                 }
                 dispatch_line(
@@ -193,7 +203,6 @@ where
                     &done_tx,
                 )
                 .await;
-                line.clear();
             }
             msg = done_rx.recv() => {
                 let Some(msg) = msg else { break };
@@ -938,24 +947,9 @@ where
     }
 }
 
-/// Request id echoed back, or null when absent (notifications/errors).
-fn id_or_null(object: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
-    object.get("id").cloned().unwrap_or(serde_json::Value::Null)
-}
-
-/// Success envelope for one request id.
-fn success_response(id: &serde_json::Value, result: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result})
-}
-
-/// Error envelope for one request id (null when no id can be echoed).
-fn error_response(
-    id: &serde_json::Value,
-    code: i32,
-    message: impl Into<String>,
-) -> serde_json::Value {
-    serde_json::json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message.into()}})
-}
+use crate::jsonrpc::{
+    INVALID_REQUEST, IncomingLine, error_response, id_or_null, read_line_capped, success_response,
+};
 
 /// Notification envelope (no id, never answered).
 fn notification(method: &str, params: serde_json::Value) -> serde_json::Value {
@@ -981,7 +975,7 @@ async fn write_success<W>(writer: &Arc<Mutex<W>>, id: &serde_json::Value, result
 where
     W: AsyncWrite + Unpin,
 {
-    write_line(writer, &success_response(id, result)).await;
+    write_line(writer, &success_response(id.clone(), result)).await;
 }
 
 /// Fail a request with a JSON-RPC error code.
@@ -993,7 +987,7 @@ async fn write_error<W>(
 ) where
     W: AsyncWrite + Unpin,
 {
-    write_line(writer, &error_response(id, code, message)).await;
+    write_line(writer, &error_response(id.clone(), code, message)).await;
 }
 
 /// Emit a server-to-client notification.
@@ -1008,6 +1002,7 @@ where
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use tokio::io::AsyncBufReadExt as _;
     use tokio::io::DuplexStream;
     use wavecode_llm::{ChatModel, ChatRequest, EventStream, StreamEvent, Usage};
 

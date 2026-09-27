@@ -12,7 +12,7 @@ Durable state is deliberately dumb: append-only bytes plus versioned formats, wi
 - Files without a header read back as v0 (`JOURNAL_FORMAT_V0`); `is_header_value` distinguishes them (numeric `format`, no `run_id`).
 - `migrate_record` lifts v0 values into the current shape on **read only** — loaders never rewrite the user's journal; unknown or missing fields degrade to defaults.
 
-Loaders count skipped corrupt lines instead of failing: `load_all` / `load_reported` (returns the skipped count for strict callers) / `load_all_checked` / `last_n` for resume previews. The journal is append-only; nothing truncates it.
+Loaders count skipped corrupt lines instead of failing: `load_all` / `load_reported` (returns the skipped count for strict callers) / `load_all_checked` / `last_n` for resume previews. The journal is append-only in normal operation; the one exception is `read_repaired`, which persists a truncation when it cuts a corrupt tail — the file the user sees can shrink, never silently (the truncation site documents why).
 
 ## Session registry (`crates/state/persistence/src/sessions.rs`)
 

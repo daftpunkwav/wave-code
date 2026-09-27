@@ -33,9 +33,12 @@ use std::sync::Arc;
 /// Registry and loader failures as explicit business errors (never panics).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PluginError {
-    /// Two plugins share one name (or a name is blank).
+    /// Two plugins share one name.
     #[error("duplicate plugin name: {0}")]
     Duplicate(String),
+    /// A plugin name is blank after trimming.
+    #[error("plugin name is blank")]
+    BlankName,
     /// A plugin depends on a name that was never registered.
     #[error("plugin {plugin} depends on missing plugin {dep}")]
     MissingDep { plugin: String, dep: String },
@@ -178,7 +181,7 @@ impl Registry {
     ) -> Result<(), PluginError> {
         let name = plugin.name().to_owned();
         if name.trim().is_empty() {
-            return Err(PluginError::Duplicate(name));
+            return Err(PluginError::BlankName);
         }
         if self.entries.contains_key(&name) {
             return Err(PluginError::Duplicate(name));

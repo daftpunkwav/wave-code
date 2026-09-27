@@ -75,7 +75,7 @@ pub enum Op {
     /// Request context compaction.
     Compact {
         /// Optional user steering for the summary (`/compact <focus>`).
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         instruction: Option<String>,
     },
     /// Rewind the conversation by whole user turns (idle `/undo` path).

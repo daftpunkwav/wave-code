@@ -4,9 +4,9 @@ English | [中文](README.zh.md)
 
 | Item | Role |
 |---|---|
-| `audit/` | `safety-audit` — in-memory append-only audit trail of allow/ask/deny/error decisions |
+| `audit/` | `safety-audit` — in-memory append-only audit trail of allow/ask/deny/error decisions (unwired: no product consumer yet, see `docs/architecture.md`) |
 | `gate/` | `safety-gate` — race-free one-shot parking of approval and question requests keyed by call id |
-| `guardrail/` | `safety-guardrail` — heuristic prompt-injection screening and taint tracking |
+| `guardrail/` | `safety-guardrail` — heuristic prompt-injection screening and taint tracking (unwired: no product consumer yet, see `docs/architecture.md`) |
 | `secrets/` | `safety-secrets` — named secret storage with redaction for logs and transcripts |
 
 This layer decides policy only: OS-level isolation (landlock, seatbelt,

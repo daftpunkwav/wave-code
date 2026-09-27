@@ -420,7 +420,6 @@ async fn stream_events(
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
     let mut receiver = session.events.subscribe();
-    let _ = &session;
     drop(sessions);
     let stream = async_stream::stream! {
         loop {
@@ -520,22 +519,38 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
     let Some(send_result) = send_result else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
-    if send_result.is_err() {
+    match send_result {
+        // Backpressure is not shutdown: a full queue means the prompt can
+        // be retried once the pump drains, so answer 429 (not 409) and
+        // keep the submission rejection visible instead of dropping it.
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            let mut response = (
+                StatusCode::TOO_MANY_REQUESTS,
+                "session queue is full; retry shortly",
+            )
+                .into_response();
+            response
+                .headers_mut()
+                .insert("Retry-After", axum::http::HeaderValue::from_static("1"));
+            response
+        }
         // The pump is gone: the session is closing.
-        return (StatusCode::CONFLICT, "session is closing").into_response();
-    }
-    match reply_rx.await {
-        Ok(Ok(())) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({"queued": true})),
-        )
-            .into_response(),
-        Ok(Err(e)) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "session closed").into_response(),
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            (StatusCode::CONFLICT, "session is closing").into_response()
+        }
+        Ok(()) => match reply_rx.await {
+            Ok(Ok(())) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"queued": true})),
+            )
+                .into_response(),
+            Ok(Err(e)) => (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response(),
+            Err(_) => (StatusCode::NOT_FOUND, "session closed").into_response(),
+        },
     }
 }
 

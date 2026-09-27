@@ -181,10 +181,10 @@ fn is_private_addr(addr: std::net::IpAddr) -> bool {
 /// resolves only into non-routable ranges fails the fetch, so a
 /// public-looking URL cannot smuggle a request into private space
 /// (split-horizon DNS, DNS rebinding). Name resolution happens per
-/// connect, so redirect hops through names are re-vetted too; private
-/// IP literals skip DNS entirely and are instead refused per hop by
-/// [`private_redirect_reason`]. The initial URL keeps the local-dev
-/// literal allowance documented on [`is_link_local_host`].
+/// connect, so redirect hops through names are re-vetted too. IP
+/// literals skip DNS entirely, so a literal redirect target is judged
+/// per hop by [`is_link_local_host`] (link-local refused; the
+/// loopback/RFC1918 allowance is documented there).
 #[derive(Debug)]
 struct NonPrivateResolver;
 
@@ -236,11 +236,31 @@ fn decode_body(bytes: &[u8], content_type: Option<&str>) -> String {
         })
     });
     match charset.as_deref() {
-        Some("iso-8859-1" | "latin-1" | "latin1" | "windows-1252" | "cp1252") => {
-            bytes.iter().map(|&b| b as char).collect()
-        }
+        Some("iso-8859-1" | "latin-1" | "latin1") => bytes.iter().map(|&b| b as char).collect(),
+        Some("windows-1252" | "cp1252") => decode_windows1252(bytes),
         _ => String::from_utf8_lossy(bytes).into_owned(),
     }
+}
+
+/// True Windows-1252 decoding: bytes `0x80`–`0x9F` map to the C1 graphics
+/// replacements (`€`, curly quotes, dashes, …), unlike latin-1 where they
+/// are invisible control characters.
+fn decode_windows1252(bytes: &[u8]) -> String {
+    const C1: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž',
+        '\u{8F}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}',
+        'ž', 'Ÿ',
+    ];
+    bytes
+        .iter()
+        .map(|&b| {
+            if (0x80..=0x9F).contains(&b) {
+                C1[(b - 0x80) as usize]
+            } else {
+                b as char
+            }
+        })
+        .collect()
 }
 
 /// Fetch a URL as text (read-only).
@@ -642,7 +662,7 @@ mod tests {
     /// Loopback/RFC1918 redirects stay allowed for local dev servers
     /// that redirect to themselves; names are the resolver's job.
     #[test]
-    fn redirect_private_literals_are_refused() {
+    fn redirect_link_local_literals_are_refused() {
         assert!(is_link_local_host("169.254.169.254"));
         assert!(is_link_local_host("169.254.1.1"));
         assert!(is_link_local_host("[fe80::1]"));

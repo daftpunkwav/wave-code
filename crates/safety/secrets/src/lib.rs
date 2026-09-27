@@ -22,9 +22,19 @@
 pub const REDACTED: &str = "***";
 
 /// Named secret store.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SecretsStore {
     values: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for SecretsStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redacted Debug (per docs/defensive-patterns.md): key names only —
+        // a derived Debug on an outer struct must never print values.
+        f.debug_struct("SecretsStore")
+            .field("names", &self.values.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl SecretsStore {

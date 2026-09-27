@@ -345,20 +345,22 @@ impl GoalState {
         status: Option<GoalStatus>,
     ) -> Result<(), GoalError> {
         self.check_version(expected_version)?;
-        let next_objective = match objective {
-            Some(text) => Some(Self::require_objective(text)?),
-            None => None,
-        };
-        if let Some(next) = status
-            && next != self.status
-            && self.status.is_terminal()
-        {
+        // A terminal goal is closed for edits of any kind: leaving the
+        // state (or rewriting its objective) goes through `set`, which
+        // restarts the round driver cleanly. The guard must not depend on
+        // the caller also passing `status` — an objective-only update
+        // would otherwise rewrite a Completed goal in place.
+        if self.status.is_terminal() {
             return Err(GoalError::UnexpectedState {
                 action: "update",
                 expected: "a non-terminal goal (set a new objective to restart)",
                 actual: self.status.as_str(),
             });
         }
+        let next_objective = match objective {
+            Some(text) => Some(Self::require_objective(text)?),
+            None => None,
+        };
         if let Some(text) = next_objective {
             self.objective = text;
         }
@@ -427,8 +429,10 @@ pub fn goals_root_for_home(home: &Path) -> PathBuf {
 /// Validate a session id: it becomes a single file name, so path
 /// separators and traversal sequences are rejected outright.
 pub fn validate_session_id(id: &str) -> Result<(), GoalError> {
+    // Same cap as the session registry (sessions.rs): one id must be
+    // valid everywhere, not legal in one store and rejected in another.
     if id.is_empty()
-        || id.len() > 64
+        || id.len() > 128
         || !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -613,6 +617,25 @@ mod tests {
         assert_eq!(idle.version, version);
     }
 
+    /// A terminal goal is closed for edits even when the caller does not
+    /// pass a status: an objective-only update must not rewrite a
+    /// Completed goal in place (restarting goes through `set`).
+    #[test]
+    fn terminal_goal_rejects_objective_only_updates() {
+        let mut goal = GoalState::default();
+        goal.set("done deal").unwrap();
+        goal.complete().unwrap();
+        let version = goal.version;
+        let err = goal.update(version, Some("rewritten"), None).unwrap_err();
+        assert!(matches!(err, GoalError::UnexpectedState { .. }), "{err}");
+        assert_eq!(goal.objective, "done deal");
+        assert_eq!(goal.status, GoalStatus::Completed);
+        assert_eq!(goal.version, version, "rejected update must not bump");
+        // `set` remains the way out of the terminal state.
+        goal.set("round two").unwrap();
+        assert_eq!(goal.status, GoalStatus::Active);
+    }
+
     #[test]
     fn round_cap_blocks_with_reason() {
         let mut goal = GoalState::default();
@@ -731,7 +754,9 @@ mod tests {
     fn session_ids_reject_path_traversal() {
         assert!(validate_session_id("default").is_ok());
         assert!(validate_session_id("thread-1_2").is_ok());
-        for bad in ["", "../evil", "a/b", "a.json", "x".repeat(65).as_str()] {
+        // The 128-char cap matches the session registry (sessions.rs).
+        assert!(validate_session_id(&"x".repeat(128)).is_ok());
+        for bad in ["", "../evil", "a/b", "a.json", "x".repeat(129).as_str()] {
             assert!(validate_session_id(bad).is_err(), "{bad:?}");
         }
     }

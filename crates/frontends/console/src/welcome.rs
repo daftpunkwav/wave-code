@@ -168,7 +168,7 @@ fn wave_banner(
     let paint = |bits: &[u32]| {
         bits.iter()
             .enumerate()
-            .map(|(cell, bits)| {
+            .map(|(cell, cell_bits)| {
                 let t = cell as f32 / (columns.saturating_sub(1)) as f32;
                 // There-and-back easing: primary at the ends, accent
                 // mid-span.
@@ -177,7 +177,7 @@ fn wave_banner(
                 format!(
                     "\x1b[{}m{}\x1b[0m",
                     c.fg_params(),
-                    char::from_u32(0x2800 + bits).unwrap()
+                    char::from_u32(0x2800 + cell_bits).unwrap()
                 )
             })
             .collect::<String>()

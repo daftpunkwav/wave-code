@@ -947,6 +947,4 @@ fn flat_cell(cell: &str) -> String {
 }
 
 #[cfg(test)]
-#[cfg(test)]
-#[cfg(test)]
 mod tests;

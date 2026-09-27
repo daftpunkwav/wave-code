@@ -228,8 +228,9 @@ impl ModelCatalog {
     /// Write the catalog back to `~/.wavecode/models.json`. The file may
     /// hold inline API keys, so on Unix it is created and kept
     /// owner-only (0600) instead of world-readable. The write lands in
-    /// a sibling temp file and is renamed into place, so a crash
-    /// mid-write can never leave a truncated catalog behind.
+    /// a sibling temp file, is flushed to disk, and is renamed into
+    /// place: a crash mid-write can never leave a truncated catalog
+    /// behind, and the contents also survive an OS crash or power loss.
     pub fn save(&self, home: &Path) -> Result<(), CatalogError> {
         let path = Self::path(home);
         if let Some(parent) = path.parent() {
@@ -257,9 +258,20 @@ impl ModelCatalog {
             file.write_all(content.as_bytes())
                 .and_then(|()| file.write_all(b"\n"))
                 .map_err(CatalogError::Write)?;
+            // Flush to disk before the rename: without it the "atomic"
+            // rename covers placement, not durability, and an OS crash
+            // could still leave an empty file behind.
+            file.sync_all().map_err(CatalogError::Write)?;
         }
         #[cfg(not(unix))]
-        std::fs::write(&tmp, content + "\n").map_err(CatalogError::Write)?;
+        {
+            use std::io::Write as _;
+            let mut file = std::fs::File::create(&tmp).map_err(CatalogError::Write)?;
+            file.write_all(content.as_bytes())
+                .and_then(|()| file.write_all(b"\n"))
+                .map_err(CatalogError::Write)?;
+            file.sync_all().map_err(CatalogError::Write)?;
+        }
         std::fs::rename(&tmp, &path).map_err(|e| {
             // Leave no temp litter behind when the rename fails.
             let _ = std::fs::remove_file(&tmp);

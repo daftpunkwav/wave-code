@@ -85,7 +85,7 @@ fn spawn_capped(program: &OsStr, args: &[String], cwd: &Path, cap: Duration) -> 
             Ok(None) => {
                 if started.elapsed() >= cap {
                     note = format!("killed after {}s", cap.as_secs());
-                    let _ = child.kill();
+                    kill_tree(&child);
                     let _ = child.wait();
                     break None;
                 }
@@ -107,17 +107,60 @@ fn spawn_capped(program: &OsStr, args: &[String], cwd: &Path, cap: Duration) -> 
     }
 }
 
+/// Per-stream output cap for one check run: beyond it the reader drains
+/// and discards (keeping the pipe empty so the child never blocks) and
+/// the retained bytes stop growing.
+const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
 fn spawn_reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut pipe = pipe;
-        let _ = pipe.read_to_end(&mut buf);
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if buf.len() < MAX_OUTPUT_BYTES {
+                        let keep = n.min(MAX_OUTPUT_BYTES - buf.len());
+                        buf.extend_from_slice(&chunk[..keep]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
         buf
     })
 }
 
 fn empty_reader() -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(Vec::new)
+}
+
+/// Kill the whole process tree, not just the direct child: a spawned
+/// grandchild inherits the stdout/stderr pipes, and a pipe-holding
+/// survivor would keep the reader threads waiting on EOF forever, so the
+/// `join()`s below would block past the wall cap. Mirrors the
+/// `taskkill /F /T` hazard fix in console's shell controller. On POSIX
+/// the direct kill remains (the child shares our process group, so a
+/// group kill is not safe without spawning into a new session).
+fn kill_tree(child: &std::process::Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id();
+        use std::os::windows::process::CommandExt;
+        // Fire-and-forget: taskkill finishes on its own once the tree is
+        // terminated.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = child.kill();
 }
 
 /// The world an eval judges: files under one work root, commands run in it.

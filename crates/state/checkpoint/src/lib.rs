@@ -291,6 +291,8 @@ mod tests {
 
 use std::path::{Path, PathBuf};
 
+use tokio::io::AsyncReadExt as _;
+
 /// Snapshot errors.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -703,7 +705,14 @@ impl SnapshotStore {
                     skipped_binary += 1;
                     continue;
                 }
-                let bytes = tokio::fs::read(entry.path()).await?;
+                // Bounded read: the cap must constrain the allocation, not
+                // just the verdict — a file that grows between the stat and
+                // the read (an active log, a sparse file) streams through a
+                // `take` window instead of being materialized in full.
+                let file = tokio::fs::File::open(entry.path()).await?;
+                let mut limited = file.take(caps.max_file_bytes.saturating_add(1));
+                let mut bytes = Vec::new();
+                limited.read_to_end(&mut bytes).await?;
                 if bytes.len() as u64 > caps.max_file_bytes {
                     skipped_large += 1;
                     if !caps_hit.iter().any(|c| c.starts_with("per-file cap")) {
@@ -755,8 +764,25 @@ impl SnapshotStore {
         )
         .await?;
         tokio::fs::create_dir_all(&self.root).await?;
-        let _ = tokio::fs::remove_dir_all(self.snapshot_dir(label)).await;
-        tokio::fs::rename(&staging, self.snapshot_dir(label)).await?;
+        // Swap, never gap: the old snapshot moves aside before the staging
+        // directory takes the label, so a crash between the two renames —
+        // or a Windows rename-over-existing-directory failure — can never
+        // leave the label without a recovery point.
+        let final_dir = self.snapshot_dir(label);
+        let trash = self.root.join(format!("{label}.old"));
+        let _ = tokio::fs::remove_dir_all(&trash).await;
+        if tokio::fs::rename(&final_dir, &trash).await.is_ok() {
+            if let Err(e) = tokio::fs::rename(&staging, &final_dir).await {
+                // Keep the old snapshot: restore it and surface the failure.
+                let _ = tokio::fs::rename(&trash, &final_dir).await;
+                let _ = tokio::fs::remove_dir_all(&trash).await;
+                return Err(e.into());
+            }
+            let _ = tokio::fs::remove_dir_all(&trash).await;
+        } else {
+            // First save under this label: nothing to protect.
+            tokio::fs::rename(&staging, &final_dir).await?;
+        }
 
         Ok(SnapshotCreateReport {
             label: label.to_owned(),

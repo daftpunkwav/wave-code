@@ -362,7 +362,9 @@ mod tests {
             .unwrap();
         for bad in [
             serde_json::json!({"path":"a.txt","limit":0}),
-            serde_json::json!({"path":"a.txt","offset":-1}),
+            // Negative offsets are now legal (tail reads); a mistyped
+            // string offset stays a business error.
+            serde_json::json!({"path":"a.txt","offset":"-1"}),
             serde_json::json!({"path":"a.txt","limit":"100"}),
         ] {
             let out = ReadFile::default().execute(bad.clone(), &c).await.unwrap();

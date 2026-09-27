@@ -50,7 +50,7 @@ async fn execute(&self, input, ctx: &ToolCtx) -> Result<ToolOutput>;
 
 `Registry::builtin()` 注册（名称 — 源文件）：
 
-- `read`、`write`、`edit` — `src/fs/mod.rs`（外加 `fs/read.rs`、`fs/write.rs`、`fs/edit.rs`）；写入是原子的（临时文件+改名），带大小上限与 edit 的精确匹配唯一性检查。`read` 把每个文件的 (mtime, len) 指纹记入会话共享的 `FileLedger`，`write` / `edit` 在落盘指纹偏离会话最近一次所见时拒绝改写，外部变更由此强制先重读，而不是被悄悄覆盖。
+- `read`、`write`、`edit` — `src/fs/mod.rs`（外加 `fs/read.rs`、`fs/write.rs`、`fs/edit.rs`）；写入是原子的（临时文件+改名），带大小上限与 edit 的精确匹配唯一性检查。`read` 支持经负 `offset` 的尾部读取（从文件末尾倒数，头部标注 `[showing lines X-Y of T]`），未命中路径时按同级文件名给出最接近的建议（有界扫描 + 有界 Levenshtein）。`read` 把每个文件的 (mtime, len) 指纹记入会话共享的 `FileLedger`，`write` / `edit` 在落盘指纹偏离会话最近一次所见时拒绝改写，外部变更由此强制先重读，而不是被悄悄覆盖。
 - `grep`、`glob` — `src/search/`；同步遍历包在 `spawn_blocking` 里。
 - `shell` — `src/shell_tool.rs`；经 `sanitize_env`（剥离 `deny_env` 名单及 `*_KEY`、`*_PAT`、`AWS_SECRET_ACCESS_KEY` 等敏感形态变量）与 OS sandbox 后端生成子进程。超时会杀死进程并报告杀死前已产生的输出；完成运行的单流在 30 KB 上限处被截断时会把全文落入 context 的 `SpillStore`，给出 `spill` 工具可读回的 `spill://` URI。
 - `python`、`node` — `src/script.rs`（非只读）。

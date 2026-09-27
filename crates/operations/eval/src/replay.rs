@@ -84,8 +84,6 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
     let mut started: HashSet<&str> = HashSet::new();
     let mut completed: HashSet<&str> = HashSet::new();
     let mut open_calls: HashMap<String, &str> = HashMap::new();
-    let mut message_completed: HashSet<&str> = HashSet::new();
-    let mut token_counts: HashMap<&str, u32> = HashMap::new();
 
     for (index, event) in events.iter().enumerate() {
         let id = event.id.as_str();
@@ -110,35 +108,27 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
                     "#{index} ({id}): ToolCallEnd for unopened call {call_id}"
                 )),
             },
+            // One AgentMessageComplete per sample is the documented order:
+            // a tool-using (or continued) turn completes once per round, so
+            // repeats under one submission id are legal.
             EventMsg::AgentMessageComplete { .. } => {
                 if !started.contains(id) {
                     violations.push(format!(
                         "#{index} ({id}): AgentMessageComplete before TurnStarted"
                     ));
                 }
-                if !message_completed.insert(id) {
-                    violations.push(format!("#{index} ({id}): duplicate AgentMessageComplete"));
-                }
             }
+            // A delta after a completion opens the next sample of the same
+            // submission (truncation continuation or a later tool round),
+            // so no per-round ordering rule applies beyond TurnStarted.
             EventMsg::AgentMessageDelta { .. } | EventMsg::AgentThinkingDelta { .. } => {
-                if message_completed.contains(id) {
-                    violations.push(format!(
-                        "#{index} ({id}): delta after AgentMessageComplete (ordering contract)"
-                    ));
-                }
                 if !started.contains(id) {
                     violations.push(format!("#{index} ({id}): delta before TurnStarted"));
                 }
             }
-            EventMsg::TokenCount { .. } => {
-                let count = token_counts.entry(id).or_insert(0);
-                *count += 1;
-                if *count > 1 {
-                    violations.push(format!(
-                        "#{index} ({id}): more than one TokenCount (settle-once contract)"
-                    ));
-                }
-            }
+            // Settles run once per completed sample, so a multi-sample turn
+            // legitimately carries several TokenCount events.
+            EventMsg::TokenCount { .. } => {}
             EventMsg::TurnCompleted { interrupted } => {
                 if !started.contains(id) {
                     violations.push(format!("#{index} ({id}): TurnCompleted before TurnStarted"));
@@ -304,7 +294,7 @@ mod tests {
                     model: "m".to_string(),
                 },
             ),
-            // Delta after the message completed.
+            // A mid-turn delta that never completed a first message.
             event(
                 "s1",
                 EventMsg::AgentMessageComplete {
@@ -353,12 +343,85 @@ mod tests {
         let joined = violations.join("\n");
         assert!(joined.contains("before TurnStarted"), "{joined}");
         assert!(joined.contains("never ended"), "{joined}");
-        assert!(
-            joined.contains("delta after AgentMessageComplete"),
-            "{joined}"
-        );
-        assert!(joined.contains("settle-once"), "{joined}");
         assert!(joined.contains("after TurnCompleted"), "{joined}");
+        // Repeated completes/deltas/settles are legal within one submission
+        // (one per sample); the removed once-only rules must not fire.
+        assert_eq!(violations.len(), 4, "{joined}");
+    }
+
+    /// A tool-using turn completes once per sample: deltas, completes, tool
+    /// pairing, and settles all repeat under the same submission id, and the
+    /// contract must accept the whole sequence (the once-only rules this
+    /// suite used to carry false-positived on exactly this shape).
+    #[test]
+    fn multi_sample_turn_passes_contract() {
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event("s1", EventMsg::AgentMessageDelta { text: "r1".into() }),
+            event(
+                "s1",
+                EventMsg::AgentMessageComplete {
+                    text: "round one".into(),
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::ToolCallBegin {
+                    call_id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::Value::Null,
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::ToolCallEnd {
+                    call_id: "c1".into(),
+                    is_error: false,
+                    output: None,
+                    outcome: ToolOutcome::Executed,
+                    duration_ms: 0,
+                },
+            ),
+            event("s1", EventMsg::AgentMessageDelta { text: "r2".into() }),
+            event(
+                "s1",
+                EventMsg::AgentMessageComplete {
+                    text: "round two".into(),
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::TokenCount {
+                    input_tokens: 10,
+                    output_tokens: 4,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                    context_window: None,
+                    context_used: None,
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::TokenCount {
+                    input_tokens: 20,
+                    output_tokens: 6,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                    context_window: None,
+                    context_used: None,
+                },
+            ),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        assert!(
+            validate_contract(&events).is_empty(),
+            "a per-sample turn is contract-clean"
+        );
     }
 
     #[test]

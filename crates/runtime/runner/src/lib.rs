@@ -538,25 +538,6 @@ impl InboxHandle {
     }
 }
 
-/*
- * @file RunLoop
- * @description Single-turn agent loop over anticorruption seams (part 2).
- *
- * Responsibilities:
- * - Drive sample, decide, dispatch, and recover for one turn.
- * - Emit wire events in a fixed order with usage settle guarantees.
- * - Enforce interrupt checkpoints, round ceilings, and retry budgets.
- *
- * This module must not depend on: concrete tools, policy, hooks, models,
- * or transport. It sees Conversation snapshots, gateway traits, and wire
- * data only.
- *
- * Deliberate divergence from the legacy fast path: every tool call goes
- * through the policy gate, including read-only calls. The legacy pipeline
- * bypassed policy for the read-only batch (a documented deny-bypass
- * risk); parallelism is preserved, only the bypass is removed.
- */
-
 /// Prompt appended when output truncation needs a continuation sample.
 pub const CONTINUATION_PROMPT: &str =
     "Output token limit reached. Continue exactly where you left off.";
@@ -1115,6 +1096,10 @@ where
 
     /// Run one turn to a terminal [`StopReason`].
     ///
+    /// Every tool call — including read-only ones — passes through the
+    /// policy gate: parallelism is preserved, and the gate is never
+    /// bypassed for read-only batches.
+    ///
     /// Event order is fixed: TurnStarted once, AgentMessageComplete per
     /// sample, ToolCallBegin all upfront in declaration order, ToolCallEnd
     /// all after in declaration order, TokenCount on every settle with a
@@ -1195,6 +1180,9 @@ where
         let mut reactive_compacts: u8 = 0;
         let mut state = TurnState::new();
         let mut last_input: Option<u64> = None;
+        // The last sample's own output tokens: the resident-context estimate
+        // needs this per-sample figure, not the billing total (see `used`).
+        let mut last_output: Option<u64> = None;
         let mut estimate_cache = EstimateCache::default();
         // Live context window for the budget gates below, re-read at each
         // loop head: a `/model` switch between turns can move it under the
@@ -1207,7 +1195,7 @@ where
             window = self.effective_window();
             // Checkpoint 1: loop head interrupt returns without sampling.
             if interrupt.is_triggered() {
-                settle(conv, &last_input, &state, window, &emit_msg);
+                settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -1232,7 +1220,11 @@ where
             // must see an iteration exactly once, so it runs here rather than
             // inside the budget branch.
             let used = match last_input {
-                Some(input_tokens) => input_tokens + state.total_output_tokens,
+                // Resident context is the last request's prompt plus that
+                // request's own output. Earlier samples' outputs are already
+                // folded into the prompt the provider billed, so the billing
+                // total (`total_output_tokens`) must not be re-added here.
+                Some(input_tokens) => input_tokens.saturating_add(last_output.unwrap_or(0)),
                 None => {
                     let carry = conv.usage_carry();
                     if carry.input_tokens > 0 {
@@ -1273,7 +1265,7 @@ where
                         "tool round limit reached ({ceiling}); stopping this turn — set max_tool_rounds in ~/.wavecode/config.toml to run longer"
                     ),
                 });
-                settle(conv, &last_input, &state, window, &emit_msg);
+                settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });
                 return StopReason::MaxToolRounds;
             }
@@ -1317,7 +1309,14 @@ where
                                 // Blocking failures abort; automatic
                                 // failures downgrade to a warning.
                                 if blocking {
-                                    settle(conv, &last_input, &state, window, &emit_msg);
+                                    settle(
+                                        conv,
+                                        &last_input,
+                                        &last_output,
+                                        &state,
+                                        window,
+                                        &emit_msg,
+                                    );
                                     emit_msg(EventMsg::Error {
                                         message: cause,
                                         recoverable: false,
@@ -1357,8 +1356,7 @@ where
 
             let request = SampleRequest {
                 system: system.to_string(),
-                messages: project_images(&history_messages(conv), self.cfg.max_wire_images),
-                // Restricted runs never see denied tools: the model plans
+                messages: project_images(&history_messages(conv), self.cfg.max_wire_images), // Restricted runs never see denied tools: the model plans
                 // within its surface instead of hitting refusals.
                 tools: self
                     .executor
@@ -1385,7 +1383,7 @@ where
                 Err(SampleError::PromptTooLong) => {
                     reactive_compacts += 1;
                     if reactive_compacts >= self.cfg.max_reactive_compacts {
-                        settle(conv, &last_input, &state, window, &emit_msg);
+                        settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                         emit_msg(EventMsg::Error {
                             message: format!(
                                 "prompt exceeds context window after {} compactions",
@@ -1401,7 +1399,7 @@ where
                         .do_compact(conv, CompactTrigger::Reactive, &emit_msg)
                         .await
                     {
-                        settle(conv, &last_input, &state, window, &emit_msg);
+                        settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                         emit_msg(EventMsg::Error {
                             message: cause,
                             recoverable: false,
@@ -1413,7 +1411,7 @@ where
                     continue;
                 }
                 Err(other) => {
-                    settle(conv, &last_input, &state, window, &emit_msg);
+                    settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                     let code = match &other {
                         SampleError::Timeout => "provider.timeout",
                         SampleError::PromptTooLong => "context.overflow",
@@ -1433,8 +1431,17 @@ where
                 }
             };
             last_input = response.input_tokens;
+            last_output = response.output_tokens;
             if let Some(output) = response.output_tokens {
                 state.add_output(output);
+            }
+            if last_input.is_none() {
+                // A successful sample with no billing data would otherwise
+                // silently skip the settle: make the gap visible so a
+                // provider/gateway dropping usage is diagnosable.
+                emit_msg(EventMsg::Warning {
+                    message: "provider returned no token usage for this sample".to_string(),
+                });
             }
             state.total_cache_read_tokens = state
                 .total_cache_read_tokens
@@ -1557,7 +1564,7 @@ where
                     Role::User,
                     result_blocks(&results, std::time::SystemTime::now()),
                 );
-                settle(conv, &last_input, &state, window, &emit_msg);
+                settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
             }
@@ -1594,7 +1601,7 @@ where
                     });
                     continue;
                 }
-                settle(conv, &last_input, &state, window, &emit_msg);
+                settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: false });
                 return StopReason::Completed;
             }
@@ -1625,7 +1632,7 @@ where
                         Role::User,
                         result_blocks(&results, std::time::SystemTime::now()),
                     );
-                    settle(conv, &last_input, &state, window, &emit_msg);
+                    settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::RepeatBreaker;
                 }
@@ -1654,7 +1661,7 @@ where
             state.bump_tool_round();
         }
 
-        settle(conv, &last_input, &state, window, &emit_msg);
+        settle(conv, &last_input, &last_output, &state, window, &emit_msg);
         emit_msg(EventMsg::TurnCompleted { interrupted: false });
         StopReason::Completed
     }
@@ -1677,7 +1684,9 @@ where
         });
         let done = self
             .compactor
-            .compact(history_messages(conv), trigger)
+            // Compaction is rare (threshold-gated), so materializing the
+            // full history here is fine; the per-sample path avoids the copy.
+            .compact(history_messages(conv).as_ref().clone(), trigger)
             .await
             .map_err(|e| e.to_string())?;
         conv.replace(vec![HistoryEntry {
@@ -2381,12 +2390,15 @@ fn result_blocks(results: &[ToolResult], now: std::time::SystemTime) -> Vec<Samp
         .collect()
 }
 
-/// Settle usage after sampling: no completed sample means no-op, so the
-/// carry is never covered and no TokenCount is emitted. `context_window`
-/// rides along so frontends can render a context meter without config.
+/// Settle usage after sampling: a sample that reported no input billing is
+/// a no-op, so the carry keeps its previous value and no TokenCount is
+/// emitted (a provider omitting usage for one sample must not overwrite the
+/// carry with zeros). `context_window` rides along so frontends can render
+/// a context meter without config.
 fn settle(
     conv: &mut Conversation,
     last_input: &Option<u64>,
+    last_output: &Option<u64>,
     state: &TurnState,
     context_window: u64,
     emit: &(dyn Fn(EventMsg) + Send + Sync),
@@ -2406,23 +2418,25 @@ fn settle(
         cache_read_tokens: state.total_cache_read_tokens,
         cache_creation_tokens: state.total_cache_creation_tokens,
         context_window: Some(context_window),
-        context_used: Some(input + state.total_output_tokens),
+        context_used: Some(input.saturating_add(last_output.unwrap_or(0))),
     });
 }
 
-/// Snapshot the conversation as model-facing messages.
-fn history_messages(conv: &Conversation) -> Vec<HistoryEntry> {
-    conv.snapshot().as_ref().clone()
+/// Snapshot the conversation as model-facing messages. The snapshot rides
+/// an `Arc`, so this is one clone inside [`Conversation::snapshot`] and no
+/// second copy here.
+fn history_messages(conv: &Conversation) -> Arc<Vec<HistoryEntry>> {
+    conv.snapshot()
 }
 
 /// Keep only the newest `keep` images in a request projection; every older
 /// image block becomes a text placeholder naming what was dropped.
 ///
-/// Sampling and compaction both go through here: an image-heavy session
-/// would otherwise carry every past screenshot in every request, and one
-/// screenshot is worth more tokens than a whole tool round. `keep == 0`
-/// disables the projection (full fidelity), and the stored conversation is
-/// never modified — only the wire copy is.
+/// Sampling goes through here: an image-heavy session would otherwise carry
+/// every past screenshot in every request, and one screenshot is worth more
+/// tokens than a whole tool round. Compaction reads the full unprojected
+/// history instead. `keep == 0` disables the projection (full fidelity),
+/// and the stored conversation is never modified — only the wire copy is.
 fn project_images(entries: &[HistoryEntry], keep: u32) -> Vec<HistoryEntry> {
     if keep == 0 {
         return entries.to_vec();

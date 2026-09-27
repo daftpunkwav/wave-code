@@ -12,7 +12,7 @@
 
 录制是 wire `Event` 值的 JSON 数组（`id` 加扁平化的 `EventMsg`，snake_case 的 `type` 标签——标签格式由 `crates/foundation/wire/src/lib.rs` 中的一个测试锁定）。录制来自 `wavecode exec --json` 会话（见 `docs/cookbook/recording-and-replaying.md`，中文版 [../cookbook/recording-and-replaying.zh.md](../cookbook/recording-and-replaying.zh.md)）。
 
-- **录制契约校验**：`crates/operations/eval/src/replay.rs` 在打分之前先按 wire 协议契约校验录制——`validate_contract` 检查每个提交：`TurnStarted` 最先且只触发一次，delta 从不跟随其 `AgentMessageComplete`，begin/end 调用配对（未开启的 end 与从未结束的调用是违规，被中断的回合除外），`TokenCount` 结算一次，`TurnCompleted` 之后无任何事件；违规累积为人类可读的行而不是在第一条就停下。`evaluate_recorded` 随后按录制的助手文本对照 `must_contain` 期望打分（`ReplayReport::pass_rate`），`read_events_jsonl` 每行加载一个 `Event`（畸形行带行号大声失败——录制是测试夹具，不是不受信数据）。同 crate 中的行为评测装置（`EvalCase`，经任意 `TurnDriver` 对最终历史做 `must_contain` / `must_not_contain`）为活的驱动器行为补足这一层。
+- **录制契约校验**：`crates/operations/eval/src/replay.rs` 在打分之前先按 wire 协议契约校验录制——`validate_contract` 检查每个提交：`TurnStarted` 最先且只触发一次，begin/end 调用配对（未开启的 end 与从未结束的调用是违规，被中断的回合除外），`TurnCompleted` 之后无任何事件；违规累积为人类可读的行而不是在第一条就停下。同一提交 id 下重复的 `AgentMessageComplete` / `AgentMessageDelta` / `TokenCount` 是合法的——运行循环**每个 sample** 完成并结算一次，因此带工具调用的回合会携带多组这类事件。`evaluate_recorded` 随后按录制的助手文本对照 `must_contain` 期望打分（`ReplayReport::pass_rate`），`read_events_jsonl` 每行加载一个 `Event`（畸形行带行号大声失败——录制是测试夹具，不是不受信数据）。同 crate 中的行为评测装置（`EvalCase`，经任意 `TurnDriver` 对最终历史做 `must_contain` / `must_not_contain`）为活的驱动器行为补足这一层。
 
 ## 第 3 层——真实 API e2e（手动）
 

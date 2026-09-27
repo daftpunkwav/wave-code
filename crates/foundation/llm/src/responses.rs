@@ -463,7 +463,7 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
             if let Some(item) = value.get("item")
                 && item.get("type").and_then(Value::as_str) == Some("function_call")
             {
-                let index = output_index(&value, state);
+                let index = output_index(&value, state)?;
                 let slot = &mut state.slots[index];
                 if let Some(call_id) = item.get("call_id").and_then(Value::as_str)
                     && !call_id.is_empty()
@@ -506,7 +506,7 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
             if let Some(item) = value.get("item") {
                 match item.get("type").and_then(Value::as_str) {
                     Some("function_call") => {
-                        let index = output_index(&value, state);
+                        let index = output_index(&value, state)?;
                         let slot = &mut state.slots[index];
                         // Defensive completion: a stream that skipped
                         // `output_item.added` still yields a usable call.
@@ -596,16 +596,26 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
 /// Slot index for an event: the item's `output_index` when present, else the
 /// most recent slot (a gateway omitting it still streams one call at a time in
 /// practice). Grows the slot table as needed.
-fn output_index(value: &Value, state: &mut ResponsesStreamState) -> usize {
+///
+/// `output_index` is provider-controlled input, so growth is bounded by
+/// [`crate::MAX_TOOL_CALL_SLOTS`]: a bogus index surfaces as a parse error
+/// instead of an allocation bomb.
+fn output_index(value: &Value, state: &mut ResponsesStreamState) -> Result<usize> {
     let index = value
         .get("output_index")
         .and_then(Value::as_u64)
         .map(|index| index as usize)
         .unwrap_or_else(|| state.slots.len().saturating_sub(1));
+    if index >= crate::MAX_TOOL_CALL_SLOTS {
+        return Err(LlmError::Sse(format!(
+            "output_index {index} exceeds the {}-slot cap",
+            crate::MAX_TOOL_CALL_SLOTS
+        )));
+    }
     while state.slots.len() <= index {
         state.slots.push(CallSlot::default());
     }
-    index
+    Ok(index)
 }
 
 /// Copies the usage block: `input_tokens` is the full prompt (cache reads are

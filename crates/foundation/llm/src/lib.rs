@@ -43,6 +43,12 @@ pub use sse::SseParser;
 /// client so the taxonomy stays uniform across wires.
 pub(crate) const MAX_ERROR_BODY_CHARS: usize = 2000;
 
+/// Upper bound on parallel tool-call slots a provider stream may address by
+/// index. Real requests carry a handful of calls; the bound exists so a
+/// broken gateway (or a hostile middleman) cannot grow the slot table
+/// unboundedly with a single bogus index.
+pub(crate) const MAX_TOOL_CALL_SLOTS: usize = 64;
+
 /// Truncates an error response body to `max_chars` characters (by char, so
 /// multibyte text is never split). The API key only travels in request
 /// headers and never enters error text.

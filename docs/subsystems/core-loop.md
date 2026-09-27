@@ -27,7 +27,7 @@ Actors never name these eight types; they drive a `TurnDriver` (blanket-impl'd f
 2. **Admission**: the `PromptSubmit` hook runs *before* `TurnStarted`. A blocked input never enters history and is never sampled; the turn ends with `Error` + `TurnCompleted` and `StopReason::Completed`.
 3. Push the user entry, emit `TurnStarted`, enter the round loop.
 4. **Checkpoint 1 — loop head**: a triggered interrupt settles usage, emits `TurnCompleted { interrupted: true }`, and returns `StopReason::Interrupted` without sampling.
-5. Drain `NextTurn` steering from the inbox as user history.
+5. Drain `NextTurn` steering from the inbox as user history; a session that crossed midnight injects a one-time calendar-rollover notice (the environment section was rendered at assembly, so the date must be re-announced).
 6. **Round ceiling**: `state.rounds_exhausted(max_tool_rounds × (round_rearms + 1))` emits a `Warning`, settles the turn, and returns `StopReason::MaxToolRounds` — a hard stop, never an error, but distinguishable from natural completion. Default `DEFAULT_MAX_TOOL_ROUNDS = 256` — wavecode targets super-long-horizon work; the `max_tool_rounds` config key overrides it per session, and the warning names the key. **An open session goal re-arms the ceiling** instead of stopping (`MAX_GOAL_REARMS = 7`, so a turn spans 8 ceilings = an effective bound of 2048 rounds); each re-arm injects the goal reminder with the budget line and counts against the bound, and a blocked / paused / completed or empty objective re-arms nothing.
 7. **Budget line** (`state-store` levels): `Warn` emits a once-per-turn warning; `AutoCompact`/`Blocking` run `do_compact` once per turn (blocking failure aborts the turn; auto failure downgrades to a warning). All gates reason with the **effective window**, re-read at each loop head from `ModelGateway::context_window()` (`None` falls back to the window frozen at assembly), so a `/model` switch onto a smaller-window model compacts through this same path *before* the next sample instead of surfacing as a hard provider overflow; a larger window changes nothing.
 8. Drain `NextStep` steering + direct injections *after* the budget line, then sample.
@@ -40,9 +40,10 @@ Actors never name these eight types; they drive a `TurnDriver` (blanket-impl'd f
     - `Stop` hook block → feed the reason back and continue (`MAX_STOP_BLOCKS = 3`, then proceed anyway);
     - otherwise break with `Completed`.
 11. **Checkpoint 3 — pre-tool**: an interrupt here synthesizes `interrupted` results for every declared call, preserving call/result pairing without executing anything.
-12. Dispatch (`execute_calls`, below), append results as a user entry, `bump_tool_round`, loop.
+12. **Repeat breaker** (`max_repeat_streak > 0`, default `MAX_REPEAT_STREAK`): the same tool-call signature repeated round after round is the signature failure mode of a stuck loop. At each `REPEAT_REMINDER_AT` threshold an escalating reminder is injected (once per threshold); at the ceiling the calls are refused — every call gets an error result carrying a text-handoff prompt — the turn settles and ends with `StopReason::RepeatBreaker` instead of burning rounds until the ceiling melts.
+13. Dispatch (`execute_calls`, below), append results as a user entry, `bump_tool_round`, loop.
 
-`settle` runs on every sampling exit; `TokenCount` is emitted only when a sample completed (carrying the effective context window and estimated `context_used` for frontend context meters), and `TurnCompleted` is emitted exactly once, last.
+`settle` runs on every sampling exit (once per sample, so multi-sample turns emit several `TokenCount`); a sample that reported no input billing skips the settle and emits a warning instead, so the usage carry is never overwritten with zeros. `TokenCount` carries the effective context window and the resident-context estimate `context_used` (last prompt plus that sample's own output — earlier samples' outputs are already inside the billed prompt) for frontend context meters, and `TurnCompleted` is emitted exactly once, last.
 
 ## Dispatch pipeline (`execute_calls`)
 

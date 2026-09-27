@@ -441,9 +441,29 @@ where
     S: Stream<Item = Result<bytes::Bytes>> + Send,
 {
     let mut state = OpenAiStreamState::default();
-    sse::decode_sse_frames(byte_stream, sse::MAX_SSE_BUF, move |data| {
+    let inner = sse::decode_sse_frames(byte_stream, sse::MAX_SSE_BUF, move |data| {
         feed_openai_data(&mut state, data)
-    })
+    });
+    // A clean EOF with no `[DONE]` frame is a torn stream, not a success:
+    // the run loop would otherwise treat the sample as completed with no
+    // billing data (and no MessageComplete ever closing the turn).
+    async_stream::stream! {
+        tokio::pin!(inner);
+        let mut saw_completion = false;
+        let mut failed = false;
+        while let Some(item) = inner.next().await {
+            if matches!(&item, Ok(StreamEvent::MessageComplete { .. })) {
+                saw_completion = true;
+            }
+            failed |= item.is_err();
+            yield item;
+        }
+        if !saw_completion && !failed {
+            yield Err(LlmError::Sse(
+                "stream ended before the terminal [DONE] frame".to_string(),
+            ));
+        }
+    }
 }
 
 /// Feeds one SSE `data` payload, returning zero or more stream events.
@@ -473,7 +493,7 @@ fn feed_openai_data(state: &mut OpenAiStreamState, data: &str) -> Result<Vec<Str
             });
         }
         for call in &choice.delta.tool_calls {
-            events.extend(apply_tool_fragment(state, call));
+            events.extend(apply_tool_fragment(state, call)?);
         }
         if choice.finish_reason.is_some() && state.stop_reason.is_none() {
             state.stop_reason = choice.finish_reason.clone();
@@ -510,10 +530,21 @@ fn openai_payload_error(error: &serde_json::Value, raw: &str) -> LlmError {
 /// Applies one `tool_calls[]` delta fragment: grows the slot table by index,
 /// emits [`StreamEvent::ToolUseBegin`] once both id and name are known, then
 /// forwards non-empty argument fragments as input deltas.
+///
+/// `index` is provider-controlled input, so growth is bounded by
+/// [`MAX_TOOL_CALL_SLOTS`]: one frame naming a huge index must surface as a
+/// parse error, not an allocation bomb.
 fn apply_tool_fragment(
     state: &mut OpenAiStreamState,
     call: &OpenAiToolCallDelta,
-) -> Vec<StreamEvent> {
+) -> Result<Vec<StreamEvent>> {
+    if call.index >= crate::MAX_TOOL_CALL_SLOTS {
+        return Err(LlmError::Sse(format!(
+            "tool call index {} exceeds the {}-slot cap",
+            call.index,
+            crate::MAX_TOOL_CALL_SLOTS
+        )));
+    }
     while state.slots.len() <= call.index {
         state.slots.push(ToolSlot::default());
     }
@@ -543,7 +574,7 @@ fn apply_tool_fragment(
             partial_json: args.clone(),
         });
     }
-    events
+    Ok(events)
 }
 
 /// Finishes the turn on `[DONE]`: closes every begun tool call, then completes
@@ -1390,6 +1421,40 @@ mod tests {
         assert!(
             matches!(&err, LlmError::Api { kind, .. } if kind == "context_length_exceeded"),
             "provider error code must be preserved: {err:?}"
+        );
+    }
+
+    /// A provider-supplied tool-call index beyond the slot cap must surface
+    /// as an error, not grow the slot table (allocation bomb via one frame).
+    #[tokio::test]
+    async fn oversized_tool_call_index_is_an_error() {
+        let results = run_decode(vec![
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":100000000,\"id\":\"call_1\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\n",
+            b"data: [DONE]\n\n",
+        ])
+        .await;
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(&results[0], Err(LlmError::Sse(msg)) if msg.contains("cap")),
+            "a huge index must fail the stream instead of allocating: {:?}",
+            results[0]
+        );
+    }
+
+    /// A clean EOF that never delivers the terminal `[DONE]` frame is a torn
+    /// stream: the wrapper ends it with an error, not silent success.
+    #[tokio::test]
+    async fn clean_eof_without_done_is_an_error() {
+        let results = run_decode(vec![
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+        ])
+        .await;
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], Ok(StreamEvent::TextDelta { .. })));
+        assert!(
+            matches!(&results[1], Err(LlmError::Sse(msg)) if msg.contains("[DONE]")),
+            "EOF without [DONE] must surface as an error: {:?}",
+            results[1]
         );
     }
 }

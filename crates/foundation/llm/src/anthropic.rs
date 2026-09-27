@@ -340,6 +340,15 @@ pub(crate) fn translate_messages(messages: &[Message], for_model: &str) -> Vec<s
                 .iter()
                 .filter_map(|block| translate_block(block, unsigned_ok))
                 .collect();
+            // Filtering can empty a message (e.g. an assistant turn whose
+            // unsigned thinking was dropped for a Claude model); the API
+            // rejects an empty `content` array with a 400, so a placeholder
+            // text block keeps the turn well-formed.
+            let content = if content.is_empty() {
+                vec![serde_json::json!({"type": "text", "text": "(no sendable content)"})]
+            } else {
+                content
+            };
             serde_json::json!({"role": role, "content": content})
         })
         .collect()
@@ -462,9 +471,29 @@ where
     S: Stream<Item = Result<bytes::Bytes>> + Send,
 {
     let mut parser = SseParser::new();
-    crate::sse::decode_sse_frames(byte_stream, max_buf, move |data| {
+    let inner = crate::sse::decode_sse_frames(byte_stream, max_buf, move |data| {
         Ok(parser.feed(data)?.into_iter().collect())
-    })
+    });
+    // A clean EOF with no `message_delta` completion is a torn stream, not a
+    // success: the run loop would otherwise treat the sample as completed
+    // with no billing data (and no MessageComplete ever closing the turn).
+    async_stream::stream! {
+        tokio::pin!(inner);
+        let mut saw_completion = false;
+        let mut failed = false;
+        while let Some(item) = inner.next().await {
+            if matches!(&item, Ok(StreamEvent::MessageComplete { .. })) {
+                saw_completion = true;
+            }
+            failed |= item.is_err();
+            yield item;
+        }
+        if !saw_completion && !failed {
+            yield Err(LlmError::Sse(
+                "stream ended without a message_delta completion".to_string(),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -727,9 +756,7 @@ mod tests {
             system: "sys".into(),
             messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "hi".into() }],
             }]),
             tools: vec![ToolSpec {
                 name: "a".into(),
@@ -748,9 +775,11 @@ mod tests {
         let v = build_request_body(&req, true, CacheTtl::FiveMinutes, None);
         assert!(v["system"][0]["cache_control"].get("ttl").is_none());
         assert!(v["tools"][0]["cache_control"].get("ttl").is_none());
-        assert!(v["messages"][0]["content"][0]["cache_control"]
-            .get("ttl")
-            .is_none());
+        assert!(
+            v["messages"][0]["content"][0]["cache_control"]
+                .get("ttl")
+                .is_none()
+        );
     }
 
     /// The one-hour lifetime carries the historical beta header on the wire
@@ -767,9 +796,7 @@ mod tests {
             system: "sys".into(),
             messages: std::sync::Arc::new(vec![Message {
                 role: Role::User,
-                content: vec![ContentBlock::Text {
-                    text: "hi".into(),
-                }],
+                content: vec![ContentBlock::Text { text: "hi".into() }],
             }]),
             tools: vec![],
             max_tokens: 8192,
@@ -1231,5 +1258,45 @@ mod image_translation_tests {
             "weighing options"
         );
         assert!(compat_unsigned[0]["content"][0].get("signature").is_none());
+    }
+
+    /// A turn whose only blocks were dropped (unsigned thinking bound for a
+    /// Claude model) must not render as an empty `content` array: the API
+    /// answers 400. A placeholder text block keeps the turn well-formed.
+    #[test]
+    fn fully_filtered_message_keeps_a_content_block() {
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                text: "only thinking".to_string(),
+                signature: None,
+            }],
+        }];
+        let messages = translate_messages(&history, "claude-opus-4-1");
+        let content = messages[0]["content"].as_array().unwrap();
+        assert!(!content.is_empty(), "empty content arrays get a 400");
+        assert_eq!(content[0]["type"], "text");
+    }
+
+    /// A clean EOF that never delivers the `message_delta` completion is a
+    /// torn stream: the wrapper ends it with an error, not silent success.
+    #[tokio::test]
+    async fn clean_eof_without_completion_is_an_error() {
+        let byte_stream = futures::stream::iter(vec![
+            Ok::<_, LlmError>(bytes::Bytes::from_static(b"event: message_start\n\n")),
+            Ok(bytes::Bytes::from_static(b"event: message_stop\n\n")),
+        ]);
+        let events: Vec<_> = decode_event_stream(byte_stream, MAX_SSE_BUF)
+            .collect()
+            .await;
+        let last = events.last().expect("the wrapper must end the stream");
+        assert!(
+            matches!(last, Err(LlmError::Sse(msg)) if msg.contains("message_delta")),
+            "EOF without a completion must surface as an error: {events:?}"
+        );
+        assert!(
+            events[..events.len() - 1].iter().all(|r| r.is_ok()),
+            "no parse error precedes the EOF marker: {events:?}"
+        );
     }
 }

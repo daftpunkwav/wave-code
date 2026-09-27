@@ -264,7 +264,11 @@ impl Registry {
         reg.register(Arc::new(fs::EditFile::new(ledger)));
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
-        reg.register(Arc::new(shell_tool::Shell));
+        // The shell tool spills the full text of truncated outputs to the
+        // same store the `spill` tool reads back (and the context prune
+        // uses), so a capped run's middle is still reachable.
+        let spill = wavecode_context::SpillStore::new(wavecode_context::default_spill_store_root());
+        reg.register(Arc::new(shell_tool::Shell::new(Some(spill))));
         reg.register(Arc::new(script::PythonTool));
         reg.register(Arc::new(script::NodeTool));
         reg.register(Arc::new(lsp::DocumentSymbols::new()));

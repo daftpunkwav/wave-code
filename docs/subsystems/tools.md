@@ -50,9 +50,9 @@ Note on `validate()`: the trait carries it as a pre-execution semantic check bey
 
 `Registry::builtin()` registers (name — source):
 
-- `read`, `write`, `edit` — `src/fs/mod.rs` (+ `fs/read.rs`, `fs/write.rs`, `fs/edit.rs`); writes are atomic (temp+rename) with size caps and exact-match uniqueness checks for edits.
+- `read`, `write`, `edit` — `src/fs/mod.rs` (+ `fs/read.rs`, `fs/write.rs`, `fs/edit.rs`); writes are atomic (temp+rename) with size caps and exact-match uniqueness checks for edits. `read` records each file's (mtime, len) fingerprint in a session-shared `FileLedger`, and `write` / `edit` refuse to mutate a file whose on-disk fingerprint drifted from the session's last view, so an outside change forces a re-read instead of being silently overwritten.
 - `grep`, `glob` — `src/search/`; sync traversal wrapped in `spawn_blocking`.
-- `shell` — `src/shell_tool.rs`; spawns through `sanitize_env` (strips `deny_env` names plus sensitive-shape variables like `*_KEY`, `*_PAT`, `AWS_SECRET_ACCESS_KEY`) and the OS sandbox backend.
+- `shell` — `src/shell_tool.rs`; spawns through `sanitize_env` (strips `deny_env` names plus sensitive-shape variables like `*_KEY`, `*_PAT`, `AWS_SECRET_ACCESS_KEY`) and the OS sandbox backend. Timeout kills the process and reports the output produced before the kill, and a stream truncated at the 30 KB cap spills its full text to the context `SpillStore`, naming the `spill://` URI the `spill` tool reads back.
 - `python`, `node` — `src/script.rs` (not read-only).
 - `lsp_symbols`, `lsp_definition`, `lsp_hover`, `lsp_references` — `src/lsp.rs`; navigation tools are read-only.
 - `web_fetch` — `src/web_fetch.rs`; `web_search` — `src/websearch.rs` (DuckDuckGo backend); both read-only.

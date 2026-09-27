@@ -105,9 +105,10 @@ fn build_argv(flag: &str, script: &str, extra: &[String]) -> Vec<String> {
 }
 
 /// Shared spawn path: stdin closed, cwd confined, env scrubbed, timeout
-/// kills the process, both output streams truncated via the shell helper.
+/// kills the process keeping the output produced so far, both output
+/// streams truncated via the shell helper.
 ///
-/// Output capture rides the shell tool's capped path (`spawn_and_collect`
+/// Output capture rides the shell tool's capped path (`spawn_collect_bounded`
 /// with [`crate::shell_tool::STREAM_CAPTURE_CAP`]): reads run to EOF so a
 /// full pipe cannot deadlock, and buffering stops at the cap so a chatty
 /// script cannot grow the process by output-rate x timeout. The visible
@@ -127,24 +128,37 @@ async fn run_script(
         .kill_on_drop(true);
     // Same scrubbing as Shell: deny_env list plus sensitive-suffix fallback.
     crate::shell_tool::sanitize_env(&mut cmd, ctx);
-    let output = match tokio::time::timeout(
-        Duration::from_millis(timeout_ms),
-        crate::shell_tool::spawn_and_collect(&mut cmd, crate::shell_tool::STREAM_CAPTURE_CAP),
-    )
-    .await
-    {
-        Ok(Ok(output)) => output,
-        Err(_) => {
-            return Ok(err_output(format!(
-                "timeout after {timeout_ms}ms: {program} {}",
-                argv.first().map_or("", String::as_str)
-            )));
+    let output =
+        match crate::shell_tool::spawn_collect_bounded(
+            &mut cmd,
+            crate::shell_tool::STREAM_CAPTURE_CAP,
+            Duration::from_millis(timeout_ms),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(e) => {
+                return Ok(err_output(format!("failed to spawn {program}: {e}")));
+            }
+        };
+    // Timeout: report the partial streams alongside the reason, matching
+    // the shell tool.
+    let Some(status) = output.status else {
+        let mut content = format!(
+            "timeout after {timeout_ms}ms, the process was killed: {program} {}\npartial output before the kill:",
+            argv.first().map_or("", String::as_str)
+        );
+        let stdout = crate::shell_tool::truncate_output(&output.stdout);
+        let stderr = crate::shell_tool::truncate_output(&output.stderr);
+        if !stdout.is_empty() {
+            content.push_str(&format!("\n--- stdout ---\n{stdout}"));
         }
-        Ok(Err(e)) => {
-            return Ok(err_output(format!("failed to spawn {program}: {e}")));
+        if !stderr.is_empty() {
+            content.push_str(&format!("\n--- stderr ---\n{stderr}"));
         }
+        return Ok(err_output(content));
     };
-    let code = output.status.code().unwrap_or(-1);
+    let code = status.code().unwrap_or(-1);
     let stdout = crate::shell_tool::truncate_output(&output.stdout);
     let stderr = crate::shell_tool::truncate_output(&output.stderr);
     let mut content = format!("exit code: {code}");

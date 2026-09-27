@@ -8,7 +8,7 @@
 | `src/fs/` | 限定在 `ToolCtx::cwd` 之下的文件工具：`read`（`read.rs`，2000 行 / 50 KB 预算）、`write`（`write.rs`，原子写，10 MB 上限）、`edit`（`edit.rs`，精确匹配唯一性检查）、`view`（`image.rs`，按魔数嗅探的图片附件，5 MB）、`present`（`present.rs`，交付物记入共享 `PresentStore`）；`mod.rs` 持有共享上限与辅助函数，还承载 `FileLedger`——`read` 记录每个文件的 (mtime, len) 指纹，`write` / `edit` 在落盘指纹偏离会话最近一次所见时拒绝改写，外部变更（格式化器、git checkout、其他进程）由此强制先重读，而不是被悄悄覆盖 |
 | `src/search/` | 只读搜索：`grep`（`grep.rs`，正则内容搜索，500 条匹配上限）与 `glob`（`glob.rs`，路径模式匹配，1000 条路径上限）；阻塞遍历放进 `spawn_blocking`，命中路径在 canonicalize 后复检以防符号链接逃逸（`mod.rs`） |
 | `src/path_guard.rs` | 路径逃逸守卫：所有检查都在 canonicalize 后的真实路径上进行（符号链接交换的 TOCTOU 窗口有明文记载），返回词法归一化的路径供展示 |
-| `src/shell_tool.rs` | `shell`：经共享 `shell_invocation` 解析的跨平台命令执行、敏感环境变量清洗、单流 30 KB 输出上限、默认 60 s 超时（上限 300 s）、经 `WAVECODE_SANDBOX_OS` 选择性开启的 OS 级隔离 |
+| `src/shell_tool.rs` | `shell`：经共享 `shell_invocation` 解析的跨平台命令执行、敏感环境变量清洗、单流 30 KB 输出上限（被截断的流把全文落入 `SpillStore` 并给出 `spill://` URI）、默认 60 s 超时（上限 300 s，超时杀死进程并报告杀死前已产生的输出）、经 `WAVECODE_SANDBOX_OS` 选择性开启的 OS 级隔离 |
 | `src/script.rs` | `python` / `node`：以内联方式非交互执行脚本，解释器按 PATH 探测，cwd 隔离，超时钳制，失败语义与 shell 一致 |
 | `src/lsp.rs` | 极简 stdio LSP 客户端加 `lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`（每次调用显式给 `server_command`，或经惰性启动、跨调用复用的注册表后端）与 `lsp_diagnostics`（渲染记录下来的 `publishDiagnostics` 推送）；不捆绑任何服务器 |
 | `src/web_fetch.rs` | `web_fetch`：仅 http/https，手工跟随重定向（最多 5 跳），流式大小上限（默认 256 KB / 硬上限 1 MB）加 `[truncated]` 标记，HTML 渲染为 Markdown（`raw=true` 可关闭） |

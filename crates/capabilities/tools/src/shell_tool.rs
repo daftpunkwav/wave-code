@@ -49,6 +49,31 @@ pub(crate) fn truncate_output(bytes: &[u8]) -> String {
     format!("{}\n[truncated]", &text[..cut])
 }
 
+/// [`truncate_output`], plus a pointer to the full text when truncation
+/// fired and a spill store is configured: the complete stream (lossily
+/// decoded, capped by the store's own eviction) lands in the store and the
+/// result names its `spill://` URI so the model can page the middle back
+/// through the `spill` tool instead of never seeing it. Store failures
+/// degrade to plain truncation — the pointer is an addition, never a
+/// replacement for the capped text.
+pub(crate) fn truncate_output_spilled(bytes: &[u8], store: Option<&wavecode_context::SpillStore>) -> String {
+    let text = truncate_output(bytes);
+    if !text.ends_with("\n[truncated]") {
+        return text;
+    }
+    let Some(store) = store else {
+        return text;
+    };
+    match store.spill(&String::from_utf8_lossy(bytes)) {
+        // The URI sits whitespace-delimited with no glued punctuation, so
+        // both the model and the spill tool can lift it out verbatim.
+        Ok(uri) => format!(
+            "{text}\nfull output saved to {uri} (read it back with the spill tool)"
+        ),
+        Err(_) => text,
+    }
+}
+
 /// Strip sensitive environment variables before spawn, so the model cannot read secrets via `set` / `env` / `echo %VAR%`.
 ///
 /// Two layers:
@@ -98,42 +123,100 @@ async fn collect_capped<R: tokio::io::AsyncRead + Unpin>(mut stream: R, cap: usi
     buf
 }
 
-/// Spawn `cmd` and collect its piped streams into at most `cap` bytes each.
+/// One child run's captured output.
+///
+/// `status` is `None` when the timeout fired first: the child was killed and
+/// whatever the streams had produced by then is kept, so a long build's log
+/// head survives its own timeout instead of vanishing with the process.
+pub(crate) struct Collected {
+    /// Exit status; `None` means the timeout killed the child.
+    pub status: Option<std::process::ExitStatus>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+/// Spawn `cmd` and collect its piped streams into at most `cap` bytes each,
+/// bounded by `timeout` across the whole run (spawn + reads + wait).
 ///
 /// Reads run to EOF so the child never blocks on a full pipe; bytes past
 /// the cap are drained and discarded. Read errors degrade to a truncated
 /// capture (the exit code still surfaces) instead of failing the call.
-/// Shared by `Shell` and the script tools so no child-output path buffers
-/// unbounded; the caller owns the timeout wrapper (kill_on_drop semantics).
-pub(crate) async fn spawn_and_collect(
+/// On timeout the child is killed and [`Collected::status`] comes back
+/// `None` with the partial streams attached. Shared by `Shell` and the
+/// script tools so no child-output path buffers unbounded or leaks a
+/// killed process's captured output.
+pub(crate) async fn spawn_collect_bounded(
     cmd: &mut tokio::process::Command,
     cap: usize,
-) -> std::io::Result<std::process::Output> {
+    timeout: Duration,
+) -> std::io::Result<Collected> {
     let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take().map(|s| collect_capped(s, cap));
-    let stderr = child.stderr.take().map(|s| collect_capped(s, cap));
-    let stdout = async {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    // The readers are owned tasks: on timeout an explicit kill closes the
+    // pipes, the tasks drain to EOF promptly (read errors degrade), and the
+    // buffers collected so far survive the kill.
+    let out_task = tokio::spawn(async move {
         match stdout {
-            Some(read) => read.await,
+            Some(s) => collect_capped(s, cap).await,
             None => Vec::new(),
         }
-    };
-    let stderr = async {
+    });
+    let err_task = tokio::spawn(async move {
         match stderr {
-            Some(read) => read.await,
+            Some(s) => collect_capped(s, cap).await,
             None => Vec::new(),
         }
-    };
-    let (stdout, stderr, status) = tokio::join!(stdout, stderr, child.wait());
-    Ok(std::process::Output {
-        status: status?,
-        stdout,
-        stderr,
-    })
+    });
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => {
+            let (stdout, stderr) = tokio::join!(out_task, err_task);
+            Ok(Collected {
+                status: Some(status),
+                // A reader task can only fail by panicking; degrade to an
+                // empty capture (the exit code still surfaces) like a read
+                // error does.
+                stdout: stdout.unwrap_or_default(),
+                stderr: stderr.unwrap_or_default(),
+            })
+        }
+        Ok(Err(e)) => Err(e),
+        // Elapsed: kill closes the child's pipe ends, so the readers see
+        // EOF right after; kill_on_drop remains as the drop-path backstop.
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            let (stdout, stderr) = tokio::join!(out_task, err_task);
+            Ok(Collected {
+                status: None,
+                stdout: stdout.unwrap_or_default(),
+                stderr: stderr.unwrap_or_default(),
+            })
+        }
+    }
 }
 
 /// Execute a shell command (a writing tool: may modify files or spawn processes, needs serial scheduling).
-pub struct Shell;
+///
+/// The optional `spill` store receives the *full* text of any output that
+/// had to be truncated, so the model can page the middle back through the
+/// `spill` tool; `None` (tests, hermetic registries) degrades to plain
+/// truncation.
+pub struct Shell {
+    spill: Option<wavecode_context::SpillStore>,
+}
+
+impl Shell {
+    /// Configure the spill store for truncated full outputs.
+    pub(crate) fn new(spill: Option<wavecode_context::SpillStore>) -> Self {
+        Self { spill }
+    }
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
 
 #[async_trait::async_trait]
 impl Tool for Shell {
@@ -145,8 +228,9 @@ impl Tool for Shell {
         "Run a shell command in the working directory. The default shell is platform-dependent \
          (cmd /C on Windows, sh -c on Unix; override with the WAVECODE_SHELL env var). \
          Use timeout_ms to bound execution (default 60000 ms, clamped to 300000 ms); on timeout \
-         the process is killed. stdout and stderr are captured separately, each truncated at 30KB. \
-         The command runs non-interactive (stdin is closed)."
+         the process is killed and the output produced so far is reported. stdout and stderr are \
+         captured separately, each truncated at 30KB with the full output saved to a spill:// URI \
+         the spill tool can read back. The command runs non-interactive (stdin is closed)."
     }
 
     fn input_schema(&self) -> Value {
@@ -220,36 +304,49 @@ impl Tool for Shell {
             // wait_with_output only collects piped streams; the default inherit would read nothing.
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            // Key: pairs with timeout cancellation semantics -- the child is auto-killed when the future is dropped
-            // (only the shell itself; see the module docs for the orphaned-grandchildren limitation).
+            // Backstop for the drop path; spawn_collect_bounded kills
+            // explicitly on the timeout path so the pipes close and the
+            // readers hand back what they captured.
             .kill_on_drop(true);
-        // timeout wraps the whole run (spawn + output reads); both streams
-        // drain concurrently (join!), so a full pipe buffer cannot deadlock
+        // The bounded run covers spawn + reads + wait in one contract; both
+        // streams drain concurrently, so a full pipe buffer cannot deadlock
         // it, and each stream stops buffering at STREAM_CAPTURE_CAP so a
         // chatty child cannot grow memory without bound.
-        let output = match tokio::time::timeout(
+        let output = match spawn_collect_bounded(
+            &mut cmd,
+            STREAM_CAPTURE_CAP,
             Duration::from_millis(timeout_ms),
-            spawn_and_collect(&mut cmd, STREAM_CAPTURE_CAP),
         )
         .await
         {
-            Ok(Ok(output)) => output,
-            // Timeout: the run future was dropped, and kill_on_drop guarantees the process is killed.
-            Err(_) => {
-                return Ok(err_output(format!(
-                    "timeout after {timeout_ms}ms: {command}"
-                )));
-            }
+            Ok(output) => output,
             // Spawn failures (e.g. missing shell) are business output for the model, not Err.
-            Ok(Err(e)) => {
+            Err(e) => {
                 return Ok(err_output(format!("failed to spawn shell: {e}")));
             }
         };
 
+        // Timeout: report the partial streams alongside the reason — a
+        // long build's log head is exactly what diagnosing the timeout needs.
+        let Some(status) = output.status else {
+            let mut content = format!(
+                "timeout after {timeout_ms}ms, the process was killed: {command}\npartial output before the kill:"
+            );
+            let stdout = truncate_output(&output.stdout);
+            let stderr = truncate_output(&output.stderr);
+            if !stdout.is_empty() {
+                content.push_str(&format!("\n--- stdout ---\n{stdout}"));
+            }
+            if !stderr.is_empty() {
+                content.push_str(&format!("\n--- stderr ---\n{stderr}"));
+            }
+            return Ok(err_output(content));
+        };
+
         // On Unix, code() is None when killed by a signal; record -1 (still non-zero, so is_error holds).
-        let code = output.status.code().unwrap_or(-1);
-        let stdout = truncate_output(&output.stdout);
-        let stderr = truncate_output(&output.stderr);
+        let code = status.code().unwrap_or(-1);
+        let stdout = truncate_output_spilled(&output.stdout, self.spill.as_ref());
+        let stderr = truncate_output_spilled(&output.stderr, self.spill.as_ref());
         let mut content = format!("exit code: {code}");
         if !stdout.is_empty() {
             content.push_str(&format!("\n--- stdout ---\n{stdout}"));
@@ -284,7 +381,7 @@ mod tests {
         // Spawns a child: held under ENV_LOCK (see its docs).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": "echo hello"}), &c)
             .await
             .unwrap();
@@ -299,7 +396,7 @@ mod tests {
         // Spawns a child: held under ENV_LOCK (see its docs).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": "exit 3"}), &c)
             .await
             .unwrap();
@@ -319,7 +416,7 @@ mod tests {
         } else {
             "sleep 10"
         };
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": cmd, "timeout_ms": 500}), &c)
             .await
             .unwrap();
@@ -338,7 +435,7 @@ mod tests {
         } else {
             "echo err >&2"
         };
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": cmd}), &c)
             .await
             .unwrap();
@@ -364,7 +461,7 @@ mod tests {
         } else {
             "yes 0123456789012345678901234567890123456789 | head -c 2000000".to_string()
         };
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": cmd}), &c)
             .await
             .unwrap();
@@ -377,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn missing_command_is_error_output() {
         let (_d, c) = ctx();
-        let out = Shell.execute(serde_json::json!({}), &c).await.unwrap();
+        let out = Shell::default().execute(serde_json::json!({}), &c).await.unwrap();
         assert!(out.is_error);
     }
 
@@ -393,7 +490,7 @@ mod tests {
         } else {
             "ls marker.txt"
         };
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": cmd}), &c)
             .await
             .unwrap();
@@ -422,6 +519,72 @@ mod tests {
         let out = truncate_output(&bytes);
         assert!(out.ends_with("[truncated]"));
         assert!(out.len() <= MAX_OUTPUT_BYTES + "\n[truncated]".len());
+    }
+
+    /// On timeout the output produced before the kill rides along with the
+    /// timeout reason — the log head is what diagnosing the timeout needs.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn timeout_reports_partial_output() {
+        // Spawns a child: held under ENV_LOCK (see its docs).
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_d, c) = ctx();
+        let cmd = if cfg!(windows) {
+            // cmd builtin busy-wait hanger, no outer parens (a grouped
+            // compound mangles the for syntax) and no grandchildren, so
+            // nothing is orphaned after the kill.
+            "echo started& for /l %i in (1,1,1000000000) do @rem"
+        } else {
+            "echo started; sleep 30"
+        };
+        let out = Shell::default()
+            .execute(
+                serde_json::json!({"command": cmd, "timeout_ms": 800}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("timeout after 800ms"), "{}", out.content);
+        assert!(
+            out.content.contains("started"),
+            "pre-kill output survives the kill: {}",
+            out.content
+        );
+    }
+
+    /// A truncated stream's full text lands in the spill store and the
+    /// result names the URI; without a store the marker stands alone.
+    #[test]
+    fn truncated_output_spills_the_full_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = wavecode_context::SpillStore::new(dir.path().to_path_buf());
+        let mut bytes = String::new();
+        for i in 0..4000 {
+            bytes.push_str(&format!("line-{i:04} tail tail tail tail tail tail\n"));
+        }
+        assert!(bytes.len() > MAX_OUTPUT_BYTES);
+
+        let out = truncate_output_spilled(bytes.as_bytes(), Some(&store));
+        assert!(out.contains("[truncated]"));
+        let uri_pos = out.find("full output saved to spill://").expect("pointer present");
+        let uri: String = out[uri_pos..]
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(4)
+            .unwrap()
+            .to_string();
+        let full = store.read(&uri).unwrap();
+        assert!(full.contains("line-3999"), "spill holds the whole stream");
+        assert!(!out.contains("line-3999"), "display stays capped");
+
+        // No store: behavior identical to plain truncation.
+        assert_eq!(
+            truncate_output_spilled(bytes.as_bytes(), None),
+            truncate_output(bytes.as_bytes())
+        );
     }
 
     #[test]
@@ -482,7 +645,7 @@ mod tests {
         } else {
             "echo \"$FOO_API_KEY\"; echo \"$FOO_PROVIDER_KEY\"; echo \"$FOO_NORMAL\""
         };
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": cmd}), &c)
             .await
             .unwrap();
@@ -538,7 +701,7 @@ mod tests {
             std::env::set_var("WAVECODE_SANDBOX_OS", "1");
         }
         let (_d, c) = ctx();
-        let out = Shell
+        let out = Shell::default()
             .execute(serde_json::json!({"command": "echo hello"}), &c)
             .await
             .unwrap();

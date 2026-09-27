@@ -6,7 +6,7 @@
 |---|---|
 | `Cargo.toml` | crate 清单；无 workspace 依赖（仅 serde/tokio） |
 | `src/lib.rs` | `TaskQueue`（优先级分层、层内 FIFO）、`DelayQueue`（按截止时间暂存）、`CronField`/`CronSpec`/`CronDaemon`（五段 cron 解析与边沿触发匹配）、`ConcurrencyLimit`（信号量闸门） |
-| `src/durable.rs` | `Scheduler` / `ScheduleEntry`：cron 条目持久化到 `<home>/.wavecode/schedule.json`，构造时重载并对错过的窗口补触发一次；运行中的工作读回为 interrupted，绝不报成 resumed |
+| `src/durable.rs` | `Scheduler` / `ScheduleEntry`：cron 条目持久化到 `<home>/.wavecode/schedule.json`，构造时重载；错过的触发不重放（每个条目在其下一个 cron 到期点触发）；运行中的工作读回为 interrupted，绝不报成 resumed |
 
 时间以参数形式进入（epoch 秒、civil 字段），绝无隐藏读取，因此每个
 调度在测试下都是确定性的。能解析但永远匹配不到真实时刻的 cron

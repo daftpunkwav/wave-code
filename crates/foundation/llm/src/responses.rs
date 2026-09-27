@@ -934,4 +934,73 @@ mod tests {
             "{events:?}"
         );
     }
+    /// The `reasoning` block rides only when an effort is set, and it
+    /// always carries the auto summary.
+    #[test]
+    fn reasoning_effort_is_injected_with_auto_summary() {
+        let req = ChatRequest {
+            model: "gpt-5".to_string(),
+            system: String::new(),
+            messages: Arc::new(vec![user_text("hi")]),
+            tools: Vec::new(),
+            max_tokens: 16,
+        };
+        let plain = build_request_body(&req, "gpt-5", None);
+        assert!(plain.get("reasoning").is_none());
+        let reasoned = build_request_body(&req, "gpt-5", Some("high"));
+        assert_eq!(reasoned["reasoning"]["effort"], "high");
+        assert_eq!(reasoned["reasoning"]["summary"], "auto");
+    }
+
+    /// Assistant history translates into standalone items: prose becomes
+    /// a `message` item, the tool call a `function_call` keyed by the
+    /// wave call id.
+    #[test]
+    fn assistant_history_becomes_message_and_function_call_items() {
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "ans".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            ],
+        }];
+        let items = translate_input(&history);
+        assert_eq!(items.len(), 2, "{items:?}");
+        // The prose item keeps the assistant role and output_text parts;
+        // the wire item omits an explicit `type` (server-side default).
+        assert_eq!(items[0]["role"], "assistant");
+        assert_eq!(items[0]["content"][0]["type"], "output_text");
+        assert_eq!(items[1]["type"], "function_call");
+        assert_eq!(items[1]["call_id"], "c1");
+    }
+
+    /// A user image block becomes an `input_image` part next to the
+    /// text parts of the same message.
+    #[test]
+    fn user_images_become_input_image_parts() {
+        let history = vec![Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Text {
+                    text: "look".to_string(),
+                },
+                ContentBlock::Image {
+                    id: None,
+                    mime: "image/png".to_string(),
+                    base64: "aGVsbG8=".to_string(),
+                },
+            ],
+        }];
+        let items = translate_input(&history);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "{items:?}");
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_image");
+    }
 }

@@ -6,7 +6,7 @@ English | [中文](README.zh.md)
 |---|---|
 | `Cargo.toml` | Crate manifest; no workspace dependencies (serde/tokio only) |
 | `src/lib.rs` | `TaskQueue` (priority levels with FIFO stability), `DelayQueue` (deadline holds), `CronField`/`CronSpec`/`CronDaemon` (five-field cron parsing and edge-triggered matching), `ConcurrencyLimit` (semaphore gate) |
-| `src/durable.rs` | `Scheduler` / `ScheduleEntry`: cron entries persisted to `<home>/.wavecode/schedule.json`, reloaded on construct with fire-once missed-fire catch-up; running work reads back as interrupted, never resumed |
+| `src/durable.rs` | `Scheduler` / `ScheduleEntry`: cron entries persisted to `<home>/.wavecode/schedule.json`, reloaded on construct; missed fires are not replayed (each entry fires at its next cron occurrence); running work reads back as interrupted, never resumed |
 
 Time enters as parameters (epoch seconds, civil fields), never as
 hidden reads, so every schedule is deterministic under test. Cron

@@ -223,6 +223,8 @@ pub fn help_lines() -> Vec<String> {
         "  /fork — snapshot this session into a resumable copy".to_string(),
         "  /title — rename the session (a picker asks for the name)".to_string(),
         "  /model — open the model picker; /model <name> switches directly".to_string(),
+        "  /model add — fill in a model spec form (provider, api, base url, limits, thinking, modalities)".to_string(),
+        "  /model list — show the catalog; /model remove <alias> deletes".to_string(),
         "  /effort — pick the reasoning effort; /effort <level> switches directly".to_string(),
         "  /permissions — open the mode picker; /plan /auto /wave switch directly".to_string(),
         "  /init — ask the agent to write AGENTS.md for this repo".to_string(),

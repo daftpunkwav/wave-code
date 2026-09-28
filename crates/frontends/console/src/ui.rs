@@ -576,6 +576,9 @@ impl ConsoleUi {
                 }
                 PromptPurpose::BtwQuestion => self.handle_btw(&value),
             },
+            Some(Answer::ModelForm { alias, spec }) => {
+                self.catalog_insert_form(alias, spec);
+            }
             None => {}
         }
     }
@@ -2572,6 +2575,12 @@ verify from the repository.";
             Some("list") => self.catalog_list(),
             Some("remove") => self.catalog_remove(parts.get(1).copied()),
             Some("set") => self.catalog_set(&parts[1..]),
+            // Bare `add` opens the spec form (every catalog field,
+            // including thinking and modalities); the positional form
+            // stays for one-line additions.
+            Some("add") if parts.len() == 1 => {
+                self.dialog = Some(Dialog::ModelForm(crate::dialogs::ModelFormDialog::new()));
+            }
             Some("add") => self.catalog_add(&parts[1..]),
             _ => self.switch_model_command(args.trim()),
         }
@@ -2738,6 +2747,24 @@ verify from the repository.";
             modalities: wavecode_config::ModalitiesSpec::default(),
         };
         let alias = rest[0].to_string();
+        let Some((mut catalog, home)) = self.load_catalog() else {
+            return;
+        };
+        catalog.insert(alias.clone(), spec);
+        match catalog.save(&home) {
+            Ok(()) => self.push_status(&format!("added {alias} (restart applies it)"), false),
+            Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
+        }
+    }
+
+    /// Persist the spec built by the `/model add` form: same insert
+    /// and save as the positional command, but the form has already
+    /// validated its own fields, so only the catalog I/O can fail.
+    fn catalog_insert_form(&mut self, alias: String, spec: wavecode_config::ModelSpec) {
+        if alias.is_empty() {
+            self.push_status("model alias is required", true);
+            return;
+        }
         let Some((mut catalog, home)) = self.load_catalog() else {
             return;
         };

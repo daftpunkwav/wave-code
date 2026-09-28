@@ -1315,6 +1315,23 @@ fn model_no_args_opens_picker_and_alt_s_switches_live() {
     );
 }
 
+/// Bare `/model add` opens the spec form; the positional form stays
+/// available for one-line additions.
+#[test]
+fn model_add_bare_opens_the_spec_form() {
+    let mut ui = ui();
+    ui.user_submit("/model add");
+    assert!(
+        matches!(ui.dialog, Some(Dialog::ModelForm(_))),
+        "spec form opens"
+    );
+    ui.handle_key(KeyEvent::plain(Key::Esc));
+    assert!(ui.dialog.is_none(), "esc dismisses");
+    // The positional form still parses as before.
+    ui.user_submit("/model add x anthropic p https://h m");
+    assert!(ui.dialog.is_none(), "positional add does not open a dialog");
+}
+
 #[test]
 fn model_picker_enter_persists_default_and_cross_provider_skips_live_switch() {
     let mut ui = ui_with_models();

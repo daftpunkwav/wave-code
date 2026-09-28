@@ -79,6 +79,14 @@ pub enum Answer {
         /// The submitted (trimmed) text.
         value: String,
     },
+    /// A model spec built by the `/model add` form, ready to insert
+    /// into the catalog.
+    ModelForm {
+        /// Catalog alias the model is saved under.
+        alias: String,
+        /// The assembled spec (every form field resolved).
+        spec: wavecode_config::ModelSpec,
+    },
 }
 
 /// Which bare-command prompt an [`Answer::Prompt`] routes back to.
@@ -121,6 +129,8 @@ pub enum Dialog {
     /// The bare-command free-text prompt (`/title`, `/editor`,
     /// `/export`, `/compact`, `/btw`).
     Prompt(PromptDialog),
+    /// The `/model add` spec form.
+    ModelForm(ModelFormDialog),
 }
 
 impl Dialog {
@@ -138,6 +148,7 @@ impl Dialog {
             Self::Theme(dialog) => dialog.title.clone(),
             Self::Effort(dialog) => dialog.title.clone(),
             Self::Prompt(dialog) => dialog.title.clone(),
+            Self::ModelForm(dialog) => dialog.title.clone(),
         }
     }
 
@@ -155,6 +166,7 @@ impl Dialog {
             Self::Theme(dialog) => dialog.handle_key(event),
             Self::Effort(dialog) => dialog.handle_key(event),
             Self::Prompt(dialog) => dialog.handle_key(event),
+            Self::ModelForm(dialog) => dialog.handle_key(event),
         }
     }
 
@@ -172,6 +184,7 @@ impl Dialog {
             Self::Theme(dialog) => dialog.render(width),
             Self::Effort(dialog) => dialog.render(width),
             Self::Prompt(dialog) => dialog.render(width),
+            Self::ModelForm(dialog) => dialog.render(width),
         }
     }
 
@@ -793,6 +806,108 @@ mod tests {
             !joined.contains("MiniMax-M3"),
             "other provider hidden: {joined}"
         );
+    }
+
+    /// The `/model add` form resolves every field into a full spec:
+    /// identity, limits, thinking variants (first = default), and the
+    /// modality lists.
+    #[test]
+    fn model_form_resolves_all_fields() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelFormDialog::new();
+        let inputs = [
+            "mini",                     // alias
+            "",                         // api (keep the default anthropic-messages)
+            "minimax",                  // provider
+            "https://api.minimax.chat", // base url
+            "MiniMax-M3",               // model
+            "MINIMAX_API_KEY",          // api key env
+            "195000",                   // context tokens
+            "8192",                     // max output
+            "low, high",                // thinking variants
+            ",image",                   // input modalities (appends to the "text" seed)
+            "",                         // output modalities (keeps the "text" seed)
+        ];
+        for input in inputs {
+            for c in input.chars() {
+                dialog.handle_key(KeyEvent::plain(Key::Char(c)));
+            }
+            if dialog.active < dialog.fields.len() - 1 {
+                dialog.handle_key(KeyEvent::plain(Key::Enter));
+            }
+        }
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        let Some(Answer::ModelForm { alias, spec }) = answer else {
+            panic!("form did not resolve: {answer:?}");
+        };
+        assert_eq!(alias, "mini");
+        assert_eq!(spec.provider, "minimax");
+        assert_eq!(spec.base_url, "https://api.minimax.chat");
+        assert_eq!(spec.model, "MiniMax-M3");
+        assert_eq!(spec.kind, wavecode_config::ApiKind::AnthropicMessages);
+        assert_eq!(spec.api_key_env.as_deref(), Some("MINIMAX_API_KEY"));
+        assert_eq!(spec.context_window, Some(195000));
+        assert_eq!(spec.max_output, Some(8192));
+        assert!(spec.reasoning.enabled);
+        assert_eq!(spec.reasoning.variants, vec!["low", "high"]);
+        assert_eq!(spec.reasoning.default.as_deref(), Some("low"));
+        assert_eq!(spec.modalities.input, vec!["text", "image"]);
+        assert_eq!(spec.modalities.output, vec!["text"]);
+    }
+
+    /// Blank required fields block the save with the form open and the
+    /// error pointing at the field; counts must be numeric. Enter on a
+    /// middle field only advances — saving happens on the last field.
+    #[test]
+    fn model_form_validates_before_resolving() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelFormDialog::new();
+        // Alias filled, walk to the last field and save: provider is
+        // required.
+        dialog.handle_key(KeyEvent::plain(Key::Char('x')));
+        while dialog.active < dialog.fields.len() - 1 {
+            dialog.handle_key(KeyEvent::plain(Key::Down));
+        }
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(answer.is_none(), "incomplete form must not resolve");
+        assert_eq!(dialog.error.as_deref(), Some("provider is required"));
+        // Count fields filter non-digits at the key: "12x" stores "12"
+        // and the form then saves fine (counts stay optional).
+        let mut dialog = ModelFormDialog::new();
+        let values = ["a", "", "p", "https://h", "m", "", "12x"];
+        for value in values {
+            for c in value.chars() {
+                dialog.handle_key(KeyEvent::plain(Key::Char(c)));
+            }
+            dialog.handle_key(KeyEvent::plain(Key::Enter));
+        }
+        assert_eq!(dialog.fields[6].value, "12", "non-digits filtered");
+        while dialog.active < dialog.fields.len() - 1 {
+            dialog.handle_key(KeyEvent::plain(Key::Down));
+        }
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        let Some(Answer::ModelForm { alias, spec }) = answer else {
+            panic!("valid form must resolve: {answer:?}");
+        };
+        assert_eq!(alias, "a");
+        assert_eq!(spec.context_window, Some(12));
+        assert_eq!(spec.max_output, None);
+    }
+
+    /// ←/→ cycle the API dialect field through the three spellings.
+    #[test]
+    fn model_form_cycles_api_kind() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelFormDialog::new();
+        dialog.handle_key(KeyEvent::plain(Key::Down)); // to `api`
+        dialog.handle_key(KeyEvent::plain(Key::Right));
+        assert_eq!(dialog.fields[1].value, "openai-chat");
+        dialog.handle_key(KeyEvent::plain(Key::Right));
+        assert_eq!(dialog.fields[1].value, "openai-responses");
+        dialog.handle_key(KeyEvent::plain(Key::Right));
+        assert_eq!(dialog.fields[1].value, "anthropic-messages");
+        dialog.handle_key(KeyEvent::plain(Key::Left));
+        assert_eq!(dialog.fields[1].value, "openai-responses");
     }
 
     /// The list window slides with the selection: a selection past the
@@ -2277,6 +2392,239 @@ impl PromptDialog {
             String::new(),
             theme.paint(Token::TextDim, self.hint),
         ];
+        border::frame(
+            body,
+            columns,
+            theme.style(Token::BorderFocus),
+            Some(self.title.clone()),
+        )
+    }
+}
+
+/// One editable row of the model spec form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormRow {
+    /// Free text (required for the identity fields).
+    Text,
+    /// The API dialect, cycled with ←/→ over its spellings.
+    ApiKind,
+    /// Unsigned token count; blank means unset.
+    Count,
+    /// Comma-separated tokens (thinking variants, modalities).
+    List,
+}
+
+struct FormField {
+    label: &'static str,
+    kind: FormRow,
+    value: String,
+}
+
+impl FormField {
+    fn new(label: &'static str, kind: FormRow, value: &str) -> Self {
+        Self {
+            label,
+            kind,
+            value: value.to_string(),
+        }
+    }
+}
+
+/// The `/model add` spec form: one field per catalog property, filled
+/// top to bottom. Enter advances (and saves on the last field), ←/→
+/// cycles the API dialect, Esc cancels. Required identity fields must
+/// be non-blank and count fields must parse before the form resolves.
+impl Default for ModelFormDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct ModelFormDialog {
+    title: String,
+    fields: Vec<FormField>,
+    active: usize,
+    error: Option<String>,
+}
+
+impl ModelFormDialog {
+    /// A blank form in fill order (thinking/modalities preseeded with
+    /// the catalog defaults).
+    pub fn new() -> Self {
+        Self {
+            title: "Add a model".to_string(),
+            fields: vec![
+                FormField::new("alias", FormRow::Text, ""),
+                FormField::new("api", FormRow::ApiKind, "anthropic-messages"),
+                FormField::new("provider", FormRow::Text, ""),
+                FormField::new("base url", FormRow::Text, ""),
+                FormField::new("model", FormRow::Text, ""),
+                FormField::new("api key env", FormRow::Text, ""),
+                FormField::new("context tokens", FormRow::Count, ""),
+                FormField::new("max output", FormRow::Count, ""),
+                FormField::new("thinking", FormRow::List, ""),
+                FormField::new("input modalities", FormRow::List, "text"),
+                FormField::new("output modalities", FormRow::List, "text"),
+            ],
+            active: 0,
+            error: None,
+        }
+    }
+
+    fn api_kinds() -> [&'static str; 3] {
+        ["anthropic-messages", "openai-chat", "openai-responses"]
+    }
+
+    /// Compose the spec from the form values; `Err` names the problem
+    /// and points at the offending field.
+    fn resolve(&self) -> Result<(String, wavecode_config::ModelSpec), (usize, String)> {
+        let value = |index: usize| self.fields[index].value.trim();
+        for index in [0, 2, 3, 4] {
+            if value(index).is_empty() {
+                return Err((index, format!("{} is required", self.fields[index].label)));
+            }
+        }
+        let context_window = match value(6).parse::<u64>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) if value(6).is_empty() => None,
+            Err(_) => return Err((6, "context tokens must be a number".to_string())),
+        };
+        let max_output = match value(7).parse::<u32>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) if value(7).is_empty() => None,
+            Err(_) => return Err((7, "max output must be a number".to_string())),
+        };
+        let kind = match value(1) {
+            "openai-chat" => wavecode_config::ApiKind::OpenaiChat,
+            "openai-responses" => wavecode_config::ApiKind::OpenaiResponses,
+            _ => wavecode_config::ApiKind::AnthropicMessages,
+        };
+        // Thinking: a variant list enables the control, the first
+        // variant is the default effort.
+        let variants: Vec<String> = value(8)
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+        let reasoning = wavecode_config::ReasoningSpec {
+            enabled: !variants.is_empty(),
+            default: variants.first().cloned(),
+            variants,
+        };
+        let split_list = |raw: &str| -> Vec<String> {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        let spec = wavecode_config::ModelSpec {
+            provider: value(2).to_string(),
+            model: value(4).to_string(),
+            kind,
+            base_url: value(3).to_string(),
+            api_key_env: (!value(5).is_empty()).then(|| value(5).to_string()),
+            api_key: None,
+            context_window,
+            max_output,
+            reasoning,
+            modalities: wavecode_config::ModalitiesSpec {
+                input: split_list(value(9)),
+                output: split_list(value(10)),
+            },
+        };
+        Ok((value(0).to_string(), spec))
+    }
+
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        let last = self.fields.len() - 1;
+        match event.key {
+            Key::Esc => return Some(Answer::Dismissed),
+            Key::Up => {
+                self.active = self.active.saturating_sub(1);
+            }
+            Key::Down => {
+                self.active = (self.active + 1).min(last);
+            }
+            Key::Left | Key::Right if self.fields[self.active].kind == FormRow::ApiKind => {
+                let kinds = Self::api_kinds();
+                let current = self.fields[self.active].value.clone();
+                let position = kinds.iter().position(|kind| *kind == current).unwrap_or(0);
+                let step = if event.key == Key::Right {
+                    1
+                } else {
+                    kinds.len() - 1
+                };
+                self.fields[self.active].value = kinds[(position + step) % kinds.len()].to_string();
+            }
+            Key::Backspace => {
+                self.fields[self.active].value.pop();
+                self.error = None;
+            }
+            Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
+                let field = &mut self.fields[self.active];
+                // The dialect cycles, it does not take typed text; count
+                // fields only take digits.
+                let editable = field.kind != FormRow::ApiKind;
+                if editable && (field.kind != FormRow::Count || c.is_ascii_digit()) {
+                    field.value.push(c);
+                }
+                self.error = None;
+            }
+            Key::Enter => {
+                if self.active < last {
+                    self.active += 1;
+                } else {
+                    match self.resolve() {
+                        Ok((alias, spec)) => return Some(Answer::ModelForm { alias, spec }),
+                        Err((index, message)) => {
+                            self.active = index;
+                            self.error = Some(message);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let label_width = self
+            .fields
+            .iter()
+            .map(|field| field.label.len())
+            .max()
+            .unwrap_or(0);
+        let mut body = Vec::new();
+        for (index, field) in self.fields.iter().enumerate() {
+            let label = format!("{:>width$}:", field.label, width = label_width);
+            let value = if index == self.active {
+                let mut text = field.value.clone();
+                text.push('▏');
+                theme.bold(Token::TextStrong, &text)
+            } else if field.value.is_empty() {
+                theme.paint(Token::TextMuted, "(unset)")
+            } else {
+                theme.paint(Token::Text, &field.value)
+            };
+            let label = if index == self.active {
+                theme.bold(Token::Accent, &label)
+            } else {
+                theme.paint(Token::TextDim, &label)
+            };
+            body.push(format!("{label} {value}"));
+        }
+        if let Some(error) = &self.error {
+            body.push(theme.paint(Token::Warning, error));
+        }
+        body.push(String::new());
+        body.push(theme.paint(
+            Token::TextDim,
+            "↑/↓ field · ←/→ api · ↵ next / save · esc cancel",
+        ));
         border::frame(
             body,
             columns,

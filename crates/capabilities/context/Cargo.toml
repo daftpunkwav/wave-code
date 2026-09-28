@@ -6,6 +6,8 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Crash-safe file replace (`atomic_write`) for the spill manifest ledger.
+infrastructure-base = { path = "../../infrastructure/base" }
 wavecode-llm = { path = "../../foundation/llm" }
 async-trait.workspace = true
 futures.workspace = true

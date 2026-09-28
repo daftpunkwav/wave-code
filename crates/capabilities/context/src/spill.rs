@@ -193,14 +193,14 @@ impl SpillStore {
         std::fs::create_dir_all(&self.root)?;
         // The manifest is the sole ledger for the 32MB cap: a truncated
         // write would read back as "0 bytes used" and disable eviction
-        // forever, so the write lands temp+rename: the manifest on disk
-        let staging = self.root.join("manifest.txt.staging-tmp");
-        std::fs::write(&staging, render_manifest(entries))?;
-        if let Err(e) = std::fs::rename(&staging, self.manifest_path()) {
-            let _ = std::fs::remove_file(&staging);
-            return Err(e);
-        }
-        Ok(())
+        // forever, so the write lands temp+rename in one atomic step. The
+        // shared primitive stages under a per-writer unique name: a fixed
+        // staging name would let two processes sharing this root clobber
+        // each other's bytes mid-write and rename half a file into place.
+        infrastructure_base::atomic_write(
+            &self.manifest_path(),
+            render_manifest(entries).as_bytes(),
+        )
     }
 
     /// Spill `content` into the store, returning its `spill://` URI.
@@ -244,7 +244,9 @@ impl SpillStore {
     /// Drop oldest entries until the total fits the cap (files and manifest
     /// pruned together; a missing file counts its manifest bytes anyway).
     fn evict_to_cap(&self, entries: &mut Vec<ManifestEntry>) {
-        let mut total: u64 = entries.iter().map(|e| e.bytes).sum();
+        // Saturating: the manifest may carry corrupt huge byte counts, and
+        // an overflowing sum would panic (debug) on every subsequent spill.
+        let mut total: u64 = entries.iter().fold(0u64, |acc, e| acc.saturating_add(e.bytes));
         while total > self.total_cap && !entries.is_empty() {
             let oldest = entries.remove(0);
             total = total.saturating_sub(oldest.bytes);
@@ -343,6 +345,25 @@ mod tests {
         let uri = store.spill("still works").unwrap();
         assert_eq!(store.read(&uri).unwrap(), "still works");
     }
+
+    /// A corrupt manifest carrying huge byte counts must not panic the
+    /// accounting (debug builds trap on integer overflow): the sum
+    /// saturates, eviction runs on the saturated total, and the fresh
+    /// spill stays readable.
+    #[test]
+    fn corrupt_manifest_byte_counts_saturate_instead_of_overflowing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SpillStore::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(dir.path()).unwrap();
+        std::fs::write(
+            dir.path().join("manifest.txt"),
+            format!("a {} 0\nb {} 0\n", u64::MAX, u64::MAX),
+        )
+        .unwrap();
+        let uri = store.spill("still works").unwrap();
+        assert_eq!(store.read(&uri).unwrap(), "still works");
+    }
+
     /// Spilling past the total cap evicts the oldest entries first —
     /// their payload files go with the manifest rows — and the newest
     /// spill stays readable.

@@ -31,12 +31,13 @@ desktop.ini
 # ZCode local tool state and session artifacts (includes historical one-off migration scripts)
 .zcode/
 
-# Claude Code local state: personal settings and throwaway worktrees
+# Local tool state: personal settings and throwaway worktrees
 .claude/settings.local.json
 .claude/worktrees/
 
 # Local agent instruction overrides (personal, never shared)
 *.local.md
+CLAUDE.md
 
 # Local docs directory (local working copy of docs): kept local-only, never committed
 docs-local/

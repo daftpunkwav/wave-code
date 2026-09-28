@@ -135,10 +135,14 @@ model = "your-model-fast"
   status rows, `/btw` side questions (read-only, answers stream into a panel
   without touching the conversation), and dialogs for `/model` (provider tabs,
   search, session-only Alt+S, a thinking-level row on OpenAI-compatible
-  providers, plus `/model list|add|set|remove` editing the
-  `~/.wavecode/models.json` catalog), `/permissions`, `/theme` (built-ins
-  plus custom themes), and
-  `/help` (scrollable keybinding + command reference).
+  providers) plus `/provider` (spec form over the full `~/.wavecode/models.json`
+  entry: API dialect, endpoint, key env var, limits, thinking variants,
+  modalities; `list` / `set` / `remove` edit saved entries), `/permissions`,
+  `/theme` (built-ins plus custom themes), `/settings` (ten rendering and
+  behavior tunables), and
+  `/help` (scrollable keybinding + command reference), `/doctor` (config,
+  credential, catalog, and settings health check), `/hooks` (the configured
+  hook table), `/release-notes` (newest changelog sections).
   Session commands: `/sessions` (alias `/resume`) resumes a recorded session
   in place, `/fork` snapshots a resumable copy, `/title` renames, `/new`
   starts a fresh session, `/init` asks the agent to write AGENTS.md,

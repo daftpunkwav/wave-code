@@ -234,3 +234,48 @@ fn memory_without_files_reports_empty() {
     assert!(text.contains("no AGENTS.md in scope"), "{text}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `/doctor` runs to completion over a real temp home (config absent
+/// is a warning, not a crash) and closes with the session facts.
+#[test]
+fn doctor_reports_over_a_temp_home() {
+    let (mut ui, home) = ui_with_home("doctor");
+    ui.user_submit("/doctor");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("home"), "home line: {text}");
+    assert!(
+        text.contains("config.toml absent"),
+        "missing config is a warning: {text}"
+    );
+    assert!(text.contains("models.json"), "catalog line: {text}");
+    assert!(
+        text.contains("console-settings.json"),
+        "settings line: {text}"
+    );
+    assert!(text.contains("mcp server"), "session line: {text}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// `/hooks` over an absent config says there is nothing configured;
+/// with a config file present the rules render one per line.
+#[test]
+fn hooks_reads_the_config_table() {
+    let (mut ui, home) = ui_with_home("hooks");
+    ui.user_submit("/hooks");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("no config.toml"), "{text}");
+    let path = home.join(".wavecode").join("config.toml");
+    // `model` and `model_provider` are required config keys: the hook
+    // table alone is a parse error, which is exactly what /doctor and
+    // /hooks report.
+    std::fs::write(
+        &path,
+        "model = \"m\"\nmodel_provider = \"p\"\n\n[hooks.PreToolUse]\nmatcher = \"write\"\ncommand = \"echo hi\"\n",
+    )
+    .unwrap();
+    ui.user_submit("/hooks");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("PreToolUse"), "hook row: {text}");
+    assert!(text.contains("echo hi"), "command row: {text}");
+    let _ = std::fs::remove_dir_all(&home);
+}

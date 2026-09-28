@@ -132,10 +132,14 @@ model = "your-model-fast"
   审批提示内联渲染（文件写入审批把受影响的行显示为彩色 diff）、
   `/mcp` 状态行、`/btw` 旁路提问（只读，答案流式汇入面板而不触碰
   对话），以及 `/model`（provider 标签页、搜索、仅本会话的 Alt+S、
-  OpenAI 兼容 provider 的 thinking 档位行，外加 `/model list|add|set|remove`
-  编辑 `~/.wavecode/models.json` catalog）、`/permissions`、`/theme`
-  （内置主题加自定义主题）、`/help`（可滚动的按键 + 命令参考）等
-  对话框。会话命令：`/sessions`（别名 `/resume`）原位恢复已记录的
+  OpenAI 兼容 provider 的 thinking 档位行）加 `/provider`（覆盖
+  `~/.wavecode/models.json` 全字段的规格表单：API 方言、端点、key
+  环境变量、上下文/输出上限、思考档位、模态；`list` / `set` /
+  `remove` 编辑已存条目）、`/permissions`、`/theme`（内置主题加自
+  定义主题）、`/settings`（十项渲染与行为开关）、`/help`（可滚动的
+  按键 + 命令参考）、`/doctor`（配置、凭据、catalog 与设置的一次性
+  体检）、`/hooks`（已配置的 hook 表）、`/release-notes`（最新变更
+  节选）等对话框。会话命令：`/sessions`（别名 `/resume`）原位恢复已记录的
   会话，`/fork` 快照出可恢复副本，`/title` 改名，`/new` 开新会话，
   `/init` 请 agent 写 AGENTS.md，`/status` 概览会话，`/undo [n]`
   （或双击 Esc）按整轮回退对话，`/compact [instruction]` 压缩上下文

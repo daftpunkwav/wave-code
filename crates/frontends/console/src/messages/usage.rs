@@ -76,6 +76,11 @@ impl Component for UsagePanel {
                     theme.paint(Token::TextDim, &format_tokens(window))
                 ),
             );
+            row(
+                &mut out,
+                "free",
+                theme.paint(Token::Text, &format_tokens(window.saturating_sub(used))),
+            );
         } else {
             row(
                 &mut out,

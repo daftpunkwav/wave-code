@@ -1440,6 +1440,14 @@ impl ConsoleUi {
                         self.push_status(&format!("WaveCode v{}", self.version), false);
                     } else if invocation.name == "memory" {
                         self.show_memory_files();
+                    } else if invocation.name == "release-notes" {
+                        self.dialog = Some(Dialog::Help(crate::dialogs::HelpPanel::new(
+                            release_notes_lines(),
+                        )));
+                    } else if invocation.name == "doctor" {
+                        self.run_doctor();
+                    } else if invocation.name == "hooks" {
+                        self.show_hooks();
                     } else if invocation.name == "snapshots" {
                         let labels = self.status.snapshot_labels();
                         self.push_status(
@@ -2653,6 +2661,152 @@ verify from the repository.";
         }
     }
 
+    /// `/doctor`: one-pass health report over the on-disk config
+    /// surface — home directory, config.toml, the active provider's
+    /// credential, models.json, console-settings.json, MCP servers —
+    /// closing with the live session facts. Every line carries an
+    /// `ok` / `warn` / `fail` marker so problems scan instantly.
+    fn run_doctor(&mut self) {
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("fail · no home directory (USERPROFILE/HOME unset)", true);
+            return;
+        };
+        let dot = home.join(".wavecode");
+        self.push_status(
+            &format!(
+                "{} · home {}",
+                if dot.is_dir() { "ok  " } else { "warn" },
+                dot.display()
+            ),
+            false,
+        );
+        let config_path = dot.join("config.toml");
+        match wavecode_config::Config::load_from(&config_path) {
+            Ok(config) => {
+                self.push_status(
+                    &format!(
+                        "ok   · config.toml ({} provider(s), {} hook event(s))",
+                        config.model_providers.len(),
+                        config.hooks.len()
+                    ),
+                    false,
+                );
+                match config.model_providers.get(&self.state.provider_id) {
+                    Some(provider) => match (&provider.env_key, &provider.api_key) {
+                        (Some(env), _) if std::env::var_os(env).is_some_and(|v| !v.is_empty()) => {
+                            self.push_status(&format!("ok   · credential via {env}"), false);
+                        }
+                        (Some(env), None) => {
+                            self.push_status(
+                                &format!("warn · key env {env} is not set in this shell"),
+                                true,
+                            );
+                        }
+                        (_, Some(_)) => {
+                            self.push_status("ok   · inline api key in config", false);
+                        }
+                        _ => {
+                            self.push_status("warn · no credential (env_key / api_key)", true);
+                        }
+                    },
+                    None => self.push_status(
+                        "info · current provider is not a config.toml entry (catalog-built?)",
+                        false,
+                    ),
+                }
+            }
+            Err(wavecode_config::ConfigError::NotFound(_)) => {
+                self.push_status("warn · config.toml absent (defaults apply)", false);
+            }
+            Err(error) => self.push_status(&format!("fail · config.toml: {error}"), true),
+        }
+        match wavecode_config::ModelCatalog::load(&home) {
+            Ok(catalog) => self.push_status(
+                &format!("ok   · models.json ({} model(s))", catalog.models.len()),
+                false,
+            ),
+            Err(error) => self.push_status(&format!("warn · models.json: {error}"), true),
+        }
+        match crate::settings::UiSettings::path() {
+            Some(path) => match std::fs::read_to_string(&path) {
+                Ok(text) => match serde_json::from_str::<crate::settings::UiSettings>(&text) {
+                    Ok(_) => self.push_status("ok   · console-settings.json", false),
+                    Err(error) => {
+                        self.push_status(&format!("warn · console-settings.json: {error}"), true)
+                    }
+                },
+                Err(_) => self.push_status("info · console-settings.json not written yet", false),
+            },
+            None => self.push_status("warn · no home for console-settings.json", true),
+        }
+        self.push_status(
+            &format!(
+                "info · {} mcp server(s) · theme {}",
+                self.state.mcp_servers.len(),
+                self.theme_name
+            ),
+            false,
+        );
+        self.push_status(
+            &format!(
+                "info · model {} (provider {}) · effort {} · mode {}{}",
+                self.state.model_name,
+                self.state.provider_id,
+                self.state.thinking_effort.as_deref().unwrap_or("off"),
+                self.state.permission_mode,
+                self.state
+                    .git_branch
+                    .as_deref()
+                    .map(|branch| format!(" · branch {branch}"))
+                    .unwrap_or_default()
+            ),
+            false,
+        );
+    }
+
+    /// `/hooks`: the configured hook table, one line per rule — event,
+    /// matcher, command, and the once/timeout modifiers.
+    fn show_hooks(&mut self) {
+        let Some(home) = self.state.home.clone() else {
+            self.push_status("no home directory — no hooks configured", false);
+            return;
+        };
+        let config_path = home.join(".wavecode").join("config.toml");
+        match wavecode_config::Config::load_from(&config_path) {
+            Ok(config) => {
+                let mut total = 0;
+                let mut events: Vec<_> = config.hooks.iter().collect();
+                events.sort_by(|a, b| a.0.cmp(b.0));
+                for (event, set) in events {
+                    for rule in set.rules() {
+                        total += 1;
+                        let matcher = rule.matcher.as_deref().unwrap_or("*");
+                        let once = if rule.once.unwrap_or(false) {
+                            " · once"
+                        } else {
+                            ""
+                        };
+                        let timeout = rule
+                            .timeout_ms
+                            .map(|ms| format!(" · {ms}ms"))
+                            .unwrap_or_default();
+                        self.push_status(
+                            &format!("{event} · {matcher} → {}{once}{timeout}", rule.command),
+                            false,
+                        );
+                    }
+                }
+                if total == 0 {
+                    self.push_status("no hook rules (config.toml [hooks.<EventPoint>])", false);
+                }
+            }
+            Err(wavecode_config::ConfigError::NotFound(_)) => {
+                self.push_status("no config.toml — no hooks configured", false);
+            }
+            Err(error) => self.push_status(&format!("hooks unavailable: {error}"), true),
+        }
+    }
+
     /// `/provider`: the model-catalog surface. Bare or `add` opens the
     /// spec form (every catalog field, including thinking and
     /// modalities); `list` / `set` / `remove` edit the saved file.
@@ -3242,6 +3396,32 @@ impl ConsoleUi {
         ));
         tui_engine::border::frame(body, columns, theme.style(Token::BorderFocus), None)
     }
+}
+
+/// The CHANGELOG's two newest sections (embedded at compile time from
+/// the workspace root), for the `/release-notes` panel.
+pub(crate) fn release_notes_lines() -> Vec<String> {
+    const CHANGELOG: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../CHANGELOG.md"
+    ));
+    let mut out = Vec::new();
+    let mut sections = 0usize;
+    for line in CHANGELOG.lines() {
+        if line.starts_with("## [") {
+            sections += 1;
+            if sections > 2 {
+                break;
+            }
+        }
+        if sections >= 1 {
+            out.push(line.to_string());
+        }
+    }
+    if out.is_empty() {
+        out.push("(the changelog has no sections yet)".to_string());
+    }
+    out
 }
 
 /// Relative age label for a session's last activity.

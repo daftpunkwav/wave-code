@@ -21,7 +21,7 @@ use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 32] = [
+pub const COMMANDS: [&str; 35] = [
     "help",
     "btw",
     "new",
@@ -32,6 +32,9 @@ pub const COMMANDS: [&str; 32] = [
     "title",
     "model",
     "provider",
+    "doctor",
+    "hooks",
+    "release-notes",
     "effort",
     "permissions",
     "auto",
@@ -102,7 +105,7 @@ pub fn dispatch(invocation: &Invocation, _state: &AppState, status: &dyn StatusQ
         "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
         "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" | "undo"
-        | "editor" | "reload" => {
+        | "editor" | "reload" | "doctor" | "hooks" | "release-notes" => {
             // Dialogs and local panels: the caller owns the behavior.
             Effect::Ops(Vec::new())
         }
@@ -237,7 +240,10 @@ pub fn help_lines() -> Vec<String> {
         "  /mcp — list configured MCP servers".to_string(),
         "  /settings — rendering, tool display, footer, confirmations, history".to_string(),
         "  /theme — pick the theme interactively; /theme <name> switches directly".to_string(),
-        "  /usage — token usage and context window".to_string(),
+        "  /usage — token usage, context window, and remaining space".to_string(),
+        "  /doctor — one-pass health check (config, credentials, catalog, settings)".to_string(),
+        "  /hooks — the configured hook table".to_string(),
+        "  /release-notes — the newest changelog sections".to_string(),
         "  /status — session, model, mode, and context summary".to_string(),
         "  /memory — the AGENTS.md instruction files in scope".to_string(),
         "  /snapshots — file-content snapshot labels".to_string(),

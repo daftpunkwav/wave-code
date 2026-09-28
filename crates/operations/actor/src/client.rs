@@ -48,7 +48,7 @@ pub enum SubmitError {
 /// (`steer`/`inject` return false, `cancel_inbox` returns 0).
 pub struct ActorClient {
     submit_tx: mpsc::Sender<Submission>,
-    event_rx: mpsc::UnboundedReceiver<Event>,
+    event_rx: mpsc::Receiver<Event>,
     interrupt: InterruptHandle,
     inbox: Option<InboxHandle>,
     handle: JoinHandle<()>,
@@ -59,7 +59,7 @@ impl ActorClient {
     /// Build a client over live channels (called by the actor spawn path).
     pub(crate) fn new(
         submit_tx: mpsc::Sender<Submission>,
-        event_rx: mpsc::UnboundedReceiver<Event>,
+        event_rx: mpsc::Receiver<Event>,
         interrupt: InterruptHandle,
         inbox: Option<InboxHandle>,
         handle: JoinHandle<()>,

@@ -23,7 +23,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use infrastructure_base::{
-    CONTROL_CHANNEL_CAP, InterruptHandle, PENDING_QUEUE_CAP, SHUTDOWN_DRAIN,
+    CONTROL_CHANNEL_CAP, EVENT_CHANNEL_CAP, InterruptHandle, PENDING_QUEUE_CAP, SHUTDOWN_DRAIN,
 };
 use runtime_child::ChildRuntime;
 use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver, TurnInput};
@@ -54,7 +54,7 @@ pub struct SessionActor<D> {
     interrupt: InterruptHandle,
     system: String,
     submit_rx: mpsc::Receiver<Submission>,
-    event_tx: mpsc::UnboundedSender<Event>,
+    event_tx: mpsc::Sender<Event>,
     pending: VecDeque<Submission>,
     durability: Option<TurnDurability>,
 }
@@ -125,7 +125,12 @@ where
         durability: Option<TurnDurability>,
     ) -> ActorClient {
         let (submit_tx, submit_rx) = mpsc::channel(CONTROL_CHANNEL_CAP);
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        // Bounded event channel: a stalled frontend must not turn a
+        // heavy streaming turn into unbounded process memory. The
+        // forwarding sinks cannot await backpressure (they are
+        // synchronous driver callbacks), so a full buffer drops events
+        // — see [`try_send_event`] for the drop policy.
+        let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAP);
         let client_interrupt = interrupt.clone();
         // The actor does not own the driver loop; it only holds the driver
         // handle. Mid-turn steering rides the loop's shared inbox handle
@@ -176,15 +181,18 @@ where
         if let Some(dur) = durability.as_ref() {
             let labels = resume_checkpoint(&dur.root);
             if let Some(newest) = labels.last() {
-                let _ = event_tx.send(Event {
-                    id: LIFECYCLE_ID.to_string(),
-                    msg: EventMsg::Warning {
-                        message: format!(
-                            "resume available from checkpoint {newest} ({} saved)",
-                            labels.len()
-                        ),
+                try_send_event(
+                    &event_tx,
+                    Event {
+                        id: LIFECYCLE_ID.to_string(),
+                        msg: EventMsg::Warning {
+                            message: format!(
+                                "resume available from checkpoint {newest} ({} saved)",
+                                labels.len()
+                            ),
+                        },
                     },
-                });
+                );
             }
         }
         let mut turn_seq: u64 = 0;
@@ -223,10 +231,13 @@ where
                         &label,
                         &snapshot,
                         &|message| {
-                            let _ = warn_tx.send(Event {
-                                id: warn_id.clone(),
-                                msg: EventMsg::Warning { message },
-                            });
+                            try_send_event(
+                                &warn_tx,
+                                Event {
+                                    id: warn_id.clone(),
+                                    msg: EventMsg::Warning { message },
+                                },
+                            );
                         },
                     );
                     let ctx = RunContext {
@@ -235,7 +246,7 @@ where
                         input: text.clone(),
                         images,
                     };
-                    let sink = unbounded_sink(&event_tx);
+                    let sink = forwarding_sink(&event_tx);
                     let op = async {
                         let _ = driver
                             .drive_turn(
@@ -298,18 +309,24 @@ where
                         &label,
                         &snapshot,
                         &|message| {
-                            let _ = warn_tx.send(Event {
-                                id: warn_id.clone(),
-                                msg: EventMsg::Warning { message },
-                            });
+                            try_send_event(
+                                &warn_tx,
+                                Event {
+                                    id: warn_id.clone(),
+                                    msg: EventMsg::Warning { message },
+                                },
+                            );
                         },
                     );
                     let tx = event_tx.clone();
                     let sink = move |event: Event| {
-                        let _ = tx.send(Event {
-                            id: id.clone(),
-                            msg: event.msg,
-                        });
+                        try_send_event(
+                            &tx,
+                            Event {
+                                id: id.clone(),
+                                msg: event.msg,
+                            },
+                        );
                     };
                     let op = async {
                         if let Err(cause) = driver
@@ -348,20 +365,26 @@ where
                     // against an active snapshot would race the turn.
                     let removed = rewind_conversation(&mut conv, turns);
                     if removed == 0 {
-                        let _ = event_tx.send(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::Warning {
-                                message: "nothing to rewind".to_string(),
+                        try_send_event(
+                            &event_tx,
+                            Event {
+                                id: sub.id.clone(),
+                                msg: EventMsg::Warning {
+                                    message: "nothing to rewind".to_string(),
+                                },
                             },
-                        });
+                        );
                     } else {
                         // Stale usage must not outlive the dropped turns;
                         // the next sample settles real numbers again.
                         conv.settle(Usage::default());
-                        let _ = event_tx.send(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::HistoryRewound { turns: removed },
-                        });
+                        try_send_event(
+                            &event_tx,
+                            Event {
+                                id: sub.id.clone(),
+                                msg: EventMsg::HistoryRewound { turns: removed },
+                            },
+                        );
                     }
                 }
                 Op::Shutdown => {
@@ -374,12 +397,15 @@ where
                     // Live mode switch through the driver seam; unknown
                     // names warn so typos never silently stick.
                     if !driver.set_permission_mode(&mode) {
-                        let _ = event_tx.send(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::Warning {
-                                message: format!("unknown permission mode: {mode:?}"),
+                        try_send_event(
+                            &event_tx,
+                            Event {
+                                id: sub.id.clone(),
+                                msg: EventMsg::Warning {
+                                    message: format!("unknown permission mode: {mode:?}"),
+                                },
                             },
-                        });
+                        );
                     }
                 }
                 Op::SetModel { name } => {
@@ -387,24 +413,30 @@ where
                     // (unknown/fixed gateway) warns so the switch never
                     // silently fails.
                     if !driver.set_model(&name) {
-                        let _ = event_tx.send(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::Warning {
-                                message: format!("model switch rejected: {name:?}"),
+                        try_send_event(
+                            &event_tx,
+                            Event {
+                                id: sub.id.clone(),
+                                msg: EventMsg::Warning {
+                                    message: format!("model switch rejected: {name:?}"),
+                                },
                             },
-                        });
+                        );
                     }
                 }
                 Op::SetThinking { effort } => {
                     // Live reasoning-effort switch; gateways without a
                     // mutable effort warn instead of silently ignoring.
                     if !driver.set_thinking(&effort) {
-                        let _ = event_tx.send(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::Warning {
-                                message: format!("thinking switch rejected: {effort:?}"),
+                        try_send_event(
+                            &event_tx,
+                            Event {
+                                id: sub.id.clone(),
+                                msg: EventMsg::Warning {
+                                    message: format!("thinking switch rejected: {effort:?}"),
+                                },
                             },
-                        });
+                        );
                     }
                 }
             }
@@ -436,16 +468,19 @@ fn rewind_conversation(conv: &mut Conversation, turns: u32) -> u32 {
 /// Run session lifecycle hooks, tagging warnings with the synthetic id.
 async fn finish_lifecycle<D: TurnDriver>(
     driver: &D,
-    event_tx: &mpsc::UnboundedSender<Event>,
+    event_tx: &mpsc::Sender<Event>,
     point: HookPoint,
 ) {
     let tx = event_tx.clone();
     driver
         .drive_hook(point, "", &|event| {
-            let _ = tx.send(Event {
-                id: LIFECYCLE_ID.to_string(),
-                msg: event.msg,
-            });
+            try_send_event(
+                &tx,
+                Event {
+                    id: LIFECYCLE_ID.to_string(),
+                    msg: event.msg,
+                },
+            );
         })
         .await;
 }
@@ -469,13 +504,38 @@ async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
     driver.end_session(&transcript).await;
 }
 
-/// Forwarding sink over the unbounded event channel.
+/// Forwarding sink over the bounded event channel.
 ///
-/// Unbounded send never blocks and only fails when the frontend is gone,
-/// which is exactly when dropping is correct.
-fn unbounded_sink(event_tx: &mpsc::UnboundedSender<Event>) -> impl Fn(Event) + '_ {
+/// Never blocks the driver: a full buffer drops (see [`try_send_event`])
+/// and send fails outright only when the frontend is gone, which is
+/// exactly when dropping is correct.
+fn forwarding_sink(event_tx: &mpsc::Sender<Event>) -> impl Fn(Event) + '_ {
     move |event: Event| {
-        let _ = event_tx.send(event);
+        try_send_event(event_tx, event);
+    }
+}
+
+/// Forward one event into the bounded event channel without awaiting.
+///
+/// The driver-facing sinks are synchronous `Fn` callbacks, so they cannot
+/// apply await-based backpressure; `try_send` guarantees the actor task
+/// never parks on a slow consumer and the interrupt path stays reachable.
+/// When a stalled frontend has filled [`EVENT_CHANNEL_CAP`] buffered
+/// events, the event is dropped with a log line: stream deltas self-heal
+/// (the completion event carries the full text), and reaching a full
+/// buffer means the consumer has been wedged for a while, where the
+/// interrupt path and process exit remain the recovery routes. A closed
+/// receiver keeps the established silent-drop convention (frontend gone).
+fn try_send_event(event_tx: &mpsc::Sender<Event>, event: Event) {
+    match event_tx.try_send(event) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            tracing::warn!(
+                id = %event.id,
+                "event channel full; dropping event for a stalled consumer"
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {}
     }
 }
 
@@ -489,7 +549,7 @@ async fn supervised<F>(
     op: F,
     submit_rx: &mut mpsc::Receiver<Submission>,
     pending: &mut VecDeque<Submission>,
-    event_tx: &mpsc::UnboundedSender<Event>,
+    event_tx: &mpsc::Sender<Event>,
     interrupt: &InterruptHandle,
     approvals: &Arc<ApprovalGate>,
     questions: &Arc<QuestionGate>,
@@ -523,7 +583,7 @@ where
 fn route_extra(
     sub: Submission,
     pending: &mut VecDeque<Submission>,
-    event_tx: &mpsc::UnboundedSender<Event>,
+    event_tx: &mpsc::Sender<Event>,
     interrupt: &InterruptHandle,
     approvals: &Arc<ApprovalGate>,
     questions: &Arc<QuestionGate>,
@@ -533,12 +593,15 @@ fn route_extra(
         Op::Rewind { .. } => {
             // Never race the active snapshot: rewind waits for idle.
             tracing::warn!(id = %sub.id, "rewind rejected mid-turn");
-            let _ = event_tx.send(Event {
-                id: sub.id,
-                msg: EventMsg::Warning {
-                    message: "rewind rejected: a turn is running".to_string(),
+            try_send_event(
+                event_tx,
+                Event {
+                    id: sub.id,
+                    msg: EventMsg::Warning {
+                        message: "rewind rejected: a turn is running".to_string(),
+                    },
                 },
-            });
+            );
         }
         Op::Interrupt => interrupt.trigger(),
         Op::SetPermissionMode { .. } | Op::SetModel { .. } | Op::SetThinking { .. } => {
@@ -573,20 +636,23 @@ fn route_extra(
 fn queue_or_reject(
     pending: &mut VecDeque<Submission>,
     sub: Submission,
-    event_tx: &mpsc::UnboundedSender<Event>,
+    event_tx: &mpsc::Sender<Event>,
 ) {
     if pending.len() >= PENDING_QUEUE_CAP {
         tracing::warn!(id = %sub.id, "submission queue is full; rejecting");
-        let _ = event_tx.send(Event {
-            id: sub.id,
-            msg: EventMsg::Error {
-                message: format!(
-                    "submission queue is full ({PENDING_QUEUE_CAP} pending); retry later"
-                ),
-                recoverable: true,
-                code: Some("queue.full".to_string()),
+        try_send_event(
+            event_tx,
+            Event {
+                id: sub.id,
+                msg: EventMsg::Error {
+                    message: format!(
+                        "submission queue is full ({PENDING_QUEUE_CAP} pending); retry later"
+                    ),
+                    recoverable: true,
+                    code: Some("queue.full".to_string()),
+                },
             },
-        });
+        );
     } else {
         pending.push_back(sub);
     }
@@ -596,14 +662,17 @@ fn queue_or_reject(
 ///
 /// Decisions are one-shot slots, so dropping is safe; staying silent is
 /// not: without this, a stale or mistyped call id fails invisibly.
-fn warn_late_approval(event_tx: &mpsc::UnboundedSender<Event>, id: &str, call_id: &str) {
+fn warn_late_approval(event_tx: &mpsc::Sender<Event>, id: &str, call_id: &str) {
     tracing::warn!(%call_id, "late approval with no parked waiter; dropped");
-    let _ = event_tx.send(Event {
-        id: id.to_string(),
-        msg: EventMsg::Warning {
-            message: format!("late approval for {call_id}: no parked waiter; dropped"),
+    try_send_event(
+        event_tx,
+        Event {
+            id: id.to_string(),
+            msg: EventMsg::Warning {
+                message: format!("late approval for {call_id}: no parked waiter; dropped"),
+            },
         },
-    });
+    );
 }
 
 /// Map wire approval decisions onto gate decisions one to one.
@@ -1411,6 +1480,40 @@ mod tests {
             1,
             "shutdown during a compact must still end the session"
         );
+    }
+
+    /// The bounded event channel drops (with a log line) once a stalled
+    /// consumer has filled it, and never blocks the sender: memory stays
+    /// capped and the actor keeps draining control ops.
+    #[test]
+    fn full_event_channel_drops_instead_of_growing() {
+        let (tx, mut rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAP);
+        for i in 0..EVENT_CHANNEL_CAP {
+            try_send_event(
+                &tx,
+                Event {
+                    id: format!("e{i}"),
+                    msg: EventMsg::Warning {
+                        message: String::new(),
+                    },
+                },
+            );
+        }
+        // Over the cap: dropped synchronously, no panic, no growth.
+        try_send_event(
+            &tx,
+            Event {
+                id: "overflow".to_string(),
+                msg: EventMsg::Warning {
+                    message: String::new(),
+                },
+            },
+        );
+        let mut received = 0;
+        while rx.try_recv().is_ok() {
+            received += 1;
+        }
+        assert_eq!(received, EVENT_CHANNEL_CAP);
     }
 
     fn durable_driver() -> FakeDriver {

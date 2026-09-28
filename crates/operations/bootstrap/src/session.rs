@@ -601,7 +601,18 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         session_id,
         mut warnings,
     } = parts;
-    let (registry, todos) = wavecode_tools::Registry::builtin_with_todos();
+    // One spill store for the whole session, built here at the composition
+    // root and injected everywhere: the shell tool spills truncated output
+    // into it, the `spill` tool reads it back, and the pruning executor
+    // prunes oversized results through it. A single shared instance (one
+    // manifest ledger) is load-bearing — separate instances over the same
+    // root would race their manifest read-modify-write cycles under
+    // concurrent spills and drop entries past the total cap.
+    let spill_store = Arc::new(wavecode_context::spill::SpillStore::new(
+        wavecode_context::spill::default_spill_store_root(),
+    ));
+    let (registry, todos) =
+        wavecode_tools::Registry::builtin_with_spill_store_and_todos(spill_store.clone());
     // `memory_write` shares the prompt index root so model-written entries
     // surface in the next session without a restart. No home means no
     // memory at all (same gate as `assemble_memory` below).
@@ -696,13 +707,12 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
 
     // 6. Run loop behind the shared driver pointer.
     let native = Arc::new(Mutex::new(NativeExecutor::new()));
-    // Oversized tool outputs spill to the side-store instead of flowing
-    // into history unbounded; the `spill` tool reads them back.
+    // Oversized tool outputs spill to the shared side-store (the same
+    // instance the shell tool and the `spill` tool hold) instead of
+    // flowing into history unbounded.
     let executor = PruningExecutor::new(
         CompositeExecutor::new(tools, native.clone(), registry.clone()),
-        wavecode_context::spill::SpillStore::new(
-            wavecode_context::spill::default_spill_store_root(),
-        ),
+        spill_store.clone(),
     );
     // Nested-instruction discovery: session assembly loaded the global,
     // project-root, and cwd tiers; this layer offers each deeper
@@ -916,10 +926,13 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     )));
     // With the job service live, the shell tool promotes a foreground
     // command that outlives its timeout into a background job instead of
-    // killing it (the builtin registration carries no handoff).
-    registry.register(wavecode_tools::shell_with_handoff(Arc::new(
-        action_jobs::tools::ForegroundRuns::new(jobs.clone()),
-    )));
+    // killing it (the builtin registration carries no handoff). The
+    // re-registration keeps the session's shared spill store so the
+    // promoted runs spill into the same ledger.
+    registry.register(wavecode_tools::shell_with_handoff(
+        spill_store.clone(),
+        Arc::new(action_jobs::tools::ForegroundRuns::new(jobs.clone())),
+    ));
     // File-content snapshots ride the same late handle: the store root
     // derives from the session memory root (`<home>/.wavecode/memories`
     // -> `<home>/.wavecode/snapshots`) so injected roots stay hermetic.

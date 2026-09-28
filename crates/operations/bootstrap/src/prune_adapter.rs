@@ -21,15 +21,19 @@ use wavecode_context::spill::{DEFAULT_PRUNE_THRESHOLD_CHARS, SpillStore, prune_t
 /// builds) flows into history unbounded and burns context until the
 /// compactor fires; pruned results carry a `spill://` URI the model can
 /// read back through the `spill` tool.
+///
+/// The store is the session's single shared `SpillStore` (injected by
+/// session assembly, the same `Arc` the shell tool and the `spill` tool
+/// hold), so all spill writers share one manifest ledger.
 pub struct PruningExecutor<E> {
     inner: E,
-    store: SpillStore,
+    store: std::sync::Arc<SpillStore>,
     threshold_chars: usize,
 }
 
 impl<E: ToolExecutor> PruningExecutor<E> {
     /// Wrap `inner` with the default prune threshold.
-    pub fn new(inner: E, store: SpillStore) -> Self {
+    pub fn new(inner: E, store: std::sync::Arc<SpillStore>) -> Self {
         Self {
             inner,
             store,
@@ -101,7 +105,7 @@ mod tests {
 
     fn pruning_executor(threshold: usize) -> (PruningExecutor<StubExecutor>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = SpillStore::new(dir.path().to_path_buf());
+        let store = std::sync::Arc::new(SpillStore::new(dir.path().to_path_buf()));
         (
             PruningExecutor::new(StubExecutor, store).with_threshold(threshold),
             dir,

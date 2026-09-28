@@ -355,14 +355,14 @@ pub trait RunHandoff: Send + Sync {
 /// does OS-confinement mode, whose spawn rewriting the handoff cannot
 /// reproduce.
 pub struct Shell {
-    spill: Option<wavecode_context::SpillStore>,
+    spill: Option<std::sync::Arc<wavecode_context::SpillStore>>,
     handoff: Option<std::sync::Arc<dyn RunHandoff>>,
 }
 
 impl Shell {
     /// Configure the spill store and the background-run handoff.
     pub(crate) fn new(
-        spill: Option<wavecode_context::SpillStore>,
+        spill: Option<std::sync::Arc<wavecode_context::SpillStore>>,
         handoff: Option<std::sync::Arc<dyn RunHandoff>>,
     ) -> Self {
         Self { spill, handoff }
@@ -378,10 +378,15 @@ impl Default for Shell {
 /// The shell tool with the background-run handoff wired: session assembly
 /// re-registers the builtin entry with this after the job service exists,
 /// so a foreground command that outlives its timeout is promoted into a
-/// background run instead of being killed. The spill store rides the same
-/// default root the builtin registration used.
-pub fn shell_with_handoff(handoff: std::sync::Arc<dyn RunHandoff>) -> Arc<dyn Tool> {
-    let spill = wavecode_context::SpillStore::new(wavecode_context::default_spill_store_root());
+/// background job instead of being killed. The spill store is injected by
+/// the composition root — the same shared instance the `spill` tool reads
+/// and the pruning executor prunes through, so all writers share one
+/// manifest ledger (separate instances over one root would race their
+/// read-modify-write cycles and drop manifest entries).
+pub fn shell_with_handoff(
+    spill: std::sync::Arc<wavecode_context::SpillStore>,
+    handoff: std::sync::Arc<dyn RunHandoff>,
+) -> Arc<dyn Tool> {
     Arc::new(Shell::new(Some(spill), Some(handoff)))
 }
 
@@ -537,8 +542,8 @@ impl Tool for Shell {
 
         // On Unix, code() is None when killed by a signal; record -1 (still non-zero, so is_error holds).
         let code = status.code().unwrap_or(-1);
-        let stdout = truncate_output_spilled(&output.stdout, self.spill.as_ref());
-        let stderr = truncate_output_spilled(&output.stderr, self.spill.as_ref());
+        let stdout = truncate_output_spilled(&output.stdout, self.spill.as_deref());
+        let stderr = truncate_output_spilled(&output.stderr, self.spill.as_deref());
         let mut content = format!("exit code: {code}");
         if !stdout.is_empty() {
             content.push_str(&format!("\n--- stdout ---\n{stdout}"));

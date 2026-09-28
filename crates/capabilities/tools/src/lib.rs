@@ -269,7 +269,25 @@ impl Registry {
     ///
     /// `todowrite` must be injected by the caller via [`Registry::with_todo_write`], sharing the same handle
     /// as the [`TodoStore`] in the session config.
+    ///
+    /// Tests-and-hermetic-registries convenience: this builds its own
+    /// spill store on the default root. Production assembly must call
+    /// [`Registry::builtin_with_spill_store`] with the session's single
+    /// shared store instead — separate instances over one root would race
+    /// their manifest read-modify-write cycles and drop entries.
     pub fn builtin() -> Self {
+        Self::builtin_with_spill_store(std::sync::Arc::new(wavecode_context::SpillStore::new(
+            wavecode_context::default_spill_store_root(),
+        )))
+    }
+
+    /// [`Registry::builtin`] against an injected spill store: the
+    /// composition root builds the session's one shared `SpillStore` and
+    /// hands the same `Arc` to the shell tool (via
+    /// [`shell_tool::shell_with_handoff`] re-registration) and the pruning
+    /// executor, so every spill writer shares one manifest ledger. The
+    /// registry stays a pure registry — it never picks a store root.
+    pub fn builtin_with_spill_store(spill: std::sync::Arc<wavecode_context::SpillStore>) -> Self {
         let reg = Self {
             tools: Mutex::new(HashMap::new()),
         };
@@ -282,13 +300,12 @@ impl Registry {
         reg.register(Arc::new(fs::EditFile::new(ledger)));
         reg.register(Arc::new(search::Grep));
         reg.register(Arc::new(search::Glob));
-        // The shell tool spills the full text of truncated outputs to the
-        // same store the `spill` tool reads back (and the context prune
-        // uses), so a capped run's middle is still reachable. No handoff
-        // here: session assembly re-registers this entry with the job
-        // service wired, so timeouts promote instead of kill.
-        let spill = wavecode_context::SpillStore::new(wavecode_context::default_spill_store_root());
-        reg.register(Arc::new(shell_tool::Shell::new(Some(spill), None)));
+        // The shell tool spills the full text of truncated outputs into
+        // the injected store — the same one the `spill` tool reads back
+        // (below) and the context prune prunes through. No handoff here:
+        // session assembly re-registers this entry with the job service
+        // wired, so timeouts promote instead of kill.
+        reg.register(Arc::new(shell_tool::Shell::new(Some(spill.clone()), None)));
         reg.register(Arc::new(script::PythonTool));
         reg.register(Arc::new(script::NodeTool));
         reg.register(Arc::new(lsp::DocumentSymbols::new()));
@@ -301,9 +318,7 @@ impl Registry {
         // Present records into a registry-scoped store (first version: no
         // steering consumer needs the handle, unlike todowrite).
         reg.register(Arc::new(fs::Present::new(fs::PresentStore::default())));
-        reg.register(Arc::new(spill_tool::SpillRead::new(
-            wavecode_context::default_spill_store_root(),
-        )));
+        reg.register(Arc::new(spill_tool::SpillRead::new(spill)));
         reg
     }
 
@@ -316,8 +331,22 @@ impl Registry {
     /// Full built-in set (including `todowrite`) with its companion [`TodoStore`] -- session assembly should
     /// store the returned store in the session config so tools and steering share one source.
     pub fn builtin_with_todos() -> (Self, TodoStore) {
+        Self::builtin_with_spill_store_and_todos(std::sync::Arc::new(
+            wavecode_context::SpillStore::new(wavecode_context::default_spill_store_root()),
+        ))
+    }
+
+    /// [`Registry::builtin_with_spill_store`] plus the `todowrite` pair:
+    /// the production session-assembly entry (one shared spill store, one
+    /// shared todo store).
+    pub fn builtin_with_spill_store_and_todos(
+        spill: std::sync::Arc<wavecode_context::SpillStore>,
+    ) -> (Self, TodoStore) {
         let todos = TodoStore::default();
-        (Self::builtin().with_todo_write(todos.clone()), todos)
+        (
+            Self::builtin_with_spill_store(spill).with_todo_write(todos.clone()),
+            todos,
+        )
     }
 
     /// Derive a by-name allowlist subset registry (the `allowed-tools` tool surface of a skill fork):

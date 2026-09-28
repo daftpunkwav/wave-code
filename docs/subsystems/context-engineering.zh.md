@@ -22,7 +22,7 @@
 
 `crates/capabilities/context/src/lib.rs` 拥有 `Thresholds`（同样的 20k/13k/3k 余量，`check` 从最深优先探测，`validate` 拒绝倒置的余量）和 `CompactionStrategy`。目前唯一发布的策略是 `ModelSummary`：一次模型调用产出五节摘要，节标题逐字固定——`## Goal` / `## Progress` / `## Key decisions` / `## File inventory` / `## Todo`——保留具体文件名、命令与错误。新历史是摘要消息加上最近 `DEFAULT_KEEP_RECENT = 10` 条逐字消息（`compact_history`），并重新规范化以保证配对。
 
-`crates/operations/bootstrap/src/compactor.rs` 把它适配到 runner 的 `Compactor` 接缝（`ContextCompactor`）：过滤空文本、映射角色、把失败上报为 `CompactError::Failed`、为 `CompactCompleted` 估算摘要 token。触发时机（auto / blocking / reactive / manual / model）留在循环里——一条触发管线，可替换的策略。
+`crates/operations/bootstrap/src/compactor.rs` 把它适配到 runner 的 `Compactor` 接缝（`ContextCompactor`）：过滤空文本、映射角色、把失败上报为 `CompactError::Failed`、为 `CompactCompleted` 估算摘要 token。触发时机（auto / blocking / reactive / manual / model）留在循环里——一条触发管线，可替换的策略。管线的逐字尾部已全链路接通：`Compacted` 携带保留的消息（`tail`），`do_compact` 以摘要加尾部替换历史——不再是历史上的仅摘要形态——用量 carry 按替换后的内容重新推导，预算检查依据的是真实残留。
 
 ## 模型请求的压缩（`compact_context`）
 
@@ -36,7 +36,7 @@
 
 ## 嵌套指令发现（`AGENTS.md`）
 
-会话装配加载全局（`~/.wavecode/AGENTS.md`）、项目根与启动目录三层，每层带各自的 `AGENTS.local.md` 补充与 `.wavecode/rules/*.md`（`wavecode_memory::collect`）；不再读取 `WAVECODE.md`/`CLAUDE.md`。更深的目录按需加载：`AgentsInstructionsExecutor` 装饰器（`crates/operations/bootstrap/src/agents_instructions.rs`）读取每个文件工具调用的 `path` 输入，从其目录向上走到项目根，把每层尚未加载的最近 `AGENTS.md` 提供给循环的 `DirectoryInstructions` 槽；下一个循环头将其落为持久用户条目，包在 `<system-reminder>` 里。持久而非瞬态：一个目录的约束对之后在该目录的每次操作都持续相关。项目根层永不重复提供（装配已有它），且每个目录每会话至多落一次。
+会话装配加载全局（`~/.wavecode/AGENTS.md`）、项目根与启动目录三层，每层带各自的 `AGENTS.local.md` 补充与 `.wavecode/rules/*.md`（`wavecode_memory::collect`）；不再读取 `WAVECODE.md`/`CLAUDE.md`。更深的目录按需加载：`AgentsInstructionsExecutor` 装饰器（`crates/operations/bootstrap/src/agents_instructions.rs`）读取每个文件工具调用的 `path` 输入，从其目录向上走到项目根，把每层尚未加载的最近 `AGENTS.md` 提供给循环的 `DirectoryInstructions` 槽；下一个循环头将其落为持久用户条目，包在 `<system-reminder>` 里。持久而非瞬态：一个目录的约束对之后在该目录的每次操作都持续相关。项目根层永不重复提供（装配已有它），且每个目录每会话至多落一次。两条边界保证这层诚实：单次注入上限 `MAX_NESTED_INSTRUCTION_CHARS = 16_000` 并附显式截断标记（超大文件无法在一个循环头撑爆预算），且压缩会清空已见集合——重写删掉了已注入的文本，规则在目录再次被触碰时可以重新提供。
 
 ## 逐出 pass（`evict_old_tool_results`）
 
@@ -56,7 +56,7 @@
 
 ## `<system-reminder>` 通道
 
-`wrap_system_reminder` 把文本包进规范的 `<system-reminder>` … `</system-reminder>` 块——压缩通知、plan 提醒与类似元文本的唯一注入格式。`ReminderChannel` 是有界 FIFO（`DEFAULT_MAX_PENDING_REMINDERS = 8`；达到上限时新 reminder 被丢弃，绝不排入无界增长）。`enqueue` 对待处理项、以及仍停留在尾部用户条目中的 reminder 去重；`flush` 在下一条 user 角色条目落位之前，把一切合并进尾部用户条目（或推入新的一条）。
+`wrap_system_reminder` 把文本包进规范的 `<system-reminder>` … `</system-reminder>` 块——harness 元文本的唯一注入格式。两个活面使用它：每采样瞬态 notes（上一节）与循环头的持久直推（steering、repeat 交接、各目录指令）。旧日的 `ReminderChannel` FIFO 已移除——从未有调用方。
 
 ## Spill 存储（`crates/capabilities/context/src/spill.rs`）
 

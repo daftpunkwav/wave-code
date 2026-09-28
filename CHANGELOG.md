@@ -18,11 +18,14 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `AGENTS.md` files load on demand as file tools touch deeper
   directories. Every sample carries transient notes rebuilt from live
   state — serving model, live window, today's date, the `Context
-  usage` line, the repeat streak — and the model can request
-  compaction via `compact_context`: the loop reviews each request
-  (session grant cap, per-turn once, usage floor) and denials ride
-  back as transient notes, so a nearly empty window never burns a
-  summary.
+  usage` line (marked when estimated), the repeat streak — and the
+  model can request compaction via `compact_context`: the loop reviews
+  each request (session grant cap, per-turn once, usage floor) and
+  denials ride back as transient notes, so a nearly empty window never
+  burns a summary. Compaction keeps a verbatim tail past the summary,
+  the system prompt assembles under a character budget (drops are
+  reported, never silent), and nested instruction files inject
+  truncated at a fixed cap and re-offer after a compaction.
 - Security: deny-first path sandbox with OS-level confinement on all
   three platforms, permission modes (`plan` / `auto` / `wave`),
   persisted "always allow" grants with a `grants` audit command,

@@ -22,7 +22,7 @@ Budgets are three levels of remaining tokens (`check_budget`):
 
 `crates/capabilities/context/src/lib.rs` owns `Thresholds` (the same 20k/13k/3k margins, `check` probes deepest-first, `validate` rejects inverted margins) and `CompactionStrategy`. The only shipped strategy is `ModelSummary`: one model call producing a five-section summary with titles pinned verbatim — `## Goal` / `## Progress` / `## Key decisions` / `## File inventory` / `## Todo` — keeping concrete filenames, commands, and errors. The new history is the summary message plus the most recent `DEFAULT_KEEP_RECENT = 10` verbatim messages (`compact_history`), re-normalized for pairing.
 
-`crates/operations/bootstrap/src/compactor.rs` adapts this to the runner's `Compactor` seam (`ContextCompactor`): filters empty texts, maps roles, reports failures as `CompactError::Failed`, and estimates summary tokens for `CompactCompleted`. Trigger timing (auto / blocking / reactive / manual / model) stays in the loop — one trigger pipeline, replaceable strategy.
+`crates/operations/bootstrap/src/compactor.rs` adapts this to the runner's `Compactor` seam (`ContextCompactor`): filters empty texts, maps roles, reports failures as `CompactError::Failed`, and estimates summary tokens for `CompactCompleted`. Trigger timing (auto / blocking / reactive / manual / model) stays in the loop — one trigger pipeline, replaceable strategy. The pipeline's verbatim tail ships end to end: `Compacted` carries the preserved messages (`tail`), and `do_compact` replaces the history with summary plus tail — not the historical summary-only shape — with the usage carry re-derived from the replacement, so the budget check reasons from what actually remains.
 
 ## Model-requested compaction (`compact_context`)
 
@@ -36,7 +36,7 @@ Every sample request carries `notes`: harness text rebuilt every iteration from 
 
 ## Nested instruction discovery (`AGENTS.md`)
 
-Session assembly loads the global (`~/.wavecode/AGENTS.md`), project-root, and cwd tiers, each with its `AGENTS.local.md` supplement and `.wavecode/rules/*.md` (`wavecode_memory::collect`); `WAVECODE.md`/`CLAUDE.md` are no longer read. Deeper directories load on demand: the `AgentsInstructionsExecutor` decorator (`crates/operations/bootstrap/src/agents_instructions.rs`) reads the `path` input of every file-tool call, walks from its directory up to the project root, and offers the nearest not-yet-loaded `AGENTS.md` per directory into the loop's `DirectoryInstructions` slot; the next loop head lands each as a persistent user entry wrapped in `<system-reminder>`. Persistent, not transient: a directory's constraints stay relevant for every later operation in it. The root tier is never re-offered (assembly already has it), and each directory lands at most once per session.
+Session assembly loads the global (`~/.wavecode/AGENTS.md`), project-root, and cwd tiers, each with its `AGENTS.local.md` supplement and `.wavecode/rules/*.md` (`wavecode_memory::collect`); `WAVECODE.md`/`CLAUDE.md` are no longer read. Deeper directories load on demand: the `AgentsInstructionsExecutor` decorator (`crates/operations/bootstrap/src/agents_instructions.rs`) reads the `path` input of every file-tool call, walks from its directory up to the project root, and offers the nearest not-yet-loaded `AGENTS.md` per directory into the loop's `DirectoryInstructions` slot; the next loop head lands each as a persistent user entry wrapped in `<system-reminder>`. Persistent, not transient: a directory's constraints stay relevant for every later operation in it. The root tier is never re-offered (assembly already has it), and each directory lands at most once per session. Two bounds keep the tier honest: an injection is capped at `MAX_NESTED_INSTRUCTION_CHARS = 16_000` with an explicit truncation marker (an oversized file cannot blow the budget in one loop head), and a compaction clears the seen-set — the rewrite deleted the injected text, so the rules may re-offer when their directory is touched again.
 
 ## The eviction pass (`evict_old_tool_results`)
 
@@ -56,7 +56,7 @@ The application layer keeps the request prefix byte-stable; the Anthropic adapte
 
 ## The `<system-reminder>` channel
 
-`wrap_system_reminder` wraps text in the canonical `<system-reminder>` … `</system-reminder>` block — the single injection format for compaction notices, plan nudges, and similar meta text. `ReminderChannel` is a bounded FIFO (`DEFAULT_MAX_PENDING_REMINDERS = 8`; at the cap new reminders are dropped, never queued into unbounded growth). `enqueue` deduplicates against pending items and against a reminder still sitting in the trailing user entry; `flush` merges everything into the trailing user entry (or pushes a fresh one) right before the next user-role entry lands.
+`wrap_system_reminder` wraps text in the canonical `<system-reminder>` … `</system-reminder>` block — the single injection format for harness meta text. Two live surfaces use it: the per-sample transient notes (previous section) and persistent loop-head pushes (steering, repeat handoffs, per-directory instructions). The former `ReminderChannel` FIFO was removed — nothing ever called it.
 
 ## Spill store (`crates/capabilities/context/src/spill.rs`)
 

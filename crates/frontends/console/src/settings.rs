@@ -72,6 +72,22 @@ pub struct UiSettings {
     /// Notification delivery style (`osc9` / `bell` / `both`); unset
     /// falls back to `WAVECODE_NOTIFY_STYLE`.
     pub notification_style: Option<String>,
+    /// Thinking blocks start expanded (Ctrl+O still toggles live).
+    pub thinking_expanded: bool,
+    /// Stream the assistant's partial draft while the turn runs;
+    /// turning it off shows only thinking blocks and finished messages.
+    pub show_streaming_draft: bool,
+    /// The footer's context meter (`context: N% (used/max)`).
+    pub show_context_footer: bool,
+    /// Rotate the footer tip; off shows only release notices on the
+    /// right-hand slot.
+    pub rotate_tips: bool,
+    /// Require the double-press confirm before exiting on an idle
+    /// editor; off makes the first Ctrl+C / Ctrl+D exit outright.
+    pub confirm_exit: bool,
+    /// Input-history entries kept per surface (the read path trims to
+    /// this many); 0 falls back to the built-in cap.
+    pub history_limit: usize,
 }
 
 impl Default for UiSettings {
@@ -88,11 +104,27 @@ impl Default for UiSettings {
             status_line_command: None,
             notifications_enabled: None,
             notification_style: None,
+            thinking_expanded: false,
+            show_streaming_draft: true,
+            show_context_footer: true,
+            rotate_tips: true,
+            confirm_exit: true,
+            history_limit: 0,
         }
     }
 }
 
 impl UiSettings {
+    /// The effective input-history cap: the configured limit, or the
+    /// built-in default when unset (0).
+    pub fn history_cap(&self) -> usize {
+        if self.history_limit == 0 {
+            crate::history::MAX_ENTRIES
+        } else {
+            self.history_limit
+        }
+    }
+
     /// The settings file path under the home directory, when known.
     pub fn path() -> Option<PathBuf> {
         let home = wavecode_config::home_dir()?;

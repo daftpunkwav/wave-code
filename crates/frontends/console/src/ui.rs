@@ -282,6 +282,7 @@ pub struct ConsoleUi {
 impl ConsoleUi {
     /// Build the UI; seeds the transcript with the welcome card.
     pub fn new(link: Box<dyn SessionLink>, ctx: &UiContext, version: impl Into<String>) -> Self {
+        let settings = crate::settings::SharedSettings::load();
         let state = AppState::new(
             ctx.model_name.clone(),
             ctx.cwd.clone(),
@@ -319,7 +320,7 @@ impl ConsoleUi {
                         ),
                 ));
                 if let Some(path) = home_history_path() {
-                    editor.load_history(history::load(&path));
+                    editor.load_history(history::load(&path, settings.get().history_cap()));
                 }
                 editor
             },
@@ -333,7 +334,7 @@ impl ConsoleUi {
             },
             streaming: StreamingController::new(),
             streaming_flushed_assistant: false,
-            expanded: ExpandedFlag::new(),
+            expanded: ExpandedFlag::with_initial(settings.get().thinking_expanded),
             open_calls: HashMap::new(),
             dialog: None,
             shell: None,
@@ -347,7 +348,7 @@ impl ConsoleUi {
             tip_index: 0,
             tip_rotated_at: Instant::now(),
             started_at: Instant::now(),
-            settings: crate::settings::SharedSettings::load(),
+            settings,
             pending_sequence: None,
             chrome_title: None,
             chrome_progress_on: false,
@@ -1438,11 +1439,7 @@ impl ConsoleUi {
                     } else if invocation.name == "version" {
                         self.push_status(&format!("WaveCode v{}", self.version), false);
                     } else if invocation.name == "memory" {
-                        let text = self.status.plan_status().unwrap_or_else(|| {
-                            "no reviewed plan yet; ask the agent to propose one with the plan tool"
-                                .to_string()
-                        });
-                        self.push_status(&text, false);
+                        self.show_memory_files();
                     } else if invocation.name == "snapshots" {
                         let labels = self.status.snapshot_labels();
                         self.push_status(
@@ -2383,13 +2380,18 @@ verify from the repository.";
     }
 
     fn exit_armed(&self) -> bool {
-        self.exit_armed_at
-            .is_some_and(|at| at.elapsed() < EXIT_CONFIRM_WINDOW)
+        // The confirm gate is a setting: off means the first idle
+        // Ctrl+C / Ctrl+D exits without the double-press window.
+        !self.settings.get().confirm_exit
+            || self
+                .exit_armed_at
+                .is_some_and(|at| at.elapsed() < EXIT_CONFIRM_WINDOW)
     }
 
     /// The two footer rows.
     pub fn footer(&mut self, columns: usize) -> Vec<String> {
-        if self.tip_rotated_at.elapsed() >= TIP_ROTATE_INTERVAL {
+        let rotate_tips = self.settings.get().rotate_tips;
+        if rotate_tips && self.tip_rotated_at.elapsed() >= TIP_ROTATE_INTERVAL {
             self.tip_index = self.tip_index.wrapping_add(1);
             self.tip_rotated_at = Instant::now();
         }
@@ -2406,12 +2408,24 @@ verify from the repository.";
             } else {
                 TransientHint::None
             };
-            return vec![row1, footer_chrome::row2(&self.state, &hint, columns)];
+            return vec![
+                row1,
+                footer_chrome::row2(
+                    &self.state,
+                    &hint,
+                    self.settings.get().show_context_footer,
+                    columns,
+                ),
+            ];
         }
         // A release notice outranks the rotating tip: same right-hand
         // slot, so it inherits the width guard and right alignment.
         let tip = footer_chrome::TIPS[self.tip_index % footer_chrome::TIPS.len()];
-        let right = self.state.update_notice.as_deref().unwrap_or(tip);
+        let right = self
+            .state
+            .update_notice
+            .as_deref()
+            .unwrap_or(if rotate_tips { tip } else { "" });
         let hint = if self.exit_armed() {
             TransientHint::ExitConfirm
         } else {
@@ -2419,7 +2433,12 @@ verify from the repository.";
         };
         vec![
             footer_chrome::row1(&self.state, Some(right), columns),
-            footer_chrome::row2(&self.state, &hint, columns),
+            footer_chrome::row2(
+                &self.state,
+                &hint,
+                self.settings.get().show_context_footer,
+                columns,
+            ),
         ]
     }
 
@@ -2517,7 +2536,7 @@ verify from the repository.";
         // streaming buffer (a new delta or the draft byte cap):
         // `update_text` drops the caches but keeps the render clock, so
         // the bullet animation keeps breathing across flushes.
-        if !self.streaming.assistant.is_empty() {
+        if !self.streaming.assistant.is_empty() && self.settings.get().show_streaming_draft {
             if self
                 .streaming_draft
                 .as_ref()
@@ -2583,6 +2602,54 @@ verify from the repository.";
                 false,
             ),
             _ => self.switch_model_command(args.trim()),
+        }
+    }
+
+    /// `/memory`: the AGENTS.md instruction files in scope for this
+    /// session — the working-directory chain upward plus the home-level
+    /// file the bootstrap reads. Each line names the file and its size,
+    /// so "what is the model reading" is one command away.
+    fn show_memory_files(&mut self) {
+        let mut found = 0;
+        let mut dir = Some(self.state.cwd.clone());
+        while let Some(current) = dir {
+            let candidate = current.join("AGENTS.md");
+            if candidate.is_file()
+                && let Ok(meta) = std::fs::metadata(&candidate)
+            {
+                found += 1;
+                self.push_status(
+                    &format!(
+                        "AGENTS.md · {} ({} lines)",
+                        candidate.display(),
+                        std::fs::read_to_string(&candidate)
+                            .map(|text| text.lines().count())
+                            .unwrap_or(0)
+                            .max(if meta.len() > 0 { 1 } else { 0 })
+                    ),
+                    false,
+                );
+            }
+            dir = current.parent().map(PathBuf::from);
+        }
+        if let Some(home) = self.state.home.clone() {
+            let candidate = home.join(".wavecode").join("AGENTS.md");
+            if candidate.is_file() {
+                found += 1;
+                let lines = std::fs::read_to_string(&candidate)
+                    .map(|text| text.lines().count())
+                    .unwrap_or(0);
+                self.push_status(
+                    &format!("AGENTS.md · {} ({lines} lines)", candidate.display()),
+                    false,
+                );
+            }
+        }
+        if found == 0 {
+            self.push_status(
+                "no AGENTS.md in scope (/init writes one for this repo)",
+                false,
+            );
         }
     }
 

@@ -1233,7 +1233,40 @@ impl SettingsDialog {
                 label: "wave denylist",
                 value: format!("{} entries (edit settings file)", view.wave_denylist.len()),
             },
+            SettingsRow {
+                label: "thinking starts expanded",
+                value: Self::bool_value(view.thinking_expanded),
+            },
+            SettingsRow {
+                label: "stream the assistant draft",
+                value: Self::bool_value(view.show_streaming_draft),
+            },
+            SettingsRow {
+                label: "context meter in footer",
+                value: Self::bool_value(view.show_context_footer),
+            },
+            SettingsRow {
+                label: "rotate footer tips",
+                value: Self::bool_value(view.rotate_tips),
+            },
+            SettingsRow {
+                label: "confirm before exit",
+                value: Self::bool_value(view.confirm_exit),
+            },
+            SettingsRow {
+                label: "input history limit",
+                value: if view.history_limit == 0 {
+                    "default (100)".to_string()
+                } else {
+                    format!("{}", view.history_limit)
+                },
+            },
         ]
+    }
+
+    /// The on/off cell for a boolean row.
+    fn bool_value(value: bool) -> String {
+        if value { "on" } else { "off" }.to_string()
     }
 
     /// Cycle the selected row's value one step (direction: +1 / -1).
@@ -1256,6 +1289,31 @@ impl SettingsDialog {
                 view.edit_display = match view.edit_display {
                     EditDisplay::Tool => EditDisplay::Diff,
                     EditDisplay::Diff => EditDisplay::Tool,
+                };
+            }
+            Some("thinking starts expanded") => {
+                view.thinking_expanded = !view.thinking_expanded;
+            }
+            Some("stream the assistant draft") => {
+                view.show_streaming_draft = !view.show_streaming_draft;
+            }
+            Some("context meter in footer") => {
+                view.show_context_footer = !view.show_context_footer;
+            }
+            Some("rotate footer tips") => {
+                view.rotate_tips = !view.rotate_tips;
+            }
+            Some("confirm before exit") => {
+                view.confirm_exit = !view.confirm_exit;
+            }
+            Some("input history limit") => {
+                // Three stops: default (100) → 500 → 1000 → default. A
+                // cycle keeps the row keyboard-only, like every other
+                // setting here.
+                view.history_limit = match (view.history_limit, direction) {
+                    (0, 1) | (500, -1) => 500,
+                    (500, 1) | (1000, -1) => 1000,
+                    _ => 0,
                 };
             }
             _ => {}

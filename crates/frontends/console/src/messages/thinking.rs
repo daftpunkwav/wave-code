@@ -41,6 +41,11 @@ impl ExpandedFlag {
         Self(Arc::new(AtomicBool::new(false)))
     }
 
+    /// A flag starting from the persisted expansion preference.
+    pub fn with_initial(expanded: bool) -> Self {
+        Self(Arc::new(AtomicBool::new(expanded)))
+    }
+
     /// Toggle and return the new state.
     pub fn toggle(&self) -> bool {
         let next = !self.0.load(std::sync::atomic::Ordering::Relaxed);

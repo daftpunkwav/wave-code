@@ -203,3 +203,34 @@ fn malformed_catalog_cancels_the_subcommands() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `/memory` lists the AGENTS.md instruction chain for the session:
+/// every file from the working directory upward, each with its line
+/// count.
+#[test]
+fn memory_lists_the_agents_chain() {
+    let (mut ui, home) = ui_with_home("memory");
+    let cwd = std::env::temp_dir().join("wavecode-memory-cwd");
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join("nested")).unwrap();
+    std::fs::write(cwd.join("AGENTS.md"), "# root\nrules here\n").unwrap();
+    std::fs::write(cwd.join("nested").join("AGENTS.md"), "# nested\n").unwrap();
+    ui.state.cwd = cwd.join("nested");
+    ui.user_submit("/memory");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("AGENTS.md"), "{text}");
+    assert!(text.contains("(2 lines)"), "root file counted: {text}");
+    assert!(text.contains("(1 lines)"), "nested file counted: {text}");
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+/// An empty scope says so instead of printing nothing.
+#[test]
+fn memory_without_files_reports_empty() {
+    let (mut ui, home) = ui_with_home("memory-empty");
+    ui.user_submit("/memory");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("no AGENTS.md in scope"), "{text}");
+    let _ = std::fs::remove_dir_all(&home);
+}

@@ -59,15 +59,16 @@ pub fn row1(state: &AppState, tip: Option<&str>, columns: usize) -> String {
     line
 }
 
-/// Build footer row 2: transient hint (left) and context meter (right).
-pub fn row2(state: &AppState, hint: &TransientHint, columns: usize) -> String {
+/// Build footer row 2: transient hint (left) and context meter
+/// (right, hidden when `show_context` is off).
+pub fn row2(state: &AppState, hint: &TransientHint, show_context: bool, columns: usize) -> String {
     let theme = theme::current();
     let mut left = String::new();
     if *hint == TransientHint::ExitConfirm {
         left.push_str(&theme.bold(Token::Warning, "Press ctrl+c again to exit"));
     }
     let mut right = String::new();
-    if let (Some(used), Some(window)) = (state.context_used, state.context_window) {
+    if show_context && let (Some(used), Some(window)) = (state.context_used, state.context_window) {
         right = theme.paint(
             Token::Text,
             &format!(
@@ -139,6 +140,15 @@ mod tests {
     }
 
     #[test]
+    fn row2_hides_the_context_meter_when_disabled() {
+        theme::set(theme::Theme::dark());
+        let on = row2(&state(), &TransientHint::None, true, 120);
+        assert!(on.contains("context:"), "{on}");
+        let off = row2(&state(), &TransientHint::None, false, 120);
+        assert!(!off.contains("context:"), "{off}");
+    }
+
+    #[test]
     fn row1_drops_tip_when_narrow() {
         theme::set(theme::Theme::dark());
         let line = row1(&state(), Some("ctrl+o expand tool output"), 40);
@@ -176,10 +186,10 @@ mod tests {
     #[test]
     fn row2_shows_context_and_exit_hint() {
         theme::set(theme::Theme::dark());
-        let line = row2(&state(), &TransientHint::None, 80);
+        let line = row2(&state(), &TransientHint::None, true, 80);
         let plain = width::strip_ansi(&line);
         assert!(plain.ends_with("context: 42% (82.0k/195k)"), "{plain:?}");
-        let hinted = row2(&state(), &TransientHint::ExitConfirm, 80);
+        let hinted = row2(&state(), &TransientHint::ExitConfirm, true, 80);
         let plain = width::strip_ansi(&hinted);
         assert!(plain.contains("Press ctrl+c again to exit"), "{plain}");
     }

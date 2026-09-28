@@ -2160,3 +2160,50 @@ async fn clear_command_is_rejected_while_shell_runs() {
     }
     assert!(ui.shell.is_none(), "shell cancelled during cleanup");
 }
+
+/// `/settings` exposes the full tunable surface; cycling a row flips
+/// the persisted value.
+#[test]
+fn settings_panel_covers_the_tunables_and_cycles_them() {
+    let mut ui = ui();
+    ui.user_submit("/settings");
+    assert!(matches!(ui.dialog, Some(Dialog::Settings(_))));
+    let frame = ui.frame(90, 30);
+    let joined: String = frame
+        .iter()
+        .map(|l| strip_ansi(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for label in [
+        "render user input as markdown",
+        "thinking starts expanded",
+        "stream the assistant draft",
+        "context meter in footer",
+        "rotate footer tips",
+        "confirm before exit",
+        "input history limit",
+    ] {
+        assert!(joined.contains(label), "missing row {label:?}: {joined}");
+    }
+    // The first row toggles markdown rendering and survives a cycle.
+    let before = ui.settings.get().render_user_markdown;
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert_eq!(ui.settings.get().render_user_markdown, !before);
+}
+
+/// With `confirm_exit` off, the first idle Ctrl+C exits instead of
+/// arming the double-press window.
+#[test]
+fn confirm_exit_off_skips_the_double_press() {
+    let mut ui = ui();
+    ui.settings.update(|view| view.confirm_exit = false);
+    let flow = ui.handle_key(KeyEvent::new(
+        Key::Char('c'),
+        Mods {
+            ctrl: true,
+            alt: false,
+            shift: false,
+        },
+    ));
+    assert_eq!(flow, Flow::Exit, "first ctrl+c exits");
+}

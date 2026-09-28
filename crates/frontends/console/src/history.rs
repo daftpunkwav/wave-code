@@ -10,7 +10,8 @@
 use std::io::{BufRead as _, Write as _};
 use std::path::PathBuf;
 
-/// Maximum entries loaded and kept per file.
+/// Maximum entries loaded and kept per file when no configured limit
+/// applies.
 pub const MAX_ENTRIES: usize = 100;
 
 /// The history file for a named surface (e.g. `console`).
@@ -20,9 +21,11 @@ pub fn history_path(home: &std::path::Path, surface: &str) -> PathBuf {
         .join(format!("{surface}.jsonl"))
 }
 
-/// Load history entries, oldest first, capped at [`MAX_ENTRIES`].
-/// Malformed lines are skipped; a missing file yields an empty list.
-pub fn load(path: &std::path::Path) -> Vec<String> {
+/// Load history entries, oldest first, capped at `limit` (0 falls
+/// back to [`MAX_ENTRIES`]). Malformed lines are skipped; a missing
+/// file yields an empty list.
+pub fn load(path: &std::path::Path, limit: usize) -> Vec<String> {
+    let limit = if limit == 0 { MAX_ENTRIES } else { limit };
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
@@ -35,8 +38,8 @@ pub fn load(path: &std::path::Path) -> Vec<String> {
             value.get("content")?.as_str().map(|s| s.to_string())
         })
         .collect();
-    if entries.len() > MAX_ENTRIES {
-        entries = entries.split_off(entries.len() - MAX_ENTRIES);
+    if entries.len() > limit {
+        entries = entries.split_off(entries.len() - limit);
     }
     entries
 }
@@ -73,14 +76,27 @@ mod tests {
         append(&temp, "first prompt");
         append(&temp, "second prompt");
         append(&temp, "   ");
-        let entries = load(&temp);
+        let entries = load(&temp, 0);
         assert_eq!(entries, vec!["first prompt", "second prompt"]);
         let _ = std::fs::remove_file(&temp);
     }
 
     #[test]
     fn missing_file_loads_empty() {
-        let entries = load(std::path::Path::new("/nonexistent/history.jsonl"));
+        let entries = load(std::path::Path::new("/nonexistent/history.jsonl"), 0);
+
+        #[test]
+        fn load_honors_a_configured_limit() {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("history.jsonl");
+            for i in 0..10 {
+                append(&path, &format!("entry-{i}"));
+            }
+            // 0 falls back to the built-in cap; a configured limit trims.
+            assert_eq!(load(&path, 0).len(), 10);
+            let entries = load(&path, 3);
+            assert_eq!(entries, vec!["entry-7", "entry-8", "entry-9"]);
+        }
         assert!(entries.is_empty());
     }
 
@@ -89,7 +105,7 @@ mod tests {
         let temp =
             std::env::temp_dir().join(format!("wc-history-bad-{}.jsonl", std::process::id()));
         std::fs::write(&temp, "{\"content\": \"good\"}\nnot json\n{\"other\": 1}\n").unwrap();
-        let entries = load(&temp);
+        let entries = load(&temp, 0);
         assert_eq!(entries, vec!["good"]);
         let _ = std::fs::remove_file(&temp);
     }
@@ -103,7 +119,7 @@ mod tests {
             body.push_str(&format!("{{\"content\": \"{i}\"}}\n"));
         }
         std::fs::write(&temp, body).unwrap();
-        let entries = load(&temp);
+        let entries = load(&temp, 0);
         assert_eq!(entries.len(), MAX_ENTRIES);
         assert_eq!(entries.first().unwrap(), "50");
         let _ = std::fs::remove_file(&temp);

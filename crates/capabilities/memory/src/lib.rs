@@ -19,8 +19,8 @@
 //! Consolidation is heuristic v1 (see [`consolidate`] for the exact limits).
 //! Still unimplemented: the 24h + 5-session gate
 //! (consolidation currently runs after every extraction), stale-entry pruning,
-//! and LLM/embedding-based similarity; `WAVECODE.override.md` overrides and
-//! fallback filenames (CLAUDE.md/AGENTS.md) are likewise later work.
+//! and LLM/embedding-based similarity. Legacy filenames (`WAVECODE.md`,
+//! `CLAUDE.md`) are deliberately no longer read.
 
 pub mod consolidate;
 pub mod extract;

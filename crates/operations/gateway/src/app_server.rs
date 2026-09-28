@@ -962,4 +962,57 @@ mod tests {
         );
         assert!(response.headers().get("Retry-After").is_some());
     }
+
+    /// A dead pump (closed command channel) answers 409: unlike a full
+    /// queue (429) the session is closing and the prompt is not retryable,
+    /// so no Retry-After hint is offered.
+    #[tokio::test]
+    async fn closed_session_answers_409_without_retry_after() {
+        let (commands, receiver) = tokio::sync::mpsc::channel(32);
+        drop(receiver);
+        let (events, _) = tokio::sync::broadcast::channel(8);
+        let session = AppSession {
+            commands,
+            submissions: 0,
+            events,
+            approvals: Arc::new(safety_gate::ApprovalGate::new()),
+            questions: Arc::new(safety_gate::QuestionGate::new()),
+            interrupt: infrastructure_base::InterruptHandle::new(),
+        };
+        let state = AppState {
+            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::from([(
+                "s-closed".to_string(),
+                session,
+            )]))),
+            token: String::new(),
+            base: ServeOptions {
+                config_path: None,
+                model_override: None,
+                cwd: std::env::temp_dir(),
+                home: None,
+                port: 0,
+                token: String::new(),
+            },
+            next_session: Arc::new(tokio::sync::Mutex::new(1)),
+            shutdown: Arc::new(tokio::sync::Notify::new()),
+            assemble: Arc::new(|_| -> Result<Box<dyn SessionSurface>, SessionError> {
+                unreachable!("no assembly in this test")
+            }),
+        };
+        let response = submit(
+            state,
+            "s-closed",
+            Op::UserInput {
+                text: "arrives at a closed pump".to_string(),
+                images: Vec::new(),
+            },
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::CONFLICT,
+            "a closing session must not read as retryable backpressure"
+        );
+        assert!(response.headers().get("Retry-After").is_none());
+    }
 }

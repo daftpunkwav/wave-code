@@ -369,6 +369,11 @@ impl Screen {
         // same-range segment is identical by construction — no line
         // comparisons at all.
         let prev_view = FrameView::new(&self.prev);
+        // Precondition: the frame never shrinks on this path — draw()
+        // routes any shrink through viewport_redraw. `record` computes
+        // `row - base_at_entry`, which would underflow for rows past
+        // the new content.
+        debug_assert!(view.total >= prev_view.total);
         let base_at_entry = self.base;
         let mut first_changed = None;
         let mut last_changed = 0usize;
@@ -395,10 +400,6 @@ impl Screen {
                     record(row, &mut first_changed, &mut last_changed);
                 }
             }
-        }
-        // Rows the previous frame had beyond the new content: stale.
-        for row in view.total..prev_view.total {
-            record(row, &mut first_changed, &mut last_changed);
         }
         let Some(first) = first_changed else {
             return false; // identical region: nothing to paint
@@ -467,13 +468,9 @@ impl Screen {
             }
         }
 
-        // Erase stale rows when the visible region shrank. The cursor
-        // physically moves down one row before the erase, so the tracked
-        // row must follow or the next frame's relative moves drift.
-        if view.total < prev_view.total && row + 1 < height {
-            let _ = write!(out, "\r\x1b[1B\x1b[J");
-            row += 1;
-        }
+        // (The erase of stale rows below a shrunken frame lives in
+        // viewport_redraw: draw() never routes a shrink here, so this
+        // path always ends at or past the previous content.)
 
         self.prev = segments.to_vec();
         self.size = (columns, height);
@@ -516,7 +513,5 @@ impl Default for Screen {
     }
 }
 
-#[cfg(test)]
-#[cfg(test)]
 #[cfg(test)]
 mod tests;

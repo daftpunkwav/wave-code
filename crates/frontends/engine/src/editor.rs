@@ -97,11 +97,38 @@ pub enum EditorAction {
     Submit(String),
 }
 
-#[derive(Debug, Default)]
+/// Entries kept when no host-provided cap applies.
+const DEFAULT_HISTORY_CAP: usize = 100;
+
+#[derive(Debug)]
 struct History {
     entries: Vec<String>,
     position: Option<usize>,
     draft: Option<String>,
+    /// Maximum entries kept (0 falls back to [`DEFAULT_HISTORY_CAP`]).
+    cap: usize,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            position: None,
+            draft: None,
+            cap: DEFAULT_HISTORY_CAP,
+        }
+    }
+}
+
+impl History {
+    /// The effective cap: a configured value, or the built-in default.
+    fn effective_cap(&self) -> usize {
+        if self.cap == 0 {
+            DEFAULT_HISTORY_CAP
+        } else {
+            self.cap
+        }
+    }
 }
 
 /// A collapsed paste: buffer text replaced by an atomic marker.
@@ -248,7 +275,7 @@ impl Editor {
     }
 
     /// Record an entry into input history: dedupes against the most
-    /// recent entry and caps at 100.
+    /// recent entry and caps at the configured cap (default 100).
     pub fn remember_history(&mut self, entry: &str) {
         if self
             .history
@@ -260,17 +287,29 @@ impl Editor {
             return;
         }
         self.history.entries.insert(0, entry.to_string());
-        self.history.entries.truncate(100);
+        self.history.entries.truncate(self.history.effective_cap());
         self.history.position = None;
         self.history.draft = None;
     }
 
+    /// Set the maximum number of history entries kept (0 falls back to
+    /// the built-in default of 100). Applies to later inserts and
+    /// seeds; call before [`Editor::load_history`].
+    pub fn set_history_cap(&mut self, cap: usize) {
+        self.history.cap = cap;
+        self.history.entries.truncate(self.history.effective_cap());
+    }
+
     /// Seed browsing history from persisted entries (oldest first).
+    /// Resets any in-progress recall: position and draft refer to the
+    /// entries being replaced.
     pub fn load_history(&mut self, entries: Vec<String>) {
         let mut entries = entries;
         entries.reverse(); // browse newest-first
-        entries.truncate(100);
+        entries.truncate(self.history.effective_cap());
         self.history.entries = entries;
+        self.history.position = None;
+        self.history.draft = None;
     }
 
     /// Snapshot all history entries, oldest first (persistence).
@@ -1566,6 +1605,37 @@ mod tests {
         assert!(editor.history_next());
         assert_eq!(editor.text(), "draft", "draft restored at end");
         assert!(!editor.history_next());
+    }
+
+    #[test]
+    fn history_cap_beyond_the_builtin_survives_submits() {
+        let mut editor = editor();
+        editor.set_history_cap(120);
+        for i in 0..110 {
+            editor.remember_history(&format!("entry-{i}"));
+        }
+        assert_eq!(editor.history_entries().len(), 110, "cap is honored");
+        // Cap 0 falls back to the built-in default of 100.
+        editor.set_history_cap(0);
+        for i in 110..210 {
+            editor.remember_history(&format!("entry-{i}"));
+        }
+        assert_eq!(editor.history_entries().len(), 100);
+    }
+
+    #[test]
+    fn load_history_resets_recall_state() {
+        let mut editor = editor();
+        editor.remember_history("old-1");
+        editor.remember_history("old-2");
+        assert!(editor.history_previous());
+        // Loading a fresh (shorter) list must drop the stale position,
+        // or the next Next would index past the new entries.
+        editor.load_history(vec!["new-1".into(), "new-2".into(), "new-3".into()]);
+        assert_eq!(editor.text(), "old-2", "buffer untouched by the load");
+        assert!(!editor.history_next(), "no recall in progress");
+        assert!(editor.history_previous());
+        assert_eq!(editor.text(), "new-3", "browsing starts at the newest");
     }
 
     #[test]

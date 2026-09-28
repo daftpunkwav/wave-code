@@ -1148,8 +1148,14 @@ fn parse_mindmap(source: &str) -> Option<TreeNode> {
             stack.push((0, node));
             continue;
         }
-        while stack.last().is_some_and(|(d, _)| *d >= depth) {
-            let (_, popped) = stack.pop().unwrap();
+        // Pop first, restore on a shallower top: the depth guard and
+        // the pop share one `while let`, so no unwrap pairs the guard
+        // with a second stack access.
+        while let Some((top_depth, popped)) = stack.pop() {
+            if top_depth < depth {
+                stack.push((top_depth, popped));
+                break;
+            }
             match stack.last_mut() {
                 Some((_, parent)) => parent.children.push(popped),
                 None => {

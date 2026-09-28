@@ -257,6 +257,11 @@ pub fn pad_to_width(line: &str, total: usize) -> String {
 /// actually wraps. A `max_width` of 0 yields the line unchanged; a
 /// line that fits is returned unmodified so callers can cache by
 /// content.
+///
+/// Boundary: one grapheme wider than the whole budget (a CJK cluster
+/// or emoji at a 1-column budget) still lands on its own line,
+/// over-wide. Cutting it would silently drop the user's text, and a
+/// grapheme cannot be split; renderers clip at write time instead.
 pub fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 || (!line.contains('\t') && width(line) <= max_width) {
         return vec![line.to_string()];
@@ -414,6 +419,17 @@ mod tests {
     fn wrap_returns_input_when_fitting() {
         assert_eq!(wrap_line("short", 80), vec!["short".to_string()]);
         assert_eq!(wrap_line("any", 0), vec!["any".to_string()]);
+    }
+
+    #[test]
+    fn wide_grapheme_in_a_tiny_budget_gets_its_own_line() {
+        // A 2-column cluster at a 1-column budget cannot be split: it
+        // lands alone on its line (over-wide) instead of dropping text.
+        let lines = wrap_line("a你b", 1);
+        assert_eq!(lines, vec!["a", "你", "b"]);
+        let lines = wrap_line("👍x", 1);
+        assert_eq!(strip_ansi(&lines[0]), "👍");
+        assert_eq!(strip_ansi(&lines[1]), "x");
     }
 
     #[test]

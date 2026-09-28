@@ -92,7 +92,8 @@ pub fn row2(state: &AppState, hint: &TransientHint, columns: usize) -> String {
     left
 }
 
-/// The tinted-bar mode badge: a colored tick plus the lowercase mode.
+/// The mode label in its mode color (plan accent / auto warning / wave
+/// warning), no leading bar — the color alone distinguishes the mode.
 pub fn mode_badge(mode: &str) -> String {
     let theme = theme::current();
     let (label, token) = match mode {
@@ -100,7 +101,7 @@ pub fn mode_badge(mode: &str) -> String {
         "wave" => ("wave", Token::Warning),
         _ => ("auto", Token::Text),
     };
-    format!("{}{}", theme.bold(token, "▍"), theme.bold(token, label))
+    theme.bold(token, label)
 }
 
 #[cfg(test)]
@@ -128,7 +129,10 @@ mod tests {
         // the process-global env would race concurrent tests.
         let line = row1(&state(), Some("ctrl+o expand tool output"), 120);
         let plain = width::strip_ansi(&line);
-        assert!(plain.contains("▍auto"), "{plain}");
+        assert!(plain.contains("auto "), "{plain}");
+        // The mode label carries no leading bar glyph: the color alone
+        // distinguishes the mode.
+        assert!(!plain.contains('▍'), "{plain}");
         assert!(plain.contains("test-model"), "{plain}");
         assert!(plain.contains("proj"), "{plain}");
         assert!(plain.contains("ctrl+o expand tool output"), "{plain}");

@@ -87,6 +87,19 @@ impl Budget {
     }
 }
 
+impl Default for Budget {
+    /// The production budget: 96k characters of frame, 64k reserved for
+    /// history, so the system prompt gets ~32k characters (~8k tokens).
+    /// Generous on purpose — the budget is a backstop against runaway
+    /// instruction files, not a target to fill.
+    fn default() -> Self {
+        Self {
+            total_chars: 96_000,
+            reserved_for_history: 64_000,
+        }
+    }
+}
+
 /// Budgeted assembly result with honest accounting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assembled {

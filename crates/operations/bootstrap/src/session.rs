@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use operations_actor::{ActorClient, SessionActor, SessionSurface, SubmitError};
 use runtime_child::ChildRuntime;
-use runtime_prompt::{DEFAULT_CATALOG_BUDGET, PromptSlots, build_system};
+use runtime_prompt::{Budget, DEFAULT_CATALOG_BUDGET, PromptSlots, assemble_budgeted};
 use runtime_runner::{RunConfig, RunInterrupts, RunLoop, ToolExecutor};
 use safety_gate::{ApprovalGate, QuestionGate};
 use state_store::Conversation;
@@ -975,15 +975,30 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
              answer, simply answer.",
         );
     }
-    let system = build_system(&PromptSlots {
-        identity,
-        instructions,
-        memory_index: memory_index.clone(),
-        skill_catalog,
-        tool_note: format!("Available tools: {}", tool_names.join(", ")),
-        environment: crate::environment::describe(&cwd),
-        summary: String::new(),
-    });
+    let assembled = assemble_budgeted(
+        &PromptSlots {
+            identity,
+            instructions,
+            memory_index: memory_index.clone(),
+            skill_catalog,
+            tool_note: format!("Available tools: {}", tool_names.join(", ")),
+            environment: crate::environment::describe(&cwd),
+            summary: String::new(),
+        },
+        &Budget::default(),
+    );
+    // The budget is a backstop, so a drop is an anomaly the user hears
+    // about — never a silent loss of instructions or identity.
+    for title in &assembled.dropped {
+        warnings.push(format!(
+            "system prompt exceeded its character budget; the '{title}' section was dropped"
+        ));
+    }
+    if assembled.catalog_truncated {
+        warnings
+            .push("the skill catalog was truncated to fit the system prompt budget".to_string());
+    }
+    let system = assembled.system;
 
     // Child turns ride the fully assembled registry: attach the system
     // prompt and the tool-surface policy now that both exist. Children

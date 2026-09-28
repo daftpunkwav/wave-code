@@ -398,14 +398,17 @@ where
             }
             let mut from = scanned.saturating_sub(3);
             while let Some((body_end, sep_len)) = find_frame_boundary(&buf[from..]) {
-                let frame: Vec<u8> = buf.drain(..from + body_end + sep_len).collect();
-                if let Some(data) = extract_data(&frame[..from + body_end])? {
+                let end = from + body_end + sep_len;
+                // The frame body is parsed straight out of the buffer (no
+                // per-frame copy; long streams cut thousands of frames).
+                if let Some(data) = extract_data(&buf[..from + body_end])? {
                     // callback returned Err: yield Err and terminate the stream (`?` operator behavior).
                     for event in on_data(&data)? {
                         yield event;
                     }
                 }
-                // After cutting one frame the remaining bytes shift forward; keep cutting from the head (one chunk may hold several frames).
+                // Cutting one frame shifts the remaining bytes forward; keep cutting from the head (one chunk may hold several frames).
+                buf.drain(..end);
                 from = 0;
             }
             scanned = buf.len();
@@ -825,8 +828,8 @@ mod tests {
             )
             .await;
             // Keep the connection open: EOF must not be what ends the read.
-            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, &vec![b'x'; 1024 * 1024])
-                .await;
+            let _ =
+                tokio::io::AsyncWriteExt::write_all(&mut socket, &vec![b'x'; 1024 * 1024]).await;
             let _ = tokio::io::AsyncWriteExt::flush(&mut socket).await;
         });
         let client = reqwest::Client::new();

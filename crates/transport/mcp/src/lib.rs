@@ -75,26 +75,62 @@ pub struct JsonRpcResponse {
     pub payload: serde_json::Value,
 }
 
-/// Decode one response line, rejecting malformed frames explicitly.
+/// One inbound JSON-RPC line classified by shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonRpcMessage {
+    /// A response (or server-initiated request) carrying a numeric id.
+    Response(JsonRpcResponse),
+    /// A server-initiated notification: no usable id, a method present.
+    /// Never a response; callers skip it.
+    Notification,
+}
+
+/// Decode one inbound line into its message shape, rejecting malformed
+/// frames explicitly.
 ///
-/// Only `jsonrpc: "2.0"` frames are accepted. When a frame carries both
-/// `result` and `error`, the error wins so failures are never read as success.
-pub fn decode_response(line: &str) -> Result<JsonRpcResponse, TransportError> {
+/// Only `jsonrpc: "2.0"` frames are accepted. A frame with a numeric id is
+/// a response; a frame without a usable id that names a method is a
+/// server-initiated notification (interleaved chatter must not abort an
+/// in-flight exchange); anything else is malformed. When a frame carries
+/// both `result` and `error`, the error wins so failures are never read as
+/// success.
+pub fn decode_message(line: &str) -> Result<JsonRpcMessage, TransportError> {
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|_| TransportError::BadFrame(line.to_string()))?;
     if value.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
         return Err(TransportError::BadFrame(line.to_string()));
     }
-    let id = value
-        .get("id")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| TransportError::BadFrame(line.to_string()))?;
-    let payload = value
-        .get("error")
-        .or_else(|| value.get("result"))
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    Ok(JsonRpcResponse { id, payload })
+    match value.get("id").and_then(|v| v.as_u64()) {
+        Some(id) => {
+            let payload = value
+                .get("error")
+                .or_else(|| value.get("result"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            Ok(JsonRpcMessage::Response(JsonRpcResponse { id, payload }))
+        }
+        // No usable id — absent, null, or non-numeric — plus a method:
+        // a server-initiated notification.
+        None if value.get("method").and_then(|v| v.as_str()).is_some() => {
+            Ok(JsonRpcMessage::Notification)
+        }
+        None => Err(TransportError::BadFrame(line.to_string())),
+    }
+}
+
+/// Decode one response line, rejecting malformed frames explicitly.
+///
+/// Only `jsonrpc: "2.0"` frames are accepted. When a frame carries both
+/// `result` and `error`, the error wins so failures are never read as success.
+pub fn decode_response(line: &str) -> Result<JsonRpcResponse, TransportError> {
+    match decode_message(line)? {
+        JsonRpcMessage::Response(response) => Ok(response),
+        // Historic contract for direct callers: a notification line is not
+        // a response and reads as a bad frame. Exchange loops that must
+        // tolerate interleaved notifications use [`decode_message`] (or
+        // [`ChildTransport::recv_message`]) instead.
+        JsonRpcMessage::Notification => Err(TransportError::BadFrame(line.to_string())),
+    }
 }
 
 /// Transport failures.
@@ -252,17 +288,35 @@ impl ChildTransport {
         Ok(())
     }
 
-    /// Read the next response line with the configured timeout.
-    pub async fn recv_response(&mut self) -> Result<JsonRpcResponse, TransportError> {
-        let line = tokio::time::timeout(
+    /// One timeout-bounded line read; EOF maps to [`TransportError::Closed`].
+    async fn next_line_bounded(&mut self) -> Result<String, TransportError> {
+        tokio::time::timeout(
             std::time::Duration::from_secs(self.timeout_secs),
             self.lines.next_line(),
         )
         .await
         .map_err(|_| TransportError::Timeout(self.timeout_secs))?
         .map_err(TransportError::Io)?
-        .ok_or(TransportError::Closed)?;
+        .ok_or(TransportError::Closed)
+    }
+
+    /// Read the next response line with the configured timeout.
+    pub async fn recv_response(&mut self) -> Result<JsonRpcResponse, TransportError> {
+        let line = self.next_line_bounded().await?;
         decode_response(&line)
+    }
+
+    /// Read the next inbound line and classify it: `Ok(None)` is a
+    /// server-initiated notification (the caller skips it and keeps
+    /// waiting for its response), `Ok(Some)` a response-shaped frame,
+    /// `Err` a transport failure or a malformed frame. Malformed frames
+    /// still fail the exchange — only well-formed notifications skip.
+    pub async fn recv_message(&mut self) -> Result<Option<JsonRpcResponse>, TransportError> {
+        let line = self.next_line_bounded().await?;
+        Ok(match decode_message(&line)? {
+            JsonRpcMessage::Response(response) => Some(response),
+            JsonRpcMessage::Notification => None,
+        })
     }
 
     /// Kill the child process; safe to call after natural exits.
@@ -353,6 +407,91 @@ mod tests {
         assert_eq!(next_id_after(1), 2);
         assert_eq!(next_id_after(u64::MAX), FIRST_REQUEST_ID);
         assert_ne!(next_id_after(u64::MAX), 0);
+    }
+
+    /// Message classification: id-bearing frames are responses, id-less
+    /// frames naming a method are notifications (skippable chatter), and
+    /// everything id-less without a method stays malformed.
+    #[test]
+    fn decode_message_classifies_notifications() {
+        assert!(matches!(
+            decode_message("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}"),
+            Ok(JsonRpcMessage::Notification)
+        ));
+        // A null id still reads as absent: some servers send it.
+        assert!(matches!(
+            decode_message("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"x\"}"),
+            Ok(JsonRpcMessage::Notification)
+        ));
+        let decoded =
+            decode_message("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}").unwrap();
+        assert_eq!(
+            decoded,
+            JsonRpcMessage::Response(JsonRpcResponse {
+                id: 7,
+                payload: serde_json::json!({"ok": true}),
+            })
+        );
+        // decode_response keeps its historic contract: notifications and
+        // malformed frames are bad frames there.
+        assert!(decode_response("{\"jsonrpc\":\"2.0\",\"method\":\"x\"}").is_err());
+        assert!(decode_message("{\"jsonrpc\":\"2.0\"}").is_err());
+        assert!(decode_message("not json").is_err());
+        assert!(decode_message("{\"jsonrpc\":\"1.0\",\"method\":\"x\"}").is_err());
+    }
+
+    /// Over a real child: a well-formed notification line is skipped (not
+    /// a BadFrame aborting the exchange) and the following response line
+    /// answers. Skipped silently where the platform refuses the spawn or
+    /// the temp path carries a space the shell commands cannot quote.
+    #[tokio::test]
+    async fn recv_message_skips_notifications_over_a_real_child() {
+        let dir = std::env::temp_dir().join(format!("wavecode-mcp-recv-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("lines.txt");
+        std::fs::write(
+            &script,
+            concat!(
+                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n",
+                "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\n",
+            ),
+        )
+        .unwrap();
+        #[cfg(windows)]
+        if dir.to_string_lossy().contains(' ') {
+            let _ = std::fs::remove_dir_all(&dir);
+            eprintln!("temp path contains a space; skipping the recv_message child test");
+            return;
+        }
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+            ("cmd", vec!["/C".into(), format!("type {}", script.display())])
+        } else {
+            ("sh", vec!["-c".into(), format!("cat '{}'", script.display())])
+        };
+        let mut transport = match ChildTransport::spawn(program, args, 10).await {
+            Ok(transport) => transport,
+            Err(_) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                eprintln!("child spawn refused; skipping the recv_message child test");
+                return;
+            }
+        };
+        // The notification is classified and skipped, never a BadFrame.
+        assert!(matches!(transport.recv_message().await, Ok(None)));
+        let response = transport
+            .recv_message()
+            .await
+            .unwrap()
+            .expect("the response line follows the notification");
+        assert_eq!(response.id, 7);
+        assert_eq!(response.payload["ok"], true);
+        // Script output exhausted: a closed transport, not a hang.
+        assert!(matches!(
+            transport.recv_message().await,
+            Err(TransportError::Closed)
+        ));
+        let _ = transport.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

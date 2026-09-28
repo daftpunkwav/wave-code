@@ -505,10 +505,15 @@ impl StdioMcpClient {
             .await
             .map_err(|e| transport_error("send", e))?;
         for _ in 0..MAX_INTERLEAVED_SKIPS {
-            let response = transport
-                .recv_response()
+            // Well-formed server notifications (no id) skip like mismatched
+            // frames; a genuinely malformed frame still fails the exchange.
+            let Some(response) = transport
+                .recv_message()
                 .await
-                .map_err(|e| transport_error("recv", e))?;
+                .map_err(|e| transport_error("recv", e))?
+            else {
+                continue;
+            };
             if response.id == id {
                 return Ok(response.payload);
             }
@@ -820,16 +825,6 @@ impl ServerSpec {
     }
 }
 
-/// [`McpClient`] decorator healing dropped connections on demand.
-///
-/// A transport failure during any request triggers one reconnect
-/// (spawn/handshake) under the client lock, then the failed call retries
-/// on the fresh connection. Concurrent callers serialize on the lock, so
-/// one healer serves them all — no background polling, and a call that
-/// arrives while healing is under way simply waits for the fresh
-/// connection. Protocol errors (bad frames, JSON-RPC errors) never
-/// heal: the server is reachable and the problem is not the connection.
-/// Capability gates use the first handshake's snapshot (`connect`).
 /// Cooldown base for the reconnect backoff: the first heal is immediate,
 /// each consecutive transport failure doubles the wait (capped at 8s).
 const RECONNECT_COOLDOWN_BASE_MS: u64 = 250;
@@ -850,6 +845,18 @@ struct HealState {
     last_heal: Option<Instant>,
 }
 
+/// [`McpClient`] decorator healing dropped connections on demand.
+///
+/// A transport failure triggers one reconnect (spawn/handshake) under the
+/// client lock, gated by the reconnect cooldown below. Idempotent calls
+/// retry on the fresh connection; `tools/call` never replays (see
+/// [`ResilientMcpClient::once_replaying`]). Concurrent callers serialize
+/// on the lock, so one healer serves them all — no background polling,
+/// and a call that arrives while healing is under way simply waits for
+/// the fresh connection. Protocol errors (bad frames, JSON-RPC errors)
+/// never heal: the server is reachable and the problem is not the
+/// connection. Capability gates use the first handshake's snapshot
+/// (`connect`).
 struct ResilientMcpClient {
     live: tokio::sync::Mutex<Arc<dyn RpcClient>>,
     spec: ServerSpec,

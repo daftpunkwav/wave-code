@@ -214,7 +214,10 @@ impl SpillStore {
         // The lock spans the whole read-modify-write so concurrent spills
         // (parallel tool rounds) cannot lose entries.
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        std::fs::write(self.entry_path(&id), bytes)?;
+        // Owner-only on Unix: spilled payloads mirror tool output, which can
+        // carry repository file content the shell tool's env scrubbing kept
+        // out of reach elsewhere.
+        infrastructure_base::write_private(&self.entry_path(&id), bytes)?;
         let mut entries = self.load_manifest();
         entries.push(ManifestEntry {
             id: id.clone(),

@@ -217,8 +217,9 @@ fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     let text = serde_json::to_string(&sessions)?;
     // Write-then-rename keeps a crash mid-write from truncating the
     // index: a truncated index reads as empty, and the next write would
-    // then drop every other session's entry for good.
-    infrastructure_base::atomic_write(&index_path(home), text.as_bytes())?;
+    // then drop every other session's entry for good. Owner-only: titles
+    // carry the first user message head.
+    infrastructure_base::atomic_write_private(&index_path(home), text.as_bytes())?;
     Ok(())
 }
 

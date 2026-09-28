@@ -128,9 +128,22 @@ pub fn shell_invocation() -> (String, &'static str) {
 /// `std::fs` only — stores needing stronger durability (fsync before the
 /// rename) keep their own write path on purpose.
 pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let staging = staging_path_for(path);
+    std::fs::write(&staging, contents)?;
+    if let Err(e) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Unique sibling staging name for an atomic replace (shared by
+/// [`atomic_write`] and [`atomic_write_private`]): process id plus a
+/// per-process sequence number.
+fn staging_path_for(path: &std::path::Path) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let staging = match path.extension() {
+    match path.extension() {
         Some(ext) => path.with_extension(format!(
             "{}.staging-{}-{}",
             ext.to_string_lossy(),
@@ -142,13 +155,93 @@ pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         )),
-    };
-    std::fs::write(&staging, contents)?;
+    }
+}
+
+/// Owner-only file mode for local private data (Unix `0o600`).
+///
+/// Everything a session writes under the home directory (`~/.wavecode`:
+/// journals, input history, spill side-store, grants) carries user content,
+/// so on multi-user Unix systems it must not be group/world readable.
+/// Windows needs no equivalent: default profile ACLs already scope files to
+/// the owning user, so every helper here is a plain write there.
+#[cfg(unix)]
+const PRIVATE_MODE: u32 = 0o600;
+
+/// Tighten an open file to owner-only (Unix only; the call is a no-op on
+/// Windows where the default ACL already scopes to the user).
+///
+/// Re-tightening on every write is deliberate: files created before this
+/// policy existed (or by a looser writer) are repaired the next time they
+/// are written instead of staying readable by other local users forever.
+#[cfg(unix)]
+fn tighten_private(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_MODE))
+}
+
+/// Write `contents` to `path` (create or truncate) as an owner-only file.
+///
+/// The private-data sibling of [`std::fs::write`] for files that carry user
+/// content: conversation journals, spill payloads, credential stores. The
+/// write and the mode are one operation, so a crash cannot leave a newly
+/// created file world-readable.
+pub fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(PRIVATE_MODE)
+            .open(path)?;
+        tighten_private(&file)?;
+        use std::io::Write;
+        file.write_all(contents)
+    }
+    #[cfg(not(unix))]
+    std::fs::write(path, contents)
+}
+
+/// [`atomic_write`] for private data: the staging file is created
+/// owner-only before the rename, so the replaced file never carries a
+/// looser mode (rename preserves the staging file's permissions).
+pub fn atomic_write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let staging = staging_path_for(path);
+    if let Err(e) = write_private(&staging, contents) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e);
+    }
     if let Err(e) = std::fs::rename(&staging, path) {
         let _ = std::fs::remove_file(&staging);
         return Err(e);
     }
     Ok(())
+}
+
+/// Open `path` for appending, creating it owner-only when missing.
+///
+/// The private-data form of `OpenOptions::create + append` for append-only
+/// local logs (history journals, input history): every write also re-tightens
+/// the mode, so a pre-policy `0o644` file is repaired on its next append.
+pub fn open_append_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(PRIVATE_MODE)
+            .open(path)?;
+        tighten_private(&file)?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// Weekday names indexed by `days_since_epoch % 7` with 1970-01-01 =
@@ -349,6 +442,92 @@ mod tests {
             .filter(|n| n.contains(".staging-"))
             .collect();
         assert!(litter.is_empty(), "the staging file must be removed: {litter:?}");
+    }
+
+    /// Private writes land the content and create the file owner-only;
+    /// an existing looser mode is tightened on rewrite.
+    #[test]
+    fn private_writes_create_and_tighten_owner_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("journal.jsonl");
+        write_private(&path, b"first").expect("first write");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        write_private(&path, b"second").expect("overwrite truncates");
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "private file stays owner-only: {mode:o}"
+            );
+            // A pre-policy world-readable file is repaired on the next write.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            write_private(&path, b"third").unwrap();
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "loose mode tightened: {mode:o}");
+        }
+    }
+
+    /// The private atomic replace carries the owner-only mode onto the
+    /// destination and leaves no staging litter behind.
+    #[test]
+    fn atomic_write_private_lands_owner_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("index.json");
+        atomic_write_private(&path, b"one").expect("first write");
+        atomic_write_private(&path, b"two").expect("replace");
+        assert_eq!(std::fs::read(&path).unwrap(), b"two");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "replaced file stays owner-only: {mode:o}"
+            );
+        }
+        let litter: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".staging-"))
+            .collect();
+        assert!(litter.is_empty(), "no staging litter: {litter:?}");
+    }
+
+    /// Private appends preserve prior content and keep the file owner-only,
+    /// including repairing a pre-policy loose mode.
+    #[test]
+    fn open_append_private_preserves_content_and_tightens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("history.jsonl");
+        {
+            let mut file = open_append_private(&path).expect("create");
+            use std::io::Write;
+            writeln!(file, "one").unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        {
+            let mut file = open_append_private(&path).expect("append");
+            use std::io::Write;
+            writeln!(file, "two").unwrap();
+        }
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, "one\ntwo\n", "append never truncates");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "append tightened the mode: {mode:o}");
+        }
     }
 
     #[test]

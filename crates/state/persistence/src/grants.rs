@@ -121,10 +121,7 @@ pub fn add_grant(home: &Path, grant: &Grant) -> Result<bool, GrantError> {
     }
     let line = serde_json::to_string(grant)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
+    let mut file = infrastructure_base::open_append_private(&path)?;
     writeln!(file, "{line}")?;
     file.flush()?;
     Ok(true)
@@ -177,7 +174,9 @@ fn rewrite(home: &Path, grants: &[Grant]) -> Result<(), GrantError> {
         text.push_str(&line);
         text.push('\n');
     }
-    infrastructure_base::atomic_write(&path, text.as_bytes())?;
+    // Owner-only: the table is persisted authority (it re-arms "always
+    // allow" on the next session), never other users' reading material.
+    infrastructure_base::atomic_write_private(&path, text.as_bytes())?;
     Ok(())
 }
 

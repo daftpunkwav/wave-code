@@ -54,11 +54,11 @@ pub fn append(path: &std::path::Path, entry: &str) {
     {
         return;
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
+    // Owner-only on Unix: the file carries everything the user submitted
+    // (the module doc's sensitive-local data), through the persistence
+    // crate's shared private-file primitive (the console's dependency set
+    // is locked, so the policy arrives as a re-export, not a new edge).
+    if let Ok(mut file) = state_persistence::open_append_private(path) {
         let value = serde_json::json!({ "content": entry });
         let _ = writeln!(file, "{value}");
     }

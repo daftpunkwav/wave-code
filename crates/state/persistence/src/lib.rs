@@ -17,6 +17,12 @@
 
 //! Persistence as dumb bytes: structure lives with the caller.
 
+/// Owner-only file primitives for local session data (`0o600` on Unix,
+/// no-op tightening elsewhere): re-exported so callers writing
+/// session-local files (frontend input history) share the one policy
+/// instead of restating the `cfg` dance per crate.
+pub use infrastructure_base::{atomic_write_private, open_append_private, write_private};
+
 /// Legacy engine journal import for session resume.
 pub mod legacy;
 
@@ -148,10 +154,7 @@ impl JsonlJournal {
             })).collect::<Vec<_>>(),
             "outcome": record.outcome,
         });
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut file = infrastructure_base::open_append_private(&self.path)?;
         if needs_header {
             let header = serde_json::json!({"format": JOURNAL_FORMAT_VERSION});
             writeln!(

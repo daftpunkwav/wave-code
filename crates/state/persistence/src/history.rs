@@ -60,10 +60,7 @@ impl HistoryJournal {
         let needs_header = std::fs::metadata(&self.path)
             .map(|m| m.len() == 0)
             .unwrap_or(true);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        let mut file = infrastructure_base::open_append_private(&self.path)?;
         if needs_header {
             let header = serde_json::json!({"k": "header", "format": HISTORY_FORMAT_VERSION});
             writeln!(file, "{header}")?;

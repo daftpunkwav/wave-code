@@ -57,7 +57,11 @@ Two screen-layer invariants keep the frame stable while it streams:
   streaming or scrollback churn above can never drag the input
   off-screen. Frames that still fit the screen skip the pin (the
   in-place diff already rewrites changed rows); identical frames write
-  nothing at all.
+  nothing at all. A shrunken frame (a dialog or the autocomplete popup
+  closing) repaints the whole viewport with the rewrite base
+  re-anchored to the new frame bottom, so the repaint and the pin
+  agree on where the input region lives and no stale copy of the
+  editor survives mid-screen.
 - **Cursor discipline**: the hardware cursor is hidden for the whole
   frame and shown again only at the input editor's caret (an embedded
   marker the screen layer resolves to a cell), so no transcript, footer

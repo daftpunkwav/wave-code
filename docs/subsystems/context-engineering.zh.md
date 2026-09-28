@@ -32,7 +32,11 @@
 
 ## 瞬态样本附注（`SampleRequest.notes`）
 
-每个采样请求携带 `notes`：由 harness 构造、投影为末尾一条 user 消息、永不落库的文本。常驻成员是实时占用行——`Context usage: {pct}% ({used}/{window} tokens)`，包在 `<system-reminder>` 里，与预算门使用同一个 `used` 数字——压缩评审的拒绝追加于其后。循环每次迭代重建该列表，所以一条 note 到下一个样本即消失；投影就是 note 的全部生命周期。提供方提示缓存不受影响：尾部断点本来就落在最新的消息上，无论有没有 note，它每回合都会变。
+每个采样请求携带 `notes`：由 harness 每次迭代从活状态重建、投影为末尾一条 user 消息、永不落库的文本——投影就是 note 的全部生命周期。成员按序为：服务中的模型及其实时窗口加今天的日期（一行；`/model` 切换或跨午夜即时生效，无需触碰已冻结的环境段——该段现在只含会话内稳定事实：OS、shell、工作目录）、`Context usage: {pct}% ({used}/{window} tokens)` 行（与预算门同一个 `used` 数字）、重复 streak 运行期间的逐级熔断提醒、以及各条压缩评审拒绝。只需要被读一次的反馈属于这里，而不是历史。提供方提示缓存不受影响：尾部断点本来就落在最新的消息上，无论有没有 notes，它每回合都会变。
+
+## 嵌套指令发现（`AGENTS.md`）
+
+会话装配加载全局（`~/.wavecode/AGENTS.md`）、项目根与启动目录三层，每层带各自的 `AGENTS.local.md` 补充与 `.wavecode/rules/*.md`（`wavecode_memory::collect`）；不再读取 `WAVECODE.md`/`CLAUDE.md`。更深的目录按需加载：`AgentsInstructionsExecutor` 装饰器（`crates/operations/bootstrap/src/agents_instructions.rs`）读取每个文件工具调用的 `path` 输入，从其目录向上走到项目根，把每层尚未加载的最近 `AGENTS.md` 提供给循环的 `DirectoryInstructions` 槽；下一个循环头将其落为持久用户条目，包在 `<system-reminder>` 里。持久而非瞬态：一个目录的约束对之后在该目录的每次操作都持续相关。项目根层永不重复提供（装配已有它），且每个目录每会话至多落一次。
 
 ## 逐出 pass（`evict_old_tool_results`）
 

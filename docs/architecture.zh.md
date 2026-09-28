@@ -112,7 +112,7 @@ infrastructure channels + interrupts + limits、TTL/LRU 缓存、分层配置、
 | `wavecode-auth` | 面向模型访问的按供应商凭据存储 |
 | `wavecode-tools` | Tool trait、注册表、内建工具（fs、search、shell、todo、子任务委派、ask-user）、路径守卫 |
 | `wavecode-skills` | `SKILL.md` 的发现、解析与目录，外加模型可调用的 `skill` 工具 |
-| `wavecode-memory` | 指令记忆（`WAVECODE.md`）与每回合转录蒸馏，外加模型可调用的 `memory_write` 工具 |
+| `wavecode-memory` | 指令记忆（`AGENTS.md` + `AGENTS.local.md` 分层，子目录首次触碰时发现）与每回合转录蒸馏，外加模型可调用的 `memory_write` 工具 |
 | `wavecode-mcp` | Model Context Protocol 客户端与接口边界：client/server trait、数据类型、服务器配置、`mcp__` 命名约定，以及把外部工具注入注册表的 stdio/streamable-HTTP 客户端桥（字节级组帧在 `transport-mcp`） |
 | `wavecode-sandbox` | 工具运行的权限与执行安全层 |
 | `wavecode-hooks` | 生命周期钩子（PreToolUse / PostToolUse / UserPromptSubmit / SessionStart） |

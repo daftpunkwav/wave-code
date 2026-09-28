@@ -12,12 +12,17 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `/fork`, `/title`, `/new`, text-level turn journal for replay.
 - Tool surface: background tasks, goal tracking, todo panels,
   `ask_user`, file snapshots with rewind, memory, skills, plan mode.
-- Context surface: the environment section states the serving model and
-  its context window; every sample carries transient notes (the live
-  `Context usage` line, never stored); and the model can request
-  compaction via `compact_context` — the loop reviews each request
-  (session grant cap, per-turn once, usage floor) and denies ride back
-  as transient notes, so a nearly empty window never burns a summary.
+- Context surface: instructions read `AGENTS.md` with `AGENTS.local.md`
+  supplements at the global, project-root, and cwd tiers (legacy
+  `WAVECODE.md`/`CLAUDE.md` are no longer read), and nested
+  `AGENTS.md` files load on demand as file tools touch deeper
+  directories. Every sample carries transient notes rebuilt from live
+  state — serving model, live window, today's date, the `Context
+  usage` line, the repeat streak — and the model can request
+  compaction via `compact_context`: the loop reviews each request
+  (session grant cap, per-turn once, usage floor) and denials ride
+  back as transient notes, so a nearly empty window never burns a
+  summary.
 - Security: deny-first path sandbox with OS-level confinement on all
   three platforms, permission modes (`plan` / `auto` / `wave`),
   persisted "always allow" grants with a `grants` audit command,

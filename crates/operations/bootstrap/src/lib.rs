@@ -19,6 +19,7 @@
 //! here, so neither side names the other directly.
 
 pub mod child_service;
+pub mod compaction_tool;
 pub mod compactor;
 pub mod composite;
 pub mod environment;

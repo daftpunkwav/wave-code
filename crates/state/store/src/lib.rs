@@ -220,6 +220,9 @@ pub enum CompactTrigger {
         /// User-supplied focus for the summary, when given.
         instruction: Option<String>,
     },
+    /// Model request via the `compact_context` tool, granted by the
+    /// loop's gate only when usage is high enough.
+    Model,
 }
 
 /// Evaluate the budget level from remaining context tokens.

@@ -732,6 +732,15 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     registry.register(Arc::new(state_goal::tool::GoalTool::new(
         goal_store.clone(),
     )));
+    // Model-driven compaction channel: the tool queues a request, the
+    // loop's gate reviews it at the next loop head — never inside tool
+    // execution, where a grant would rewrite the history the tool result
+    // still rides. Both sides share the slot; dropping the wiring would
+    // leave the tool advertising a channel nobody reads.
+    let compaction_requests = Arc::new(runtime_runner::CompactionRequests::new());
+    registry.register(Arc::new(crate::compaction_tool::CompactContextTool::new(
+        compaction_requests.clone(),
+    )));
     let worker = Arc::new(
         RunLoop::new(
             executor,
@@ -758,7 +767,8 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             },
             interrupt.clone(),
         )
-        .with_goals(crate::goal_adapter::GoalTrackerAdapter::new(goal_store).shared()),
+        .with_goals(crate::goal_adapter::GoalTrackerAdapter::new(goal_store).shared())
+        .with_compaction_requests(compaction_requests),
     );
     // Per-run tool allowlist for fork-scoped skill surfaces; the handle
     // is Arc-backed, so grabbing it before `worker` moves is enough.

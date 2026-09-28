@@ -160,6 +160,59 @@ impl TurnState {
 /// melts the turn. A successful sample resets the count.
 pub const MAX_REACTIVE_COMPACTS: u8 = 3;
 
+/// Session-level cap on model-requested compactions (default for
+/// [`RunLoop::with_model_compact_limit`]).
+///
+/// Bounds a loop where the model compacts, refills the window, and
+/// compacts again: past this many grants in one session every further
+/// `compact_context` request is denied as a transient note.
+pub const MAX_MODEL_COMPACTS: u32 = 4;
+
+/// Minimum fraction of the context window that must be in use before a
+/// model-requested compaction is granted.
+///
+/// The gate exists because the model only sees the usage note, not the
+/// gates behind it: without it a model can burn real summary calls on a
+/// nearly empty window.
+pub const MODEL_COMPACT_MIN_USED_PCT: u64 = 50;
+
+/// Shared slot the `compact_context` tool writes and the run loop
+/// consumes at the next loop head.
+///
+/// The split keeps a safe ordering: a grant rewrites the whole history,
+/// so compaction must never run inside tool execution where the calling
+/// tool's result has not landed yet. The tool only queues; the loop
+/// reviews and executes at the loop head, after results are stored.
+#[derive(Default)]
+pub struct CompactionRequests {
+    pending: std::sync::Mutex<std::collections::VecDeque<String>>,
+}
+
+impl CompactionRequests {
+    /// An empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue one request. Requests coalesce in FIFO order; the loop's
+    /// gate reviews each and denies the rest of a batch once one grant
+    /// has fired.
+    pub fn request(&self, reason: String) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back(reason);
+    }
+
+    /// Drain every queued request. The loop head consumes the slot this
+    /// way at its review point; tests and diagnostics may drain too, and
+    /// a drained slot simply has nothing for the gate to review.
+    pub fn take_all(&self) -> Vec<String> {
+        let mut slot = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *slot).into_iter().collect()
+    }
+}
+
 /// One tool invocation requested by the model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
@@ -960,6 +1013,17 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     /// calendar rolled over. Interior-mutable because the loop is shared
     /// across turns behind `&self`.
     announced_date: std::sync::Mutex<Option<String>>,
+    /// Model-driven compaction channel, wired by
+    /// [`RunLoop::with_compaction_requests`]: `None` means the model has
+    /// no compaction channel at all.
+    compaction_requests: Option<std::sync::Arc<CompactionRequests>>,
+    /// Grants made for model-requested compactions this session;
+    /// [`RunLoop::with_model_compact_limit`] bounds it. Atomic because
+    /// the loop is shared across turns behind `&self`.
+    model_compactions: std::sync::atomic::AtomicU32,
+    /// Ceiling for [`Self::model_compactions`]; zero disables grants but
+    /// the tool (if wired) still queues, and the gate still answers.
+    max_model_compacts: u32,
 }
 
 impl<E, P, H, M, A, T, C> RunLoop<E, P, H, M, A, T, C>
@@ -1001,7 +1065,29 @@ where
             run_interrupts: RunInterrupts::default(),
             inbox: InboxHandle::new(),
             announced_date,
+            compaction_requests: None,
+            model_compactions: std::sync::atomic::AtomicU32::new(0),
+            max_model_compacts: MAX_MODEL_COMPACTS,
         }
+    }
+
+    /// Wire the model-driven compaction channel (builder): the
+    /// `compact_context` tool writes into this slot and the loop reviews
+    /// the requests at the next loop head. Without it the model has no
+    /// compaction channel.
+    pub fn with_compaction_requests(
+        mut self,
+        requests: std::sync::Arc<CompactionRequests>,
+    ) -> Self {
+        self.compaction_requests = Some(requests);
+        self
+    }
+
+    /// Cap model-requested compactions for this session (builder; zero
+    /// denies every request while keeping the review answers flowing).
+    pub fn with_model_compact_limit(mut self, limit: u32) -> Self {
+        self.max_model_compacts = limit;
+        self
     }
 
     /// Let the session's durable objective continue the loop when the model
@@ -1104,10 +1190,10 @@ where
     }
 
     /// Transient notes attached to one sample request: the live context-
-    /// usage line, plus any pending transient verdicts handed in by the
-    /// loop head. Rebuilt every iteration and never stored, so a note
-    /// reads as an instrument panel for the upcoming call and is gone by
-    /// the next one. A zero window (degenerate config) notes nothing.
+    /// usage line, plus the denial texts of reviewed compaction requests.
+    /// Rebuilt every iteration and never stored, so a note reads as an
+    /// instrument panel for the upcoming call and is gone by the next
+    /// one. A zero window (degenerate config) notes nothing.
     fn sample_notes(&self, used: u64, window: u64, denials: &[String]) -> Vec<String> {
         let mut notes = Vec::new();
         if window > 0 {
@@ -1116,8 +1202,44 @@ where
                 "Context usage: {pct}% ({used}/{window} tokens)"
             )));
         }
-        notes.extend(denials.iter().cloned());
+        notes.extend(
+            denials
+                .iter()
+                .map(|denial| wavecode_wire::wrap_system_reminder(denial)),
+        );
         notes
+    }
+
+    /// Review one model-requested compaction: `Ok` grants it (the caller
+    /// runs the compaction), `Err` carries the denial reason that rides
+    /// the next sample as a transient note.
+    ///
+    /// The gates run in escalation order — session limit first, then the
+    /// per-turn once flag, then the usage floor — so the model always
+    /// sees the deepest reason its request was refused.
+    fn review_model_compact(&self, used: u64, window: u64, compacted: bool) -> Result<(), String> {
+        let done = self
+            .model_compactions
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if done >= self.max_model_compacts {
+            return Err(format!(
+                "model compaction limit reached ({done}/{})",
+                self.max_model_compacts
+            ));
+        }
+        if compacted {
+            return Err("context was already compacted this turn".to_string());
+        }
+        if window == 0 {
+            return Err("context window is zero".to_string());
+        }
+        let pct = used.saturating_mul(100) / window;
+        if pct < MODEL_COMPACT_MIN_USED_PCT {
+            return Err(format!(
+                "context is only {pct}% used ({used}/{window} tokens); compaction needs at least {MODEL_COMPACT_MIN_USED_PCT}%"
+            ));
+        }
+        Ok(())
     }
 
     /// Run one turn to a terminal [`StopReason`].
@@ -1362,6 +1484,54 @@ where
                 }
             }
 
+            // Model-requested compaction (the `compact_context` tool):
+            // reviewed here, at a safe point — tool results are already
+            // in history, so a grant can rewrite it wholesale. Denials
+            // ride the next sample as transient notes; the stored
+            // history never carries them. A grant restarts the loop
+            // head, because `used` is stale after the rewrite.
+            let mut denials: Vec<String> = Vec::new();
+            let mut granted = false;
+            if let Some(slot) = self.compaction_requests.as_ref() {
+                for reason in slot.take_all() {
+                    if granted {
+                        denials.push(format!(
+                            "compaction request denied: superseded by an earlier granted request in this batch ({reason})"
+                        ));
+                        continue;
+                    }
+                    let _ = reason;
+                    match self.review_model_compact(used, window, compacted) {
+                        Ok(()) => match self.do_compact(conv, CompactTrigger::Model, &emit_msg).await
+                        {
+                            Ok(()) => {
+                                self.model_compactions
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                compacted = true;
+                                granted = true;
+                            }
+                            Err(cause) => {
+                                denials.push(format!("compaction request denied: {cause}"));
+                            }
+                        },
+                        Err(why) => {
+                            denials.push(format!("compaction request denied: {why}"));
+                        }
+                    }
+                }
+            }
+            if !denials.is_empty() {
+                emit_msg(EventMsg::Warning {
+                    message: denials.join("; "),
+                });
+            }
+            if granted {
+                // Restart the loop head: the rewrite reset the stored
+                // history, so `used`, the date check, and the budget gate
+                // all re-run before the next sample.
+                continue;
+            }
+
             // Pre-sample steering (NextStep target) plus direct injections:
             // both land as user history immediately before the next sample
             // so they steer the upcoming call, after the budget line.
@@ -1392,7 +1562,7 @@ where
                     .filter(|tool| self.run_allowlist.is_allowed(&ctx.run_id, &tool.name))
                     .collect(),
                 output_cap: self.cfg.max_output_tokens,
-                notes: self.sample_notes(used, window, &[]),
+                notes: self.sample_notes(used, window, &denials),
             };
             // Live deltas stream to frontends ahead of the assembled
             // message; ordering (deltas before AgentMessageComplete) is
@@ -2507,6 +2677,7 @@ fn trigger_name(trigger: &CompactTrigger) -> &'static str {
         CompactTrigger::Blocking => "blocking",
         CompactTrigger::Reactive => "reactive",
         CompactTrigger::Manual { .. } => "manual",
+        CompactTrigger::Model => "model",
     }
 }
 
@@ -4386,6 +4557,231 @@ mod run_loop_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!history.contains("Context usage"), "{history}");
+    }
+
+    /// A granted model request compacts with the `Model` trigger and the
+    /// conversation collapses to the summary.
+    #[tokio::test]
+    async fn model_compaction_granted_at_high_usage() {
+        let fx = Fixture::new();
+        let trigger_log: std::sync::Arc<Mutex<Vec<CompactTrigger>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (exec, policy, hooks, model, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: trigger_log.clone(),
+        };
+        let slot = std::sync::Arc::new(CompactionRequests::new());
+        slot.request("heavy history".to_string());
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 150_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let events = fx.events.clone();
+        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
+            fx.interrupt.clone()
+        })
+        .with_compaction_requests(slot)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            trigger_log.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            &[CompactTrigger::Model]
+        );
+        let started = fx.lock_events().iter().any(|e| {
+            serde_json::to_value(&e.msg).unwrap().get("type").and_then(|t| t.as_str())
+                == Some("compact_started")
+                && serde_json::to_value(&e.msg).unwrap().get("trigger").and_then(|t| t.as_str())
+                    == Some("model")
+        });
+        assert!(started, "compact_started names the model trigger");
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(history, "summary", "a grant rewrites history to the summary");
+    }
+
+    /// Below the usage floor the request is denied and the denial rides
+    /// only the next sample's notes — never the stored history.
+    #[tokio::test]
+    async fn model_compaction_denied_below_ratio_rides_as_transient_note() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let notes_log: NotesLog = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let model = NotesModel {
+            steps: Mutex::new(VecDeque::new()),
+            notes: notes_log.clone(),
+        };
+        let slot = std::sync::Arc::new(CompactionRequests::new());
+        slot.request("too eager".to_string());
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
+            fx.interrupt.clone()
+        })
+        .with_compaction_requests(slot)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert!(
+            !fx.event_kinds().contains(&"compact_started".to_string()),
+            "a denial must not compact"
+        );
+        let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(log.len(), 1, "one sample: {log:?}");
+        let denial = &log[0][1];
+        assert!(denial.contains("compaction request denied"), "{denial:?}");
+        assert!(
+            denial.contains("context is only 1% used"),
+            "the denial names the measured ratio: {denial:?}"
+        );
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !history.contains("compaction request denied"),
+            "denials are transient: {history}"
+        );
+    }
+
+    /// A zero limit denies every request with the limit named.
+    #[tokio::test]
+    async fn model_compaction_limit_zero_denies_with_reason() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let notes_log: NotesLog = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let model = NotesModel {
+            steps: Mutex::new(VecDeque::new()),
+            notes: notes_log.clone(),
+        };
+        let slot = std::sync::Arc::new(CompactionRequests::new());
+        slot.request("still eager".to_string());
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 190_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let events = fx.events.clone();
+        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
+            fx.interrupt.clone()
+        })
+        .with_compaction_requests(slot)
+        .with_model_compact_limit(0)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            log[0].iter().any(|n| n.contains("limit reached (0/0)")),
+            "{:?}",
+            log[0]
+        );
+    }
+
+    /// Within one batch the first grant wins; the remaining requests are
+    /// denied as superseded and only one compaction runs.
+    #[tokio::test]
+    async fn granted_request_supersedes_the_rest_of_its_batch() {
+        let fx = Fixture::new();
+        let trigger_log: std::sync::Arc<Mutex<Vec<CompactTrigger>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (exec, policy, hooks, model, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: trigger_log.clone(),
+        };
+        let slot = std::sync::Arc::new(CompactionRequests::new());
+        slot.request("first".to_string());
+        slot.request("second".to_string());
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 150_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let events = fx.events.clone();
+        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
+            fx.interrupt.clone()
+        })
+        .with_compaction_requests(slot)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert_eq!(
+            trigger_log.lock().unwrap_or_else(|e| e.into_inner()).len(),
+            1,
+            "one grant per batch"
+        );
+        assert!(fx.lock_events().iter().any(|e| {
+            serde_json::to_value(&e.msg).unwrap().get("type").and_then(|t| t.as_str())
+                == Some("warning")
+                && serde_json::to_value(&e.msg)
+                    .unwrap()
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("superseded"))
+        }));
+    }
+
+    /// A failing compactor downgrades the grant into a denial note and
+    /// the turn continues instead of dying.
+    #[tokio::test]
+    async fn failed_model_compaction_reports_and_continues() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, _) = default_parts();
+        let notes_log: NotesLog = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let model = NotesModel {
+            steps: Mutex::new(VecDeque::new()),
+            notes: notes_log.clone(),
+        };
+        let compactor = FakeCompactor {
+            fail: true,
+            calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+        };
+        let slot = std::sync::Arc::new(CompactionRequests::new());
+        slot.request("heavy".to_string());
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 150_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let events = fx.events.clone();
+        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
+            fx.interrupt.clone()
+        })
+        .with_compaction_requests(slot)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed, "a failed grant is not fatal");
+        let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            log[0]
+                .iter()
+                .any(|n| n.contains("compaction request denied: compaction failed: boom")),
+            "{:?}",
+            log[0]
+        );
     }
 
     #[tokio::test]

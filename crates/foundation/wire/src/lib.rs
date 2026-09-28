@@ -134,6 +134,12 @@ pub enum WireDecision {
 }
 
 /// Approval kind carried with an approval request for display routing.
+///
+/// Serde twin of `wavecode_protocol::ApprovalKind` (the sandbox-side
+/// verdict vocabulary): the two crates cannot share a dependency edge, so
+/// each names the enum, and the composition root locks their serde forms
+/// byte-equal — a tag change here must be mirrored there in the same
+/// commit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {

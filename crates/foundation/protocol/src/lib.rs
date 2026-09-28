@@ -106,6 +106,11 @@ pub enum ToolKind {
 }
 
 /// Approval kind (the approval request's `kind`), letting the frontend pick a display shape.
+///
+/// Serde twin of `wavecode_wire::ApprovalKind` (the live event payload
+/// type): the two crates cannot share a dependency edge, so each names
+/// the enum, and the composition root locks their serde forms byte-equal
+/// — a tag change here must be mirrored there in the same commit.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

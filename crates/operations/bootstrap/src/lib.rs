@@ -61,3 +61,40 @@ pub use session::{
 };
 pub use status_queries::SessionStatus;
 pub use tool_adapter::ToolAdapter;
+
+/// Cross-stack serde contract: `wavecode_wire` and `wavecode_protocol`
+/// are sibling vocabulary crates that cannot share a dependency edge, so
+/// each names its own `ApprovalKind` — the wire event payload type and
+/// the sandbox verdict type. Both spell `exec` / `write` in snake_case on
+/// the wire; this test locks the two representations byte-equal so a tag
+/// change on one side cannot ship without the other (both enums' doc
+/// comments point here).
+#[cfg(test)]
+mod approval_kind_cross_stack {
+    #[test]
+    fn wire_and_protocol_approval_kinds_serialize_identically() {
+        let pairs = [
+            (
+                wavecode_wire::ApprovalKind::Exec,
+                wavecode_protocol::ApprovalKind::Exec,
+            ),
+            (
+                wavecode_wire::ApprovalKind::Write,
+                wavecode_protocol::ApprovalKind::Write,
+            ),
+        ];
+        for (wire, protocol) in pairs {
+            let wire_json = serde_json::to_value(wire).unwrap();
+            let protocol_json = serde_json::to_value(protocol).unwrap();
+            assert_eq!(
+                wire_json, protocol_json,
+                "ApprovalKind serde forms drifted between wire and protocol"
+            );
+            // Deserialize each side's form as the other: the tags are
+            // interchangeable, not merely equal-by-coincidence.
+            let wire_back: wavecode_wire::ApprovalKind =
+                serde_json::from_value(protocol_json).unwrap();
+            assert_eq!(wire_back, wire);
+        }
+    }
+}

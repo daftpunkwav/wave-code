@@ -2,13 +2,16 @@
 //! the newest published GitHub release on the binary-release repo,
 //! and optionally replace the running binary with it.
 //!
-//! Explicit surface only (`wavecode update`, `wavecode update
-//! --install`): no startup probing, no background download. A check
-//! failure is reported and exits non-zero instead of ever degrading
-//! into a false "up to date". The install path downloads the bare
-//! release asset, verifies it against the published sha256 checksum
-//! before touching anything, refuses to touch source builds, and
-//! keeps a `.bak` of the replaced binary as the rollback copy.
+//! Downloads and installs happen only on the explicit surface
+//! (`wavecode update --install`): the interactive session may run one
+//! passive availability check in the background to fill the footer
+//! notice, but it never downloads. A check failure is reported and
+//! exits non-zero instead of ever degrading into a false "up to date".
+//! The install path downloads the bare release asset from the GitHub
+//! host only (origin allowlist in [`fetch_release`]), verifies it
+//! against the published sha256 checksum before touching anything,
+//! refuses to touch source builds, and keeps a `.bak` of the replaced
+//! binary as the rollback copy.
 
 use anyhow::{Context as _, Result};
 use serde_json::Value;
@@ -16,6 +19,35 @@ use sha2::{Digest as _, Sha256};
 
 /// Repository whose GitHub Releases carry `wavecode` binaries.
 const RELEASES_REPO: &str = "daftpunkwav/wave-code";
+
+/// The only host a release asset may download from. `browser_download_url`
+/// values on GitHub Releases point here; anything else in the API payload
+/// is dropped at parse time. The sha256 verification stays the
+/// content-level guarantee, this is the origin-level one: a tampered or
+/// misbehaving API response must not redirect the binary download (and
+/// its checksum) to an unknown host.
+const RELEASE_ASSET_HOST: &str = "github.com";
+
+/// True when `url` is an https URL on [`RELEASE_ASSET_HOST`] (case- and
+/// trailing-dot-insensitive on the host, the forms reqwest compares
+/// case-insensitively too). Subdomain lookalikes
+/// (`github.com.evil.test`) and http-downgrades fail the check.
+fn is_release_asset_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    match parsed.host_str() {
+        // A trailing root dot is the DNS root label, still github.com.
+        Some(host) => host
+            .strip_suffix('.')
+            .unwrap_or(host)
+            .eq_ignore_ascii_case(RELEASE_ASSET_HOST),
+        None => false,
+    }
+}
 
 /// One downloadable file attached to a release.
 #[derive(Debug, Clone)]
@@ -109,7 +141,7 @@ pub async fn fetch_release(client: &reqwest::Client) -> Result<Option<Release>> 
         for asset in list {
             let name = asset["name"].as_str().unwrap_or_default();
             let asset_url = asset["browser_download_url"].as_str().unwrap_or_default();
-            if !name.is_empty() && !asset_url.is_empty() {
+            if !name.is_empty() && !asset_url.is_empty() && is_release_asset_url(asset_url) {
                 assets.push(Asset {
                     name: name.to_string(),
                     url: asset_url.to_string(),
@@ -318,6 +350,32 @@ mod tests {
             classify("v9.9.9", "https://example.com/new"),
             UpdateStatus::Available { .. }
         ));
+    }
+
+    /// The asset origin allowlist: GitHub release URLs pass; lookalike
+    /// hosts, http downgrades, subdomain spoofs, and garbage fail.
+    #[test]
+    fn asset_urls_must_point_at_the_release_host() {
+        assert!(is_release_asset_url(
+            "https://github.com/daftpunkwav/wave-code/releases/download/v0.2.1/wavecode-bin"
+        ));
+        // Case-insensitive host, trailing root dot tolerated.
+        assert!(is_release_asset_url("https://GitHub.com/a/b"));
+        assert!(is_release_asset_url("https://github.com./a/b"));
+        for rejected in [
+            "http://github.com/daftpunkwav/wave-code/releases/download/v/x",
+            "https://github.com.evil.test/a/b",
+            "https://evil.test/github.com/a/b",
+            "https://raw.githubusercontent.com/a/b",
+            "ftp://github.com/a/b",
+            "not a url",
+            "",
+        ] {
+            assert!(
+                !is_release_asset_url(rejected),
+                "'{rejected}' must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -266,9 +266,16 @@ fn unwrap_url(href: &str) -> String {
 
 /// Whether the HTML looks like a DDG results page at all (guards the
 /// parse-failure business error: a block page / captcha carries none of these
-/// markers).
+/// markers). The anchors are the result classes for hit pages and the
+/// `no-results` marker / "no results" text for empty pages. The bare word
+/// "results" is deliberately NOT an anchor — it appears on unrelated pages
+/// (nav text, block pages), which would mask a DOM redesign as a silent
+/// "no results found".
 fn looks_like_ddg_results(html: &str) -> bool {
-    html.contains("result__a") || html.contains("result__snippet") || html.contains("results")
+    html.contains("result__a")
+        || html.contains("result__snippet")
+        || html.contains("no-results")
+        || html.to_ascii_lowercase().contains("no results")
 }
 
 /// Result link pattern (`class="result__a"` anchors with their href);
@@ -479,6 +486,27 @@ mod tests {
         assert_eq!(parse_ddg_html(STUB_HTML, 1).len(), 1);
         assert!(parse_ddg_html("<html><body>captcha</body></html>", 5).is_empty());
         assert!(!looks_like_ddg_results("<html><body>captcha</body></html>"));
+    }
+
+    /// The anchor set distinguishes the three page shapes: hits (result
+    /// classes), an honest empty page (no-results marker / text), and an
+    /// unrecognized page (DOM redesign, block page) that must surface as a
+    /// parse failure instead of a silent "no results found".
+    #[test]
+    fn page_shape_anchors_distinguish_hits_empty_and_unrecognized() {
+        // Hit pages carry the result anchors.
+        assert!(looks_like_ddg_results(STUB_HTML));
+        // An honest empty page: the no-results marker or the text form.
+        assert!(looks_like_ddg_results(
+            r#"<div class="no-results">Nothing here.</div>"#
+        ));
+        assert!(looks_like_ddg_results("<p>No results for that query.</p>"));
+        assert!(looks_like_ddg_results("<p>NO RESULTS.</p>"));
+        // A redesigned page that still mentions "results" in prose carries
+        // none of the anchors: it must NOT read as an empty result page.
+        let redesigned = r#"<html><body>View results on the new portal. results</body></html>"#;
+        assert!(!looks_like_ddg_results(redesigned));
+        assert!(parse_ddg_html(redesigned, 5).is_empty());
     }
 
     #[test]

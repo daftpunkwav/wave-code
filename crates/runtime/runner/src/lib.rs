@@ -171,6 +171,43 @@ pub const MAX_MODEL_COMPACTS: u32 = 4;
 /// nearly empty window.
 pub const MODEL_COMPACT_MIN_USED_PCT: u64 = 50;
 
+/// Shared slot the per-directory instruction discovery writes and the run
+/// loop consumes at the next loop head.
+///
+/// When a file tool touches a directory whose nearest `AGENTS.md` has not
+/// been loaded yet, discovery queues `(directory, content)` here; the loop
+/// turns each into a persistent user entry wrapped in `<system-reminder>`,
+/// so the directory's rules ride the conversation from that point on.
+/// Persistent, not transient: a directory's constraints stay relevant for
+/// every later operation in it, and the text does not go stale.
+#[derive(Default)]
+pub struct DirectoryInstructions {
+    pending: std::sync::Mutex<std::collections::VecDeque<(std::path::PathBuf, String)>>,
+}
+
+impl DirectoryInstructions {
+    /// An empty slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue one discovered instruction file's directory and content.
+    pub fn offer(&self, directory: std::path::PathBuf, content: String) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push_back((directory, content));
+    }
+
+    /// Drain every queued instruction. The loop head consumes the slot
+    /// at its injection point; tests and diagnostics may drain too, and
+    /// a drained slot simply has nothing left to land.
+    pub fn take_all(&self) -> Vec<(std::path::PathBuf, String)> {
+        let mut slot = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *slot).into_iter().collect()
+    }
+}
+
 /// Shared slot the `compact_context` tool writes and the run loop
 /// consumes at the next loop head.
 ///
@@ -999,6 +1036,10 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     /// [`RunLoop::with_compaction_requests`]: `None` means the model has
     /// no compaction channel at all.
     compaction_requests: Option<std::sync::Arc<CompactionRequests>>,
+    /// Per-directory instruction channel, wired by
+    /// [`RunLoop::with_instruction_requests`]: `None` means no nested
+    /// `AGENTS.md` discovery runs.
+    instruction_requests: Option<std::sync::Arc<DirectoryInstructions>>,
     /// Grants made for model-requested compactions this session;
     /// [`RunLoop::with_model_compact_limit`] bounds it. Atomic because
     /// the loop is shared across turns behind `&self`.
@@ -1046,9 +1087,21 @@ where
             run_interrupts: RunInterrupts::default(),
             inbox: InboxHandle::new(),
             compaction_requests: None,
+            instruction_requests: None,
             model_compactions: std::sync::atomic::AtomicU32::new(0),
             max_model_compacts: MAX_MODEL_COMPACTS,
         }
+    }
+
+    /// Wire the per-directory instruction channel (builder): discovery
+    /// queues nested `AGENTS.md` content here and the loop lands each as
+    /// a persistent user entry at the next loop head.
+    pub fn with_instruction_requests(
+        mut self,
+        requests: std::sync::Arc<DirectoryInstructions>,
+    ) -> Self {
+        self.instruction_requests = Some(requests);
+        self
     }
 
     /// Wire the model-driven compaction channel (builder): the
@@ -1337,6 +1390,23 @@ where
             for text in self.inbox.take_next_turn() {
                 conv.push(Role::User, text);
                 applied += 1;
+            }
+
+            // Per-directory instructions discovered by the file tools:
+            // each lands as a persistent user entry, so a directory's
+            // rules ride the conversation from the turn after its first
+            // touched file onward.
+            if let Some(requests) = self.instruction_requests.as_ref() {
+                for (directory, content) in requests.take_all() {
+                    conv.push(
+                        Role::User,
+                        wavecode_wire::wrap_system_reminder(&format!(
+                            "Project instructions from {}:\n\n{}",
+                            directory.display(),
+                            content.trim_end()
+                        )),
+                    );
+                }
             }
 
             // Context use feeds both gates below. The incremental estimator
@@ -6039,6 +6109,47 @@ mod run_loop_tests {
         assert!(
             !history.contains("today: "),
             "the date note is transient: {history}"
+        );
+    }
+
+    /// Discovered per-directory instructions land as persistent history:
+    /// a directory's rules ride the conversation from the turn after its
+    /// first touched file onward, the opposite of the transient notes.
+    #[tokio::test]
+    async fn discovered_directory_instructions_land_as_persistent_history() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        let requests = std::sync::Arc::new(DirectoryInstructions::new());
+        requests.offer(
+            std::path::PathBuf::from("/w/crates/app"),
+            "APP RULES".to_string(),
+        );
+        let conv = &mut Conversation::new();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            { fx.interrupt.clone() },
+        )
+        .with_instruction_requests(requests)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            history.contains("Project instructions from /w/crates/app")
+                && history.contains("APP RULES"),
+            "{history}"
         );
     }
 

@@ -704,6 +704,16 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             wavecode_context::spill::default_spill_store_root(),
         ),
     );
+    // Nested-instruction discovery: session assembly loaded the global,
+    // project-root, and cwd tiers; this layer offers each deeper
+    // directory's AGENTS.md the first time a file tool touches it. The
+    // project root bounds the upward walk — its own tier is already in.
+    let instruction_requests = Arc::new(runtime_runner::DirectoryInstructions::new());
+    let executor = crate::agents_instructions::AgentsInstructionsExecutor::new(
+        executor,
+        wavecode_memory::find_project_root(&cwd),
+        instruction_requests.clone(),
+    );
     // Durable goal service (persisted objective with CAS): the store path
     // derives from home (`<home>/.wavecode/goals/<session>.json`) so resume
     // in the same home reopens the same goal. Corrupt content warns and
@@ -763,7 +773,8 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             interrupt.clone(),
         )
         .with_goals(crate::goal_adapter::GoalTrackerAdapter::new(goal_store).shared())
-        .with_compaction_requests(compaction_requests),
+        .with_compaction_requests(compaction_requests)
+        .with_instruction_requests(instruction_requests),
     );
     // Per-run tool allowlist for fork-scoped skill surfaces; the handle
     // is Arc-backed, so grabbing it before `worker` moves is enough.

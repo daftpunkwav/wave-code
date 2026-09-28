@@ -428,6 +428,13 @@ pub trait ToolExecutor: Send + Sync {
     fn available_tools(&self) -> Vec<ToolRef> {
         Vec::new()
     }
+
+    /// The loop calls this after a compaction rewrote the history.
+    /// Layers that remember what they already injected into the old
+    /// history clear that memory, so their content can be re-offered
+    /// when the model touches the relevant files again. Default does
+    /// nothing.
+    fn note_compacted(&self) {}
 }
 
 /// Decides the policy verdict for one tool call before execution.
@@ -898,12 +905,19 @@ impl GoalTracker for NoGoal {
 }
 
 /// Result of one context compaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Compacted {
     /// Summary text replacing the compacted history.
     pub summary: String,
     /// Token estimate of the summary message.
     pub summary_tokens: u64,
+    /// Verbatim tail preserved past the summary (most recent messages,
+    /// pairing-normalized by the compactor). Empty means summary-only
+    /// replacement — the historical shape a minimal compactor keeps.
+    /// Tail entries are the compactor's flattened text view of the history
+    /// (tool payloads rendered as text), so they never carry pairing
+    /// obligations into the replacement.
+    pub tail: Vec<HistoryEntry>,
 }
 
 /// Compaction failure modes.
@@ -1215,6 +1229,7 @@ where
         &self,
         used: u64,
         window: u64,
+        estimated: bool,
         repeat_streak: u32,
         denials: &[String],
     ) -> Vec<String> {
@@ -1228,9 +1243,14 @@ where
             infrastructure_base::format_date(std::time::SystemTime::now())
         )));
         if let Some(pct) = used.saturating_mul(100).checked_div(window) {
-            notes.push(wavecode_wire::wrap_system_reminder(&format!(
-                "Context usage: {pct}% ({used}/{window} tokens)"
-            )));
+            let figure = if estimated {
+                // No provider bill and no carry yet: the number is a
+                // character estimate and says so.
+                format!("Context usage: ~{pct}% ({used}/{window} tokens, estimated)")
+            } else {
+                format!("Context usage: {pct}% ({used}/{window} tokens)")
+            };
+            notes.push(wavecode_wire::wrap_system_reminder(&figure));
         }
         // `repeat_note` already returns None below the first threshold.
         if let Some(text) = repeat_note(repeat_streak) {
@@ -1411,6 +1431,10 @@ where
             // Context use feeds both gates below. The incremental estimator
             // must see an iteration exactly once, so it runs here rather than
             // inside the budget branch.
+            let carry = conv.usage_carry();
+            // Estimated = no provider bill for this conversation yet and no
+            // carry: the figure comes from the character heuristic.
+            let estimated = last_input.is_none() && carry.input_tokens == 0;
             let used = match last_input {
                 // Resident context is the last request's prompt plus that
                 // request's own output. Earlier samples' outputs are already
@@ -1418,7 +1442,6 @@ where
                 // total (`total_output_tokens`) must not be re-added here.
                 Some(input_tokens) => input_tokens.saturating_add(last_output.unwrap_or(0)),
                 None => {
-                    let carry = conv.usage_carry();
                     if carry.input_tokens > 0 {
                         carry.input_tokens + carry.output_tokens
                     } else {
@@ -1608,7 +1631,7 @@ where
                     .filter(|tool| self.run_allowlist.is_allowed(&ctx.run_id, &tool.name))
                     .collect(),
                 output_cap: self.cfg.max_output_tokens,
-                notes: self.sample_notes(used, window, state.repeat_streak, &denials),
+                notes: self.sample_notes(used, window, estimated, state.repeat_streak, &denials),
             };
             // Live deltas stream to frontends ahead of the assembled
             // message; ordering (deltas before AgentMessageComplete) is
@@ -1937,18 +1960,34 @@ where
             .compact(history_messages(conv).as_ref().clone(), trigger)
             .await
             .map_err(|e| e.to_string())?;
-        conv.replace(vec![HistoryEntry {
+        // The new history is the summary entry plus whatever verbatim tail
+        // the compactor preserved; a compactor without a tail degrades to
+        // the summary-only replacement.
+        let mut replacement = vec![HistoryEntry {
             role: Role::User,
             blocks: vec![state_store::Block::Text(done.summary.clone())],
-        }]);
+        }];
+        replacement.extend(done.tail.iter().cloned());
+        conv.replace(replacement);
+        // The usage carry must describe the replacement, not the old
+        // history: summary plus the retained tail's estimate, or the next
+        // budget check would reason from a figure that no longer exists.
+        let tail_tokens: u64 = done
+            .tail
+            .iter()
+            .map(|entry| estimate_tokens(&entry.text()))
+            .sum();
         conv.settle(Usage {
-            input_tokens: estimate_tokens(&done.summary) + CONTEXT_OVERHEAD_TOKENS,
+            input_tokens: done.summary_tokens + tail_tokens + CONTEXT_OVERHEAD_TOKENS,
             output_tokens: 0,
             ..Usage::default()
         });
         emit(EventMsg::CompactCompleted {
             summary_tokens: done.summary_tokens,
         });
+        // Discovery layers treat a compaction as "everything was said
+        // again from scratch": per-directory instructions may re-offer.
+        self.executor.note_compacted();
         let post = self.hooks.run(HookPoint::PostCompact, "").await;
         if !post.message.is_empty() {
             emit(EventMsg::Warning {
@@ -3036,6 +3075,8 @@ mod run_loop_tests {
     struct FakeCompactor {
         fail: bool,
         calls: std::sync::Arc<Mutex<Vec<CompactTrigger>>>,
+        /// Verbatim tail the compactor preserves past the summary.
+        tail: Vec<HistoryEntry>,
     }
 
     #[async_trait::async_trait]
@@ -3055,6 +3096,7 @@ mod run_loop_tests {
             Ok(Compacted {
                 summary: "summary".to_string(),
                 summary_tokens: 10,
+                tail: self.tail.clone(),
             })
         }
     }
@@ -3178,6 +3220,7 @@ mod run_loop_tests {
             FakeCompactor {
                 fail: false,
                 calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+                tail: Vec::new(),
             },
         )
     }
@@ -4297,6 +4340,7 @@ mod run_loop_tests {
         let compactor = FakeCompactor {
             fail: false,
             calls: trigger_log.clone(),
+            tail: Vec::new(),
         };
         let (model, samples) = switchable_model();
         let conv = &mut Conversation::new();
@@ -4358,6 +4402,7 @@ mod run_loop_tests {
         let compactor = FakeCompactor {
             fail: false,
             calls: trigger_log.clone(),
+            tail: Vec::new(),
         };
         let (model, samples) = switchable_model();
         let conv = &mut Conversation::new();
@@ -4415,6 +4460,7 @@ mod run_loop_tests {
         let compactor = FakeCompactor {
             fail: false,
             calls: trigger_log.clone(),
+            tail: Vec::new(),
         };
         let (model, samples) = switchable_model();
         let conv = &mut Conversation::new();
@@ -4580,6 +4626,15 @@ mod run_loop_tests {
         assert_eq!(outcome, StopReason::Completed);
         let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(log.len(), 2, "two samples drove the turn: {log:?}");
+        // The first sample has no provider bill yet: its figure is the
+        // character estimate and is marked as such. The second reports
+        // billed usage unmarked.
+        assert!(log[0][1].contains("tokens, estimated)"), "{:?}", log[0][1]);
+        assert!(
+            !log[1][1].contains("estimated") && log[1][1].contains("Context usage: 25%"),
+            "{:?}",
+            log[1][1]
+        );
         for sample_notes in log.iter() {
             assert_eq!(sample_notes.len(), 2, "{sample_notes:?}");
             assert!(
@@ -4611,6 +4666,7 @@ mod run_loop_tests {
         let compactor = FakeCompactor {
             fail: false,
             calls: trigger_log.clone(),
+            tail: Vec::new(),
         };
         let slot = std::sync::Arc::new(CompactionRequests::new());
         slot.request("heavy history".to_string());
@@ -4667,6 +4723,80 @@ mod run_loop_tests {
         assert_eq!(
             history, "summary",
             "a grant rewrites history to the summary"
+        );
+    }
+
+    /// A compactor that preserves a verbatim tail replaces the history
+    /// with summary plus tail, and the usage carry describes the
+    /// replacement rather than the old history.
+    #[tokio::test]
+    async fn compaction_preserves_a_verbatim_tail() {
+        let fx = Fixture::new();
+        let trigger_log: std::sync::Arc<Mutex<Vec<CompactTrigger>>> =
+            std::sync::Arc::new(Mutex::new(Vec::new()));
+        let (exec, policy, hooks, model, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: trigger_log.clone(),
+            tail: vec![
+                HistoryEntry {
+                    role: Role::User,
+                    blocks: vec![state_store::Block::Text(
+                        "kept tool output: exit code 7".to_string(),
+                    )],
+                },
+                HistoryEntry {
+                    role: Role::Assistant,
+                    blocks: vec![state_store::Block::Text("noted".to_string())],
+                },
+            ],
+        };
+        let slot = std::sync::Arc::new(CompactionRequests::new());
+        slot.request("heavy history".to_string());
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 150_000,
+            output_tokens: 0,
+            ..Usage::default()
+        });
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .with_compaction_requests(slot)
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(history.starts_with("summary"), "{history}");
+        assert!(
+            history.contains("kept tool output: exit code 7") && history.contains("noted"),
+            "the tail rides the replacement: {history}"
+        );
+        // The post-compaction carry sums the summary and the tail: the
+        // next budget check must not reason from the old 150k figure.
+        let carry = conv.usage_carry();
+        assert!(
+            carry.input_tokens > 0 && carry.input_tokens < 1_000,
+            "carry describes the replacement: {carry:?}"
         );
     }
 
@@ -4782,6 +4912,7 @@ mod run_loop_tests {
         let compactor = FakeCompactor {
             fail: false,
             calls: trigger_log.clone(),
+            tail: Vec::new(),
         };
         let slot = std::sync::Arc::new(CompactionRequests::new());
         slot.request("first".to_string());
@@ -4843,6 +4974,7 @@ mod run_loop_tests {
         let compactor = FakeCompactor {
             fail: true,
             calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+            tail: Vec::new(),
         };
         let slot = std::sync::Arc::new(CompactionRequests::new());
         slot.request("heavy".to_string());
@@ -6052,10 +6184,7 @@ mod run_loop_tests {
             .map(|entry| entry.text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            !history.contains("has now been issued"),
-            "{history}"
-        );
+        assert!(!history.contains("has now been issued"), "{history}");
     }
 
     /// A different call between repeats resets the streak: the breaker must

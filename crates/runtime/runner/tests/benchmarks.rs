@@ -159,6 +159,7 @@ impl Compactor for NullCompactor {
         Ok(Compacted {
             summary: "bench".to_string(),
             summary_tokens: 1,
+            ..Compacted::default()
         })
     }
 }

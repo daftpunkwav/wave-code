@@ -176,9 +176,38 @@ impl Compactor for ContextCompactor {
             .await
             .map_err(|e| CompactError::Failed(e.to_string()))?;
         let summary = self.finalize(outcome.summary);
+        // `outcome.messages` is [summary entry, verbatim tail...] at the
+        // pipeline's flattened text view; rebuild the tail as seam entries.
+        // Footers ride the summary entry only, so the tail stays verbatim.
+        let tail = outcome
+            .messages
+            .into_iter()
+            .skip(1)
+            .map(|message| {
+                let text = message
+                    .content
+                    .into_iter()
+                    .map(|block| match block {
+                        ContentBlock::Text { text } => text,
+                        other => format!("{other:?}"),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                HistoryEntry {
+                    role: if message.role == Role::Assistant {
+                        HistoryRole::Assistant
+                    } else {
+                        HistoryRole::User
+                    },
+                    blocks: vec![state_store::Block::Text(text)],
+                }
+            })
+            .collect();
+        let summary_tokens = estimate_tokens(&summary);
         Ok(Compacted {
-            summary_tokens: estimate_tokens(&summary),
             summary,
+            summary_tokens,
+            tail,
         })
     }
 }

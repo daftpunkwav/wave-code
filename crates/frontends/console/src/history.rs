@@ -84,20 +84,21 @@ mod tests {
     #[test]
     fn missing_file_loads_empty() {
         let entries = load(std::path::Path::new("/nonexistent/history.jsonl"), 0);
-
-        #[test]
-        fn load_honors_a_configured_limit() {
-            let temp = tempfile::tempdir().unwrap();
-            let path = temp.path().join("history.jsonl");
-            for i in 0..10 {
-                append(&path, &format!("entry-{i}"));
-            }
-            // 0 falls back to the built-in cap; a configured limit trims.
-            assert_eq!(load(&path, 0).len(), 10);
-            let entries = load(&path, 3);
-            assert_eq!(entries, vec!["entry-7", "entry-8", "entry-9"]);
-        }
         assert!(entries.is_empty());
+    }
+
+    /// A configured limit trims the tail of the load (0 falls back to
+    /// the built-in cap).
+    #[test]
+    fn load_honors_a_configured_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.jsonl");
+        for i in 0..10 {
+            append(&path, &format!("entry-{i}"));
+        }
+        assert_eq!(load(&path, 0).len(), 10);
+        let entries = load(&path, 3);
+        assert_eq!(entries, vec!["entry-7", "entry-8", "entry-9"]);
     }
 
     #[test]

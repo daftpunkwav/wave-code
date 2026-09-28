@@ -2684,7 +2684,7 @@ verify from the repository.";
         let rows = self.status.job_rows();
         if rows.is_empty() {
             self.push_status(
-                "no background jobs (a shell command that outlives its                  timeout is promoted into one)",
+                "no background jobs (a shell command that outlives its timeout is promoted into one)",
                 false,
             );
             return;

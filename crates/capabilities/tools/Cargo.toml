@@ -25,6 +25,14 @@ tokio.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 glob.workspace = true
+# Console code-page fallback for child-output decoding (GBK `dir`
+# output and friends that plain UTF-8 lossy turns into U+FFFD noise).
+encoding_rs.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# GetACP() for the fallback decoder below; raw bindings like the
+# sandbox backend use.
+windows-sys = { workspace = true, features = ["Win32_Globalization"] }
 
 [dev-dependencies]
 tempfile.workspace = true

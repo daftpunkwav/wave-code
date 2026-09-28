@@ -52,7 +52,7 @@ async fn execute(&self, input, ctx: &ToolCtx) -> Result<ToolOutput>;
 
 - `read`、`write`、`edit` — `src/fs/mod.rs`（外加 `fs/read.rs`、`fs/write.rs`、`fs/edit.rs`）；写入是原子的（临时文件+改名），带大小上限与 edit 的精确匹配唯一性检查。`read` 支持经负 `offset` 的尾部读取（从文件末尾倒数，头部标注 `[showing lines X-Y of T]`），未命中路径时按同级文件名给出最接近的建议（有界扫描 + 有界 Levenshtein）。`read` 把每个文件的 (mtime, len) 指纹记入会话共享的 `FileLedger`，`write` / `edit` 在落盘指纹偏离会话最近一次所见时拒绝改写，外部变更由此强制先重读，而不是被悄悄覆盖。
 - `grep`、`glob` — `src/search/`；同步遍历包在 `spawn_blocking` 里。
-- `shell` — `src/shell_tool.rs`；经 `sanitize_env`（剥离 `deny_env` 名单及 `*_KEY`、`*_PAT`、`AWS_SECRET_ACCESS_KEY` 等敏感形态变量）与 OS sandbox 后端生成子进程。会话装配把 job 服务接为 shell 的 `RunHandoff`，因此超过超时的命令会被**晋升**为后台作业（进程在 `JobService` 下继续运行；turn 继续推进，由 `job_wait`/`job_output` 收集；完成通知只在晋升时才打开）——没有接缝时、或在 `WAVECODE_SANDBOX_OS` 隔离模式下，超时杀死进程并报告杀死前已产生的输出。完成运行的单流在捕获上限处被截断时会把全文落入 context 的 `SpillStore`，给出 `spill` 工具可读回的 `spill://` URI。
+- `shell` — `src/shell_tool.rs`；经 `sanitize_env`（剥离 `deny_env` 名单及 `*_KEY`、`*_PAT`、`AWS_SECRET_ACCESS_KEY` 等敏感形态变量）与 OS sandbox 后端生成子进程。会话装配把 job 服务接为 shell 的 `RunHandoff`，因此超过超时的命令会被**晋升**为后台作业（进程在 `JobService` 下继续运行；turn 继续推进，由 `job_wait`/`job_output` 收集；完成通知只在晋升时才打开）——没有接缝时、或在 `WAVECODE_SANDBOX_OS` 隔离模式下，超时杀死进程并报告杀死前已产生的输出。完成运行的单流在捕获上限处被截断时会把全文落入 context 的 `SpillStore`，给出 `spill` 工具可读回的 `spill://` URI。捕获流先按 UTF-8 解码，逐行回退到 Windows ANSI 代码页（中文主机为 GBK），`cmd` 内建命令的输出不再变成 U+FFFD 乱码；`python`/`node` 走同一个解码器。
 - `python`、`node` — `src/script.rs`（非只读）。
 - `lsp_symbols`、`lsp_definition`、`lsp_hover`、`lsp_references` — `src/lsp.rs`；导航工具只读。
 - `web_fetch` — `src/web_fetch.rs`；`web_search` — `src/websearch.rs`（DuckDuckGo 后端）；两者只读。

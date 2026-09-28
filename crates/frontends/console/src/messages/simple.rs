@@ -310,8 +310,13 @@ impl Component for AssistantMessage {
         self.lines = None;
         // The renderer bakes the theme into its styles at construction:
         // restyle in place so the next render repaints under the new
-        // theme instead of the one this message was built with.
+        // theme instead of the one this message was built with. The
+        // highlighter bakes the syntax theme the same way — without a
+        // rebuild, dark-era code blocks stay near-invisible on the
+        // light paper.
         self.markdown.set_style(Self::markdown_styles());
+        self.markdown
+            .set_highlighter(crate::highlight::highlighter());
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

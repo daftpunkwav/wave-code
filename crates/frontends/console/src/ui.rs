@@ -2171,6 +2171,16 @@ verify from the repository.";
         // editor (and its popup) must be rebuilt for the new palette,
         // and every transcript component drops its cached lines.
         self.editor.set_style(editor_style());
+        // The generic style resets the border to Neutral; the mode or
+        // shell accent re-applies so a theme switch does not gray out
+        // the plan/auto/shell border color.
+        if self.shell_chrome {
+            let shell = theme::current().style(Token::ShellMode);
+            self.editor.set_border_style(shell);
+        } else {
+            let border = mode_border_style(&self.state.permission_mode);
+            self.editor.set_border_style(border);
+        }
         self.transcript.invalidate_all();
         // The live draft bakes the old palette into its cached lines.
         self.streaming_draft = None;
@@ -2379,9 +2389,13 @@ verify from the repository.";
             self.tip_rotated_at = Instant::now();
         }
         // An external status line owns row 1 outright when it has
-        // produced output.
+        // produced output. Sanitized text rides the theme's dim tone:
+        // unpainted, it would inherit the host foreground and drop off
+        // the palette contract on a recolored light paper.
         if let Some(line) = self.state.status_line.clone() {
-            let row1 = tui_engine::width::truncate_to_width(&line, columns);
+            let row1 = theme::current()
+                .style(Token::TextDim)
+                .paint(&tui_engine::width::truncate_to_width(&line, columns));
             let hint = if self.exit_armed() {
                 TransientHint::ExitConfirm
             } else {
@@ -2407,11 +2421,18 @@ verify from the repository.";
     /// Tick work for the external status line: spawn when due, pick up
     /// a finished line. True when the footer needs a repaint.
     pub fn poll_statusline(&mut self) -> bool {
+        // Sync before the guard: a disabled status line still has to
+        // retire its last rendered output, or the final line parks in
+        // the footer until the session is replaced.
+        let line = self.status_line.current();
         if self.status_line.command().is_none() {
+            if line.is_none() && self.state.status_line.is_some() {
+                self.state.status_line = None;
+                return true;
+            }
             return false;
         }
         self.status_line.maybe_spawn(self.status_snapshot());
-        let line = self.status_line.current();
         if line != self.state.status_line {
             self.state.status_line = line;
             true

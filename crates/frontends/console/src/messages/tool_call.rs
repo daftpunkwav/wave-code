@@ -154,10 +154,12 @@ pub struct ToolCall {
 
 /// Per-tool output styling for one (possibly wrapped) line. Grep match
 /// lines light up their path and line number; anything else — and any
-/// wrap segment too broken to parse — stays dim body text.
+/// wrap segment too broken to parse — rides the body text tone. The
+/// output is what the user is reading: the dim tone (below the light
+/// theme's AA contrast for body text) stays on the punctuation.
 fn style_output_line(tool: &str, line: &str) -> String {
     let theme = theme::current();
-    let body = theme.style(Token::TextDim);
+    let body = theme.style(Token::Text);
     if tool.eq_ignore_ascii_case("grep")
         && let Some((path, rest)) = line.split_once(':')
         && let Some((number, content)) = rest.split_once(':')
@@ -168,9 +170,9 @@ fn style_output_line(tool: &str, line: &str) -> String {
         return format!(
             "  {}{}{}{}",
             theme.style(Token::Text).paint(path),
-            body.paint(":"),
+            theme.style(Token::TextDim).paint(":"),
             theme.style(Token::Accent).paint(number),
-            body.paint(&format!(":{content}")),
+            theme.style(Token::TextDim).paint(&format!(":{content}")),
         );
     }
     format!("  {}", body.paint(line))
@@ -432,7 +434,8 @@ mod tests {
         // The path rides a different SGR than the dim body.
         assert!(styled.contains("src/lib.rs\x1b[0m"), "{styled}");
         assert!(styled.contains("42"), "{styled}");
-        // Non-grep tools stay dim even for identical shapes.
+        // Non-grep tools ride the readable body text even for identical
+        // shapes: the dim tone stays on grep's structural punctuation.
         let other = style_output_line("read", "src/lib.rs:42:pub fn main() {}");
         assert_eq!(strip_ansi(&other), "  src/lib.rs:42:pub fn main() {}");
         assert_eq!(
@@ -440,14 +443,14 @@ mod tests {
             format!(
                 "  {}",
                 theme::current()
-                    .style(Token::TextDim)
+                    .style(Token::Text)
                     .paint("src/lib.rs:42:pub fn main() {}")
             )
         );
     }
 
     #[test]
-    fn malformed_grep_lines_stay_dim() {
+    fn malformed_grep_lines_ride_body_text() {
         theme::set(theme::Theme::dark());
         for line in [
             "no colons here",
@@ -458,7 +461,7 @@ mod tests {
             let styled = style_output_line("grep", line);
             assert_eq!(
                 styled,
-                format!("  {}", theme::current().style(Token::TextDim).paint(line)),
+                format!("  {}", theme::current().style(Token::Text).paint(line)),
                 "{line}"
             );
         }

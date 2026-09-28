@@ -83,6 +83,12 @@ pub fn row2(state: &AppState, hint: &TransientHint, columns: usize) -> String {
         .max(if right.is_empty() { 0 } else { 1 });
     left.push_str(&" ".repeat(spacing));
     left.push_str(&right);
+    // A combined row wider than the terminal overflows to the screen
+    // layer's hard truncate, which eats the right edge; trimming the
+    // left hint instead keeps the context counter visible.
+    if width::width(&left) > columns {
+        return width::truncate_to_width(&left, columns);
+    }
     left
 }
 

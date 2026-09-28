@@ -1,4 +1,4 @@
-//! Instruction memory (`WAVECODE.md`) discovery, concatenation, and `@path`
+//! Instruction memory (`AGENTS.md`) discovery, concatenation, and `@path`
 //! reference expansion.
 //!
 //! Pure logic with sync IO: collection is a one-shot startup action (cli
@@ -8,52 +8,47 @@
 //! Collection order (concatenated global-first, local-last):
 //!
 //! ```text
-//! user-level ~/.wavecode/WAVECODE.md -> project-root WAVECODE.md + .wavecode/rules/*.md
-//! -> cwd WAVECODE.md + .wavecode/rules/*.md
+//! user-level ~/.wavecode/AGENTS.md -> project-root AGENTS.md + .wavecode/rules/*.md
+//! -> cwd AGENTS.md + .wavecode/rules/*.md
 //! ```
 //!
 //! The project root is located upward via `.git` (a directory or a file, so
 //! worktree shapes work); when the cwd equals the project root or lies outside
 //! it, real paths are deduplicated and no file is concatenated twice.
 //!
-//! Deliberate omission (out of the first-version scope; the remaining SPEC
-//! section 7.1 items land later): `WAVECODE.override.md` project-level
-//! overrides. Fallback filenames (AGENTS.md/CLAUDE.md) ARE implemented: a
-//! tier with no `WAVECODE.md` falls back to `AGENTS.md`, then `CLAUDE.md`
-//! (first existing wins) so repos following either cross-tool convention
-//! still get their instructions loaded.
+//! Each tier also concatenates `AGENTS.local.md` right after its `AGENTS.md`
+//! when present — the personal, uncommitted supplement. There are no fallback
+//! filenames: a directory without `AGENTS.md` simply has no instruction tier.
 
 use std::path::{Path, PathBuf};
 
 /// Instruction memory filename.
-pub const INSTRUCTION_FILE: &str = "WAVECODE.md";
+pub const INSTRUCTION_FILE: &str = "AGENTS.md";
 
-/// Fallback instruction filenames per tier, tried in order after
-/// [`INSTRUCTION_FILE`] when that file does not exist (interop with repos
-/// following the AGENTS.md / CLAUDE.md conventions; first existing wins so a
-/// repo carrying duplicated copies does not double its context cost).
-pub const FALLBACK_INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
+/// Per-directory local supplement, concatenated right after
+/// [`INSTRUCTION_FILE`] when present: personal additions that stay
+/// uncommitted, mirroring the `*.local.md` ignore convention.
+pub const LOCAL_INSTRUCTION_FILE: &str = "AGENTS.local.md";
 
-/// Resolve the instruction file for one tier directory: `WAVECODE.md` when it
-/// exists, otherwise the first [`FALLBACK_INSTRUCTION_FILES`] entry that
-/// exists, otherwise `WAVECODE.md` itself (the read fails and the tier is
-/// skipped, same as before).
-fn resolve_instruction_file(dir: &Path) -> PathBuf {
-    let primary = dir.join(INSTRUCTION_FILE);
-    if primary.exists() {
-        return primary;
+/// The instruction files of one tier directory, in concat order: `AGENTS.md`
+/// followed by `AGENTS.local.md` when both exist. The local file is a
+/// supplement, not a substitute: without `AGENTS.md` the tier is skipped
+/// entirely — a stray local file invents no instructions.
+fn resolve_instruction_files(dir: &Path) -> Vec<PathBuf> {
+    let base = dir.join(INSTRUCTION_FILE);
+    if !base.exists() {
+        return Vec::new();
     }
-    for name in FALLBACK_INSTRUCTION_FILES {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return candidate;
-        }
+    let mut files = vec![base];
+    let local = dir.join(LOCAL_INSTRUCTION_FILE);
+    if local.exists() {
+        files.push(local);
     }
-    primary
+    files
 }
 
 /// Depth cap for recursive `@path` reference expansion:
-/// WAVECODE.md itself is depth 0, files it references are depth 1, and so on;
+/// AGENTS.md itself is depth 0, files it references are depth 1, and so on;
 /// references inside files past the cap are kept as literal text, unexpanded.
 pub const MAX_INCLUDE_DEPTH: usize = 5;
 
@@ -78,7 +73,7 @@ pub fn find_project_root(cwd: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Collect instruction memory: user level (`home/.wavecode/WAVECODE.md`) ->
+/// Collect instruction memory: user level (`home/.wavecode/AGENTS.md`) ->
 /// project root -> cwd, concatenated tier by tier; the project-root and cwd
 /// tiers each bring their `.wavecode/rules/*.md` files (merged sorted by
 /// filename). A None `home` skips the user level. Every file is concatenated
@@ -88,17 +83,17 @@ pub fn collect(home: Option<&Path>, cwd: &Path) -> InstructionMemory {
     let mut mem = InstructionMemory::default();
     let mut seen: Vec<PathBuf> = Vec::new();
 
-    // One tier: one instruction file (WAVECODE.md, or the AGENTS.md/CLAUDE.md
-    // fallback when absent) plus that tier's rules-dir *.md files (sorted by
-    // filename). The user and project tiers have different directory shapes
-    // (~/.wavecode/WAVECODE.md + ~/.wavecode/rules vs
-    // <dir>/WAVECODE.md + <dir>/.wavecode/rules), so the caller passes both
+    // One tier: its instruction files (AGENTS.md + AGENTS.local.md, when
+    // present) plus that tier's rules-dir *.md files (sorted by filename).
+    // The user and project tiers have different directory shapes
+    // (~/.wavecode/AGENTS.md + ~/.wavecode/rules vs
+    // <dir>/AGENTS.md + <dir>/.wavecode/rules), so the caller passes both
     // paths explicitly.
     let collect_level = |instr_dir: PathBuf,
                          rules_dir: PathBuf,
                          mem: &mut InstructionMemory,
                          seen: &mut Vec<PathBuf>| {
-        let mut files = vec![resolve_instruction_file(&instr_dir)];
+        let mut files = resolve_instruction_files(&instr_dir);
         if let Ok(entries) = std::fs::read_dir(&rules_dir) {
             let mut rules: Vec<PathBuf> = entries
                 .filter_map(std::result::Result::ok)
@@ -221,7 +216,7 @@ fn split_trailing_whitespace(token: &str) -> (&str, &str) {
 /// Trust boundary for `@ref`: only relative paths inside base_dir. Absolute
 /// paths (including Windows drive / UNC prefixes and rooted forms) and `..`
 /// components are always rejected — an unbounded reference is an unsandboxed
-/// arbitrary-file-read primitive (a cloned, untrusted repo's WAVECODE.md could
+/// arbitrary-file-read primitive (a cloned, untrusted repo's AGENTS.md could
 /// pull files from outside the cwd into model context). Rejected references
 /// follow the same policy as missing files: kept literal, shown honestly.
 fn at_ref_allowed(reference: &str) -> bool {
@@ -277,10 +272,10 @@ mod tests {
         let home = dir.path().join("home");
         let root = dir.path().join("repo");
         let cwd = root.join("crates/xyz");
-        write(&home.join(".wavecode/WAVECODE.md"), "USER-LEVEL");
+        write(&home.join(".wavecode/AGENTS.md"), "USER-LEVEL");
         write(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
-        write(&root.join("WAVECODE.md"), "PROJECT-ROOT");
-        write(&cwd.join("WAVECODE.md"), "CWD-LEVEL");
+        write(&root.join("AGENTS.md"), "PROJECT-ROOT");
+        write(&cwd.join("AGENTS.md"), "CWD-LEVEL");
 
         let mem = collect(Some(&home), &cwd);
         let (u, r, c) = (
@@ -303,11 +298,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         write(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
-        write(&root.join("WAVECODE.md"), "ROOT");
+        write(&root.join("AGENTS.md"), "ROOT");
         let nested = root.join("a/b");
         std::fs::create_dir_all(&nested).unwrap();
         assert_eq!(find_project_root(&nested).as_deref(), Some(root.as_path()));
-        // cwd == project root: the same WAVECODE.md is concatenated once.
+        // cwd == project root: the same AGENTS.md is concatenated once.
         let mem = collect(None, &root);
         assert_eq!(mem.combined.matches("ROOT").count(), 1);
         assert_eq!(mem.sources.len(), 1);
@@ -321,7 +316,7 @@ mod tests {
         let root = dir.path().join("repo");
         write(&root.join(".git/HEAD"), "x\n");
         write(&root.join("docs/extra.md"), "EXTRA-CONTENT");
-        write(&root.join("WAVECODE.md"), "before\n@docs/extra.md\nafter");
+        write(&root.join("AGENTS.md"), "before\n@docs/extra.md\nafter");
 
         let mem = collect(None, &root);
         assert!(
@@ -335,7 +330,7 @@ mod tests {
         );
         // References to missing files stay literal (honest display).
         write(
-            &root.join("WAVECODE.md"),
+            &root.join("AGENTS.md"),
             "see @docs/missing.md for details",
         );
         let mem = collect(None, &root);
@@ -353,7 +348,7 @@ mod tests {
         write(&root.join("docs/extra.md"), "EXTRA-CONTENT");
         write(&dir.path().join("secret.md"), "SECRET-CONTENT");
         write(
-            &root.join("WAVECODE.md"),
+            &root.join("AGENTS.md"),
             "absolute @D:/secret.md and parent @../secret.md never expand, but @./docs/extra.md does",
         );
 
@@ -383,7 +378,7 @@ mod tests {
         symlink(&dir.path().join("secret.md"), &root.join("docs/link.md")).unwrap();
         symlink(&root.join("docs/real.md"), &root.join("docs/in-link.md")).unwrap();
         write(
-            &root.join("WAVECODE.md"),
+            &root.join("AGENTS.md"),
             "out-of-bounds @docs/link.md and in-bounds @docs/in-link.md",
         );
 
@@ -420,10 +415,10 @@ mod tests {
             };
             write(&root.join(format!("f{i}.md")), &content);
         }
-        write(&root.join("WAVECODE.md"), "@f0.md");
+        write(&root.join("AGENTS.md"), "@f0.md");
 
         let mem = collect(None, &root);
-        // WAVECODE.md is depth 0 -> f0..f4 (depths 1..=5) expand; the @f5.md
+        // AGENTS.md is depth 0 -> f0..f4 (depths 1..=5) expand; the @f5.md
         // inside f4 (depth 5) already hits the cap and stays literal.
         for i in 0..=4 {
             assert!(
@@ -453,7 +448,7 @@ mod tests {
         write(&root.join(".git/HEAD"), "x\n");
         write(&root.join("a.md"), "A-CONTENT\n@b.md");
         write(&root.join("b.md"), "B-CONTENT\n@a.md");
-        write(&root.join("WAVECODE.md"), "@a.md");
+        write(&root.join("AGENTS.md"), "@a.md");
 
         let mem = collect(None, &root);
         assert!(mem.combined.contains("A-CONTENT"));
@@ -469,7 +464,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
         write(&root.join(".git/HEAD"), "x\n");
-        write(&root.join("WAVECODE.md"), "ROOT");
+        write(&root.join("AGENTS.md"), "ROOT");
         write(&root.join(".wavecode/rules/02-style.md"), "RULE-STYLE");
         write(&root.join(".wavecode/rules/01-test.md"), "RULE-TEST");
         write(&root.join(".wavecode/rules/skip.txt"), "NOT-MD");
@@ -488,7 +483,7 @@ mod tests {
             !mem.combined.contains("NOT-MD"),
             "non-.md files do not merge"
         );
-        // Sources: WAVECODE.md plus two rules files.
+        // Sources: AGENTS.md plus two rules files.
         assert_eq!(mem.sources.len(), 3);
     }
 
@@ -499,8 +494,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let cwd = dir.path().join("plain/sub");
-        write(&home.join(".wavecode/WAVECODE.md"), "USER-LEVEL");
-        write(&cwd.join("WAVECODE.md"), "CWD-LEVEL");
+        write(&home.join(".wavecode/AGENTS.md"), "USER-LEVEL");
+        write(&cwd.join("AGENTS.md"), "CWD-LEVEL");
         // A tempdir ancestor that happens to be a git repo would mislocate —
         // confirm explicitly before asserting.
         if cwd.ancestors().all(|p| !p.join(".git").exists()) {
@@ -519,9 +514,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let cwd = dir.path().join("plain");
-        write(&home.join(".wavecode/WAVECODE.md"), "USER-LEVEL");
+        write(&home.join(".wavecode/AGENTS.md"), "USER-LEVEL");
         write(&home.join(".wavecode/rules/01-global.md"), "GLOBAL-RULE");
-        write(&cwd.join("WAVECODE.md"), "CWD-LEVEL");
+        write(&cwd.join("AGENTS.md"), "CWD-LEVEL");
         if cwd.ancestors().all(|p| !p.join(".git").exists()) {
             let mem = collect(Some(&home), &cwd);
             assert!(
@@ -533,61 +528,62 @@ mod tests {
                 mem.combined.find("USER-LEVEL").unwrap(),
                 mem.combined.find("GLOBAL-RULE").unwrap(),
             );
-            assert!(u < g, "user-level rules sort after their own WAVECODE.md");
+            assert!(u < g, "user-level rules sort after their own AGENTS.md");
         }
     }
 
-    /// Fallback filenames (interop): a tier with no WAVECODE.md falls back to
-    /// AGENTS.md, then CLAUDE.md, first existing wins.
+    /// Local supplements: `AGENTS.local.md` concatenates right after the
+    /// tier's `AGENTS.md`; a directory without `AGENTS.md` has no tier at
+    /// all (no fallback filenames exist).
     #[test]
-    fn fallback_instruction_files_first_existing_wins() {
+    fn local_file_appends_after_the_tier_instruction_file() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("repo-a");
-        write(&root.join(".git/HEAD"), "x\n");
-        // Only AGENTS.md: it wins over the (absent) CLAUDE.md.
-        write(&root.join("AGENTS.md"), "FROM-AGENTS");
-        let mem = collect(None, &root);
+
+        // AGENTS.md alone: the tier loads from it.
+        let root_a = dir.path().join("repo-a");
+        write(&root_a.join(".git/HEAD"), "x\n");
+        write(&root_a.join("AGENTS.md"), "A-AGENTS");
+        let mem = collect(None, &root_a);
         assert!(
-            mem.combined.contains("FROM-AGENTS"),
-            "AGENTS.md fallback should load:\n{}",
+            mem.combined.contains("A-AGENTS"),
+            "AGENTS.md should load:\n{}",
             mem.combined
         );
 
-        // Both AGENTS.md and CLAUDE.md: AGENTS.md wins, CLAUDE.md must not
-        // also load (first-existing-wins avoids duplicated copies).
+        // AGENTS.md + AGENTS.local.md: local lands after, both load.
         let root_b = dir.path().join("repo-b");
         write(&root_b.join(".git/HEAD"), "x\n");
         write(&root_b.join("AGENTS.md"), "B-AGENTS");
-        write(&root_b.join("CLAUDE.md"), "B-CLAUDE");
+        write(&root_b.join("AGENTS.local.md"), "B-LOCAL");
         let mem = collect(None, &root_b);
-        assert!(mem.combined.contains("B-AGENTS"));
-        assert!(
-            !mem.combined.contains("B-CLAUDE"),
-            "CLAUDE.md must not load when AGENTS.md exists:\n{}",
-            mem.combined
+        let (base, local) = (
+            mem.combined.find("B-AGENTS").unwrap(),
+            mem.combined.find("B-LOCAL").unwrap(),
         );
+        assert!(base < local, "local sorts after AGENTS.md:\n{}", mem.combined);
+        assert_eq!(mem.sources.len(), 2);
 
-        // Only CLAUDE.md: second fallback kicks in.
+        // AGENTS.local.md alone: no AGENTS.md, no tier — a stray local file
+        // does not invent instructions.
         let root_c = dir.path().join("repo-c");
         write(&root_c.join(".git/HEAD"), "x\n");
-        write(&root_c.join("CLAUDE.md"), "C-CLAUDE");
+        write(&root_c.join("AGENTS.local.md"), "C-LOCAL");
         let mem = collect(None, &root_c);
         assert!(
-            mem.combined.contains("C-CLAUDE"),
-            "CLAUDE.md fallback should load:\n{}",
+            !mem.combined.contains("C-LOCAL"),
+            "local without AGENTS.md must not load:\n{}",
             mem.combined
         );
 
-        // WAVECODE.md present: fallbacks never load.
+        // Legacy filenames are dead: neither WAVECODE.md nor CLAUDE.md
+        // is read anymore.
         let root_d = dir.path().join("repo-d");
         write(&root_d.join(".git/HEAD"), "x\n");
         write(&root_d.join("WAVECODE.md"), "D-WAVECODE");
-        write(&root_d.join("AGENTS.md"), "D-AGENTS");
         write(&root_d.join("CLAUDE.md"), "D-CLAUDE");
         let mem = collect(None, &root_d);
-        assert!(mem.combined.contains("D-WAVECODE"));
-        assert!(!mem.combined.contains("D-AGENTS"));
-        assert!(!mem.combined.contains("D-CLAUDE"));
-        assert_eq!(mem.sources.len(), 1);
+        assert!(!mem.combined.contains("D-WAVECODE"), "{}", mem.combined);
+        assert!(!mem.combined.contains("D-CLAUDE"), "{}", mem.combined);
+        assert!(mem.sources.is_empty());
     }
 }

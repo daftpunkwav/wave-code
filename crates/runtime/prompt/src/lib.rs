@@ -38,7 +38,7 @@ mod titles {
 pub struct PromptSlots {
     /// Agent identity and operating rules; almost always present.
     pub identity: String,
-    /// Project instructions (WAVECODE.md layers, rules files).
+    /// Project instructions (AGENTS.md layers, rules files).
     pub instructions: String,
     /// Persistent memory index snapshot.
     pub memory_index: String,

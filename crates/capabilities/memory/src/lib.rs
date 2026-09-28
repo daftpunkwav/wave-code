@@ -1,6 +1,6 @@
 //! wavecode-memory — memory system.
 //!
-//! - Instruction memory ([`instructions`]): layered `WAVECODE.md` discovery
+//! - Instruction memory ([`instructions`]): layered `AGENTS.md` discovery
 //!   (user level -> project root -> cwd) with `@path` recursive references
 //!   (depth cap 5, cycle-safe) merged with `.wavecode/rules/*.md` rule dirs;
 //! - Persistent memory ([`store`]): user / feedback / project / reference

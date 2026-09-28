@@ -106,6 +106,12 @@ where
     writer.flush().await
 }
 
+/// Byte cap on a single header line: a malformed or hostile server must
+/// not be able to grow the read buffer without bound while the body cap
+/// (below) never triggers. LSP headers are tiny in practice; 64 KiB is
+/// orders of magnitude above any legitimate `Content-Length` line.
+const MAX_HEADER_LINE_BYTES: usize = 64 * 1024;
+
 /// Read one framed message (whole read bounded by `timeout`).
 async fn read_frame<R>(reader: &mut R, timeout: Duration) -> std::io::Result<Value>
 where
@@ -115,11 +121,22 @@ where
         let mut content_length: Option<usize> = None;
         loop {
             let mut line = String::new();
-            let n = reader.read_line(&mut line).await?;
+            // The `take` bounds one header line's allocation: a server that
+            // keeps sending bytes without a newline stops at the cap instead
+            // of growing the string until the timeout fires.
+            let mut limited = (&mut *reader).take(MAX_HEADER_LINE_BYTES as u64);
+            let n = limited.read_line(&mut line).await?;
+            drop(limited);
             if n == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "LSP stream closed",
+                ));
+            }
+            if n as usize == MAX_HEADER_LINE_BYTES && !line.ends_with('\n') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("LSP header line exceeds the {MAX_HEADER_LINE_BYTES}-byte cap"),
                 ));
             }
             let trimmed = line.trim();
@@ -1398,6 +1415,25 @@ mod tests {
     fn frame_decode_rejects_garbage() {
         assert!(parse_frame(b"not a frame").is_none());
         assert!(parse_frame(b"Content-Length: 5\r\n\r\n{bad").is_none());
+    }
+
+    /// A header line past the cap is a protocol error, not an unbounded
+    /// buffer: a hostile or broken server cannot grow memory until the
+    /// timeout by withholding the newline.
+    #[tokio::test]
+    async fn oversized_header_line_is_refused() {
+        let (client_end, mut server_end) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            // More than the cap in one line, no newline, then EOF.
+            let line = vec![b'A'; MAX_HEADER_LINE_BYTES + 1];
+            let _ = server_end.write_all(&line).await;
+        });
+        let mut reader = tokio::io::BufReader::new(client_end);
+        let err = read_frame(&mut reader, Duration::from_secs(10))
+            .await
+            .expect_err("oversized header must fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("header line"), "{err}");
     }
 
     #[tokio::test]

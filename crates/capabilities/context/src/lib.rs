@@ -366,7 +366,7 @@ impl CompactionStrategy for ModelSummary {
             model: self.model_name.clone(),
             system: SUMMARY_SYSTEM.to_owned(),
             messages: Arc::new(messages),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: budget.max(1),
         };
         let mut stream = self.model.stream(req).await?;

@@ -38,6 +38,12 @@ pub struct ModelAdapter {
     /// condition mirrors this). `None` when the window is fixed by
     /// explicit provider config: a name switch cannot move it.
     per_model_window: Option<u64>,
+    /// Memoized tool specs keyed by the requested name list. The set is
+    /// stable across turns (the registry changes only when MCP servers
+    /// register late), so the schema build — a fresh JSON value per tool —
+    /// happens once per set instead of once per sample; any name-list
+    /// change rebuilds it.
+    tool_specs: std::sync::Mutex<(Vec<String>, Arc<Vec<ToolSpec>>)>,
 }
 
 impl ModelAdapter {
@@ -57,6 +63,7 @@ impl ModelAdapter {
             max_tokens,
             registry,
             per_model_window: None,
+            tool_specs: std::sync::Mutex::new((Vec::new(), Arc::new(Vec::new()))),
         }
     }
 
@@ -106,18 +113,39 @@ impl ModelAdapter {
         messages
     }
 
-    /// Advertise exactly the registered tools, schemas included.
-    fn tools(&self, request: &SampleRequest) -> Vec<ToolSpec> {
-        request
+    /// Advertise exactly the registered tools, schemas included. The built
+    /// list is memoized on the requested name list: a stable set (every
+    /// turn after the first) shares one `Arc` instead of rebuilding every
+    /// tool's JSON schema per sample.
+    fn tools(&self, request: &SampleRequest) -> Arc<Vec<ToolSpec>> {
+        let names: Vec<&str> = request
             .tools
             .iter()
-            .filter_map(|ToolRef { name, .. }| self.registry.get(name))
-            .map(|tool| ToolSpec {
-                name: tool.name().to_string(),
-                description: tool.description().to_string(),
-                input_schema: tool.input_schema(),
-            })
-            .collect()
+            .map(|ToolRef { name, .. }| name.as_str())
+            .collect();
+        let mut cache = self.tool_specs.lock().unwrap_or_else(|e| e.into_inner());
+        if cache.0.len() == names.len()
+            && cache.0.iter().map(String::as_str).eq(names.iter().copied())
+        {
+            return Arc::clone(&cache.1);
+        }
+        let specs: Arc<Vec<ToolSpec>> = Arc::new(
+            request
+                .tools
+                .iter()
+                .filter_map(|ToolRef { name, .. }| self.registry.get(name))
+                .map(|tool| ToolSpec {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    input_schema: tool.input_schema(),
+                })
+                .collect(),
+        );
+        *cache = (
+            names.iter().map(|name| (*name).to_string()).collect(),
+            specs,
+        );
+        Arc::clone(&cache.1)
     }
 }
 
@@ -573,6 +601,37 @@ mod tests {
         }
     }
 
+    /// A stable tool-name set shares one spec build across samples (the
+    /// per-turn schema rebuild the memo removes); any name-list change
+    /// rebuilds, and the shared specs stay equal to a fresh build.
+    #[test]
+    fn tool_specs_are_memoized_per_name_set() {
+        let adapter = adapter(vec![]);
+        let mut req = request();
+        req.tools = vec![ToolRef {
+            name: "shell".to_string(),
+            description: String::new(),
+        }];
+        let first = adapter.tools(&req);
+        let second = adapter.tools(&req);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the same name set must reuse the built specs"
+        );
+        // A changed set rebuilds; overlapping specs stay identical.
+        req.tools.push(ToolRef {
+            name: "read".to_string(),
+            description: String::new(),
+        });
+        let third = adapter.tools(&req);
+        assert!(!Arc::ptr_eq(&first, &third), "a new name set rebuilds");
+        assert_eq!(first.len(), 1);
+        assert_eq!(third.len(), 2);
+        assert_eq!(third[0], first[0].clone());
+        // The latest set is the memo: re-requesting it hits again.
+        assert!(Arc::ptr_eq(&third, &adapter.tools(&req)));
+    }
+
     #[test]
     fn notes_project_as_one_trailing_user_message() {
         let mut req = request();
@@ -910,7 +969,7 @@ mod tests {
             model: "test-model".to_string(),
             system: String::new(),
             messages: Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 10,
         };
         let mut stream = model.stream(req).await.unwrap();
@@ -943,7 +1002,7 @@ mod tests {
             model: "test-model".to_string(),
             system: String::new(),
             messages: Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 10,
         };
         assert!(chain.stream(req).await.is_err());
@@ -963,7 +1022,7 @@ mod tests {
             model: "test-model".to_string(),
             system: String::new(),
             messages: Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 10,
         };
         assert!(matches!(

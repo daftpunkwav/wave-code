@@ -386,6 +386,7 @@ fn retrying_items<M: ChatModel + 'static>(
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use std::sync::Arc;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -394,7 +395,7 @@ mod tests {
             model: "test".to_string(),
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 10,
         }
     }

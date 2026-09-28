@@ -777,6 +777,7 @@ impl ModelCapabilities {
 mod tests {
     use super::*;
     use crate::{Role, ToolSpec};
+    use std::sync::Arc;
 
     fn tool_spec() -> ToolSpec {
         ToolSpec {
@@ -928,7 +929,7 @@ mod tests {
                     text: "hi".to_string(),
                 }],
             }]),
-            tools: vec![tool_spec()],
+            tools: Arc::new(vec![tool_spec()]),
             max_tokens: 100,
         };
         let body = build_request_body(&req, "deepseek-chat", None);
@@ -950,7 +951,7 @@ mod tests {
             model: String::new(),
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
-            tools,
+            tools: Arc::new(tools),
             max_tokens: 4096,
         };
         let reasoning = build_request_body(&req(Vec::new()), "o3-mini", None);
@@ -984,7 +985,7 @@ mod tests {
             model: "deepseek-chat".to_string(),
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 100,
         };
         let body = build_request_body(&req, "deepseek-chat", Some("low"));
@@ -1291,7 +1292,7 @@ mod tests {
             model: "m".into(),
             system: String::new(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             max_tokens: 1,
         };
         let err = match client.stream(req).await {

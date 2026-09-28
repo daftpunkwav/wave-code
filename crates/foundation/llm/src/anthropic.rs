@@ -15,6 +15,7 @@
 //! `POST {base_url}/v1/messages` starts an SSE streaming request; byte chunks flow through
 //! buffering and framing, then [`crate::SseParser`] parses each frame into [`crate::StreamEvent`].
 
+use std::borrow::Cow;
 use std::time::Duration;
 
 use futures::{Stream, StreamExt};
@@ -226,7 +227,7 @@ pub(crate) fn build_request_body(
     thinking_budget: Option<u32>,
 ) -> serde_json::Value {
     let merged = merge_adjacent_same_role(&req.messages);
-    let mut messages = translate_messages(&merged, &req.model);
+    let mut messages = translate_messages(merged.iter().map(|m| &**m), &req.model);
     if prompt_caching
         && let Some(last) = messages.last_mut()
         && let Some(last_block) = last
@@ -323,10 +324,13 @@ fn thinking_body(budget: u32, max_tokens: u32) -> Option<serde_json::Value> {
 /// form so existing wire expectations are unchanged. Thinking blocks go back
 /// as `thinking` (see [`translate_block`]); `for_model` decides whether
 /// unsigned ones may be emitted at all.
-pub(crate) fn translate_messages(messages: &[Message], for_model: &str) -> Vec<serde_json::Value> {
+pub(crate) fn translate_messages<'a>(
+    messages: impl IntoIterator<Item = &'a Message>,
+    for_model: &str,
+) -> Vec<serde_json::Value> {
     let unsigned_ok = allows_unsigned_thinking(for_model);
     messages
-        .iter()
+        .into_iter()
         .map(|m| {
             let role = match m.role {
                 Role::User => "user",
@@ -428,28 +432,34 @@ fn translate_block(block: &ContentBlock, unsigned_ok: bool) -> Option<serde_json
 /// endpoint. Merge means concatenating the content block arrays; adjacent Text blocks get a newline
 /// separator so they cannot glue together, while ToolResult blocks sit side by side per protocol (several
 /// tool_result blocks may legally belong to one user message).
-fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Message> {
-    let mut out: Vec<Message> = Vec::with_capacity(messages.len());
+///
+/// Entries that need no merge stay borrowed: a turn with no adjacent pair
+/// (the common shape) deep-copies nothing, and a merging turn clones only
+/// the merged run, not the whole history.
+fn merge_adjacent_same_role(messages: &[Message]) -> Vec<Cow<'_, Message>> {
+    let mut out: Vec<Cow<'_, Message>> = Vec::with_capacity(messages.len());
     for msg in messages {
-        if let Some(last) = out.last_mut()
-            && last.role == msg.role
-        {
-            let mut content = std::mem::take(&mut last.content);
-            match (content.last_mut(), msg.content.first()) {
-                (
-                    Some(ContentBlock::Text { text: prev }),
-                    Some(ContentBlock::Text { text: next }),
-                ) => {
-                    prev.push('\n');
-                    prev.push_str(next);
-                    content.extend(msg.content.iter().skip(1).cloned());
-                }
-                _ => content.extend(msg.content.iter().cloned()),
-            }
-            last.content = content;
+        let merges = matches!(out.last(), Some(last) if last.role == msg.role);
+        if !merges {
+            out.push(Cow::Borrowed(msg));
             continue;
         }
-        out.push(msg.clone());
+        // Promote the previous entry to an owned copy (cloning its content
+        // only once, at the first merge) and fold `msg` into it; a longer
+        // run keeps folding into the owned accumulator.
+        let mut merged = match out.pop().expect("merge target checked above") {
+            Cow::Borrowed(prev) => prev.clone(),
+            Cow::Owned(prev) => prev,
+        };
+        match (merged.content.last_mut(), msg.content.first()) {
+            (Some(ContentBlock::Text { text: prev }), Some(ContentBlock::Text { text: next })) => {
+                prev.push('\n');
+                prev.push_str(next);
+                merged.content.extend(msg.content.iter().skip(1).cloned());
+            }
+            _ => merged.content.extend(msg.content.iter().cloned()),
+        }
+        out.push(Cow::Owned(merged));
     }
     out
 }
@@ -483,6 +493,7 @@ mod tests {
     use crate::sse::find_subsequence;
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
+    use std::sync::Arc;
 
     #[test]
     fn try_new_constructs_client() {
@@ -620,11 +631,11 @@ mod tests {
                     }],
                 },
             ]),
-            tools: vec![ToolSpec {
+            tools: std::sync::Arc::new(vec![ToolSpec {
                 name: "read_file".into(),
                 description: "read".into(),
                 input_schema: serde_json::json!({"type":"object"}),
-            }],
+            }]),
             max_tokens: 8192,
         };
         let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
@@ -653,7 +664,7 @@ mod tests {
                     input: serde_json::json!("just a string"),
                 }],
             }]),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             max_tokens: 8192,
         };
         let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
@@ -687,7 +698,7 @@ mod tests {
                     content: vec![ContentBlock::Text { text: "go".into() }],
                 },
             ]),
-            tools: vec![
+            tools: std::sync::Arc::new(vec![
                 ToolSpec {
                     name: "a".into(),
                     description: "da".into(),
@@ -698,7 +709,7 @@ mod tests {
                     description: "db".into(),
                     input_schema: serde_json::json!({"type":"object"}),
                 },
-            ],
+            ]),
             max_tokens: 8192,
         };
         let v = build_request_body(&req, true, CacheTtl::FiveMinutes, None);
@@ -739,11 +750,11 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::Text { text: "hi".into() }],
             }]),
-            tools: vec![ToolSpec {
+            tools: std::sync::Arc::new(vec![ToolSpec {
                 name: "a".into(),
                 description: "da".into(),
                 input_schema: serde_json::json!({"type":"object"}),
-            }],
+            }]),
             max_tokens: 8192,
         };
         assert_eq!(CacheTtl::FiveMinutes.wire(), None);
@@ -779,7 +790,7 @@ mod tests {
                 role: Role::User,
                 content: vec![ContentBlock::Text { text: "hi".into() }],
             }]),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             max_tokens: 8192,
         };
         // Local endpoint that records the request head; the response status
@@ -834,7 +845,7 @@ mod tests {
             model: "m1".into(),
             system: String::new(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             max_tokens: 8192,
         };
         let v = build_request_body(&req, true, CacheTtl::FiveMinutes, Some(4096));
@@ -884,7 +895,7 @@ mod tests {
                     }],
                 },
             ]),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             max_tokens: 8,
         };
         let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
@@ -1059,7 +1070,7 @@ mod tests {
             model: "m".into(),
             system: "s".into(),
             messages: std::sync::Arc::new(vec![]),
-            tools: vec![],
+            tools: Arc::new(vec![]),
             max_tokens: 1,
         };
         let err = match client.stream(req).await {

@@ -73,7 +73,7 @@ impl MemoryFinisher {
                 role: Role::User,
                 content: vec![ContentBlock::Text { text }],
             }]),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: DISTILL_MAX_TOKENS,
         };
         let mut stream = self

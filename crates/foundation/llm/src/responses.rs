@@ -692,7 +692,7 @@ mod tests {
             model: "gpt-5".to_string(),
             system: "be terse".to_string(),
             messages: Arc::new(vec![user_text("hi")]),
-            tools: vec![tool_spec()],
+            tools: Arc::new(vec![tool_spec()]),
             max_tokens: 2048,
         };
         let body = build_request_body(&req, "gpt-5", None);
@@ -717,7 +717,7 @@ mod tests {
             model: "gpt-5".to_string(),
             system: String::new(),
             messages: Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 100,
         };
         let body = build_request_body(&req, "gpt-5", Some("low"));
@@ -963,7 +963,7 @@ mod tests {
             model: "gpt-5".to_string(),
             system: String::new(),
             messages: Arc::new(vec![user_text("hi")]),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 16,
         };
         let plain = build_request_body(&req, "gpt-5", None);

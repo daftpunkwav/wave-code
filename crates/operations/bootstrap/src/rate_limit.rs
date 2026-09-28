@@ -80,6 +80,7 @@ impl<M: wavecode_llm::ChatModel> wavecode_llm::ChatModel for RateLimitedModel<M>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use wavecode_llm::ChatModel as _;
 
     struct CountingModel {
@@ -107,7 +108,7 @@ mod tests {
             model: "m".to_string(),
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
-            tools: Vec::new(),
+            tools: Arc::new(Vec::new()),
             max_tokens: 1,
         }
     }

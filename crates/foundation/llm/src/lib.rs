@@ -258,7 +258,10 @@ pub struct ChatRequest {
     /// O(n²) deep copy; provider implementations serialize inside `stream()`,
     /// never holding the snapshot long-term.
     pub messages: Arc<Vec<Message>>,
-    pub tools: Vec<ToolSpec>,
+    /// Tool specs are shared for the same reason: the set is stable across
+    /// turns, so callers memoize the built specs and every request (and
+    /// every retry/failover attempt's `Clone`) pays one refcount bump.
+    pub tools: Arc<Vec<ToolSpec>>,
     pub max_tokens: u32,
 }
 

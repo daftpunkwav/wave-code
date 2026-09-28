@@ -2403,7 +2403,7 @@ verify from the repository.";
     }
 
     /// The JSON session snapshot handed to the status-line command on
-    /// stdin (Claude Code-compatible field set).
+    /// stdin.
     fn status_snapshot(&self) -> serde_json::Value {
         serde_json::json!({
             "model": self.state.model_name,

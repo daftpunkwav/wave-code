@@ -6,7 +6,7 @@
 //!    turn / not yet re-sampled after compaction) fall back to the
 //!    [`estimate_tokens`] character estimate.
 //! 2. **Three-level thresholds** ([`Thresholds`], parameterized by window
-//!    proportion, defaults aligned with measured Claude Code values): warn line at
+//!    proportion, defaults from measured token-scale experience): warn line at
 //!    window-20k / auto-compact line at window-13k / blocking line at
 //!    window-3k.
 //! 3. **Compaction**: abstracted behind the [`CompactionStrategy`] trait
@@ -153,8 +153,7 @@ pub enum BudgetLevel {
     Blocking,
 }
 
-/// Three-level thresholds (defaults aligned with measured Claude Code
-/// values).
+/// Three-level thresholds (defaults from measured token-scale experience).
 ///
 /// Parameterized as "margins below the top of the window" rather than ratio
 /// floats: 20k/13k/3k are measured token-scale experience values that shift

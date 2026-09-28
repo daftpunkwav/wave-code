@@ -184,8 +184,8 @@ impl Skill {
     /// call arguments, `${WAVECODE_SKILL_DIR}` with the skill directory path.
     ///
     /// When the body has no `$ARGUMENTS` placeholder but the caller passed
-    /// arguments, the arguments are appended at the end of the body (matching
-    /// Claude Code behavior: a missing placeholder does not drop arguments).
+    /// arguments, the arguments are appended at the end of the body: a
+    /// missing placeholder does not drop arguments.
     pub fn expand(&self, args: &str) -> String {
         let args = args.trim();
         let mut out = self

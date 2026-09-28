@@ -62,9 +62,9 @@ pub struct UiSettings {
     /// External editor command for Ctrl+G (`/editor <cmd>`); falls back
     /// to `$VISUAL` then `$EDITOR` when unset.
     pub editor_command: Option<String>,
-    /// External status-line command (Claude Code-compatible: JSON
-    /// session snapshot on stdin, first stdout line replaces footer
-    /// row 1). Applied by the poll loop about once per second.
+    /// External status-line command (a JSON session snapshot on stdin,
+    /// first stdout line replaces footer row 1). Applied by the poll
+    /// loop about once per second.
     pub status_line_command: Option<String>,
     /// Turn-finished notifications: `Some(false)` disables them; unset
     /// falls back to `WAVECODE_NOTIFY=0`.

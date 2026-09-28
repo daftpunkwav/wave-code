@@ -1,4 +1,4 @@
-//! External status-line command (Claude Code-compatible contract).
+//! External status-line command protocol.
 //!
 //! When `status_line_command` is set in the console settings, the
 //! command receives one JSON snapshot of the session state on stdin

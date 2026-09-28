@@ -965,7 +965,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         memory_index: memory_index.clone(),
         skill_catalog,
         tool_note: format!("Available tools: {}", tool_names.join(", ")),
-        environment: crate::environment::describe(&cwd, session_now),
+        environment: crate::environment::describe(&cwd, session_now, &model_name, context_window),
         summary: String::new(),
     });
 

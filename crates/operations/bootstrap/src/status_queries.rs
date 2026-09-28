@@ -25,6 +25,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use action_jobs::JobService;
 use operations_actor::StatusQueries;
 use state_checkpoint::SnapshotStore;
 use state_goal::GoalState;
@@ -42,16 +43,23 @@ const HEAD_CHARS: usize = 500;
 pub struct SessionStatus {
     home: Option<std::path::PathBuf>,
     snapshots: SnapshotStore,
+    jobs: Option<std::sync::Arc<JobService>>,
 }
 
 impl SessionStatus {
     /// Build over the session's home and the snapshot root already used
     /// by the registered `snapshot` / `restore` tools (single root, never
-    /// a frontend-derived re-resolution).
-    pub fn new(home: Option<&Path>, snapshot_root: std::path::PathBuf) -> Self {
+    /// a frontend-derived re-resolution). The job service, when wired,
+    /// backs the `/agents` background view.
+    pub fn new(
+        home: Option<&Path>,
+        snapshot_root: std::path::PathBuf,
+        jobs: Option<std::sync::Arc<JobService>>,
+    ) -> Self {
         Self {
             home: home.map(Path::to_path_buf),
             snapshots: SnapshotStore::new(snapshot_root),
+            jobs,
         }
     }
 
@@ -99,6 +107,42 @@ impl StatusQueries for SessionStatus {
             Ok(info) => Some(info.display()),
             Err(_) => None,
         }
+    }
+
+    fn job_rows(&self) -> Vec<String> {
+        let Some(jobs) = &self.jobs else {
+            return Vec::new();
+        };
+        jobs.overview()
+            .iter()
+            .map(|job| {
+                let state = match job.snapshot.state {
+                    action_jobs::JobState::Running => "running".to_string(),
+                    action_jobs::JobState::Finished => {
+                        let cause = if job.snapshot.cancelled {
+                            "cancelled"
+                        } else if job.snapshot.timed_out {
+                            "timed out"
+                        } else {
+                            "finished"
+                        };
+                        match job.snapshot.exit_code {
+                            Some(code) => format!("{cause} (exit {code})"),
+                            None => cause.to_string(),
+                        }
+                    }
+                };
+                // The command head is the identifying part; the full
+                // output stays on `job_output`.
+                let head: String = job.command.chars().take(60).collect();
+                let ellipsis = if job.command.chars().count() > 60 {
+                    "…"
+                } else {
+                    ""
+                };
+                format!("{} · {state} · {head}{ellipsis}", job.id)
+            })
+            .collect()
     }
 }
 
@@ -179,7 +223,7 @@ mod tests {
     #[test]
     fn snapshot_summary_is_none_for_unknown_labels() {
         let dir = tempfile::tempdir().unwrap();
-        let status = SessionStatus::new(None, dir.path().to_path_buf());
+        let status = SessionStatus::new(None, dir.path().to_path_buf(), None);
         assert!(status.snapshot_labels().is_empty());
         assert_eq!(status.snapshot_summary("nope"), None);
         // Malicious labels never panic; they just do not resolve.

@@ -1440,6 +1440,8 @@ impl ConsoleUi {
                         self.push_status(&format!("WaveCode v{}", self.version), false);
                     } else if invocation.name == "memory" {
                         self.show_memory_files();
+                    } else if invocation.name == "agents" {
+                        self.show_agents();
                     } else if invocation.name == "release-notes" {
                         self.dialog = Some(Dialog::Help(crate::dialogs::HelpPanel::new(
                             release_notes_lines(),
@@ -2658,6 +2660,23 @@ verify from the repository.";
                 "no AGENTS.md in scope (/init writes one for this repo)",
                 false,
             );
+        }
+    }
+
+    /// `/agents`: the background-job table — promoted shell commands
+    /// running past their turn, with lifecycle state per row.
+    fn show_agents(&mut self) {
+        let rows = self.status.job_rows();
+        if rows.is_empty() {
+            self.push_status(
+                "no background jobs (a shell command that outlives its                  timeout is promoted into one)",
+                false,
+            );
+            return;
+        }
+        self.push_status(&format!("{} background job(s):", rows.len()), false);
+        for row in rows {
+            self.push_status(&row, false);
         }
     }
 

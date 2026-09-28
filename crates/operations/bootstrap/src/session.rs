@@ -918,7 +918,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
     // command that outlives its timeout into a background job instead of
     // killing it (the builtin registration carries no handoff).
     registry.register(wavecode_tools::shell_with_handoff(Arc::new(
-        action_jobs::tools::ForegroundRuns::new(jobs),
+        action_jobs::tools::ForegroundRuns::new(jobs.clone()),
     )));
     // File-content snapshots ride the same late handle: the store root
     // derives from the session memory root (`<home>/.wavecode/memories`
@@ -1081,8 +1081,12 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
 
     // Frontend status views share the tool-side snapshot root so /plan,
     // /goal, /snapshots, and /rewind read exactly what the tools wrote.
-    let status =
-        crate::status_queries::SessionStatus::new(home.as_deref(), status_snapshot_root).shared();
+    let status = crate::status_queries::SessionStatus::new(
+        home.as_deref(),
+        status_snapshot_root,
+        Some(jobs.clone()),
+    )
+    .shared();
 
     SessionHandle {
         client,

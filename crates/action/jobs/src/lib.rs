@@ -85,6 +85,20 @@ pub enum JobState {
     Finished,
 }
 
+/// Service-wide view of one job (the `/agents` display): the row the
+/// snapshot alone cannot name — which command runs and who owns it.
+#[derive(Debug, Clone)]
+pub struct JobOverview {
+    /// Job id (`job-N`).
+    pub id: String,
+    /// The shell command the job runs.
+    pub command: String,
+    /// Session id charged at spawn.
+    pub owner: String,
+    /// The lifecycle snapshot.
+    pub snapshot: JobSnapshot,
+}
+
 /// Point-in-time view of one job for `wait` and `read`.
 #[derive(Debug, Clone)]
 pub struct JobSnapshot {
@@ -136,6 +150,8 @@ impl JobSnapshot {
 struct JobSlot {
     /// Owner charged at spawn, for cap accounting.
     owner: String,
+    /// The shell command string, for service-wide displays.
+    command: String,
     /// Current lifecycle state.
     state: Mutex<JobState>,
     /// Terminal exit code once reaped.
@@ -224,6 +240,7 @@ impl JobService {
         let id = format!("job-{n}");
         let slot = Arc::new(JobSlot {
             owner: request.owner.clone(),
+            command: request.command.clone(),
             state: Mutex::new(JobState::Running),
             exit_code: Mutex::new(None),
             cancelled: AtomicBool::new(false),
@@ -261,6 +278,32 @@ impl JobService {
             .get(id)
             .cloned()
             .map(|slot| snapshot(id, &slot))
+    }
+
+    /// Every tracked job, oldest first — the service-wide view behind
+    /// the `/agents` display (ids allocate monotonically, so the sort
+    /// key is the numeric suffix, not the string).
+    pub fn overview(&self) -> Vec<JobOverview> {
+        let jobs = self.lock_jobs();
+        let mut rows: Vec<(usize, String, Arc<JobSlot>)> = jobs
+            .iter()
+            .map(|(id, slot)| {
+                let index = id
+                    .strip_prefix("job-")
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(usize::MAX);
+                (index, id.clone(), slot.clone())
+            })
+            .collect();
+        rows.sort_by_key(|(index, _, _)| *index);
+        rows.into_iter()
+            .map(|(_, id, slot)| JobOverview {
+                id: id.clone(),
+                command: slot.command.clone(),
+                owner: slot.owner.clone(),
+                snapshot: snapshot(&id, &slot),
+            })
+            .collect()
     }
 
     /// Block up to `timeout_ms`, then snapshot without killing.
@@ -550,6 +593,23 @@ mod tests {
         let runtime = Arc::new(ChildRuntime::new());
         let service = JobService::new(runtime.clone());
         (runtime, service)
+    }
+
+    /// `overview` lists every job oldest first with its command and
+    /// owner — the `/agents` table.
+    #[tokio::test]
+    async fn overview_lists_jobs_oldest_first() {
+        let (_runtime, service) = harness();
+        service.spawn(request("s1", "first command")).unwrap();
+        service.spawn(request("s2", "second command")).unwrap();
+        let rows = service.overview();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "job-1");
+        assert_eq!(rows[0].command, "first command");
+        assert_eq!(rows[0].owner, "s1");
+        assert_eq!(rows[1].id, "job-2");
+        assert_eq!(rows[1].command, "second command");
+        assert!(matches!(rows[0].snapshot.state, JobState::Running));
     }
 
     fn request(owner: &str, command: &str) -> JobRequest {

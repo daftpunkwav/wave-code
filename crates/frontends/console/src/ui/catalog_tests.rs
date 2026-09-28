@@ -279,3 +279,14 @@ fn hooks_reads_the_config_table() {
     assert!(text.contains("echo hi"), "command row: {text}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// `/agents` with no background jobs says so (and how one comes to be)
+/// instead of printing an empty table.
+#[test]
+fn agents_without_jobs_reports_empty() {
+    let (mut ui, home) = ui_with_home("agents");
+    ui.user_submit("/agents");
+    let text = transcript_plain(&mut ui);
+    assert!(text.contains("no background jobs"), "{text}");
+    let _ = std::fs::remove_dir_all(&home);
+}

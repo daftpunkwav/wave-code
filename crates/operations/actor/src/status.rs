@@ -31,4 +31,9 @@ pub trait StatusQueries: Send + Sync {
     fn snapshot_labels(&self) -> Vec<String>;
     /// One snapshot's display summary, or `None` for an unknown label.
     fn snapshot_summary(&self, label: &str) -> Option<String>;
+    /// The background-job table, one rendered row per job (oldest
+    /// first). Empty when the surface has no job service or no jobs.
+    fn job_rows(&self) -> Vec<String> {
+        Vec::new()
+    }
 }

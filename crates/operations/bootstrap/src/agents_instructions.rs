@@ -25,6 +25,24 @@ use std::sync::{Arc, Mutex};
 use runtime_runner::{DirectoryInstructions, ToolCall, ToolExecutor, ToolRef, ToolResult};
 use wavecode_memory::instructions::INSTRUCTION_FILE;
 
+/// Character cap for one nested `AGENTS.md` injection (~4k tokens), with
+/// the overflow replaced by an explicit truncation marker so the model
+/// knows the text was cut rather than silently losing its tail.
+pub const MAX_NESTED_INSTRUCTION_CHARS: usize = 16_000;
+
+fn truncate_instructions(content: String) -> String {
+    if content.chars().count() <= MAX_NESTED_INSTRUCTION_CHARS {
+        return content;
+    }
+    let mut head: String = content.chars().take(MAX_NESTED_INSTRUCTION_CHARS).collect();
+    head.push_str(&format!(
+        "
+
+[truncated: this AGENTS.md exceeds {MAX_NESTED_INSTRUCTION_CHARS} characters;          the remainder was cut at injection time]"
+    ));
+    head
+}
+
 /// Discovery decorator over any [`ToolExecutor`].
 pub struct AgentsInstructionsExecutor<E> {
     inner: E,
@@ -75,7 +93,11 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
         candidates
     }
 
-    /// Offer the nearest not-yet-injected `AGENTS.md` for `dir`.
+    /// Offer the nearest not-yet-injected `AGENTS.md` for `dir`. Files
+    /// past [`MAX_NESTED_INSTRUCTION_CHARS`] are offered truncated: the
+    /// rules' head (conventions, boundaries) is what matters, and an
+    /// oversized injection must not be able to blow the budget in one
+    /// loop head.
     fn discover(&self, dir: &Path) {
         for directory in self.candidate_dirs(dir) {
             let mut seen = self.injected.lock().unwrap_or_else(|e| e.into_inner());
@@ -86,7 +108,8 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
                 Ok(content) => {
                     seen.insert(directory.clone());
                     drop(seen);
-                    self.requests.offer(directory, content);
+                    self.requests
+                        .offer(directory, truncate_instructions(content));
                 }
                 // Unreadable mid-walk: mark visited and keep climbing, so a
                 // racing delete cannot spin the discovery every call.
@@ -134,6 +157,17 @@ impl<E: ToolExecutor> ToolExecutor for AgentsInstructionsExecutor<E> {
 
     fn available_tools(&self) -> Vec<ToolRef> {
         self.inner.available_tools()
+    }
+
+    /// A compaction replaced the whole history, so every injected
+    /// instruction left it: clear the seen-set and let the rules come
+    /// back the next time their directory is touched. Directories the
+    /// model never revisits stay out of context on purpose.
+    fn note_compacted(&self) {
+        self.injected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -227,6 +261,87 @@ mod tests {
         assert!(
             requests.take_all().is_empty(),
             "the root tier belongs to session assembly, not discovery"
+        );
+    }
+
+    /// After a compaction clears the seen-set, a directory whose rules
+    /// were already injected can be offered again.
+    #[tokio::test]
+    async fn a_compaction_lets_instructions_come_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        write(
+            &root.join(".git/HEAD"),
+            "x
+",
+        );
+        write(&root.join("crates/app/AGENTS.md"), "APP RULES");
+        write(&root.join("crates/app/src/lib.rs"), "fn main() {}");
+
+        let requests = Arc::new(DirectoryInstructions::new());
+        let executor = AgentsInstructionsExecutor::new(
+            PassthroughExecutor,
+            Some(root.clone()),
+            requests.clone(),
+        );
+        executor
+            .execute(call_at(
+                &root.join("crates/app/src/lib.rs").to_string_lossy(),
+            ))
+            .await;
+        assert_eq!(requests.take_all().len(), 1);
+
+        executor.note_compacted();
+        executor
+            .execute(call_at(
+                &root.join("crates/app/src/lib.rs").to_string_lossy(),
+            ))
+            .await;
+        let drained = requests.take_all();
+        assert_eq!(
+            drained,
+            vec![(root.join("crates/app"), "APP RULES".to_string())],
+            "the rule re-offers after compaction: {drained:?}"
+        );
+    }
+
+    /// An oversized AGENTS.md injects truncated, with an explicit marker
+    /// instead of a silently lost tail.
+    #[tokio::test]
+    async fn oversized_instructions_are_truncated_with_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        write(
+            &root.join(".git/HEAD"),
+            "x
+",
+        );
+        write(
+            &root.join("big/AGENTS.md"),
+            &"x".repeat(MAX_NESTED_INSTRUCTION_CHARS + 500),
+        );
+        write(&root.join("big/src/lib.rs"), "fn main() {}");
+
+        let requests = Arc::new(DirectoryInstructions::new());
+        let executor =
+            AgentsInstructionsExecutor::new(PassthroughExecutor, Some(root), requests.clone());
+        executor
+            .execute(call_at(
+                &dir.path().join("repo/big/src/lib.rs").to_string_lossy(),
+            ))
+            .await;
+        let drained = requests.take_all();
+        assert_eq!(drained.len(), 1);
+        let content = &drained[0].1;
+        assert!(
+            content.contains("[truncated: this AGENTS.md exceeds")
+                && content.ends_with("the remainder was cut at injection time]"),
+            "{content}"
+        );
+        assert!(
+            content.chars().count() < MAX_NESTED_INSTRUCTION_CHARS + 200,
+            "head plus the marker, nothing more: {}",
+            content.chars().count()
         );
     }
 

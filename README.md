@@ -142,7 +142,7 @@ model = "your-model-fast"
   behavior tunables), and
   `/help` (scrollable keybinding + command reference), `/doctor` (config,
   credential, catalog, and settings health check), `/hooks` (the configured
-  hook table), `/release-notes` (newest changelog sections).
+  hook table), `/release-notes` (newest changelog sections), `/agents` (the background-job table).
   Session commands: `/sessions` (alias `/resume`) resumes a recorded session
   in place, `/fork` snapshots a resumable copy, `/title` renames, `/new`
   starts a fresh session, `/init` asks the agent to write AGENTS.md,

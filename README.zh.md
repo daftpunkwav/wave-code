@@ -139,7 +139,7 @@ model = "your-model-fast"
   定义主题）、`/settings`（十项渲染与行为开关）、`/help`（可滚动的
   按键 + 命令参考）、`/doctor`（配置、凭据、catalog 与设置的一次性
   体检）、`/hooks`（已配置的 hook 表）、`/release-notes`（最新变更
-  节选）等对话框。会话命令：`/sessions`（别名 `/resume`）原位恢复已记录的
+  节选）、`/agents`（后台作业表）等对话框。会话命令：`/sessions`（别名 `/resume`）原位恢复已记录的
   会话，`/fork` 快照出可恢复副本，`/title` 改名，`/new` 开新会话，
   `/init` 请 agent 写 AGENTS.md，`/status` 概览会话，`/undo [n]`
   （或双击 Esc）按整轮回退对话，`/compact [instruction]` 压缩上下文

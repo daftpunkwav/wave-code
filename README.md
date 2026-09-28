@@ -7,14 +7,6 @@ a shared agent core (multi-turn ReAct loop, tools, skills, memory, MCP).
 
 > 🚧 Under active development; no stable release yet.
 
-## Acknowledgments
-
-WaveCode's console experience was shaped by studying several excellent
-terminal coding agents — notably [Kimi Code CLI](https://github.com/MoonshotAI/kimi-code)
-(MIT; its pi-tui frontend informed the differential-rendering console)
-alongside codex, opencode, and Claude Code. All Rust code here is a
-fresh implementation.
-
 ## Install
 
 Prebuilt binaries (sha256-verified) ship with each `v*` release:

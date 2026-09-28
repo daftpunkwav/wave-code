@@ -480,36 +480,6 @@ rows vanish while `<summary>X</summary>` becomes a bold `▸ X` marker
 row, and `<kbd>C</kbd>` becomes inline code. Spans that cannot map —
 or tags outside the handled set — pass through unchanged.
 
-### Reference study (codex, opencode, claude-code, kimi-code)
-
-What was adopted, and what was rejected:
-
-- **codex (ratatui)** — closest analog. Adopted: syntax themes as a
-  registry of names resolved against the two-face bundle with
-  runtime-swappable selection (codex keeps a `THEME` global plus a
-  revision counter; wave pairs the syntax theme with the chrome theme
-  instead, which satisfies the same goal with less machinery). Adopted:
-  the terminal background decides the default look. Rejected: no
-  framing at all around code blocks — with sparse highlights a block
-  has no visible extent; wave draws the dim frame.
-- **opencode (charmbracelet)** — the reference for
-  palette-drives-syntax: its `generateSyntax(theme)` derives every
-  syntax scope color from the theme's own `syntax*` values, exactly
-  the pairing wave implements with `SyntaxTheme`. Adopted its
-  synthwave84 color values as the on-disk reference for the neon
-  palette. Rejected: one-line `marginTop` between message parts —
-  wave needs in-message rhythm too, so separation lives in the
-  renderer.
-- **kimi-code (pi-tui)** — a streaming markdown lexer like wave's.
-  Adopted: "add spacing unless a space token follows" is the same
-  invariant wave's ensure-one-blank implements without lookahead.
-  Rejected: rendering the raw ``` fence line as a dim border row — the
-  fence markers themselves were the complaint; wave frames with rules
-  instead.
-- **claude-code (Ink)** — desktop/web surface, not a terminal
-  markdown renderer; nothing applicable beyond confirming the common
-  convention of blank-line-separated blocks.
-
 ## Deliberate non-goals this generation
 
 Background tasks and a plan approval flow need wire or

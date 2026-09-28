@@ -9,13 +9,6 @@ ReAct 循环、工具、技能、记忆、MCP）。
 
 > 🚧 积极开发中；尚无稳定版本。
 
-## 致谢
-
-WaveCode 的控制台体验源自对多个优秀终端编码代理的研究——尤其是
-[Kimi Code CLI](https://github.com/MoonshotAI/kimi-code)
-（MIT；其 pi-tui 前端启发了差分渲染的控制台），以及 codex、opencode
-和 Claude Code。此处全部 Rust 代码均为全新实现。
-
 ## 安装
 
 每个 `v*` release 都附带预编译二进制（经 sha256 校验）：

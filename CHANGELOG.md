@@ -21,7 +21,7 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   TypeScript SDK.
 - Console UI: wave-themed rendering, syntax highlighting, window
   title and tab progress, kill-ring/yank-pop, typing-burst paste protection,
-  external status-line command (Claude Code contract), custom JSON
+  external status-line command (JSON snapshot contract), custom JSON
   themes, `/undo` rewind picker, `/editor` (Ctrl+G), `/reload`,
   `/btw` side questions, and a model catalog (`~/.wavecode/models.json`)
   edited through `/model list|add|set|remove` beside the picker.

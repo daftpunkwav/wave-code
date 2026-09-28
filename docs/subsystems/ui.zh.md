@@ -298,16 +298,6 @@ Fence 在语法高亮器之前咨询可插拔渲染器
 行、`<kbd>C</kbd>` 变为行内代码。无法映射的 span——
 或处理集合之外的标签——原样通过。
 
-### 参考研究（codex、opencode、claude-code、kimi-code）
-
-采纳了什么，拒绝了什么：
-
-- **codex (ratatui)** — 最接近的同类。采纳：语法主题作为名字注册表，对 two-face bundle 解析，支持运行时切换（codex 保持一个 `THEME` 全局加修订计数器；wave 改为把语法主题与 chrome 主题配对，用更少的机制满足同一目标）。采纳：终端背景决定默认观感。拒绝：代码块完全不加框——高亮稀疏时块没有可见边界；wave 画暗色框。
-- **opencode (charmbracelet)** — 调色板驱动语法的参照：其 `generateSyntax(theme)` 从主题自身的 `syntax*` 值派生每个语法 scope 的颜色，正是 wave 用 `SyntaxTheme` 实现的配对。采纳其 synthwave84 颜色值作为霓虹调色板的磁盘参考。拒绝：消息部件之间一行的 `marginTop`——wave 需要消息内的节奏，因此间隔放在渲染器里。
-- **kimi-code (pi-tui)** — 与 wave 相似的流式 markdown 词法器。采纳："除非后面跟空格 token 否则加间隔"与 wave 的 ensure-one-blank 无前瞻实现的同一不变量一致。拒绝：把原始 ``` fence 行渲染为暗色边框行——fence 标记本身就是被抱怨的对象；wave 改用规则线加框。
-- **claude-code (Ink)** — 桌面/Web 表面，不是终端
-  markdown 渲染器；除确认空行分隔块的通行约定外无可适用之处。
-
 ## 本代刻意的非目标
 
 后台任务与 plan 审批流需要尚不存在的 wire 或

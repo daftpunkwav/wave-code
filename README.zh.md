@@ -78,11 +78,12 @@ model = "your-model-fast"
 # The same picker also reads `~/.wavecode/models.json`, a standalone model
 # catalog holding full provider specs (endpoint, API kind, context/output
 # limits, thinking variants, modalities). Edit it in the console with
-# `/model list` / `add` / `set` / `remove`, or by hand — bare
-# `/model add` opens a fill-in form over every spec field (alias, API
+# `/provider list` / `add` / `set` / `remove`, or by hand — bare
+# `/provider add` opens a fill-in form over every spec field (alias, API
 # dialect, provider, base URL, key env var, limits, thinking variants,
-# modalities); its models merge into `[models]` at startup, and a
-# config.toml provider with the same id wins over a catalog one.
+# modalities); `/model` itself only switches. Its models merge into
+# `[models]` at startup, and a config.toml provider with the same id
+# wins over a catalog one.
 
 # Optional: cheap model for routine side sessions. `/btw` answers sample
 # through this [models] entry instead of the primary model; an explicit

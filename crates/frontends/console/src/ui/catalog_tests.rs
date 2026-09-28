@@ -1,4 +1,4 @@
-//! Functional tests for the `/model` catalog subcommands
+//! Functional tests for the `/provider` catalog subcommands
 //! (`list` / `add` / `set` / `remove`): each drives the slash command
 //! against a catalog file in a temporary home and checks both the
 //! status line and the on-disk effect. Plain `/model <name>` switching
@@ -70,10 +70,10 @@ fn seed(home: &Path) -> PathBuf {
 #[test]
 fn list_on_an_empty_catalog_reports_empty() {
     let (mut ui, home) = ui_with_home("list-empty");
-    ui.user_submit("/model list");
+    ui.user_submit("/provider list");
     let text = transcript_plain(&mut ui);
     assert!(
-        text.contains("model catalog is empty (/model add ...)"),
+        text.contains("model catalog is empty (/provider add ...)"),
         "{text}"
     );
     assert!(!ModelCatalog::path(&home).exists(), "no file created");
@@ -83,7 +83,7 @@ fn list_on_an_empty_catalog_reports_empty() {
 fn add_writes_the_catalog_and_list_shows_it() {
     let (mut ui, home) = ui_with_home("add");
     ui.user_submit(
-        "/model add glm anthropic-messages bigmodel https://open.bigmodel.cn/api/anthropic \
+        "/provider add glm anthropic-messages bigmodel https://open.bigmodel.cn/api/anthropic \
          glm-5.3 100000 128000",
     );
     let text = transcript_plain(&mut ui);
@@ -97,7 +97,7 @@ fn add_writes_the_catalog_and_list_shows_it() {
     assert_eq!(spec.max_output, Some(128_000));
     assert_eq!(spec.kind, wavecode_config::ApiKind::AnthropicMessages);
 
-    ui.user_submit("/model list");
+    ui.user_submit("/provider list");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("glm · glm-5.3"), "{text}");
     let _ = std::fs::remove_dir_all(&home);
@@ -106,7 +106,7 @@ fn add_writes_the_catalog_and_list_shows_it() {
 #[test]
 fn add_rejects_an_unknown_api_kind_without_writing() {
     let (mut ui, home) = ui_with_home("add-bad-kind");
-    ui.user_submit("/model add glm soap bigmodel https://x glm-5.3");
+    ui.user_submit("/provider add glm soap bigmodel https://x glm-5.3");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("unknown api kind soap"), "{text}");
     assert!(!ModelCatalog::path(&home).exists(), "nothing written");
@@ -116,15 +116,15 @@ fn add_rejects_an_unknown_api_kind_without_writing() {
 fn set_patches_one_field_and_saves() {
     let (mut ui, home) = ui_with_home("set");
     seed(&home);
-    ui.user_submit("/model set glm context 123000");
+    ui.user_submit("/provider set glm context 123000");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("glm updated (context = 123000)"), "{text}");
     let catalog = ModelCatalog::load(&home).unwrap();
     assert_eq!(catalog.get("glm").unwrap().context_window, Some(123_000));
 
     // The thinking field toggles the reasoning spec; off clears it.
-    ui.user_submit("/model set glm thinking max");
-    ui.user_submit("/model set glm thinking off");
+    ui.user_submit("/provider set glm thinking max");
+    ui.user_submit("/provider set glm thinking off");
     let catalog = ModelCatalog::load(&home).unwrap();
     let spec = catalog.get("glm").unwrap();
     assert!(!spec.reasoning.enabled);
@@ -136,10 +136,10 @@ fn set_patches_one_field_and_saves() {
 fn set_unknown_field_or_alias_reports() {
     let (mut ui, home) = ui_with_home("set-bad");
     seed(&home);
-    ui.user_submit("/model set glm color blue");
+    ui.user_submit("/provider set glm color blue");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("unknown field color"), "{text}");
-    ui.user_submit("/model set nope context 5");
+    ui.user_submit("/provider set nope context 5");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("no model named nope"), "{text}");
     let _ = std::fs::remove_dir_all(&home);
@@ -151,8 +151,8 @@ fn set_unknown_field_or_alias_reports() {
 fn set_rejects_unparseable_numbers_without_writing() {
     let (mut ui, home) = ui_with_home("set-bad-number");
     seed(&home);
-    ui.user_submit("/model set glm context abc");
-    ui.user_submit("/model set glm output 1.5");
+    ui.user_submit("/provider set glm context abc");
+    ui.user_submit("/provider set glm output 1.5");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("invalid context value"), "{text}");
     assert!(text.contains("invalid output value"), "{text}");
@@ -168,14 +168,14 @@ fn set_rejects_unparseable_numbers_without_writing() {
 fn remove_drops_the_spec_and_saves() {
     let (mut ui, home) = ui_with_home("remove");
     seed(&home);
-    ui.user_submit("/model remove glm");
+    ui.user_submit("/provider remove glm");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("removed glm"), "{text}");
     let catalog = ModelCatalog::load(&home).unwrap();
     assert!(catalog.get("glm").is_none(), "spec dropped on disk");
 
     // Removing an unknown alias reports instead of writing.
-    ui.user_submit("/model remove glm");
+    ui.user_submit("/provider remove glm");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("no model named glm"), "{text}");
     let _ = std::fs::remove_dir_all(&home);
@@ -188,9 +188,9 @@ fn malformed_catalog_cancels_the_subcommands() {
     let (mut ui, home) = ui_with_home("malformed");
     let path = ModelCatalog::path(&home);
     std::fs::write(&path, "{ not json").unwrap();
-    ui.user_submit("/model list");
-    ui.user_submit("/model add glm anthropic bigmodel https://x glm-5.3");
-    ui.user_submit("/model remove glm");
+    ui.user_submit("/provider list");
+    ui.user_submit("/provider add glm anthropic bigmodel https://x glm-5.3");
+    ui.user_submit("/provider remove glm");
     let text = transcript_plain(&mut ui);
     assert!(
         text.matches("model catalog load failed:").count() == 3,

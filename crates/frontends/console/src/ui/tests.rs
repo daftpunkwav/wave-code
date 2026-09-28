@@ -1315,21 +1315,35 @@ fn model_no_args_opens_picker_and_alt_s_switches_live() {
     );
 }
 
-/// Bare `/model add` opens the spec form; the positional form stays
-/// available for one-line additions.
+/// Bare `/provider add` opens the spec form; `/model` is a switching
+/// command and points at /provider for its retired subcommands.
 #[test]
-fn model_add_bare_opens_the_spec_form() {
+fn provider_add_bare_opens_the_spec_form() {
     let mut ui = ui();
-    ui.user_submit("/model add");
+    ui.user_submit("/provider add");
     assert!(
         matches!(ui.dialog, Some(Dialog::ModelForm(_))),
         "spec form opens"
     );
     ui.handle_key(KeyEvent::plain(Key::Esc));
     assert!(ui.dialog.is_none(), "esc dismisses");
-    // The positional form still parses as before.
-    ui.user_submit("/model add x anthropic p https://h m");
+    // The positional form still parses.
+    ui.user_submit("/provider add x anthropic p https://h m");
     assert!(ui.dialog.is_none(), "positional add does not open a dialog");
+    // /model keeps its switching focus and routes the old subcommands
+    // to /provider with a status hint.
+    ui.user_submit("/model add");
+    assert!(ui.dialog.is_none(), "/model add opens nothing");
+    let frame = ui.frame(80, 24);
+    let joined: String = frame
+        .iter()
+        .map(|l| strip_ansi(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("/provider"),
+        "migration hint shown: {joined}"
+    );
 }
 
 #[test]

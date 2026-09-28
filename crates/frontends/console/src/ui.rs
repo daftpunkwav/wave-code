@@ -1394,6 +1394,8 @@ impl ConsoleUi {
                         )));
                     } else if invocation.name == "model" {
                         self.handle_model_command(&invocation.args);
+                    } else if invocation.name == "provider" {
+                        self.handle_provider_command(&invocation.args);
                     } else if invocation.name == "permissions" && invocation.args.is_empty() {
                         self.dialog = Some(Dialog::Permissions(
                             crate::dialogs::PermissionPickerDialog::new(
@@ -2569,20 +2571,42 @@ verify from the repository.";
     /// [`Self::catalog_list`] and friends); any other word switches
     /// models through the picker semantics (see
     /// [`Self::switch_model_command`]).
+    /// `/model` is a switching command only: bare opens the picker, a
+    /// name switches. The catalog-editing subcommands live under
+    /// `/provider` now; the old spellings point there instead of
+    /// silently doing nothing.
     fn handle_model_command(&mut self, args: &str) {
         let parts: Vec<&str> = args.split_whitespace().collect();
         match parts.first().copied() {
-            Some("list") => self.catalog_list(),
-            Some("remove") => self.catalog_remove(parts.get(1).copied()),
-            Some("set") => self.catalog_set(&parts[1..]),
-            // Bare `add` opens the spec form (every catalog field,
-            // including thinking and modalities); the positional form
-            // stays for one-line additions.
-            Some("add") if parts.len() == 1 => {
+            Some("add") | Some("list") | Some("set") | Some("remove") => self.push_status(
+                "model configuration moved to /provider (add | list | set | remove)",
+                false,
+            ),
+            _ => self.switch_model_command(args.trim()),
+        }
+    }
+
+    /// `/provider`: the model-catalog surface. Bare or `add` opens the
+    /// spec form (every catalog field, including thinking and
+    /// modalities); `list` / `set` / `remove` edit the saved file.
+    fn handle_provider_command(&mut self, args: &str) {
+        let parts: Vec<&str> = args.split_whitespace().collect();
+        // Bare behaves like `add`: the command IS the config surface.
+        let sub = parts.first().copied().unwrap_or("add");
+        match sub {
+            "add" if parts.len() <= 1 => {
                 self.dialog = Some(Dialog::ModelForm(crate::dialogs::ModelFormDialog::new()));
             }
-            Some("add") => self.catalog_add(&parts[1..]),
-            _ => self.switch_model_command(args.trim()),
+            "add" => self.catalog_add(&parts[1..]),
+            "list" => self.catalog_list(),
+            "remove" => self.catalog_remove(parts.get(1).copied()),
+            "set" => self.catalog_set(&parts[1..]),
+            other => {
+                self.push_status(
+                    &format!("unknown /provider subcommand {other:?} (add | list | set | remove)"),
+                    true,
+                );
+            }
         }
     }
 
@@ -2610,7 +2634,7 @@ verify from the repository.";
             return;
         };
         if catalog.models.is_empty() {
-            self.push_status("model catalog is empty (/model add ...)", false);
+            self.push_status("model catalog is empty (/provider add ...)", false);
             return;
         }
         for (alias, spec) in &catalog.models {
@@ -2638,7 +2662,7 @@ verify from the repository.";
     /// `/model remove <alias>`: drop the spec and save.
     fn catalog_remove(&mut self, alias: Option<&str>) {
         let Some(alias) = alias else {
-            self.push_status("usage: /model remove <alias>", true);
+            self.push_status("usage: /provider remove <alias>", true);
             return;
         };
         let Some((mut catalog, home)) = self.load_catalog() else {
@@ -2660,7 +2684,7 @@ verify from the repository.";
         let (Some(alias), Some(field), Some(value)) = (rest.first(), rest.get(1), rest.get(2))
         else {
             self.push_status(
-                "usage: /model set <alias> <context|output|thinking|input> <value>",
+                "usage: /provider set <alias> <context|output|thinking|input> <value>",
                 true,
             );
             return;
@@ -2719,7 +2743,7 @@ verify from the repository.";
     fn catalog_add(&mut self, rest: &[&str]) {
         if rest.len() < 5 {
             self.push_status(
-                "usage: /model add <alias> <anthropic-messages|openai-chat|openai-responses> \
+                "usage: /provider add <alias> <anthropic-messages|openai-chat|openai-responses> \
                  <provider> <base_url> <model> [context] [max_output]",
                 true,
             );

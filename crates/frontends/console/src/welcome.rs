@@ -68,7 +68,9 @@ fn wave_offset(inner: usize) -> usize {
 pub fn render(info: &WelcomeInfo, width: usize) -> Vec<String> {
     let theme = theme::current();
     let palette = theme.palette();
-    let inner = width.saturating_sub(2).max(24);
+    // Honor the real budget: a clamped-up `inner` (the old `.max(24)`)
+    // emitted 24-column card lines into 1-2 column viewports.
+    let inner = width.saturating_sub(2);
 
     let mut content: Vec<String> = Vec::new();
     content.push(String::new());
@@ -120,7 +122,12 @@ pub fn render(info: &WelcomeInfo, width: usize) -> Vec<String> {
 
     // One blank spacer keeps the transcript below from hugging the card.
     content.push(String::new());
+    // Degenerate budgets (inner smaller than one fact row or the
+    // wordmark) truncate per line instead of overflowing the frame.
     content
+        .into_iter()
+        .map(|line| width::truncate_to_width(&line, inner))
+        .collect()
 }
 
 /// The interference-wave banner, drawn as a braille oscilloscope trace:
@@ -280,7 +287,7 @@ impl Component for Welcome {
         let ease = 1.0 - (1.0 - t).powi(3);
         let mut frame = render(&self.info, width);
         let palette = theme::current().palette();
-        let inner = width.saturating_sub(2).max(24);
+        let inner = width.saturating_sub(2);
         let (top, bottom) = wave_banner(
             inner,
             ease * std::f32::consts::TAU * 1.5,

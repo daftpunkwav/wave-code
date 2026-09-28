@@ -94,6 +94,29 @@ fn submit_enqueues_and_renders_user_message() {
     assert!(joined.contains("hello"), "user text in frame: {joined}");
 }
 
+/// Degenerate viewports (1-column terminals, single-row screens) must
+/// render without panics and survive the full write pipeline: the
+/// frame assembles, and the diff renderer truncates over-wide lines at
+/// write time (Screen::write_line, tested in tui-engine) instead of
+/// underflowing on `columns - 2` style arithmetic.
+#[test]
+fn degenerate_viewport_sizes_render_without_panics() {
+    let mut screen = tui_engine::screen::Screen::new();
+    screen.set_margin(crate::ui::GUTTER);
+    for (columns, rows) in [(1usize, 1usize), (2, 1), (1, 30), (2, 30), (0, 0)] {
+        let mut ui = ui();
+        // Content on both sides of the frame: a submitted user turn and
+        // a wide-character draft exercise transcript + editor + footer.
+        ui.submit("user content to render");
+        ui.editor.insert_text("editor draft 你好");
+        let frame = ui.frame(columns, rows);
+        let segment: tui_engine::component::Segment = Arc::new(frame);
+        let mut out: Vec<u8> = Vec::new();
+        screen.draw(&mut out, &[segment], columns, rows);
+        assert!(!out.is_empty(), "frame({columns},{rows}) wrote nothing");
+    }
+}
+
 #[test]
 fn busy_submit_queues_message_and_pane_renders() {
     let mut ui = ui();
@@ -1898,6 +1921,9 @@ fn theme_no_args_opens_picker_and_enter_applies() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(joined.contains("theme switched (deepwave)"), "{joined}");
+    // Restore the default: the applied deepwave install is a process
+    // global, and leaving it behind races every later dark assertion.
+    theme::set(theme::Theme::dark());
 }
 
 #[test]

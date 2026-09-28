@@ -76,14 +76,23 @@ impl StatusLine {
         let latest = Arc::clone(&self.latest);
         tokio::spawn(async move {
             if let Ok(line) = run_once(&command, snapshot).await {
-                *latest.lock().expect("statusline slot") = Some(line);
+                *lock(&latest) = Some(line);
             }
         });
     }
 
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<String>> {
-        self.latest.lock().expect("statusline slot")
+        lock(&self.latest)
     }
+}
+
+/// Lock a slot, recovering from poison: the slot is a plain `Option`
+/// with no invariant a panic could have broken, so a poisoned guard
+/// (a panic in another thread mid-write) degrades to the inner value
+/// instead of taking down the render loop.
+fn lock(slot: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String>> {
+    slot.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Run the command once: JSON snapshot in, first stdout line out.

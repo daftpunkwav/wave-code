@@ -531,6 +531,9 @@ mod tests {
             "dark body gone: {:?}",
             lines[0]
         );
+        // Restore the default: the theme is a process global, and a
+        // light install left behind races every later dark assertion.
+        theme::set(theme::Theme::dark());
     }
 
     /// A theme switch repaints the user band under the new palette:
@@ -563,6 +566,9 @@ mod tests {
             "light role color: {:?}",
             lines[0]
         );
+        // Restore the default: the theme is a process global, and a
+        // light install left behind races every later dark assertion.
+        theme::set(theme::Theme::dark());
     }
 
     /// The assistant bullet carries exactly one space before the body.
@@ -669,6 +675,9 @@ mod tests {
             "code span text intact: {:?}",
             lines[2]
         );
+        // Restore the default: the theme is a process global, and a
+        // deepwave install left behind races every later dark assertion.
+        theme::set(theme::Theme::dark());
     }
 
     /// A live draft's bullet keeps breathing across text updates: the

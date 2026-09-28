@@ -197,12 +197,12 @@ impl SharedSettings {
 
     /// Snapshot the current values.
     pub fn get(&self) -> UiSettings {
-        self.inner.lock().expect("settings lock").clone()
+        self.lock().clone()
     }
 
     /// Apply `edit` to the current values and persist the result.
     pub fn update(&self, edit: impl FnOnce(&mut UiSettings)) {
-        let mut guard = self.inner.lock().expect("settings lock");
+        let mut guard = self.lock();
         edit(&mut guard);
         if self.persist {
             guard.save();
@@ -212,6 +212,17 @@ impl SharedSettings {
     /// Discard live values and reload from disk (`/reload`); holders
     /// of this handle see the fresh values on their next read.
     pub fn reload(&self) {
-        *self.inner.lock().expect("settings lock") = UiSettings::load();
+        *self.lock() = UiSettings::load();
+    }
+
+    /// Lock the shared settings, recovering from poison: the guarded
+    /// value is a plain struct cloned/assigned wholesale, with no
+    /// invariant a panic mid-critical-section could break, so a
+    /// poisoned guard degrades to the inner value instead of failing
+    /// every later read (the render path locks this every frame).
+    fn lock(&self) -> std::sync::MutexGuard<'_, UiSettings> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }

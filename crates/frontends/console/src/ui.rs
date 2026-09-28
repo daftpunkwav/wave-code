@@ -329,7 +329,11 @@ impl ConsoleUi {
                         ),
                 ));
                 if let Some(path) = home_history_path() {
-                    editor.load_history(history::load(&path, settings.get().history_cap()));
+                    // The editor keeps its own cap so later submits
+                    // honor the configured limit, not a built-in 100.
+                    let cap = settings.get().history_cap();
+                    editor.set_history_cap(cap);
+                    editor.load_history(history::load(&path, cap));
                 }
                 editor
             },
@@ -3234,7 +3238,10 @@ verify from the repository.";
         let Some(slot) = &self.update_slot else {
             return false;
         };
-        match slot.lock().expect("update slot lock").take() {
+        // Poison recovery: the slot is a plain Option with no invariant
+        // a panic could break; a poisoned guard must not take down the
+        // render tick.
+        match slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
             Some(text) => {
                 self.state.update_notice = Some(text);
                 true

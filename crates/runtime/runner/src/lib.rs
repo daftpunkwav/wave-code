@@ -105,10 +105,8 @@ pub(crate) struct TurnState {
     pub(crate) round_rearms: u8,
     /// Consecutive dispatch rounds whose tool-call signature matched the
     /// previous round's (0 = the last round differed or none ran yet).
+    /// Rendered live into the per-sample notes while it lasts.
     pub(crate) repeat_streak: u32,
-    /// Escalation reminders already injected for the current streak, so each
-    /// [`REPEAT_REMINDER_AT`] threshold fires exactly once.
-    pub(crate) repeat_reminders_sent: u8,
     /// Signature of the previous round's tool calls (see
     /// [`TurnState::note_call_signature`]).
     pub(crate) last_call_signature: Option<String>,
@@ -138,14 +136,11 @@ impl TurnState {
     /// Fold one dispatch round's tool-call signature into the repeat streak.
     ///
     /// Returns the new streak length; a different signature resets it to 1.
-    /// Escalation counters restart with the streak so each threshold fires
-    /// once per run of identical calls.
     pub fn note_call_signature(&mut self, signature: &str) -> u32 {
         if self.last_call_signature.as_deref() == Some(signature) {
             self.repeat_streak = self.repeat_streak.saturating_add(1);
         } else {
             self.repeat_streak = 1;
-            self.repeat_reminders_sent = 0;
             self.last_call_signature = Some(signature.to_string());
         }
         self.repeat_streak
@@ -475,6 +470,16 @@ pub trait ModelGateway: Send + Sync {
         None
     }
 
+    /// The wire model name the gateway currently samples into, when that
+    /// can change at runtime through [`ModelGateway::set_model`]; `None`
+    /// leaves the loop on its configured name. The loop renders this into
+    /// the per-sample notes, so the model always sees the live identity
+    /// instead of a name frozen at assembly that a `/model` switch would
+    /// silently stale.
+    fn current_model(&self) -> Option<String> {
+        None
+    }
+
     /// Switch the reasoning-effort level for subsequent samples; false
     /// rejects the level. Adapters over gateways with a mutable effort
     /// override this; fixed gateways keep the default (rejecting).
@@ -604,14 +609,24 @@ impl InboxHandle {
 pub const CONTINUATION_PROMPT: &str =
     "Output token limit reached. Continue exactly where you left off.";
 
-/// Escalating reminders injected when the same tool call keeps repeating.
+/// The transient note rendered when the same tool call keeps repeating.
 ///
-/// The sequence walks the model out of a stuck loop with a different demand
-/// each time: falsify the approach, ask for the missing input, conclude from
-/// what is already known. Inserted into history — never as a fresh user turn
-/// the model could mistake for the human — so they ride the next sample.
-fn repeat_reminder(level: usize, streak: u32) -> String {
-    let text = match level {
+/// The escalation walks the model out of a stuck loop with a different
+/// demand each level: falsify the approach, ask for the missing input,
+/// conclude from what is already known. Rendered into the per-sample
+/// notes from the live streak — never stored — so the text always
+/// matches the current count and vanishes once the model breaks the
+/// pattern. `None` below the first threshold.
+fn repeat_note(streak: u32) -> Option<String> {
+    let level = REPEAT_REMINDER_AT
+        .iter()
+        .filter(|&&at| at <= streak)
+        .count();
+    if level == 0 {
+        return None;
+    }
+    let index = level - 1;
+    let text = match index {
         0 => format!(
             "The same tool call has now been issued {streak} times in a row. \
              Run the cheapest test that could disprove your current approach, \
@@ -629,7 +644,7 @@ fn repeat_reminder(level: usize, streak: u32) -> String {
              gathered and list what remains uncertain."
         ),
     };
-    wavecode_wire::wrap_system_reminder(&text)
+    Some(wavecode_wire::wrap_system_reminder(&text))
 }
 
 /// Handoff text attached to the synthetic tool results when the repeat
@@ -641,28 +656,6 @@ fn repeat_handoff(streak: u32) -> String {
          in text covering the current blocker, what each attempt established, \
          and what you need to continue."
     )
-}
-
-/// The next escalation due for the current streak, if any: returns the
-/// threshold that just fired and its reminder text, advancing the sent
-/// counter. Each threshold fires once per streak.
-fn next_escalation(state: &mut TurnState) -> Option<(u32, String)> {
-    // How many thresholds the streak has crossed: the escalating levels run
-    // from the lowest to the highest, so counting is the right ladder (a
-    // `position` search would keep returning the first match).
-    let due = REPEAT_REMINDER_AT
-        .iter()
-        .filter(|&&at| at <= state.repeat_streak)
-        .count() as u8;
-    if due == 0 || due <= state.repeat_reminders_sent {
-        return None;
-    }
-    state.repeat_reminders_sent = due;
-    let index = usize::from(due - 1);
-    Some((
-        REPEAT_REMINDER_AT[index],
-        repeat_reminder(index, state.repeat_streak),
-    ))
 }
 
 /// Canonical signature of one round's tool calls: name plus argument JSON, in
@@ -766,12 +759,6 @@ pub struct RunConfig {
     /// older images travel as text placeholders (0 keeps every image, for
     /// callers that want full fidelity).
     pub max_wire_images: u32,
-    /// Calendar date rendered into the system prompt at assembly
-    /// ([`infrastructure_base::format_date`] format). The loop compares it
-    /// with the current date before sampling and injects a one-off reminder
-    /// when a long-lived session crosses midnight, so the model never works
-    /// from a stale date. `None` disables the check.
-    pub session_date: Option<String>,
 }
 
 /// User decision delivered for one parked approval request.
@@ -1008,11 +995,6 @@ pub struct RunLoop<E, P, H, M, A, T, C> {
     run_allowlist: RunAllowlist,
     run_interrupts: RunInterrupts,
     inbox: InboxHandle,
-    /// Date already announced to the model: seeded from
-    /// [`RunConfig::session_date`], advanced when the loop notices the
-    /// calendar rolled over. Interior-mutable because the loop is shared
-    /// across turns behind `&self`.
-    announced_date: std::sync::Mutex<Option<String>>,
     /// Model-driven compaction channel, wired by
     /// [`RunLoop::with_compaction_requests`]: `None` means the model has
     /// no compaction channel at all.
@@ -1049,7 +1031,6 @@ where
         cfg: RunConfig,
         interrupt: InterruptHandle,
     ) -> Self {
-        let announced_date = std::sync::Mutex::new(cfg.session_date.clone());
         Self {
             executor,
             policy,
@@ -1064,7 +1045,6 @@ where
             run_allowlist: RunAllowlist::default(),
             run_interrupts: RunInterrupts::default(),
             inbox: InboxHandle::new(),
-            announced_date,
             compaction_requests: None,
             model_compactions: std::sync::atomic::AtomicU32::new(0),
             max_model_compacts: MAX_MODEL_COMPACTS,
@@ -1154,29 +1134,6 @@ where
         self.inbox.clone()
     }
 
-    /// A reminder announcing a calendar rollover, or `None` while the
-    /// session's announced date still matches today.
-    ///
-    /// The announced date advances on the first check after midnight, so the
-    /// notice lands exactly once per change no matter how many turns follow.
-    fn date_change_notice(&self) -> Option<String> {
-        let announced = self.cfg.session_date.as_ref()?;
-        let today = infrastructure_base::format_date(std::time::SystemTime::now());
-        let mut slot = self
-            .announced_date
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let current = slot.as_ref().unwrap_or(announced);
-        if *current == today {
-            return None;
-        }
-        *slot = Some(today.clone());
-        Some(wavecode_wire::wrap_system_reminder(&format!(
-            "The calendar date has changed: today is {today}. The `Session date` \
-             line in the environment section is from when this session started."
-        )))
-    }
-
     /// Context window the budget gates reason with this iteration.
     ///
     /// A `/model` switch can move the real window under the loop's feet
@@ -1189,18 +1146,43 @@ where
             .unwrap_or(self.cfg.context_window)
     }
 
-    /// Transient notes attached to one sample request: the live context-
-    /// usage line, plus the denial texts of reviewed compaction requests.
-    /// Rebuilt every iteration and never stored, so a note reads as an
-    /// instrument panel for the upcoming call and is gone by the next
-    /// one. A zero window (degenerate config) notes nothing.
-    fn sample_notes(&self, used: u64, window: u64, denials: &[String]) -> Vec<String> {
+    /// Transient notes attached to one sample request, rebuilt every
+    /// iteration and never stored — an instrument panel for the upcoming
+    /// call, gone by the next one. Built dynamically from live state:
+    ///
+    /// - the serving model and its live window (follows a `/model`
+    ///   switch, unlike the assembly-frozen environment section);
+    /// - today's date (re-read every iteration, so a session that
+    ///   outlives midnight is correct without a rollover notice);
+    /// - the live context-usage line (same `used` the budget gates see);
+    /// - the current repeat streak when the model is re-issuing calls;
+    /// - denial texts from reviewed compaction requests.
+    fn sample_notes(
+        &self,
+        used: u64,
+        window: u64,
+        repeat_streak: u32,
+        denials: &[String],
+    ) -> Vec<String> {
         let mut notes = Vec::new();
+        let model = self
+            .model
+            .current_model()
+            .unwrap_or_else(|| self.cfg.model_name.clone());
+        notes.push(wavecode_wire::wrap_system_reminder(&format!(
+            "Model: {model} (context window: {window} tokens); today: {}",
+            infrastructure_base::format_date(std::time::SystemTime::now())
+        )));
         if window > 0 {
             let pct = used.saturating_mul(100) / window;
             notes.push(wavecode_wire::wrap_system_reminder(&format!(
                 "Context usage: {pct}% ({used}/{window} tokens)"
             )));
+        }
+        if repeat_streak > 0 {
+            if let Some(text) = repeat_note(repeat_streak) {
+                notes.push(text);
+            }
         }
         notes.extend(
             denials
@@ -1355,13 +1337,6 @@ where
             for text in self.inbox.take_next_turn() {
                 conv.push(Role::User, text);
                 applied += 1;
-            }
-
-            // Calendar rollover: the environment section was rendered at
-            // assembly, so a session that outlives midnight would keep
-            // sampling with a stale date. Announce the new one once.
-            if let Some(notice) = self.date_change_notice() {
-                conv.push(Role::User, notice);
             }
 
             // Context use feeds both gates below. The incremental estimator
@@ -1564,7 +1539,7 @@ where
                     .filter(|tool| self.run_allowlist.is_allowed(&ctx.run_id, &tool.name))
                     .collect(),
                 output_cap: self.cfg.max_output_tokens,
-                notes: self.sample_notes(used, window, &denials),
+                notes: self.sample_notes(used, window, state.repeat_streak, &denials),
             };
             // Live deltas stream to frontends ahead of the assembled
             // message; ordering (deltas before AgentMessageComplete) is
@@ -1837,14 +1812,17 @@ where
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::RepeatBreaker;
                 }
-                if let Some((threshold, text)) = next_escalation(&mut state) {
+                if streak >= REPEAT_REMINDER_AT[0] {
                     emit_msg(EventMsg::Warning {
                         message: format!(
-                            "same tool call repeated {streak} times; reminding the model ({threshold}/{})",
+                            "same tool call repeated {streak} times; the repeat note rides this sample's notes ({}/{})",
+                            REPEAT_REMINDER_AT
+                                .iter()
+                                .filter(|&&at| at <= streak)
+                                .count(),
                             self.cfg.max_repeat_streak
                         ),
                     });
-                    conv.push(Role::User, text);
                 }
             }
             let (results, hook_contexts) = self
@@ -3085,7 +3063,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             interrupt,
         )
@@ -3893,7 +3870,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -3961,7 +3937,6 @@ mod run_loop_tests {
                     max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                     max_repeat_streak: MAX_REPEAT_STREAK,
                     max_wire_images: MAX_WIRE_IMAGES,
-                    session_date: None,
                 },
                 fx.interrupt.clone(),
             )
@@ -4176,7 +4151,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         )
@@ -4285,7 +4259,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -4345,7 +4318,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -4403,7 +4375,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -4541,13 +4512,12 @@ mod run_loop_tests {
         let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(log.len(), 2, "two samples drove the turn: {log:?}");
         for sample_notes in log.iter() {
-            assert_eq!(sample_notes.len(), 1, "{sample_notes:?}");
+            assert_eq!(sample_notes.len(), 2, "{sample_notes:?}");
             assert!(
-                sample_notes[0].contains("Context usage: 25% (50001/200000 tokens)")
-                    || sample_notes[0].contains("Context usage:"),
+                sample_notes[1].contains("Context usage:"),
                 "{sample_notes:?}"
             );
-            assert!(sample_notes[0].starts_with("<system-reminder>"));
+            assert!(sample_notes[1].starts_with("<system-reminder>"));
         }
         // The first sample reported the pre-tool estimate; the second saw
         // the provider-billed usage. Both were request-scoped: nothing
@@ -4669,7 +4639,7 @@ mod run_loop_tests {
         );
         let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(log.len(), 1, "one sample: {log:?}");
-        let denial = &log[0][1];
+        let denial = &log[0][2];
         assert!(denial.contains("compaction request denied"), "{denial:?}");
         assert!(
             denial.contains("context is only 1% used"),
@@ -5213,7 +5183,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -5695,7 +5664,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         )
@@ -5773,7 +5741,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         );
@@ -5819,7 +5786,6 @@ mod run_loop_tests {
         compactor: FakeCompactor,
         max_tool_rounds: u32,
         max_repeat_streak: u32,
-        session_date: Option<&str>,
         interrupt: InterruptHandle,
     ) -> RunLoop<FakeExecutor, P, FakeHooks, M, FakeApprovals, FakePlans, FakeCompactor> {
         RunLoop::new(
@@ -5843,7 +5809,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: session_date.map(str::to_string),
             },
             interrupt,
         )
@@ -5893,7 +5858,6 @@ mod run_loop_tests {
             compactor,
             8,
             6,
-            None,
             fx.interrupt.clone(),
         );
         let conv = &mut Conversation::new();
@@ -5913,17 +5877,14 @@ mod run_loop_tests {
             .map(|entry| entry.text())
             .collect::<Vec<_>>()
             .join("\n");
-        // Both escalations fired, each once.
-        assert_eq!(
-            history.matches("has now been issued 3 times").count(),
-            1,
+        // The escalation reminders are transient now: they ride each
+        // sample's notes, so the stored history carries only the tool
+        // traffic and the breaker handoff, never the nudges.
+        assert!(
+            !history.contains("has now been issued 3 times"),
             "{history}"
         );
-        assert_eq!(
-            history.matches("has been issued 5 times").count(),
-            1,
-            "{history}"
-        );
+        assert!(!history.contains("has been issued 5 times"), "{history}");
         // The handoff names the refusal so the model can explain the blocker.
         assert!(
             history.contains("stopped by the repeat breaker"),
@@ -5975,7 +5936,6 @@ mod run_loop_tests {
             compactor,
             8,
             2,
-            None,
             fx.interrupt.clone(),
         );
         let conv = &mut Conversation::new();
@@ -6012,7 +5972,6 @@ mod run_loop_tests {
             compactor,
             8,
             2,
-            None,
             fx.interrupt.clone(),
         );
         let conv = &mut Conversation::new();
@@ -6023,22 +5982,21 @@ mod run_loop_tests {
         assert_eq!(run.executor.lock_executed().len(), 1);
     }
 
-    /// A session that outlives midnight gets one notice naming the new date;
-    /// later turns stay quiet.
+    /// The date is a dynamic per-sample note now: it rides every request
+    /// from a fresh clock read (so midnight rollovers are always correct)
+    /// and never lands in the stored history.
     #[tokio::test]
-    async fn a_stale_session_date_is_announced_once() {
+    async fn today_rides_each_sample_as_a_transient_note() {
         let fx = Fixture::new();
-        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
-        model
-            .steps
-            .lock()
-            .unwrap()
-            .push_back(ModelStep::Answer(text_response("one")));
-        model
-            .steps
-            .lock()
-            .unwrap()
-            .push_back(ModelStep::Answer(text_response("two")));
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let notes_log: NotesLog = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut steps = VecDeque::new();
+        steps.push_back(ModelStep::Answer(text_response("one")));
+        steps.push_back(ModelStep::Answer(text_response("two")));
+        let model = NotesModel {
+            steps: Mutex::new(steps),
+            notes: notes_log.clone(),
+        };
         let run = build_tuned_loop(
             exec,
             policy,
@@ -6049,8 +6007,6 @@ mod run_loop_tests {
             compactor,
             8,
             MAX_REPEAT_STREAK,
-            // Stale by construction: the loop compares against today.
-            Some("1970-01-01 (Thursday)"),
             fx.interrupt.clone(),
         );
         let conv = &mut Conversation::new();
@@ -6062,16 +6018,27 @@ mod run_loop_tests {
             .run_turn(&fx.ctx, conv, TurnInput::text("again"), "sys", &|_| {})
             .await;
         assert_eq!(outcome, StopReason::Completed);
+        let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(log.len(), 2, "two turns, one sample each: {log:?}");
+        for sample_notes in log.iter() {
+            assert!(
+                sample_notes[0].contains("today: "),
+                "every sample names the live date: {sample_notes:?}"
+            );
+            assert!(
+                sample_notes[0].contains("Model: test"),
+                "every sample names the serving model: {sample_notes:?}"
+            );
+        }
         let history = conv
             .snapshot()
             .iter()
             .map(|entry| entry.text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(
-            history.matches("calendar date has changed").count(),
-            1,
-            "{history}"
+        assert!(
+            !history.contains("today: "),
+            "the date note is transient: {history}"
         );
     }
 
@@ -6304,7 +6271,6 @@ mod run_loop_tests {
             compactor,
             2,
             MAX_REPEAT_STREAK,
-            None,
             fx.interrupt.clone(),
         )
         .with_goals(std::sync::Arc::new(FakeGoal { open: true }))
@@ -6376,7 +6342,6 @@ mod run_loop_tests {
                 max_reactive_compacts: MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: MAX_REPEAT_STREAK,
                 max_wire_images: MAX_WIRE_IMAGES,
-                session_date: None,
             },
             fx.interrupt.clone(),
         )

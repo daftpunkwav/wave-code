@@ -704,10 +704,6 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
             wavecode_context::spill::default_spill_store_root(),
         ),
     );
-    // One clock read seeds both the environment paragraph and the loop's
-    // midnight-rollover check, so the two can never disagree about the date.
-    let session_now = std::time::SystemTime::now();
-    let session_date = crate::environment::format_date(session_now);
     // Durable goal service (persisted objective with CAS): the store path
     // derives from home (`<home>/.wavecode/goals/<session>.json`) so resume
     // in the same home reopens the same goal. Corrupt content warns and
@@ -763,7 +759,6 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
                 max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,
                 max_wire_images: runtime_runner::MAX_WIRE_IMAGES,
-                session_date: Some(session_date),
             },
             interrupt.clone(),
         )
@@ -975,7 +970,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         memory_index: memory_index.clone(),
         skill_catalog,
         tool_note: format!("Available tools: {}", tool_names.join(", ")),
-        environment: crate::environment::describe(&cwd, session_now, &model_name, context_window),
+        environment: crate::environment::describe(&cwd),
         summary: String::new(),
     });
 
@@ -2020,7 +2015,6 @@ api_key = "k-inline"
                 max_reactive_compacts: runtime_runner::MAX_REACTIVE_COMPACTS,
                 max_repeat_streak: runtime_runner::MAX_REPEAT_STREAK,
                 max_wire_images: runtime_runner::MAX_WIRE_IMAGES,
-                session_date: None,
             },
             interrupt,
         )

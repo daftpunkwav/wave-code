@@ -466,6 +466,15 @@ impl ModelGateway for ModelAdapter {
         )
     }
 
+    fn current_model(&self) -> Option<String> {
+        Some(
+            self.model_name
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        )
+    }
+
     fn set_thinking(&self, effort: &str) -> bool {
         let effort = effort.trim();
         if effort.is_empty() {

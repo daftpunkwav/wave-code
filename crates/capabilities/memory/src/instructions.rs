@@ -329,10 +329,7 @@ mod tests {
             "marker should be replaced"
         );
         // References to missing files stay literal (honest display).
-        write(
-            &root.join("AGENTS.md"),
-            "see @docs/missing.md for details",
-        );
+        write(&root.join("AGENTS.md"), "see @docs/missing.md for details");
         let mem = collect(None, &root);
         assert!(mem.combined.contains("@docs/missing.md"));
     }
@@ -560,7 +557,11 @@ mod tests {
             mem.combined.find("B-AGENTS").unwrap(),
             mem.combined.find("B-LOCAL").unwrap(),
         );
-        assert!(base < local, "local sorts after AGENTS.md:\n{}", mem.combined);
+        assert!(
+            base < local,
+            "local sorts after AGENTS.md:\n{}",
+            mem.combined
+        );
         assert_eq!(mem.sources.len(), 2);
 
         // AGENTS.local.md alone: no AGENTS.md, no tier — a stray local file

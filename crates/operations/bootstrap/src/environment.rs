@@ -53,10 +53,6 @@ fn shell_name() -> String {
         })
 }
 
-/// Format `now` as `YYYY-MM-DD (Weekday)`; see
-/// [`infrastructure_base::format_date`] for the shared implementation.
-pub use infrastructure_base::format_date;
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -747,9 +747,10 @@ pub const MAX_STOP_BLOCKS: u8 = 3;
 /// (default for [`RunConfig::max_repeat_streak`]); the escalations below
 /// fire first, so this is the last resort against a stuck loop.
 pub const MAX_REPEAT_STREAK: u32 = 12;
-/// Repeat streaks at which the loop injects an escalating reminder
-/// (a falsification check, then a request for the missing input, then an
-/// instruction to conclude). Each fires once per streak.
+/// Repeat streaks at which the escalating reminder bands begin (a
+/// falsification check, then a request for the missing input, then an
+/// instruction to conclude). While the streak lasts, the current band's
+/// text renders into every sample's notes — never stored in history.
 pub const REPEAT_REMINDER_AT: [u32; 3] = [3, 5, 8];
 /// How many images the wire projection keeps per request (default for
 /// [`RunConfig::max_wire_images`]).
@@ -1226,16 +1227,14 @@ where
             "Model: {model} (context window: {window} tokens); today: {}",
             infrastructure_base::format_date(std::time::SystemTime::now())
         )));
-        if window > 0 {
-            let pct = used.saturating_mul(100) / window;
+        if let Some(pct) = used.saturating_mul(100).checked_div(window) {
             notes.push(wavecode_wire::wrap_system_reminder(&format!(
                 "Context usage: {pct}% ({used}/{window} tokens)"
             )));
         }
-        if repeat_streak > 0 {
-            if let Some(text) = repeat_note(repeat_streak) {
-                notes.push(text);
-            }
+        // `repeat_note` already returns None below the first threshold.
+        if let Some(text) = repeat_note(repeat_streak) {
+            notes.push(text);
         }
         notes.extend(
             denials
@@ -4631,7 +4630,7 @@ mod run_loop_tests {
             plans,
             compactor,
             8,
-            { fx.interrupt.clone() },
+            fx.interrupt.clone(),
         )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
@@ -4695,7 +4694,7 @@ mod run_loop_tests {
             plans,
             compactor,
             8,
-            { fx.interrupt.clone() },
+            fx.interrupt.clone(),
         )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
@@ -4755,7 +4754,7 @@ mod run_loop_tests {
             plans,
             compactor,
             8,
-            { fx.interrupt.clone() },
+            fx.interrupt.clone(),
         )
         .with_compaction_requests(slot)
         .with_model_compact_limit(0)
@@ -4803,7 +4802,7 @@ mod run_loop_tests {
             plans,
             compactor,
             8,
-            { fx.interrupt.clone() },
+            fx.interrupt.clone(),
         )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
@@ -4863,7 +4862,7 @@ mod run_loop_tests {
             plans,
             compactor,
             8,
-            { fx.interrupt.clone() },
+            fx.interrupt.clone(),
         )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
@@ -5976,6 +5975,89 @@ mod run_loop_tests {
         );
     }
 
+    /// While a repeat streak runs, the escalating note rides each sample's
+    /// notes at the `REPEAT_REMINDER_AT` bands — text matching the live
+    /// count, below the first threshold nothing, never stored in history.
+    #[tokio::test]
+    async fn repeat_note_rides_samples_at_the_escalation_bands() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let notes_log: NotesLog = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut steps = VecDeque::new();
+        for index in 0..4 {
+            steps.push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::ToolUse {
+                    call_id: format!("c{index}"),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "a"}),
+                }],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        }
+        steps.push_back(ModelStep::Answer(text_response("done")));
+        let model = NotesModel {
+            steps: Mutex::new(steps),
+            notes: notes_log.clone(),
+        };
+        let run = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        let conv = &mut Conversation::new();
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
+        // Five samples: the four tool rounds plus the closing answer. The
+        // note appears exactly while the streak sits at or past 3 — samples
+        // 4 and 5 see streaks 3 and 4, both inside the first band.
+        assert_eq!(log.len(), 5, "{log:?}");
+        for sample_notes in log.iter().take(3) {
+            assert!(
+                sample_notes.iter().all(|n| !n.contains("issued")),
+                "below the first band: {sample_notes:?}"
+            );
+        }
+        // The band's note appends after the standing model/date and usage
+        // notes, with the streak live at sampling time: samples 4 and 5
+        // see streaks 3 and 4, both inside the first band.
+        assert_eq!(log[3].len(), 3, "{:?}", log[3]);
+        assert!(
+            log[3][2].contains("has now been issued 3 times"),
+            "{:?}",
+            log[3]
+        );
+        assert_eq!(log[4].len(), 3, "{:?}", log[4]);
+        assert!(
+            log[4][2].contains("has now been issued 4 times"),
+            "{:?}",
+            log[4]
+        );
+        // The note is request-scoped: the stored history never carries it.
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !history.contains("has now been issued"),
+            "{history}"
+        );
+    }
+
     /// A different call between repeats resets the streak: the breaker must
     /// never fire on a model that keeps varying its calls.
     #[tokio::test]
@@ -6134,7 +6216,7 @@ mod run_loop_tests {
             plans,
             compactor,
             8,
-            { fx.interrupt.clone() },
+            fx.interrupt.clone(),
         )
         .with_instruction_requests(requests)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})

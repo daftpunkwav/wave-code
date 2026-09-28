@@ -54,6 +54,12 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
     fn candidate_dirs(&self, dir: &Path) -> Vec<PathBuf> {
         let mut candidates = Vec::new();
         for ancestor in dir.ancestors() {
+            // `ancestors` ends at the empty path, one past the filesystem
+            // root; joining it would resolve against the process cwd and
+            // re-offer the cwd tier assembly already loaded.
+            if ancestor.as_os_str().is_empty() {
+                break;
+            }
             if let Some(root) = &self.root {
                 if ancestor == root.as_path() {
                     break;
@@ -91,6 +97,8 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
         }
     }
 
+    /// Test-only peek at the injected set.
+    #[cfg(test)]
     fn lock_injected(&self) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
         self.injected.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -100,8 +108,10 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
 impl<E: ToolExecutor> ToolExecutor for AgentsInstructionsExecutor<E> {
     async fn execute(&self, call: ToolCall) -> ToolResult {
         // The file tools share one input convention: the target lives in
-        // `path`. Tools without it (shell, grep, glob patterns) offer no
-        // directory hint and are passed through untouched.
+        // `path`, and discovery walks its containing directory. Grep's
+        // optional search root rides the same field; it is a directory, so
+        // the walk starts one level up — bounded, just conservative. Tools
+        // without a path (shell, glob) pass through untouched.
         if let Some(path) = call
             .input
             .get("path")
@@ -233,5 +243,19 @@ mod tests {
             .await;
         assert!(!outcome.is_error);
         assert!(requests.take_all().is_empty());
+    }
+
+    /// The upward walk stops at the filesystem root: the empty trailing
+    /// ancestor of `Path::ancestors` is never a candidate, so nothing can
+    /// resolve against the process cwd or re-offer the cwd tier.
+    #[test]
+    fn the_walk_stops_at_the_filesystem_root() {
+        let requests = Arc::new(DirectoryInstructions::new());
+        let executor = AgentsInstructionsExecutor::new(PassthroughExecutor, None, requests.clone());
+        let candidates = executor.candidate_dirs(Path::new("/w/repo/src"));
+        assert!(
+            candidates.iter().all(|d| !d.as_os_str().is_empty()),
+            "empty ancestor must not be a candidate: {candidates:?}"
+        );
     }
 }

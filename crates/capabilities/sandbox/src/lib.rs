@@ -217,7 +217,22 @@ impl Rule {
     }
 
     fn matches_text(&self, candidate: &str) -> bool {
-        if self.exact {
+        // File-scope comparison runs on lexically normalized text on both
+        // sides (see [`normalize_path_text`]): a `..`-spelled path is judged
+        // by the location it names, so a deny rule cannot be dodged by a
+        // `x/../protected/y` disguise and an allow rule cannot reach past
+        // its own prefix. Normalizing the pattern too keeps mixed-separator
+        // and `//`-leading config spellings matching what they matched
+        // before (normalization is idempotent).
+        if self.scope == RuleScope::File {
+            let candidate = normalize_path_text(candidate);
+            let pattern = normalize_path_text(&self.pattern);
+            if self.exact {
+                pattern == candidate
+            } else {
+                wildcard_match(&pattern, &candidate)
+            }
+        } else if self.exact {
             self.pattern == candidate
         } else {
             wildcard_match(&self.pattern, candidate)
@@ -393,6 +408,29 @@ fn sensitive_path_reason(path: &str) -> Option<&'static str> {
     None
 }
 
+/// Lexically normalize a File-scope candidate before rule matching: `.` and
+/// empty segments drop, `..` pops the previous segment, both `/` and `\` act
+/// as segment separators, and the result is joined with `/`. A `..`-spelled
+/// path is then judged by the location it resolves to, not its spelling — a
+/// deny rule (`File(secrets/**)`) cannot be dodged by `docs/../secrets/x`,
+/// and an allow rule cannot reach past its own prefix (`File(docs/**)` no
+/// longer exempts `docs/../src/x`). Leading `..` that pops past the root
+/// vanish; such escape attempts are rejected at execution by the path guard,
+/// and keeping them unmatched would only narrow coverage.
+fn normalize_path_text(path: &str) -> String {
+    let mut segments: Vec<&str> = Vec::new();
+    for part in path.split(['/', '\\']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+
 /// Wildcard matching: `*` matches any character run (including `/` and the
 /// empty string), `?` matches one character, everything else is literal.
 /// Iterative with star backtracking — O(n·m) worst case, fine for short rules
@@ -547,9 +585,15 @@ impl Sandbox {
     ///   session-level allow can never exempt an explicit ban.
     pub fn allow_always(&self, tool: &str, input: &serde_json::Value) -> Option<Rule> {
         let (scope, text) = if tool == "shell" {
-            (RuleScope::Bash, input.get("command")?.as_str()?)
+            (RuleScope::Bash, input.get("command")?.as_str()?.to_owned())
         } else {
-            (RuleScope::File, input.get("path")?.as_str()?)
+            // File rules match on the lexically normalized candidate, so the
+            // derived rule is stored normalized too (an approved `a/../b`
+            // exempts `b` and its own spelling alike).
+            (
+                RuleScope::File,
+                normalize_path_text(input.get("path")?.as_str()?),
+            )
         };
         if text.is_empty() {
             return None;
@@ -606,8 +650,9 @@ impl Sandbox {
         {
             let resolved = resolved_for_sensitive_check(path);
             if let Some(reason) = sensitive_path_reason(&resolved) {
-                // `allow_always` records the raw input string, so the
-                // exemption must match that spelling too: on an existing
+                // `allow_always` records the approved text normalized the
+                // same way `matches_text` normalizes candidates, so the
+                // exemption must compare those spellings: on an existing
                 // file the resolved path is canonical (on Windows even
                 // `\\?\`-prefixed) and would never equal the approved
                 // text, turning every "always allow" back into an ask.
@@ -1890,6 +1935,85 @@ mod tests {
             ),
             "the approved exact rule must exempt the existing file"
         );
+    }
+
+    /// A `..`-spelled path is matched by the location it resolves to, not
+    /// its raw spelling: a protected-directory deny cannot be dodged by a
+    /// `x/../secrets/y` disguise, and a scoped allow cannot reach past its
+    /// own prefix. (The path guard confines execution to the workspace, so
+    /// without this normalization the deny would simply miss.)
+    #[test]
+    fn file_rules_match_traversal_spelled_paths_normalized() {
+        let deny = Sandbox::new(PermissionMode::Wave, &[], &["File(secrets/**)".into()]).unwrap();
+        assert!(matches!(
+            deny.decide(
+                "write",
+                &file_input("docs/../secrets/key.pem"),
+                false,
+                false,
+                ToolKind::FileEdit
+            ),
+            Verdict::Deny { .. }
+        ));
+        // Backslash separators normalize the same way (Windows spellings).
+        assert!(matches!(
+            deny.decide(
+                "write",
+                &file_input("docs\\..\\secrets\\key.pem"),
+                false,
+                false,
+                ToolKind::FileEdit
+            ),
+            Verdict::Deny { .. }
+        ));
+        // A scoped allow no longer exempts writes outside its prefix.
+        let allow = Sandbox::new(PermissionMode::Plan, &["File(docs/**)".into()], &[]).unwrap();
+        assert_eq!(
+            allow.decide(
+                "write",
+                &file_input("docs/a.md"),
+                false,
+                false,
+                ToolKind::FileEdit
+            ),
+            Verdict::Allow
+        );
+        assert_ne!(
+            allow.decide(
+                "write",
+                &file_input("docs/../src/main.rs"),
+                false,
+                false,
+                ToolKind::FileEdit
+            ),
+            Verdict::Allow
+        );
+    }
+
+    /// Approving a `..`-spelled sensitive path exempts the normalized
+    /// location: the derived rule is stored normalized, so the same call and
+    /// its clean spelling both stop asking.
+    #[test]
+    fn allow_always_of_traversal_spelled_path_stores_normalized() {
+        let sb = Sandbox::without_rules(PermissionMode::Wave);
+        sb.allow_always("read", &file_input("docs/../.env"));
+        assert!(matches!(
+            sb.decide(
+                "read",
+                &file_input("docs/../.env"),
+                true,
+                false,
+                ToolKind::Other
+            ),
+            Verdict::Allow
+        ));
+        assert!(matches!(
+            sb.decide("read", &file_input(".env"), true, false, ToolKind::Other),
+            Verdict::Allow
+        ));
+        // A normalization that erases the path derives nothing.
+        let sb2 = Sandbox::without_rules(PermissionMode::Wave);
+        assert!(sb2.allow_always("read", &file_input("..")).is_none());
     }
 
     #[test]

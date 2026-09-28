@@ -1401,6 +1401,14 @@ impl ConsoleUi {
                         && invocation.args.is_empty()
                     {
                         self.open_session_picker();
+                    } else if matches!(invocation.name.as_str(), "sessions" | "resume") {
+                        // The picker is the only resume surface; a typed
+                        // id silently matching nothing would look like a
+                        // swallowed command.
+                        self.push_status(
+                            "/sessions takes no arguments — pick from the list",
+                            false,
+                        );
                     } else if invocation.name == "fork" {
                         self.fork_session();
                     } else if invocation.name == "title" {
@@ -1542,6 +1550,16 @@ impl ConsoleUi {
 
     /// `/sessions`: list recorded sessions in a picker.
     fn open_session_picker(&mut self) {
+        // Switching sessions replaces the whole UI state (outbox and
+        // queue included): a running turn would be silently dropped,
+        // so resume waits for the turn to end like /new and /fork do.
+        if self.state.busy() {
+            self.push_status(
+                "cannot switch sessions while a turn runs (press Esc to interrupt)",
+                false,
+            );
+            return;
+        }
         let Some(home) = self.state.home.clone() else {
             self.push_status("sessions are unavailable without a home directory", true);
             return;
@@ -3189,7 +3207,11 @@ pub async fn run_with_factory(
                     }
                 }
                 Some(Ok(CEvent::Paste(text))) => {
-                    ui.editor.insert_paste(&text);
+                    // A modal owns the keyboard: pasting behind it would
+                    // silently land in the covered editor.
+                    if ui.dialog.is_none() {
+                        ui.editor.insert_paste(&text);
+                    }
                     if let Err(e) = ui.render(&mut stdout.lock(), columns, rows) {
                         abort_reason = Some(format!("terminal render error: {e}"));
                     }

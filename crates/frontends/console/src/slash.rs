@@ -94,7 +94,7 @@ pub enum Effect {
 }
 
 /// Dispatch a command against the current state and status queries.
-pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQueries) -> Effect {
+pub fn dispatch(invocation: &Invocation, _state: &AppState, status: &dyn StatusQueries) -> Effect {
     match invocation.name.as_str() {
         "help" => Effect::Ops(Vec::new()),
         "clear" | "new" => Effect::Ops(Vec::new()), // handled by the UI caller
@@ -129,12 +129,16 @@ pub fn dispatch(invocation: &Invocation, state: &AppState, status: &dyn StatusQu
             }
         }
         "permissions" => {
-            let mode = if invocation.args.is_empty() {
-                cycle_mode(&state.permission_mode)
+            if invocation.args.is_empty() {
+                // Bare opens the picker in the UI caller; an op here
+                // would rotate the mode behind the picker and leave it
+                // applied even after the picker is dismissed.
+                Effect::Ops(Vec::new())
             } else {
-                normalize_mode(&invocation.args)
-            };
-            Effect::Ops(vec![Op::SetPermissionMode { mode }])
+                Effect::Ops(vec![Op::SetPermissionMode {
+                    mode: normalize_mode(&invocation.args),
+                }])
+            }
         }
         // Direct mode shortcuts: one-line aliases of /permissions
         // modes, so a mode flip never costs a picker round trip.
@@ -202,9 +206,11 @@ pub fn help_lines() -> Vec<String> {
         "  ctrl+t                 expand the todo panel".to_string(),
         "  ctrl+s                 steer a running turn".to_string(),
         "  ctrl+g                 edit the draft in an external editor".to_string(),
+        "  ctrl+m                 toggle mermaid diagram rendering".to_string(),
+        "  ctrl+d                 exit (empty editor; double-press)".to_string(),
         "  ctrl+c                 interrupt; double-press exits".to_string(),
-        "  esc                    interrupt the running turn".to_string(),
-        "  esc esc                rewind the conversation (pick a turn)".to_string(),
+        "  esc                    interrupt the running turn / close panels".to_string(),
+        "  esc esc                rewind the conversation (idle only)".to_string(),
         "  up / down              input history".to_string(),
         "  alt+b / alt+f          jump one word back / forward".to_string(),
         "  !cmd                   run a local shell command".to_string(),

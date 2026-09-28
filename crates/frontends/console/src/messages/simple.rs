@@ -127,7 +127,7 @@ impl Component for UserMessage {
                 .iter()
                 .cloned()
                 .collect(),
-            None => width::wrap_line(&self.text, body_width),
+            None => width::wrap_text(&self.text, body_width),
         };
         // The bullet band: role color over the input highlight,
         // lightened while the request phase runs.
@@ -375,7 +375,7 @@ impl Component for StatusLine {
         let body_width =
             columns.saturating_sub(width::width(STATUS_BULLET) + width::width(MESSAGE_INDENT));
         let mut out = Vec::new();
-        for (index, line) in width::wrap_line(&self.text, body_width)
+        for (index, line) in width::wrap_text(&self.text, body_width)
             .into_iter()
             .enumerate()
         {

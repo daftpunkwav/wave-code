@@ -381,15 +381,13 @@ impl QuestionDialog {
                 self.selected = (self.selected + 1) % self.options.len();
                 None
             }
+            // Every printable character — digits included — enters the
+            // free-text answer: a numeric shortcut here would submit
+            // the named option mid-word ("2 hours" picking #2). The
+            // numbers on the options are visual; selection rides
+            // ↑/↓ + Enter (the approval dialog, with no free text,
+            // keeps its digit shortcuts).
             Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
-                if let Ok(digit) = c.to_string().parse::<usize>()
-                    && digit >= 1
-                    && digit <= self.options.len()
-                {
-                    self.selected = digit - 1;
-                    return Some(self.answer_selected());
-                }
-                // Free-text entry: any other printable character.
                 self.free_text.push(c);
                 None
             }
@@ -458,7 +456,7 @@ impl QuestionDialog {
         content.push(theme.paint(Token::TextDim, &typed));
         content.push(theme.paint(
             Token::TextDim,
-            "type for free text · ↵ answers · esc dismisses",
+            "↑/↓ select · type for free text · ↵ answers · esc dismisses",
         ));
         border::frame(content, columns, theme.style(Token::BorderFocus), None)
     }
@@ -543,12 +541,15 @@ mod tests {
     #[test]
     fn question_options_and_free_text() {
         theme::set(theme::Theme::dark());
-        let mut dialog = QuestionDialog::new(
-            "q1".to_string(),
-            "Pick one",
-            vec!["alpha".to_string(), "beta".to_string()],
-        );
-        let answer = dialog.handle_key(KeyEvent::plain(Key::Char('2')));
+        let answer = {
+            let mut dialog = QuestionDialog::new(
+                "q1".to_string(),
+                "Pick one",
+                vec!["alpha".to_string(), "beta".to_string()],
+            );
+            dialog.handle_key(KeyEvent::plain(Key::Down));
+            dialog.handle_key(KeyEvent::plain(Key::Enter))
+        };
         assert!(matches!(
             answer,
             Some(Answer::Question { answer, .. }) if answer == "beta"
@@ -562,6 +563,28 @@ mod tests {
         assert!(matches!(
             answer,
             Some(Answer::Question { answer, .. }) if answer == "because"
+        ));
+    }
+
+    /// Free-text typing accepts digits too: a numeric shortcut would
+    /// submit the named option mid-word ("2 hours" picking #2).
+    #[test]
+    fn question_free_text_accepts_digits() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = QuestionDialog::new(
+            "q3".to_string(),
+            "How long?",
+            vec!["one hour".to_string(), "one day".to_string()],
+        );
+        for c in "2 hours".chars() {
+            if let Some(answer) = dialog.handle_key(KeyEvent::plain(Key::Char(c))) {
+                panic!("digit '{c}' submitted mid-word: {answer:?}");
+            }
+        }
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(matches!(
+            answer,
+            Some(Answer::Question { answer, .. }) if answer == "2 hours"
         ));
     }
 
@@ -770,6 +793,35 @@ mod tests {
             !joined.contains("MiniMax-M3"),
             "other provider hidden: {joined}"
         );
+    }
+
+    /// The list window slides with the selection: a selection past the
+    /// fixed page still renders with its marker, and the collapse line
+    /// tracks what is left below the window.
+    #[test]
+    fn model_picker_window_slides_with_selection() {
+        theme::set(theme::Theme::dark());
+        let entries: Vec<ModelEntryView> = (0..12)
+            .map(|i| ModelEntryView {
+                label: format!("model-{i:02}"),
+                provider: "p".to_string(),
+                model: format!("model-{i:02}"),
+                effort: None,
+            })
+            .collect();
+        let mut dialog = ModelPickerDialog::new(entries, "absent".to_string(), None, Vec::new());
+        for _ in 0..9 {
+            dialog.handle_key(KeyEvent::plain(Key::Down));
+        }
+        assert_eq!(dialog.selected, 9);
+        let joined: String = dialog
+            .render(80)
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("❯ model-09"), "selection visible: {joined}");
+        assert!(joined.contains("▼ 2 more"), "collapse tracks: {joined}");
     }
 
     #[test]
@@ -1101,11 +1153,15 @@ impl SettingsDialog {
         match (event.key, event.mods) {
             (Key::Esc, _) => Some(Answer::Dismissed),
             (Key::Up, _) => {
-                self.selected = self.selected.saturating_sub(1);
+                self.selected = if self.selected == 0 {
+                    count.saturating_sub(1)
+                } else {
+                    self.selected - 1
+                };
                 None
             }
             (Key::Down, _) => {
-                self.selected = (self.selected + 1).min(count.saturating_sub(1));
+                self.selected = (self.selected + 1) % count.max(1);
                 None
             }
             (Key::Left, _) => {
@@ -1125,7 +1181,13 @@ impl SettingsDialog {
         let rows = self.rows();
         let mut body = Vec::new();
         for (index, row) in rows.iter().enumerate() {
-            let marker = if index == self.selected { "▍" } else { " " };
+            // Painted like every other selection glyph (footer's mode
+            // badge does the same): unpainted, it drops off the theme
+            // contract and goes unreadable on a recolored light paper.
+            let marker = theme.paint(
+                Token::Primary,
+                if index == self.selected { "▍" } else { " " },
+            );
             let label = theme.paint(Token::Text, row.label);
             let value = if index == self.selected {
                 theme.bold(Token::Primary, &row.value)
@@ -1382,16 +1444,25 @@ impl ModelPickerDialog {
         body.push(strip.trim_end().to_string());
         body.push(String::new());
         // List window with the current marker and `N more` collapse.
+        // The window slides with the selection: a fixed top-anchored
+        // window leaves the highlighted row invisible once it moves
+        // past the page.
         let visible = self.filtered.len().min(PICKER_PAGE);
-        for row in 0..visible {
-            let entry_index = self.filtered[row];
+        let start = if self.selected >= visible {
+            (self.selected + 1 - visible).min(self.filtered.len() - visible)
+        } else {
+            0
+        };
+        for offset in 0..visible {
+            let index = start + offset;
+            let entry_index = self.filtered[index];
             let entry = &self.entries[entry_index];
-            let marker = if row == self.selected { "❯ " } else { "  " };
+            let marker = if index == self.selected { "❯ " } else { "  " };
             let mut line = format!("{marker}{}", entry.label);
-            if self.is_current(row) {
+            if self.is_current(index) {
                 line.push_str(&theme.paint(Token::Success, "  ← current"));
             }
-            if row == self.selected {
+            if index == self.selected {
                 body.push(theme.bold(Token::TextStrong, &line));
             } else {
                 body.push(theme.paint(Token::Text, &line));
@@ -1399,10 +1470,10 @@ impl ModelPickerDialog {
         }
         if self.filtered.is_empty() {
             body.push(theme.paint(Token::TextDim, "No matches"));
-        } else if self.filtered.len() > visible && self.query.trim().is_empty() {
+        } else if start + visible < self.filtered.len() {
             body.push(theme.paint(
                 Token::TextDim,
-                &format!("  ▼ {} more", self.filtered.len() - visible),
+                &format!("  ▼ {} more", self.filtered.len() - start - visible),
             ));
         }
         if !self.query.trim().is_empty() {
@@ -1763,16 +1834,25 @@ impl SessionPickerDialog {
         ));
         body.push(String::new());
         let visible = self.filtered.len().min(PICKER_PAGE);
-        for row in 0..visible {
-            let entry = &self.rows[self.filtered[row]];
-            let marker = if row == self.selected { "❯ " } else { "  " };
+        // The window slides with the selection (see the model picker):
+        // a fixed top-anchored page strands the highlighted row below
+        // it, visually unreachable.
+        let start = if self.selected >= visible {
+            (self.selected + 1 - visible).min(self.filtered.len() - visible)
+        } else {
+            0
+        };
+        for offset in 0..visible {
+            let index = start + offset;
+            let entry = &self.rows[self.filtered[index]];
+            let marker = if index == self.selected { "❯ " } else { "  " };
             let head = format!(
                 "{marker}{}  {}  {} turns",
                 width::truncate_to_width(&entry.title, columns.saturating_sub(24)),
                 entry.age,
                 entry.turns
             );
-            if row == self.selected {
+            if index == self.selected {
                 body.push(theme.bold(Token::TextStrong, &head));
                 body.push(theme.paint(Token::TextDim, &format!("    {}", entry.id)));
             } else {
@@ -1780,7 +1860,12 @@ impl SessionPickerDialog {
             }
         }
         if self.filtered.is_empty() {
-            body.push(theme.paint(Token::TextDim, "No sessions yet"));
+            body.push(theme.paint(Token::TextDim, "No matching sessions"));
+        } else if start + visible < self.filtered.len() {
+            body.push(theme.paint(
+                Token::TextDim,
+                &format!("  ▼ {} more", self.filtered.len() - start - visible),
+            ));
         }
         border::frame(
             body,

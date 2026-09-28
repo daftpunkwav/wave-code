@@ -1421,6 +1421,36 @@ fn permissions_no_args_opens_picker_and_enter_applies() {
     );
 }
 
+/// Bare `/permissions` must not rotate the mode behind the picker: a
+/// dismissal has to leave the mode exactly as it was.
+#[test]
+fn permissions_bare_leaves_mode_until_picked() {
+    let mut ui = ui();
+    let before = ui.state.permission_mode.clone();
+    ui.user_submit("/permissions");
+    assert!(ui.dialog.is_some(), "mode picker opens");
+    ui.handle_key(KeyEvent::plain(Key::Esc));
+    assert!(ui.dialog.is_none());
+    assert_eq!(ui.state.permission_mode, before, "dismissal is a no-op");
+    assert!(
+        !ui.pending_ops()
+            .iter()
+            .any(|op| matches!(op, Op::SetPermissionMode { .. })),
+        "no mode op queued by the bare form",
+    );
+}
+
+/// A running turn blocks the session picker: switching sessions would
+/// silently drop the turn and the queued messages.
+#[test]
+fn sessions_picker_refuses_to_open_while_busy() {
+    let mut ui = ui();
+    ui.submit("running turn");
+    assert!(ui.state.busy());
+    ui.user_submit("/sessions");
+    assert!(ui.dialog.is_none(), "picker stays closed");
+}
+
 #[test]
 fn help_opens_panel_dialog_instead_of_status_lines() {
     let mut ui = ui();

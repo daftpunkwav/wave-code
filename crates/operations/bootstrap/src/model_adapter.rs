@@ -159,7 +159,10 @@ pub(crate) fn to_content_block(block: &Block) -> ContentBlock {
 /// Build one provider client from resolved config.
 ///
 /// The primary and every fallback go through this single point so wiring
-/// stays identical across the chain. `reasoning_effort` rides the
+/// stays identical across the chain. Construction is fallible: the
+/// underlying HTTP/TLS client build (e.g. root-certificate loading)
+/// surfaces as `Err` so the caller decides — the primary fails assembly,
+/// a fallback degrades to a startup warning. `reasoning_effort` rides the
 /// OpenAI-compatible client best-effort (`effort_override` from a saved
 /// picker default wins over the provider config); Anthropic has no such
 /// wire param and ignores it. Keys arrive already resolved per provider
@@ -169,25 +172,27 @@ pub fn build_chat_model(
     api_key: String,
     model_name: &str,
     effort_override: Option<&str>,
-) -> Arc<dyn ChatModel> {
+) -> Result<Arc<dyn ChatModel>, String> {
     let model: Arc<dyn ChatModel> = match provider.kind {
         wavecode_config::ProviderKind::OpenAiCompatible => {
-            let client = wavecode_llm::OpenAIClient::new(
+            let client = wavecode_llm::OpenAIClient::try_new(
                 provider.base_url.clone(),
                 api_key,
                 model_name.to_string(),
-            );
+            )
+            .map_err(|e| e.to_string())?;
             match effort_override.or(provider.reasoning_effort.as_deref()) {
                 Some(effort) => Arc::new(client.with_reasoning_effort(effort.to_string())),
                 None => Arc::new(client),
             }
         }
         wavecode_config::ProviderKind::OpenAiResponses => {
-            let client = wavecode_llm::ResponsesClient::new(
+            let client = wavecode_llm::ResponsesClient::try_new(
                 provider.base_url.clone(),
                 api_key,
                 model_name.to_string(),
-            );
+            )
+            .map_err(|e| e.to_string())?;
             // Same best-effort effort contract as the chat client; the
             // Responses wire nests it under `reasoning.effort`.
             match effort_override.or(provider.reasoning_effort.as_deref()) {
@@ -196,7 +201,8 @@ pub fn build_chat_model(
             }
         }
         wavecode_config::ProviderKind::Anthropic => {
-            let client = wavecode_llm::AnthropicClient::new(provider.base_url.clone(), api_key);
+            let client = wavecode_llm::AnthropicClient::try_new(provider.base_url.clone(), api_key)
+                .map_err(|e| e.to_string())?;
             // Prompt caching defaults ON (unset = enabled); thinking only
             // when a budget is configured. Both are per-provider choices.
             let client = match provider.prompt_caching {
@@ -225,10 +231,10 @@ pub fn build_chat_model(
     };
     // Optional local throttling keeps a retry loop from hammering the
     // endpoint; provider-side 429 handling stays the second line.
-    match provider.rpm_limit {
+    Ok(match provider.rpm_limit {
         Some(rpm) => Arc::new(crate::rate_limit::RateLimitedModel::new(model, rpm)),
         None => model,
-    }
+    })
 }
 
 /// Ordered provider failover over [`ChatModel`] request establishment.

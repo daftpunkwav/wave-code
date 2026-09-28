@@ -425,24 +425,32 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
     // Primary plus ordered fallbacks share one constructor; each fallback
     // resolves its own provider entry and key, so credentials never cross
-    // providers. Unresolvable fallbacks (unknown name, missing key) warn
-    // and skip instead of failing the session.
+    // providers. Unresolvable fallbacks (unknown name, missing key, client
+    // init failure) warn and skip instead of failing the session. The
+    // primary has nothing to degrade to — a client that cannot even build
+    // (TLS init) aborts assembly, matching the hard-failure convention.
     let primary: Arc<dyn wavecode_llm::ChatModel> = crate::model_adapter::build_chat_model(
         provider,
         api_key,
         &model_name,
         thinking_override.as_deref(),
-    );
+    )
+    .map_err(SessionError::Model)?;
     let mut chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = vec![primary];
     for name in &provider.fallback_providers {
         match config.resolve_named_provider(name) {
             Ok((fallback_provider, fallback_key)) => {
-                chain.push(crate::model_adapter::build_chat_model(
+                match crate::model_adapter::build_chat_model(
                     fallback_provider,
                     fallback_key,
                     &model_name,
                     thinking_override.as_deref(),
-                ))
+                ) {
+                    Ok(model) => chain.push(model),
+                    Err(error) => {
+                        warnings.push(format!("skipping fallback provider {name:?}: {error}"))
+                    }
+                }
             }
             Err(error) => warnings.push(format!("skipping fallback provider {name:?}: {error}")),
         }

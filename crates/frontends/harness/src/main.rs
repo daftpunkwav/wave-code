@@ -1406,6 +1406,10 @@ async fn run_tui_new(
             print_config_error(&e);
             std::process::exit(2)
         }
+        Err(operations_bootstrap::SessionError::Model(message)) => {
+            eprintln!("[fail] {message}");
+            std::process::exit(2)
+        }
     };
     handle.connect_mcp_servers().await;
     for warning in &handle.warnings {

@@ -35,6 +35,11 @@ pub enum SessionError {
     /// Configuration loading or provider resolution failed.
     #[error(transparent)]
     Config(#[from] wavecode_config::ConfigError),
+    /// The provider client itself could not be built (HTTP/TLS init
+    /// failure). No model means no session: this aborts assembly instead
+    /// of degrading into a session that cannot sample.
+    #[error("model client initialization failed: {0}")]
+    Model(String),
 }
 
 /// Assembly inputs, all caller-owned.

@@ -396,7 +396,11 @@ async fn fetch_client_credentials(
         .unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS);
     Ok(CachedToken {
         value: access.to_owned(),
-        expires_at: Instant::now() + Duration::from_secs(lifetime),
+        // A bogus huge `expires_in` (server-controlled input) must not panic
+        // on Instant overflow: clip to the default lifetime instead.
+        expires_at: Instant::now()
+            .checked_add(Duration::from_secs(lifetime))
+            .unwrap_or_else(|| Instant::now() + Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS)),
     })
 }
 
@@ -1016,6 +1020,53 @@ mod tests {
             2,
             "expired tokens are never reused"
         );
+    }
+
+    /// A bogus huge `expires_in` (server-controlled input) clips the cached
+    /// expiry instead of panicking on `Instant` overflow.
+    #[tokio::test]
+    async fn oauth_huge_expires_in_does_not_panic() {
+        let token_hits = Arc::new(AtomicUsize::new(0));
+        let counter = token_hits.clone();
+        let handler: Handler = Arc::new(move |request: &RecordedRequest| {
+            if request.path == "/token" {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    200,
+                    json_headers(),
+                    br#"{"access_token":"tok-huge","token_type":"Bearer","expires_in":18446744073709551615}"#.to_vec(),
+                )
+            } else if request.headers.get("authorization").map(String::as_str)
+                != Some("Bearer tok-huge")
+            {
+                (401, vec![], b"bad token".to_vec())
+            } else {
+                main_handler(request)
+            }
+        });
+        let server = StubServer::spawn(handler).await;
+        let transport = HttpMcp::new(HttpMcpConfig {
+            endpoint: server.url("/mcp"),
+            headers: HashMap::new(),
+            oauth: Some(OAuthClientCredentials {
+                token_url: server.url("/token"),
+                client_id: "wave".to_owned(),
+                client_secret: "s3cret".to_owned(),
+                scope: None,
+            }),
+        })
+        .unwrap();
+        // The saturated expiry keeps the token cached: one token fetch
+        // serves both the handshake and the follow-up request.
+        transport
+            .rpc("initialize", serde_json::json!({}))
+            .await
+            .unwrap();
+        transport
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(token_hits.load(Ordering::SeqCst), 1);
     }
 
     /// A static `Authorization` header wins over OAuth: the token endpoint is

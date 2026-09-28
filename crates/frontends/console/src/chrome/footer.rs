@@ -92,13 +92,13 @@ pub fn row2(state: &AppState, hint: &TransientHint, columns: usize) -> String {
     left
 }
 
-/// The mode label in its mode color (plan accent / auto warning / wave
-/// warning), no leading bar — the color alone distinguishes the mode.
+/// The mode label in its mode color (plan accent / auto text / wave
+/// orange), no leading bar — the color alone distinguishes the mode.
 pub fn mode_badge(mode: &str) -> String {
     let theme = theme::current();
     let (label, token) = match mode {
         "plan" => ("plan", Token::Primary),
-        "wave" => ("wave", Token::Warning),
+        "wave" => ("wave", Token::Wave),
         _ => ("auto", Token::Text),
     };
     theme.bold(token, label)

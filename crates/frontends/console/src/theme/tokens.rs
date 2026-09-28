@@ -52,6 +52,9 @@ pub enum Token {
     RoleUser,
     /// Shell-mode prompt and border.
     ShellMode,
+    /// The wave permission-mode badge (a warm orange, distinct from the
+    /// caution amber the shell and warnings share).
+    Wave,
     /// Neutral lines and chrome: code frames, table borders, rules, the
     /// editor prompt/border — a true gray with no accent hue.
     Neutral,
@@ -64,7 +67,7 @@ pub enum Token {
 
 /// Every token the UI can request. A theme file may override any
 /// subset; missing entries inherit from the file's `base` theme.
-pub const ALL_TOKENS: [Token; 23] = [
+pub const ALL_TOKENS: [Token; 24] = [
     Token::Primary,
     Token::Accent,
     Token::Text,
@@ -76,6 +79,7 @@ pub const ALL_TOKENS: [Token; 23] = [
     Token::BorderFocus,
     Token::Success,
     Token::Warning,
+    Token::Wave,
     Token::Error,
     Token::DiffAdded,
     Token::DiffRemoved,
@@ -114,6 +118,8 @@ pub struct Palette {
     pub diff_meta: Color,
     pub role_user: Color,
     pub shell_mode: Color,
+    /// The wave mode badge's warm orange.
+    pub wave: Color,
     /// Neutral gray for lines and input chrome (no accent hue).
     pub neutral: Color,
     /// The user input row's background highlight.
@@ -124,7 +130,7 @@ pub struct Palette {
 
 impl Palette {
     /// A palette with every slot black (the starting point for
-    /// complete theme files, which must overwrite all 23 tokens).
+    /// complete theme files, which must overwrite all 24 tokens).
     pub const fn black() -> Self {
         Self {
             primary: Color::rgb(0, 0, 0),
@@ -147,6 +153,7 @@ impl Palette {
             diff_meta: Color::rgb(0, 0, 0),
             role_user: Color::rgb(0, 0, 0),
             shell_mode: Color::rgb(0, 0, 0),
+            wave: Color::rgb(0, 0, 0),
             neutral: Color::rgb(0, 0, 0),
             input_bg: Color::rgb(0, 0, 0),
             background: Color::rgb(0, 0, 0),
@@ -167,6 +174,7 @@ impl Palette {
             Token::BorderFocus => self.border_focus,
             Token::Success => self.success,
             Token::Warning => self.warning,
+            Token::Wave => self.wave,
             Token::Error => self.error,
             Token::DiffAdded => self.diff_added,
             Token::DiffRemoved => self.diff_removed,
@@ -196,6 +204,7 @@ impl Palette {
             Token::BorderFocus => self.border_focus = color,
             Token::Success => self.success = color,
             Token::Warning => self.warning = color,
+            Token::Wave => self.wave = color,
             Token::Error => self.error = color,
             Token::DiffAdded => self.diff_added = color,
             Token::DiffRemoved => self.diff_removed = color,
@@ -266,6 +275,7 @@ mod tests {
             diff_meta: Color::rgb(0, 0, 0),
             role_user: Color::rgb(0, 0, 0),
             shell_mode: Color::rgb(0, 0, 0),
+            wave: Color::rgb(0, 0, 0),
             neutral: Color::rgb(0, 0, 0),
             input_bg: Color::rgb(0, 0, 0),
             background: Color::rgb(0, 0, 0),

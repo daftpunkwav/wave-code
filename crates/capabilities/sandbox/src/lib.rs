@@ -80,6 +80,10 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// truncates separately when rendering.
 /// Hard cap for one approval detail payload; large enough for the
 /// multi-line diff of a file-write approval after line budgeting.
+/// Mirrors `infrastructure_base::APPROVAL_DETAIL_TRUNCATION` (the wire-side
+/// budget the composition root re-truncates with): the two budgets are the
+/// same 2000-char contract on the sandbox side and the wire side, kept in
+/// step by this comment pair (no dependency edge exists between the crates).
 const DETAIL_MAX_CHARS: usize = 2000;
 
 /// Rule scope (the entry prefix): `Bash(...)` matches the full command,
@@ -567,9 +571,18 @@ impl Sandbox {
 
     /// "Always allow" (`ApprovalDecision::AllowAlways`): derive one
     /// **literally exact** session-level rule from this call and append it to
-    /// the allow table, returning the rule; when the input lacks `command` /
-    /// `path` text or it is empty, nothing can be derived and this returns
-    /// `None` (callers degrade to a one-shot allow).
+    /// the allow table, returning the rule; when the input carries no
+    /// derivable candidate text (below) or it is empty, nothing can be
+    /// derived and this returns `None` (callers degrade to a one-shot
+    /// allow).
+    ///
+    /// Candidate selection mirrors the rule-matching input keys
+    /// ([`Rule::matches`]): a non-empty `command` derives a Bash-scope
+    /// rule (so every shell-kind tool — `shell`, `python`, `node` — can
+    /// derive, not just the one literally named "shell"); otherwise a
+    /// `path` derives a File-scope rule, matched on the lexically
+    /// normalized text (an approved `a/../b` exempts `b` and its own
+    /// spelling alike).
     ///
     /// Semantics and bounds:
     /// - In-session table: the rule is appended to the shared allow table and
@@ -581,15 +594,23 @@ impl Sandbox {
     /// - Exact matching: derived rules carry `exact = true` and compare
     ///   literally — an approved command holding `*` / `?` never degrades
     ///   into a wildcard-widened allow surface;
+    /// - Scope binding: a derived Bash rule exempts only shell-kind tools
+    ///   and a File rule only file-editing tools ([`Rule::scope_allows_tool`]),
+    ///   so a rule derived from a foreign tool's same-named key never
+    ///   exempts that tool itself;
     /// - Deny-first is unaffected: `decide` judges deny first, so a
     ///   session-level allow can never exempt an explicit ban.
-    pub fn allow_always(&self, tool: &str, input: &serde_json::Value) -> Option<Rule> {
-        let (scope, text) = if tool == "shell" {
-            (RuleScope::Bash, input.get("command")?.as_str()?.to_owned())
+    pub fn allow_always(&self, _tool: &str, input: &serde_json::Value) -> Option<Rule> {
+        let (scope, text) = if let Some(command) = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .filter(|command| !command.is_empty())
+        {
+            (RuleScope::Bash, command.to_owned())
         } else {
-            // File rules match on the lexically normalized candidate, so the
-            // derived rule is stored normalized too (an approved `a/../b`
-            // exempts `b` and its own spelling alike).
+            // File rules match on the lexically normalized candidate, so
+            // the derived rule is stored normalized too (an approved
+            // `a/../b` exempts `b` and its own spelling alike).
             (
                 RuleScope::File,
                 normalize_path_text(input.get("path")?.as_str()?),
@@ -967,6 +988,53 @@ mod tests {
                 "tools builtin {} is missing from the sandbox classification table — added / renamed tools must update the approval classification",
                 spec.name
             );
+        }
+    }
+
+    /// The name-string special cases this crate still carries are locked to
+    /// the builtin set, so a rename or an added tool cannot silently bypass
+    /// them:
+    /// - `ask_detail` renders write/edit diffs only for the tools literally
+    ///   named `write` / `edit` — those must stay the only FileEdit builtins;
+    /// - `is_user_question` routes the tool named `ask_user` — that must be
+    ///   the question tool's real registry name;
+    /// - shell-kind commands derive Bash rules in `allow_always` by input
+    ///   key (no name check left), asserted per shell-kind builtin.
+    #[test]
+    fn sandbox_name_special_cases_track_the_builtin_set() {
+        use wavecode_tools::Tool as _;
+        let (reg, _todos) = wavecode_tools::Registry::builtin_with_todos();
+        let names_with_kind = |kind: ToolKind| -> Vec<String> {
+            let mut names: Vec<String> = reg
+                .specs()
+                .into_iter()
+                .map(|spec| spec.name)
+                .filter(|name| reg.get(name).map(|tool| tool.kind()) == Some(kind))
+                .collect();
+            names.sort();
+            names
+        };
+        // ask_detail's diff special-casing: exactly write / edit.
+        assert_eq!(
+            names_with_kind(ToolKind::FileEdit),
+            vec!["edit".to_string(), "write".to_string()],
+            "a new FileEdit builtin needs an ask_detail branch (or a generic fallback decision)"
+        );
+        // The question routing name is the question tool's registry name.
+        assert_eq!(
+            wavecode_tools::AskUserTool.name(),
+            "ask_user",
+            "is_user_question routes on this exact name"
+        );
+        // Every shell-kind builtin derives a Bash-scope exact rule from its
+        // command input (the allow_always contract: input keys, not names).
+        let sb = Sandbox::without_rules(PermissionMode::Auto);
+        for name in names_with_kind(ToolKind::Shell) {
+            let rule = sb
+                .allow_always(&name, &json!({"command": "cargo test"}))
+                .expect("shell-kind input derives a rule");
+            assert_eq!(rule.scope, RuleScope::Bash, "{name}");
+            assert_eq!(rule.to_string(), "Bash(cargo test)", "{name}");
         }
     }
 

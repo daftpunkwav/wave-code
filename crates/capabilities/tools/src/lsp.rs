@@ -755,14 +755,37 @@ impl<T: LspTransport> LspClient<T> {
     }
 }
 
-/// Convert a filesystem path to a `file://` URI (best-effort:
-/// backslashes become forward slashes, no percent-encoding).
+/// Percent-encode a URI path per RFC 3986: unreserved bytes (`A-Z a-z 0-9
+/// - . _ ~`) pass through, `/` separates segments, and `:` is kept so
+/// Windows drive letters stay the conventional `file:///C:/...` shape;
+/// every other byte encodes as `%XX` over its UTF-8 bytes. Without this,
+/// a path holding a space, `#`, `%`, or non-ASCII text addresses a
+/// different resource on the server side (a raw `#` cuts the path off at
+/// fragment parsing, a raw `%` poisons the percent-decode).
+fn encode_uri_path(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// Convert a filesystem path to a `file://` URI: backslashes become
+/// forward slashes and the path is percent-encoded (see
+/// [`encode_uri_path`]). Producers and consumers here both go through
+/// this function, so pooled requests and diagnostics filters address the
+/// exact same URI strings the server observes.
 fn path_to_uri(path: &std::path::Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     if text.starts_with('/') {
-        format!("file://{text}")
+        format!("file://{}", encode_uri_path(&text))
     } else {
-        format!("file:///{text}")
+        format!("file:///{}", encode_uri_path(&text))
     }
 }
 
@@ -1608,6 +1631,29 @@ mod tests {
         assert_eq!(
             path_to_uri(std::path::Path::new("/tmp/a.py")),
             "file:///tmp/a.py"
+        );
+    }
+
+    /// Reserved and non-ASCII path characters percent-encode over UTF-8 so
+    /// the URI survives round trips through servers that decode it; the
+    /// Windows drive colon stays literal.
+    #[test]
+    fn path_to_uri_percent_encodes_reserved_and_non_ascii_bytes() {
+        assert_eq!(
+            path_to_uri(std::path::Path::new("/tmp/my file.py")),
+            "file:///tmp/my%20file.py"
+        );
+        assert_eq!(
+            path_to_uri(std::path::Path::new("/tmp/a#b%c.py")),
+            "file:///tmp/a%23b%25c.py"
+        );
+        assert_eq!(
+            path_to_uri(std::path::Path::new("/tmp/备注.rs")),
+            "file:///tmp/%E5%A4%87%E6%B3%A8.rs"
+        );
+        assert_eq!(
+            path_to_uri(std::path::Path::new("C:\\Users\\me\\a.py")),
+            "file:///C:/Users/me/a.py"
         );
     }
 

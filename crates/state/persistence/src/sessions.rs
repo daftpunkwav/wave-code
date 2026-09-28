@@ -72,6 +72,16 @@ pub fn index_path(home: &Path) -> PathBuf {
 }
 
 /// Journal path for one session id, rejecting path escapes.
+///
+/// Error-channel convention for this module's path surface: **mutating**
+/// entries (`record_turn`, `record_rewind`, `fork_session`,
+/// `record_child_turn`, `load_session_history`) return
+/// `Result<_, SessionError>` so an invalid id surfaces as
+/// [`SessionError::InvalidId`]; the **query** helpers below
+/// (`session_journal_file`, `session_history_file`, `child_journal_file`)
+/// return `Option` because their callers fold "no home / no id / invalid
+/// id" into one no-journal state and have no failure to report — an
+/// invalid id degrades to `None` exactly like a missing identity.
 fn journal_path(home: &Path, id: &str) -> Result<PathBuf, SessionError> {
     if !is_valid_session_id(id) {
         return Err(SessionError::InvalidId(id.to_string()));
@@ -82,7 +92,7 @@ fn journal_path(home: &Path, id: &str) -> Result<PathBuf, SessionError> {
 /// Journal file one session's turns are appended to, for callers that want
 /// to *name* it (a prompt note pointing at the on-disk record) rather than
 /// read or write it. `None` for an invalid id, so path escapes stay rejected
-/// at one place.
+/// at one place (see the error-channel convention on [`journal_path`]).
 pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
     journal_path(home, id).ok()
 }
@@ -91,13 +101,17 @@ pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
 /// journal, sharing its id validation (path-escape guard). The turn journal
 /// records what happened per turn for the picker and the text-level fallback;
 /// this file is the block-level write-ahead log that resume samples from.
+/// `None` for an invalid id (see the error-channel convention on
+/// [`journal_path`]).
 pub fn session_history_file(home: &Path, id: &str) -> Option<PathBuf> {
     Some(journal_path(home, id).ok()?.with_extension("history.jsonl"))
 }
 
 /// Journal file for one child task of a session:
 /// `.../sessions/children/<parent>/<child>.jsonl`, keeping a session's own
-/// log and its subagents' logs together without mixing them.
+/// log and its subagents' logs together without mixing them. `None` for an
+/// invalid parent or child id (see the error-channel convention on
+/// [`journal_path`]).
 pub fn child_journal_file(home: &Path, parent: &str, child: &str) -> Option<PathBuf> {
     if !is_valid_session_id(parent) || !is_valid_session_id(child) {
         return None;
@@ -191,13 +205,68 @@ fn default_title(history: &[(bool, String)]) -> String {
     }
 }
 
-/// Load the whole index; missing or broken files yield an empty list.
-pub fn list_sessions(home: &Path) -> Vec<SessionMeta> {
+/// Load the index, salvaging what parses: the happy path reads the whole
+/// array; a corrupt file falls back to per-object salvage so one broken
+/// entry costs itself instead of dropping every other session from the
+/// picker. Returns the parsed entries plus the number of skipped ones.
+fn load_index(home: &Path) -> (Vec<SessionMeta>, usize) {
     let text = match std::fs::read_to_string(index_path(home)) {
         Ok(text) => text,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), 0),
     };
-    let mut sessions: Vec<SessionMeta> = serde_json::from_str(&text).unwrap_or(Vec::new());
+    match serde_json::from_str::<Vec<SessionMeta>>(&text) {
+        Ok(sessions) => (sessions, 0),
+        Err(_) => salvage_index_objects(&text),
+    }
+}
+
+/// Salvage the parseable `{...}` objects out of a corrupt index file
+/// (missing/corrupt reads keep the session list usable). String-aware
+/// brace balancing: every top-level brace run is one entry, and quoted
+/// braces inside titles or cwds never split one. Unparsable runs are
+/// counted and skipped, never silently merged.
+fn salvage_index_objects(text: &str) -> (Vec<SessionMeta>, usize) {
+    let mut sessions = Vec::new();
+    let mut malformed = 0usize;
+    let (mut depth, mut in_string, mut escaped, mut start) = (0usize, false, false, 0usize);
+    for (i, &byte) in text.as_bytes().iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    match serde_json::from_str::<SessionMeta>(&text[start..=i]) {
+                        Ok(meta) => sessions.push(meta),
+                        Err(_) => malformed += 1,
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (sessions, malformed)
+}
+
+/// Load the whole index for the picker: sorted newest-first. Missing or
+/// corrupt files yield whatever still parses (see [`load_index`]).
+pub fn list_sessions(home: &Path) -> Vec<SessionMeta> {
+    let mut sessions = load_index(home).0;
     sessions.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
     sessions
 }
@@ -206,10 +275,7 @@ pub fn list_sessions(home: &Path) -> Vec<SessionMeta> {
 fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     let dir = sessions_dir(home);
     std::fs::create_dir_all(&dir)?;
-    let mut sessions = {
-        let text = std::fs::read_to_string(index_path(home)).unwrap_or_default();
-        serde_json::from_str::<Vec<SessionMeta>>(&text).unwrap_or_default()
-    };
+    let (mut sessions, _malformed) = load_index(home);
     match sessions.iter_mut().find(|entry| entry.id == meta.id) {
         Some(entry) => *entry = meta,
         None => sessions.push(meta),
@@ -321,10 +387,7 @@ pub fn set_title(home: &Path, id: &str, title: &str) -> Result<Option<SessionMet
     if title.is_empty() {
         return Ok(None);
     }
-    let mut sessions = {
-        let text = std::fs::read_to_string(index_path(home)).unwrap_or_default();
-        serde_json::from_str::<Vec<SessionMeta>>(&text).unwrap_or_default()
-    };
+    let mut sessions = load_index(home).0;
     let mut updated = None;
     for entry in &mut sessions {
         if entry.id == id {
@@ -529,13 +592,14 @@ mod tests {
     }
 
     #[test]
-    fn broken_index_files_degrade_to_empty() {
+    fn broken_index_files_degrade_without_losing_parseable_entries() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
         std::fs::create_dir_all(sessions_dir(home)).unwrap();
+        // Wholly corrupt (no salvageable object): the picker reads empty...
         std::fs::write(index_path(home), "{not json").unwrap();
         assert!(list_sessions(home).is_empty());
-        // Recording heals the index by upserting over the broken file.
+        // ...and recording heals the index by upserting over the broken file.
         record_turn(
             home,
             "s-2",
@@ -547,6 +611,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list_sessions(home).len(), 1);
+
+        // One corrupt entry among good ones costs itself only: the good
+        // entries stay listed, and the next upsert rewrites the survivors
+        // instead of dropping them.
+        let good = |id: &str| {
+            format!(
+                r#"{{"id": "{id}", "title": "t", "cwd": "/tmp", "created_at": 1, "updated_at": 2, "turns": 1}}"#
+            )
+        };
+        let corrupt = format!("[{}, {{\"id\": \"bad\"}}, {}]", good("s-a"), good("s-b"));
+        std::fs::write(index_path(home), corrupt).unwrap();
+        let listed = list_sessions(home);
+        let ids: Vec<&str> = listed.iter().map(|meta| meta.id.as_str()).collect();
+        assert_eq!(ids, vec!["s-a", "s-b"]);
+        // The salvage path ignores braces inside quoted titles (string-aware
+        // balancing): a `{` in a title must not split its entry.
+        let bracey = format!(
+            r#"[{{"id": "s-c", "title": "a }} {{ weird {{ title", "cwd": "/tmp", "created_at": 1, "updated_at": 3, "turns": 1}}, {}]"#,
+            good("s-a")
+        );
+        std::fs::write(index_path(home), bracey).unwrap();
+        let listed = list_sessions(home);
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert_eq!(listed[0].id, "s-c");
+        assert_eq!(listed[0].title, "a } { weird { title");
+        // Recording over the salvaged index keeps the good entries.
+        record_turn(
+            home,
+            "s-c",
+            "/tmp",
+            "hi",
+            &history(),
+            "Completed",
+            &|t: &str| t.to_string(),
+        )
+        .unwrap();
+        assert_eq!(list_sessions(home).len(), 2);
     }
 
     /// The fork's seeded snapshot rides the redaction gate like every other

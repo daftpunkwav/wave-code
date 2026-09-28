@@ -40,7 +40,10 @@ pub const HOOK_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Character budget for event text payloads.
 pub const EVENT_TEXT_TRUNCATION: usize = 2000;
 /// Character budget for approval detail strings; sized for the
-/// multi-line diff a file-write approval carries.
+/// multi-line diff a file-write approval carries. Mirrored by the
+/// sandbox crate's `DETAIL_MAX_CHARS` (the producing side), kept in step
+/// by that constant's doc comment — no dependency edge exists between
+/// the crates.
 pub const APPROVAL_DETAIL_TRUNCATION: usize = 2000;
 
 /// Cooperative interrupt handle shared across spawned tasks.
@@ -418,7 +421,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains(".staging-"))
             .collect();
-        assert!(litter.is_empty(), "staging files must not linger: {litter:?}");
+        assert!(
+            litter.is_empty(),
+            "staging files must not linger: {litter:?}"
+        );
     }
 
     /// A failed rename must clean up its staging file instead of littering
@@ -441,7 +447,10 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.contains(".staging-"))
             .collect();
-        assert!(litter.is_empty(), "the staging file must be removed: {litter:?}");
+        assert!(
+            litter.is_empty(),
+            "the staging file must be removed: {litter:?}"
+        );
     }
 
     /// Private writes land the content and create the file owner-only;

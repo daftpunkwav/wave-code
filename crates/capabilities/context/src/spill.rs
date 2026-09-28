@@ -249,7 +249,9 @@ impl SpillStore {
     fn evict_to_cap(&self, entries: &mut Vec<ManifestEntry>) {
         // Saturating: the manifest may carry corrupt huge byte counts, and
         // an overflowing sum would panic (debug) on every subsequent spill.
-        let mut total: u64 = entries.iter().fold(0u64, |acc, e| acc.saturating_add(e.bytes));
+        let mut total: u64 = entries
+            .iter()
+            .fold(0u64, |acc, e| acc.saturating_add(e.bytes));
         while total > self.total_cap && !entries.is_empty() {
             let oldest = entries.remove(0);
             total = total.saturating_sub(oldest.bytes);
@@ -262,6 +264,11 @@ impl SpillStore {
 /// untouched; larger ones spill to `store` and the caller sees
 /// [`PRUNE_MARKER`] plus the `spill://` URI, the total char count, and a head
 /// excerpt of [`PRUNE_HEAD_CHARS`] chars.
+///
+/// Degradation contract: when the spill itself fails (IO fault), the full
+/// content passes through inline after a failure note — pruning is an
+/// availability optimization, never a data-loss risk, so a broken store
+/// costs context budget, not output.
 pub fn prune_tool_output(content: &str, store: &SpillStore, threshold_chars: usize) -> String {
     let total = content.chars().count();
     if total <= threshold_chars {

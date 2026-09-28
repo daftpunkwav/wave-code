@@ -333,7 +333,7 @@ impl ConsoleUi {
                     // honor the configured limit, not a built-in 100.
                     let cap = settings.get().history_cap();
                     editor.set_history_cap(cap);
-                    editor.load_history(history::load(&path, cap));
+                    editor.load_history(history::load(&path, Some(cap)));
                 }
                 editor
             },

@@ -21,11 +21,11 @@ pub fn history_path(home: &std::path::Path, surface: &str) -> PathBuf {
         .join(format!("{surface}.jsonl"))
 }
 
-/// Load history entries, oldest first, capped at `limit` (0 falls
-/// back to [`MAX_ENTRIES`]). Malformed lines are skipped; a missing
-/// file yields an empty list.
-pub fn load(path: &std::path::Path, limit: usize) -> Vec<String> {
-    let limit = if limit == 0 { MAX_ENTRIES } else { limit };
+/// Load history entries, oldest first, capped at `limit`: `None` falls
+/// back to [`MAX_ENTRIES`], `Some(0)` loads nothing. Malformed lines are
+/// skipped; a missing file yields an empty list.
+pub fn load(path: &std::path::Path, limit: Option<usize>) -> Vec<String> {
+    let limit = limit.unwrap_or(MAX_ENTRIES);
     let Ok(file) = std::fs::File::open(path) else {
         return Vec::new();
     };
@@ -76,19 +76,19 @@ mod tests {
         append(&temp, "first prompt");
         append(&temp, "second prompt");
         append(&temp, "   ");
-        let entries = load(&temp, 0);
+        let entries = load(&temp, None);
         assert_eq!(entries, vec!["first prompt", "second prompt"]);
         let _ = std::fs::remove_file(&temp);
     }
 
     #[test]
     fn missing_file_loads_empty() {
-        let entries = load(std::path::Path::new("/nonexistent/history.jsonl"), 0);
+        let entries = load(std::path::Path::new("/nonexistent/history.jsonl"), None);
         assert!(entries.is_empty());
     }
 
-    /// A configured limit trims the tail of the load (0 falls back to
-    /// the built-in cap).
+    /// A configured limit trims the tail of the load; `None` falls back to
+    /// the built-in cap and `Some(0)` loads nothing.
     #[test]
     fn load_honors_a_configured_limit() {
         let temp = tempfile::tempdir().unwrap();
@@ -96,9 +96,11 @@ mod tests {
         for i in 0..10 {
             append(&path, &format!("entry-{i}"));
         }
-        assert_eq!(load(&path, 0).len(), 10);
-        let entries = load(&path, 3);
+        assert_eq!(load(&path, None).len(), 10);
+        let entries = load(&path, Some(3));
         assert_eq!(entries, vec!["entry-7", "entry-8", "entry-9"]);
+        // An explicit zero is expressible: load nothing.
+        assert!(load(&path, Some(0)).is_empty());
     }
 
     #[test]
@@ -106,7 +108,7 @@ mod tests {
         let temp =
             std::env::temp_dir().join(format!("wc-history-bad-{}.jsonl", std::process::id()));
         std::fs::write(&temp, "{\"content\": \"good\"}\nnot json\n{\"other\": 1}\n").unwrap();
-        let entries = load(&temp, 0);
+        let entries = load(&temp, None);
         assert_eq!(entries, vec!["good"]);
         let _ = std::fs::remove_file(&temp);
     }
@@ -120,7 +122,7 @@ mod tests {
             body.push_str(&format!("{{\"content\": \"{i}\"}}\n"));
         }
         std::fs::write(&temp, body).unwrap();
-        let entries = load(&temp, 0);
+        let entries = load(&temp, None);
         assert_eq!(entries.len(), MAX_ENTRIES);
         assert_eq!(entries.first().unwrap(), "50");
         let _ = std::fs::remove_file(&temp);

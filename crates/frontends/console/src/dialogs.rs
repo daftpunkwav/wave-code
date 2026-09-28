@@ -985,11 +985,77 @@ mod tests {
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             api_key_env: Some("ZHIPU_API_KEY".to_string()),
         };
-        let mut dialog = ModelWizardDialog::new(Some(preset));
+        let dialog = ModelWizardDialog::new(Some(preset));
         assert_eq!(dialog.provider, "bigmodel");
         assert_eq!(dialog.api, 1);
         assert_eq!(dialog.base_url, "https://open.bigmodel.cn/api/paas/v4");
         assert_eq!(dialog.api_key, "ZHIPU_API_KEY");
+    }
+
+    /// The settings panel cycles both directions: Left walks each row
+    /// back down instead of sticking (the tool-display row lands on
+    /// names, the history-limit row walks 1000 → 500 → default).
+    #[test]
+    fn settings_cycle_walks_both_directions() {
+        theme::set(theme::Theme::dark());
+        let settings = crate::settings::SharedSettings::without_persistence(Default::default());
+        let mut dialog = SettingsDialog::new(settings.clone());
+        use crate::settings::ToolDisplay;
+        // Row 2: tool call display (defaults to summary). Left lands on
+        // names; left again rests; three rights wrap back around.
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        dialog.handle_key(KeyEvent::plain(Key::Left));
+        assert_eq!(settings.get().tool_display, ToolDisplay::Names);
+        dialog.handle_key(KeyEvent::plain(Key::Left));
+        assert_eq!(settings.get().tool_display, ToolDisplay::Names);
+        for _ in 0..3 {
+            dialog.handle_key(KeyEvent::plain(Key::Right));
+        }
+        assert_eq!(settings.get().tool_display, ToolDisplay::Names);
+        // Row 10: input history limit. Two rights reach 1000; two lefts
+        // walk back down to the default.
+        for _ in 0..8 {
+            dialog.handle_key(KeyEvent::plain(Key::Down));
+        }
+        dialog.handle_key(KeyEvent::plain(Key::Right));
+        dialog.handle_key(KeyEvent::plain(Key::Right));
+        assert_eq!(settings.get().history_limit, 1000);
+        dialog.handle_key(KeyEvent::plain(Key::Left));
+        assert_eq!(settings.get().history_limit, 500);
+        dialog.handle_key(KeyEvent::plain(Key::Left));
+        assert_eq!(settings.get().history_limit, 0);
+    }
+
+    /// Esc leaves the wizard from the choice and multiselect steps too:
+    /// their components previously swallowed it against the on-screen
+    /// "esc cancel" hint. Esc inside a custom-entry field still only
+    /// closes the entry.
+    #[test]
+    fn wizard_esc_leaves_component_steps() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelWizardDialog::new(None);
+        wizard_text(&mut dialog, "p");
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // api -> base url
+        wizard_text(&mut dialog, "https://h");
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // -> model id
+        wizard_text(&mut dialog, "m");
+        wizard_text(&mut dialog, "a"); // alias -> context (a SizeChoice step)
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(
+            matches!(answer, Some(Answer::Dismissed)),
+            "esc leaves the context step: {answer:?}"
+        );
+        // A multiselect step: Esc inside the custom-entry field closes
+        // the entry; Esc outside it leaves the wizard.
+        let mut dialog = ModelWizardDialog::new(None);
+        dialog.step = WizardStep::Thinking;
+        dialog.handle_key(KeyEvent::plain(Key::Char('+')));
+        assert!(
+            dialog.handle_key(KeyEvent::plain(Key::Esc)).is_none(),
+            "esc inside the custom entry only closes it"
+        );
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Esc));
+        assert!(matches!(answer, Some(Answer::Dismissed)));
     }
 
     /// The provider opening list picks an existing provider (Some) or
@@ -1384,9 +1450,14 @@ impl SettingsDialog {
                 view.render_user_markdown = !view.render_user_markdown;
             }
             Some("tool call display") => {
+                // names → summary → full, wrapping on the right and
+                // resting on names when walking left; each (value,
+                // direction) pair names its own target.
                 view.tool_display = match (view.tool_display, direction) {
-                    (ToolDisplay::Names, 1) | (ToolDisplay::Summary, -1) => ToolDisplay::Summary,
-                    (ToolDisplay::Summary, 1) | (ToolDisplay::Full, -1) => ToolDisplay::Full,
+                    (ToolDisplay::Names, 1) => ToolDisplay::Summary,
+                    (ToolDisplay::Summary, 1) => ToolDisplay::Full,
+                    (ToolDisplay::Summary, -1) => ToolDisplay::Names,
+                    (ToolDisplay::Full, -1) => ToolDisplay::Summary,
                     _ => ToolDisplay::Names,
                 };
             }
@@ -1412,12 +1483,15 @@ impl SettingsDialog {
                 view.confirm_exit = !view.confirm_exit;
             }
             Some("input history limit") => {
-                // Three stops: default (100) → 500 → 1000 → default. A
-                // cycle keeps the row keyboard-only, like every other
-                // setting here.
+                // Three stops: default (100) → 500 → 1000 → default.
+                // A cycle keeps the row keyboard-only, like every other
+                // setting here; the left direction walks back down
+                // (1000 → 500 → default) and rests at the default.
                 view.history_limit = match (view.history_limit, direction) {
-                    (0, 1) | (500, -1) => 500,
-                    (500, 1) | (1000, -1) => 1000,
+                    (0, 1) => 500,
+                    (500, 1) => 1000,
+                    (500, -1) => 0,
+                    (1000, -1) => 500,
                     _ => 0,
                 };
             }
@@ -2635,6 +2709,9 @@ enum Nav {
     Stay,
     Prev,
     Next,
+    /// Esc at a component-owned step (outside its custom-entry field):
+    /// leave the wizard like the text steps do.
+    Exit,
 }
 
 /// A checkable option list with a cursor and inline custom-entry input
@@ -2702,6 +2779,7 @@ impl MultiSelect {
                 }
             }
             Key::Char('+') => self.custom = Some(String::new()),
+            Key::Esc => return Nav::Exit,
             Key::Backspace => return Nav::Prev,
             Key::Enter => return Nav::Next,
             _ => {}
@@ -2780,6 +2858,7 @@ impl SizeChoice {
         match key {
             Key::Up => self.cursor = self.cursor.saturating_sub(1),
             Key::Down => self.cursor = (self.cursor + 1).min(self.presets.len()),
+            Key::Esc => return Nav::Exit,
             Key::Enter => {
                 if self.cursor == self.presets.len() {
                     self.custom = Some(String::new());
@@ -2906,7 +2985,7 @@ impl ModelWizardDialog {
             WizardStep::Thinking => "Thinking levels (space toggles, + adds custom)",
             WizardStep::InputMods => "Input modalities",
             WizardStep::OutputMods => "Output modalities",
-            WizardStep::Review => "Review — ↵ saves, a adds another model on this provider",
+            WizardStep::Review => "Review — ↵ stages & continues, s saves all",
         }
     }
 
@@ -2975,6 +3054,17 @@ impl ModelWizardDialog {
         self.output_mods = MultiSelect::new(&OUTPUT_MOD_PRESETS, &["text"]);
     }
 
+    /// The Esc outcome: staged entries submit together, a bare wizard
+    /// dismisses (the wizard never throws away confirmed work).
+    fn esc_answer(&mut self) -> Option<Answer> {
+        if self.entries.is_empty() {
+            return Some(Answer::Dismissed);
+        }
+        Some(Answer::ModelForm {
+            entries: std::mem::take(&mut self.entries),
+        })
+    }
+
     fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
         let index = WIZARD_ORDER
             .iter()
@@ -3002,6 +3092,7 @@ impl ModelWizardDialog {
                 }
                 return None;
             }
+            Nav::Exit => return self.esc_answer(),
             Nav::Stay => {
                 // The choice and multiselect steps own the keyboard:
                 // their component advances them (Nav::Next), and a Stay
@@ -3043,14 +3134,7 @@ impl ModelWizardDialog {
                 });
             }
             Key::Esc => {
-                if self.entries.is_empty() {
-                    return Some(Answer::Dismissed);
-                }
-                // Entries already staged: Esc submits them (the wizard
-                // never throws away confirmed work).
-                return Some(Answer::ModelForm {
-                    entries: std::mem::take(&mut self.entries),
-                });
+                return self.esc_answer();
             }
             Key::Backspace => {
                 let active_text = match self.step {
@@ -3222,7 +3306,7 @@ impl ModelWizardDialog {
         }
         body.push(String::new());
         let hint = match self.step {
-            WizardStep::Review => "↵ save · a add another model here · esc cancel",
+            WizardStep::Review => "↵ stage & continue · s save all · esc finish",
             WizardStep::Thinking | WizardStep::InputMods | WizardStep::OutputMods => {
                 "↑/↓ move · space toggle · + custom · ↵ next · esc cancel"
             }

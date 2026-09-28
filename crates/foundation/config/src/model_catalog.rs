@@ -249,39 +249,38 @@ impl ModelCatalog {
             std::process::id(),
             STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        #[cfg(unix)]
-        {
-            use std::io::Write as _;
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .map_err(CatalogError::Write)?;
-            // An existing temp file keeps its mode on rewrite: tighten
-            // it to owner-only as well, and the rename carries that mode
-            // onto the catalog.
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                .map_err(CatalogError::Write)?;
-            file.write_all(content.as_bytes())
-                .and_then(|()| file.write_all(b"\n"))
-                .map_err(CatalogError::Write)?;
-            // Flush to disk before the rename: without it the "atomic"
-            // rename covers placement, not durability, and an OS crash
-            // could still leave an empty file behind.
-            file.sync_all().map_err(CatalogError::Write)?;
-        }
-        #[cfg(not(unix))]
-        {
-            use std::io::Write as _;
-            let mut file = std::fs::File::create(&tmp).map_err(CatalogError::Write)?;
-            file.write_all(content.as_bytes())
-                .and_then(|()| file.write_all(b"\n"))
-                .map_err(CatalogError::Write)?;
-            file.sync_all().map_err(CatalogError::Write)?;
-        }
+        // One write path for every platform: only the open (plus the Unix
+        // owner-only mode) differs, while the write and the durability
+        // flush must never drift apart between the two branches.
+        use std::io::Write as _;
+        let mut file = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)
+                    .map_err(CatalogError::Write)?;
+                // An existing temp file keeps its mode on rewrite: tighten
+                // it to owner-only as well, and the rename carries that
+                // mode onto the catalog.
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(CatalogError::Write)?;
+                file
+            }
+            #[cfg(not(unix))]
+            std::fs::File::create(&tmp).map_err(CatalogError::Write)?
+        };
+        file.write_all(content.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
+            .map_err(CatalogError::Write)?;
+        // Flush to disk before the rename: without it the "atomic"
+        // rename covers placement, not durability, and an OS crash
+        // could still leave an empty file behind.
+        file.sync_all().map_err(CatalogError::Write)?;
         std::fs::rename(&tmp, &path).map_err(|e| {
             // Leave no temp litter behind when the rename fails.
             let _ = std::fs::remove_file(&tmp);

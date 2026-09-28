@@ -233,7 +233,7 @@ pub fn help_lines() -> Vec<String> {
         "  /fork — snapshot this session into a resumable copy".to_string(),
         "  /title — rename the session (a picker asks for the name)".to_string(),
         "  /model — open the model picker; /model <name> switches directly".to_string(),
-        "  /provider add — fill in a model spec form (provider, api, base url, limits, thinking, modalities)".to_string(),
+        "  /provider — guided setup: pick a provider or walk the new-model wizard (api, endpoint, key, limits, thinking levels, modalities)".to_string(),
         "  /provider list — show the catalog; /provider set|remove edit saved entries".to_string(),
         "  /effort — pick the reasoning effort; /effort <level> switches directly".to_string(),
         "  /permissions — open the mode picker; /plan /auto /wave switch directly".to_string(),

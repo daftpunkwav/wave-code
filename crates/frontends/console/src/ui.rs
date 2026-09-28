@@ -162,6 +162,15 @@ pub struct LaunchSpec {
 }
 
 /// A launched session: live link plus the facts the UI keeps.
+/// Provider-level seed for the model wizard (picked from the
+/// provider list): the four fields every model on one provider shares.
+pub struct ProviderPreset {
+    pub provider: String,
+    pub api: String,
+    pub base_url: String,
+    pub api_key_env: Option<String>,
+}
+
 pub struct SessionLaunch {
     /// Live session link (actor client in production).
     pub link: Box<dyn SessionLink>,
@@ -577,8 +586,14 @@ impl ConsoleUi {
                 }
                 PromptPurpose::BtwQuestion => self.handle_btw(&value),
             },
-            Some(Answer::ModelForm { alias, spec }) => {
-                self.catalog_insert_form(alias, spec);
+            Some(Answer::ModelForm { entries }) => {
+                self.catalog_insert_form(entries);
+            }
+            Some(Answer::ProviderPicked { name }) => {
+                let preset = name.and_then(|provider| self.provider_preset(&provider));
+                self.dialog = Some(Dialog::ModelForm(Box::new(
+                    crate::dialogs::ModelWizardDialog::new(preset),
+                )));
             }
             None => {}
         }
@@ -2826,21 +2841,27 @@ verify from the repository.";
         }
     }
 
-    /// `/provider`: the model-catalog surface. Bare or `add` opens the
-    /// spec form (every catalog field, including thinking and
-    /// modalities); `list` / `set` / `remove` edit the saved file.
+    /// `/provider`: the guided catalog surface. Bare lists the existing
+    /// providers (picking one preseeds the wizard) plus a new-provider
+    /// row; `add` opens the wizard directly; `list` / `set` / `remove`
+    /// edit the saved file.
     fn handle_provider_command(&mut self, args: &str) {
         let parts: Vec<&str> = args.split_whitespace().collect();
-        // Bare behaves like `add`: the command IS the config surface.
-        let sub = parts.first().copied().unwrap_or("add");
-        match sub {
-            "add" if parts.len() <= 1 => {
-                self.dialog = Some(Dialog::ModelForm(crate::dialogs::ModelFormDialog::new()));
+        match parts.first().copied() {
+            None => {
+                self.dialog = Some(Dialog::ProviderPick(Box::new(
+                    crate::dialogs::ProviderPickerDialog::new(self.catalog_providers()),
+                )));
             }
-            "add" => self.catalog_add(&parts[1..]),
-            "list" => self.catalog_list(),
-            "remove" => self.catalog_remove(parts.get(1).copied()),
-            "set" => self.catalog_set(&parts[1..]),
+            Some("add") if parts.len() == 1 => {
+                self.dialog = Some(Dialog::ModelForm(Box::new(
+                    crate::dialogs::ModelWizardDialog::new(None),
+                )));
+            }
+            Some("add") => self.catalog_add(&parts[1..]),
+            Some("list") => self.catalog_list(),
+            Some("remove") => self.catalog_remove(parts.get(1).copied()),
+            Some("set") => self.catalog_set(&parts[1..]),
             other => {
                 self.push_status(
                     &format!("unknown /provider subcommand {other:?} (add | list | set | remove)"),
@@ -3021,22 +3042,68 @@ verify from the repository.";
         }
     }
 
-    /// Persist the spec built by the `/model add` form: same insert
-    /// and save as the positional command, but the form has already
-    /// validated its own fields, so only the catalog I/O can fail.
-    fn catalog_insert_form(&mut self, alias: String, spec: wavecode_config::ModelSpec) {
-        if alias.is_empty() {
-            self.push_status("model alias is required", true);
+    /// Persist the specs built by the `/provider` wizard: same insert
+    /// and save as the positional command, but the wizard has already
+    /// validated its own fields, so only the catalog I/O can fail. One
+    /// pass can carry several models sharing one provider.
+    fn catalog_insert_form(&mut self, entries: Vec<(String, wavecode_config::ModelSpec)>) {
+        if entries.is_empty() {
             return;
         }
         let Some((mut catalog, home)) = self.load_catalog() else {
             return;
         };
-        catalog.insert(alias.clone(), spec);
+        for (alias, spec) in &entries {
+            if alias.is_empty() {
+                self.push_status("model alias is required", true);
+                return;
+            }
+            catalog.insert(alias.clone(), spec.clone());
+        }
+        let names: Vec<&str> = entries.iter().map(|(alias, _)| alias.as_str()).collect();
         match catalog.save(&home) {
-            Ok(()) => self.push_status(&format!("added {alias} (restart applies it)"), false),
+            Ok(()) => self.push_status(
+                &format!("added {} (restart applies it)", names.join(", ")),
+                false,
+            ),
             Err(e) => self.push_status(&format!("catalog save failed: {e}"), true),
         }
+    }
+
+    /// Distinct providers in the saved catalog with their model counts,
+    /// alphabetically — the `/provider` opening list.
+    fn catalog_providers(&self) -> Vec<(String, usize)> {
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        if let Some(home) = self.state.home.clone()
+            && let Ok(catalog) = wavecode_config::ModelCatalog::load(&home)
+        {
+            for spec in catalog.models.values() {
+                *counts.entry(spec.provider.clone()).or_default() += 1;
+            }
+        }
+        counts.into_iter().collect()
+    }
+
+    /// The provider-level preset a wizard seeds from: the first spec
+    /// under that provider donates its dialect, endpoint, and key env.
+    fn provider_preset(&self, provider: &str) -> Option<ProviderPreset> {
+        let home = self.state.home.clone()?;
+        let catalog = wavecode_config::ModelCatalog::load(&home).ok()?;
+        catalog
+            .models
+            .values()
+            .find(|spec| spec.provider == provider)
+            .map(|spec| ProviderPreset {
+                provider: spec.provider.clone(),
+                api: match spec.kind {
+                    wavecode_config::ApiKind::AnthropicMessages => "anthropic-messages",
+                    wavecode_config::ApiKind::OpenaiChat => "openai-chat",
+                    wavecode_config::ApiKind::OpenaiResponses => "openai-responses",
+                }
+                .to_string(),
+                base_url: spec.base_url.clone(),
+                api_key_env: spec.api_key_env.clone(),
+            })
     }
 
     /// `/model <name>`: switch through the picker semantics. A name

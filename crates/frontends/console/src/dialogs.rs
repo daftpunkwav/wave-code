@@ -79,13 +79,18 @@ pub enum Answer {
         /// The submitted (trimmed) text.
         value: String,
     },
-    /// A model spec built by the `/model add` form, ready to insert
-    /// into the catalog.
+    /// Model specs built by the `/provider` wizard, ready to insert
+    /// into the catalog (one wizard pass can stage several models on
+    /// one provider).
     ModelForm {
-        /// Catalog alias the model is saved under.
-        alias: String,
-        /// The assembled spec (every form field resolved).
-        spec: wavecode_config::ModelSpec,
+        /// Each (alias, spec) in entry order.
+        entries: Vec<(String, wavecode_config::ModelSpec)>,
+    },
+    /// A provider picked from the opening list (`None` = add a new
+    /// one); the caller opens the wizard seeded from it.
+    ProviderPicked {
+        /// The provider name, or `None` for a brand-new provider.
+        name: Option<String>,
     },
 }
 
@@ -129,8 +134,11 @@ pub enum Dialog {
     /// The bare-command free-text prompt (`/title`, `/editor`,
     /// `/export`, `/compact`, `/btw`).
     Prompt(PromptDialog),
-    /// The `/model add` spec form.
-    ModelForm(ModelFormDialog),
+    /// The `/provider` opening view: existing providers plus a
+    /// new-provider row.
+    ProviderPick(Box<ProviderPickerDialog>),
+    /// The step-at-a-time model spec wizard.
+    ModelForm(Box<ModelWizardDialog>),
 }
 
 impl Dialog {
@@ -148,6 +156,7 @@ impl Dialog {
             Self::Theme(dialog) => dialog.title.clone(),
             Self::Effort(dialog) => dialog.title.clone(),
             Self::Prompt(dialog) => dialog.title.clone(),
+            Self::ProviderPick(dialog) => dialog.title.clone(),
             Self::ModelForm(dialog) => dialog.title.clone(),
         }
     }
@@ -166,6 +175,7 @@ impl Dialog {
             Self::Theme(dialog) => dialog.handle_key(event),
             Self::Effort(dialog) => dialog.handle_key(event),
             Self::Prompt(dialog) => dialog.handle_key(event),
+            Self::ProviderPick(dialog) => dialog.handle_key(event),
             Self::ModelForm(dialog) => dialog.handle_key(event),
         }
     }
@@ -184,6 +194,7 @@ impl Dialog {
             Self::Theme(dialog) => dialog.render(width),
             Self::Effort(dialog) => dialog.render(width),
             Self::Prompt(dialog) => dialog.render(width),
+            Self::ProviderPick(dialog) => dialog.render(width),
             Self::ModelForm(dialog) => dialog.render(width),
         }
     }
@@ -808,106 +819,200 @@ mod tests {
         );
     }
 
-    /// The `/model add` form resolves every field into a full spec:
-    /// identity, limits, thinking variants (first = default), and the
-    /// modality lists.
-    #[test]
-    fn model_form_resolves_all_fields() {
-        theme::set(theme::Theme::dark());
-        let mut dialog = ModelFormDialog::new();
-        let inputs = [
-            "mini",                     // alias
-            "",                         // api (keep the default anthropic-messages)
-            "minimax",                  // provider
-            "https://api.minimax.chat", // base url
-            "MiniMax-M3",               // model
-            "MINIMAX_API_KEY",          // api key env
-            "195000",                   // context tokens
-            "8192",                     // max output
-            "low, high",                // thinking variants
-            ",image",                   // input modalities (appends to the "text" seed)
-            "",                         // output modalities (keeps the "text" seed)
-        ];
-        for input in inputs {
-            for c in input.chars() {
-                dialog.handle_key(KeyEvent::plain(Key::Char(c)));
-            }
-            if dialog.active < dialog.fields.len() - 1 {
-                dialog.handle_key(KeyEvent::plain(Key::Enter));
-            }
+    // ---- the /provider wizard ----
+
+    /// Type into the wizard's current text field and advance.
+    fn wizard_text(dialog: &mut ModelWizardDialog, text: &str) {
+        for c in text.chars() {
+            dialog.handle_key(KeyEvent::plain(Key::Char(c)));
         }
-        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
-        let Some(Answer::ModelForm { alias, spec }) = answer else {
-            panic!("form did not resolve: {answer:?}");
+        dialog.handle_key(KeyEvent::plain(Key::Enter));
+    }
+
+    /// The wizard resolves a full MiniMax-style spec: presets for the
+    /// sizes, every thinking level ticked, the key stored as an env
+    /// reference.
+    #[test]
+    fn wizard_resolves_a_full_model() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelWizardDialog::new(None);
+        macro_rules! trace {
+            ($dialog:expr, $key:expr) => {{
+                $dialog.handle_key($key);
+                eprintln!("after {:?} -> step {:?}", $key, $dialog.step);
+            }};
+        }
+        wizard_text(&mut dialog, "minimax");
+        trace!(dialog, KeyEvent::plain(Key::Enter));
+        // dialog.handle_key(KeyEvent::plain(Key::Enter)); // api: anthropic-messages
+        wizard_text(&mut dialog, "https://api.minimax.chat");
+        wizard_text(&mut dialog, "env:MINIMAX_API_KEY");
+        wizard_text(&mut dialog, "MiniMax-M3.1-Flash-Preview");
+        wizard_text(&mut dialog, "mini-flash");
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // context: 256k preset
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // max output: 128k preset
+        // Thinking: tick all five presets.
+        for _ in 0..5 {
+            dialog.handle_key(KeyEvent::plain(Key::Char(' ')));
+            dialog.handle_key(KeyEvent::plain(Key::Down));
+        }
+        dialog.handle_key(KeyEvent::plain(Key::Enter));
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // input: text ticked
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // output: text ticked
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Char('s')));
+        let Some(Answer::ModelForm { entries }) = answer else {
+            panic!("wizard did not resolve: {answer:?}");
         };
-        assert_eq!(alias, "mini");
+        assert_eq!(entries.len(), 1);
+        let (alias, spec) = &entries[0];
+        assert_eq!(alias, "mini-flash");
         assert_eq!(spec.provider, "minimax");
-        assert_eq!(spec.base_url, "https://api.minimax.chat");
-        assert_eq!(spec.model, "MiniMax-M3");
-        assert_eq!(spec.kind, wavecode_config::ApiKind::AnthropicMessages);
-        assert_eq!(spec.api_key_env.as_deref(), Some("MINIMAX_API_KEY"));
-        assert_eq!(spec.context_window, Some(195000));
-        assert_eq!(spec.max_output, Some(8192));
+        assert_eq!(spec.model, "MiniMax-M3.1-Flash-Preview");
+        assert_eq!(spec.context_window, Some(256 * 1024));
+        assert_eq!(spec.max_output, Some(128 * 1024));
         assert!(spec.reasoning.enabled);
-        assert_eq!(spec.reasoning.variants, vec!["low", "high"]);
+        assert_eq!(
+            spec.reasoning.variants,
+            vec!["low", "medium", "high", "xhigh", "max"]
+        );
         assert_eq!(spec.reasoning.default.as_deref(), Some("low"));
-        assert_eq!(spec.modalities.input, vec!["text", "image"]);
+        assert_eq!(spec.api_key_env.as_deref(), Some("MINIMAX_API_KEY"));
+        assert_eq!(spec.modalities.input, vec!["text"]);
         assert_eq!(spec.modalities.output, vec!["text"]);
     }
 
-    /// Blank required fields block the save with the form open and the
-    /// error pointing at the field; counts must be numeric. Enter on a
-    /// middle field only advances — saving happens on the last field.
+    /// The review page stages a model and resets the per-model fields,
+    /// so several models share one provider pass; save submits both.
     #[test]
-    fn model_form_validates_before_resolving() {
+    fn wizard_stages_two_models_on_one_provider() {
         theme::set(theme::Theme::dark());
-        let mut dialog = ModelFormDialog::new();
-        // Alias filled, walk to the last field and save: provider is
-        // required.
-        dialog.handle_key(KeyEvent::plain(Key::Char('x')));
-        while dialog.active < dialog.fields.len() - 1 {
-            dialog.handle_key(KeyEvent::plain(Key::Down));
-        }
-        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
-        assert!(answer.is_none(), "incomplete form must not resolve");
-        assert_eq!(dialog.error.as_deref(), Some("provider is required"));
-        // Count fields filter non-digits at the key: "12x" stores "12"
-        // and the form then saves fine (counts stay optional).
-        let mut dialog = ModelFormDialog::new();
-        let values = ["a", "", "p", "https://h", "m", "", "12x"];
-        for value in values {
-            for c in value.chars() {
-                dialog.handle_key(KeyEvent::plain(Key::Char(c)));
-            }
+        let mut dialog = ModelWizardDialog::new(None);
+        wizard_text(&mut dialog, "minimax");
+        dialog.handle_key(KeyEvent::plain(Key::Enter));
+        wizard_text(&mut dialog, "https://api.minimax.chat");
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // blank api key
+        wizard_text(&mut dialog, "MiniMax-M3.1-Flash-Preview");
+        wizard_text(&mut dialog, "mini-flash");
+        // Five Enters: context 256k, output 128k, thinking, input, output.
+        for _ in 0..5 {
             dialog.handle_key(KeyEvent::plain(Key::Enter));
         }
-        assert_eq!(dialog.fields[6].value, "12", "non-digits filtered");
-        while dialog.active < dialog.fields.len() - 1 {
-            dialog.handle_key(KeyEvent::plain(Key::Down));
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // review: stage
+        assert_eq!(dialog.entries.len(), 1);
+        assert!(dialog.model_id.is_empty(), "model fields reset");
+        assert_eq!(dialog.provider, "minimax", "provider kept");
+        // Second model on the same provider: model, alias, context,
+        // output, thinking, input, output = seven Enters to review.
+        wizard_text(&mut dialog, "MiniMax-M2.5");
+        wizard_text(&mut dialog, "mini-old");
+        for _ in 0..7 {
+            dialog.handle_key(KeyEvent::plain(Key::Enter));
         }
-        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
-        let Some(Answer::ModelForm { alias, spec }) = answer else {
-            panic!("valid form must resolve: {answer:?}");
+        // Esc with staged entries submits them.
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Esc));
+        let Some(Answer::ModelForm { entries }) = answer else {
+            panic!("wizard did not resolve: {answer:?}");
         };
-        assert_eq!(alias, "a");
-        assert_eq!(spec.context_window, Some(12));
-        assert_eq!(spec.max_output, None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].0, "mini-old");
+        assert_eq!(entries[1].1.provider, "minimax");
     }
 
-    /// ←/→ cycle the API dialect field through the three spellings.
+    /// A custom context size is typed after picking the custom row and
+    /// parses through plain digit counts.
     #[test]
-    fn model_form_cycles_api_kind() {
+    fn wizard_accepts_a_custom_context_size() {
         theme::set(theme::Theme::dark());
-        let mut dialog = ModelFormDialog::new();
-        dialog.handle_key(KeyEvent::plain(Key::Down)); // to `api`
+        let mut dialog = ModelWizardDialog::new(None);
+        wizard_text(&mut dialog, "p");
+        dialog.handle_key(KeyEvent::plain(Key::Enter));
+        wizard_text(&mut dialog, "https://h");
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // -> model id
+        wizard_text(&mut dialog, "m"); // model id
+        wizard_text(&mut dialog, "a"); // alias
+        // Now on the context step: three Downs land on the custom row.
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        dialog.handle_key(KeyEvent::plain(Key::Down)); // custom...
+        dialog.handle_key(KeyEvent::plain(Key::Enter));
+        for c in "1000000".chars() {
+            dialog.handle_key(KeyEvent::plain(Key::Char(c)));
+        }
+        dialog.handle_key(KeyEvent::plain(Key::Enter));
+        // Fast-forward the rest and save.
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // max output 128k
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // thinking
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // input
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // output
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // review: stage
+        // Esc with staged entries submits them.
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Esc));
+        let Some(Answer::ModelForm { entries }) = answer else {
+            panic!("wizard did not resolve: {answer:?}");
+        };
+        assert_eq!(entries[0].1.context_window, Some(1_000_000));
+    }
+
+    /// Saving without the required identity fields keeps the wizard
+    /// open with the error named.
+    #[test]
+    fn wizard_validates_before_saving() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelWizardDialog::new(None);
+        // Straight to the review page with everything blank.
+        dialog.step = WizardStep::Review;
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Char('s')));
+        assert!(answer.is_none(), "blank wizard must not resolve");
+        assert_eq!(dialog.error.as_deref(), Some("model name is required"));
+    }
+
+    /// Left and right cycle the API dialect; a provider preset seeds
+    /// the first four steps.
+    #[test]
+    fn wizard_cycles_api_and_accepts_presets() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ModelWizardDialog::new(None);
+        dialog.handle_key(KeyEvent::plain(Key::Enter)); // provider blank -> api
         dialog.handle_key(KeyEvent::plain(Key::Right));
-        assert_eq!(dialog.fields[1].value, "openai-chat");
-        dialog.handle_key(KeyEvent::plain(Key::Right));
-        assert_eq!(dialog.fields[1].value, "openai-responses");
-        dialog.handle_key(KeyEvent::plain(Key::Right));
-        assert_eq!(dialog.fields[1].value, "anthropic-messages");
+        assert_eq!(dialog.api, 1);
         dialog.handle_key(KeyEvent::plain(Key::Left));
-        assert_eq!(dialog.fields[1].value, "openai-responses");
+        dialog.handle_key(KeyEvent::plain(Key::Left));
+        assert_eq!(dialog.api, 2);
+
+        let preset = crate::ui::ProviderPreset {
+            provider: "bigmodel".to_string(),
+            api: "openai-chat".to_string(),
+            base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            api_key_env: Some("ZHIPU_API_KEY".to_string()),
+        };
+        let mut dialog = ModelWizardDialog::new(Some(preset));
+        assert_eq!(dialog.provider, "bigmodel");
+        assert_eq!(dialog.api, 1);
+        assert_eq!(dialog.base_url, "https://open.bigmodel.cn/api/paas/v4");
+        assert_eq!(dialog.api_key, "ZHIPU_API_KEY");
+    }
+
+    /// The provider opening list picks an existing provider (Some) or
+    /// the add-new row (None).
+    #[test]
+    fn provider_picker_picks_existing_or_new() {
+        theme::set(theme::Theme::dark());
+        let mut dialog = ProviderPickerDialog::new(vec![
+            ("bigmodel".to_string(), 3),
+            ("minimax".to_string(), 1),
+        ]);
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(matches!(
+            answer,
+            Some(Answer::ProviderPicked { name: Some(name) }) if name == "bigmodel"
+        ));
+        dialog.handle_key(KeyEvent::plain(Key::Down));
+        dialog.handle_key(KeyEvent::plain(Key::Down)); // the add row
+        let answer = dialog.handle_key(KeyEvent::plain(Key::Enter));
+        assert!(matches!(
+            answer,
+            Some(Answer::ProviderPicked { name: None })
+        ));
     }
 
     /// The list window slides with the selection: a selection past the
@@ -2459,189 +2564,552 @@ impl PromptDialog {
     }
 }
 
-/// One editable row of the model spec form.
+// ---------------------------------------------------------------------
+// Model wizard
+// ---------------------------------------------------------------------
+
+/// One step of the model wizard, in fill order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormRow {
-    /// Free text (required for the identity fields).
-    Text,
-    /// The API dialect, cycled with ←/→ over its spellings.
+enum WizardStep {
+    ProviderName,
     ApiKind,
-    /// Unsigned token count; blank means unset.
-    Count,
-    /// Comma-separated tokens (thinking variants, modalities).
-    List,
+    BaseUrl,
+    ApiKey,
+    ModelId,
+    Alias,
+    ContextWindow,
+    MaxOutput,
+    Thinking,
+    InputMods,
+    OutputMods,
+    Review,
 }
 
-struct FormField {
-    label: &'static str,
-    kind: FormRow,
-    value: String,
+const WIZARD_ORDER: [WizardStep; 12] = [
+    WizardStep::ProviderName,
+    WizardStep::ApiKind,
+    WizardStep::BaseUrl,
+    WizardStep::ApiKey,
+    WizardStep::ModelId,
+    WizardStep::Alias,
+    WizardStep::ContextWindow,
+    WizardStep::MaxOutput,
+    WizardStep::Thinking,
+    WizardStep::InputMods,
+    WizardStep::OutputMods,
+    WizardStep::Review,
+];
+
+/// Context presets offered before free-form entry. `k` and `M` are the
+/// binary units catalogs quote (256k = 262144).
+const CONTEXT_PRESETS: [&str; 3] = ["256k", "500k", "1M"];
+const MAX_OUTPUT_PRESETS: [&str; 2] = ["128k", "64k"];
+/// Reasoning-effort presets every model can tick; customs append.
+pub const THINKING_PRESETS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// Modality presets.
+const INPUT_MOD_PRESETS: [&str; 4] = ["text", "image", "audio", "video"];
+const OUTPUT_MOD_PRESETS: [&str; 2] = ["text", "image"];
+
+/// Parse a size cell: a bare token count, or `Nk` / `NM` in binary
+/// units. `None` when the cell is blank or malformed.
+fn parse_size(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    if let Ok(count) = lower.parse::<u64>() {
+        return Some(count);
+    }
+    if let Some(head) = lower.strip_suffix('k') {
+        return head.trim().parse::<u64>().ok().map(|n| n * 1024);
+    }
+    if let Some(head) = lower.strip_suffix('m') {
+        return head.trim().parse::<u64>().ok().map(|n| n * 1024 * 1024);
+    }
+    None
 }
 
-impl FormField {
-    fn new(label: &'static str, kind: FormRow, value: &str) -> Self {
+/// Where one key leaves the current wizard step.
+enum Nav {
+    Stay,
+    Prev,
+    Next,
+}
+
+/// A checkable option list with a cursor and inline custom-entry input
+/// (typed after `+`, committed with Enter). Space toggles.
+struct MultiSelect {
+    options: Vec<String>,
+    checked: Vec<bool>,
+    cursor: usize,
+    /// Some(_): typing a custom option name into this buffer.
+    custom: Option<String>,
+}
+
+impl MultiSelect {
+    fn new(presets: &[&str], prechecked: &[&str]) -> Self {
+        let options: Vec<String> = presets.iter().map(|s| s.to_string()).collect();
+        let checked = options
+            .iter()
+            .map(|option| prechecked.contains(&option.as_str()))
+            .collect();
         Self {
-            label,
-            kind,
-            value: value.to_string(),
+            options,
+            checked,
+            cursor: 0,
+            custom: None,
+        }
+    }
+
+    fn selected(&self) -> Vec<String> {
+        self.options
+            .iter()
+            .zip(&self.checked)
+            .filter(|(_, checked)| **checked)
+            .map(|(option, _)| option.clone())
+            .collect()
+    }
+
+    /// One key while this list owns the step.
+    fn handle_key(&mut self, key: &Key, mods: &tui_engine::keys::Mods) -> Nav {
+        if let Some(buffer) = &mut self.custom {
+            match key {
+                Key::Enter => {
+                    let name = buffer.trim().to_string();
+                    self.custom = None;
+                    if !name.is_empty() && !self.options.iter().any(|o| o == &name) {
+                        self.options.push(name);
+                        self.checked.push(true);
+                        self.cursor = self.options.len() - 1;
+                    }
+                }
+                Key::Backspace => {
+                    buffer.pop();
+                }
+                Key::Char(c) if !mods.ctrl && !mods.alt => buffer.push(*c),
+                Key::Esc => self.custom = None,
+                _ => {}
+            }
+            return Nav::Stay;
+        }
+        match key {
+            Key::Up => self.cursor = self.cursor.saturating_sub(1),
+            Key::Down => self.cursor = (self.cursor + 1).min(self.options.len()),
+            Key::Char(' ') => {
+                if let Some(checked) = self.checked.get_mut(self.cursor) {
+                    *checked = !*checked;
+                }
+            }
+            Key::Char('+') => self.custom = Some(String::new()),
+            Key::Backspace => return Nav::Prev,
+            Key::Enter => return Nav::Next,
+            _ => {}
+        }
+        Nav::Stay
+    }
+
+    fn render(&self, theme: &crate::theme::Theme, body: &mut Vec<String>) {
+        for (index, option) in self.options.iter().enumerate() {
+            let tick = if self.checked[index] { "[x]" } else { "[ ]" };
+            let line = format!("{tick} {option}");
+            if index == self.cursor {
+                body.push(theme.bold(Token::TextStrong, &format!("❯ {line}")));
+            } else {
+                body.push(theme.paint(Token::Text, &format!("  {line}")));
+            }
+        }
+        // The custom-entry row sits after the presets.
+        match &self.custom {
+            Some(buffer) => {
+                body.push(theme.bold(Token::Accent, &format!("❯ + custom: {buffer}▏")));
+            }
+            None => {
+                let line = "+ add custom";
+                if self.cursor == self.options.len() {
+                    body.push(theme.bold(Token::TextStrong, &format!("❯ {line}")));
+                } else {
+                    body.push(theme.paint(Token::TextDim, &format!("  {line}")));
+                }
+            }
         }
     }
 }
 
-/// The `/model add` spec form: one field per catalog property, filled
-/// top to bottom. Enter advances (and saves on the last field), ←/→
-/// cycles the API dialect, Esc cancels. Required identity fields must
-/// be non-blank and count fields must parse before the form resolves.
-impl Default for ModelFormDialog {
-    fn default() -> Self {
-        Self::new()
+/// A pick-one list with presets and a trailing free-form entry
+/// (`256k` / `500k` / `1M` / custom).
+struct SizeChoice {
+    presets: Vec<String>,
+    cursor: usize,
+    /// Some(text): the custom cell being typed.
+    custom: Option<String>,
+    chosen_custom: Option<String>,
+}
+
+impl SizeChoice {
+    fn new(presets: &[&str]) -> Self {
+        Self {
+            presets: presets.iter().map(|s| s.to_string()).collect(),
+            cursor: 0,
+            custom: None,
+            chosen_custom: None,
+        }
+    }
+
+    fn handle_key(&mut self, key: &Key, mods: &tui_engine::keys::Mods) -> Nav {
+        if let Some(buffer) = &mut self.custom {
+            match key {
+                Key::Enter => {
+                    let text = buffer.trim().to_string();
+                    if parse_size(&text).is_none() {
+                        return Nav::Stay; // invalid input keeps the field
+                    }
+                    self.chosen_custom = Some(text);
+                    self.custom = None;
+                    return Nav::Next;
+                }
+                Key::Backspace => {
+                    buffer.pop();
+                }
+                Key::Char(c) if !mods.ctrl && !mods.alt => buffer.push(*c),
+                Key::Esc => self.custom = None,
+                _ => {}
+            }
+            return Nav::Stay;
+        }
+        match key {
+            Key::Up => self.cursor = self.cursor.saturating_sub(1),
+            Key::Down => self.cursor = (self.cursor + 1).min(self.presets.len()),
+            Key::Enter => {
+                if self.cursor == self.presets.len() {
+                    self.custom = Some(String::new());
+                } else {
+                    self.chosen_custom = None;
+                    return Nav::Next;
+                }
+            }
+            _ => {}
+        }
+        Nav::Stay
+    }
+
+    /// The raw cell (a preset string or the typed custom value).
+    fn value(&self) -> String {
+        if let Some(custom) = &self.chosen_custom {
+            return custom.clone();
+        }
+        self.presets
+            .get(self.cursor)
+            .cloned()
+            .unwrap_or_else(|| self.presets.first().cloned().unwrap_or_default())
+    }
+
+    fn render(&self, theme: &crate::theme::Theme, body: &mut Vec<String>) {
+        for (index, preset) in self.presets.iter().enumerate() {
+            let line = preset.clone();
+            if index == self.cursor && self.custom.is_none() {
+                body.push(theme.bold(Token::TextStrong, &format!("❯ {line}")));
+            } else {
+                body.push(theme.paint(Token::Text, &format!("  {line}")));
+            }
+        }
+        match &self.custom {
+            Some(buffer) => {
+                body.push(theme.bold(Token::Accent, &format!("❯ custom: {buffer}▏")));
+            }
+            None => {
+                let line = "custom…";
+                if self.cursor == self.presets.len() {
+                    body.push(theme.bold(Token::TextStrong, &format!("❯ {line}")));
+                } else {
+                    body.push(theme.paint(Token::TextDim, &format!("  {line}")));
+                }
+            }
+        }
     }
 }
 
-pub struct ModelFormDialog {
+/// The step-at-a-time model builder behind `/provider add`: provider
+/// fields first, then per-model fields, with a review step that can
+/// loop back to add another model under the same provider. All
+/// accumulated entries submit together.
+pub struct ModelWizardDialog {
     title: String,
-    fields: Vec<FormField>,
-    active: usize,
+    step: WizardStep,
+    // Provider-level fields survive the "add another model" loop.
+    provider: String,
+    api: usize,
+    base_url: String,
+    api_key: String,
+    // Model-level fields reset per model.
+    model_id: String,
+    alias: String,
+    context: SizeChoice,
+    max_output: SizeChoice,
+    thinking: MultiSelect,
+    input_mods: MultiSelect,
+    output_mods: MultiSelect,
+    entries: Vec<(String, wavecode_config::ModelSpec)>,
     error: Option<String>,
 }
 
-impl ModelFormDialog {
-    /// A blank form in fill order (thinking/modalities preseeded with
-    /// the catalog defaults).
-    pub fn new() -> Self {
+pub const API_KINDS: [&str; 3] = ["anthropic-messages", "openai-chat", "openai-responses"];
+
+impl ModelWizardDialog {
+    /// A wizard over an optional provider preset (picked from the
+    /// provider list): the name, dialect, endpoint, and key env seed
+    /// the first four steps.
+    pub fn new(preset: Option<crate::ui::ProviderPreset>) -> Self {
+        let (provider, api, base_url, api_key) = preset
+            .map(|preset| {
+                let api = API_KINDS
+                    .iter()
+                    .position(|kind| *kind == preset.api)
+                    .unwrap_or(0);
+                (
+                    preset.provider,
+                    api,
+                    preset.base_url,
+                    preset.api_key_env.unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
         Self {
-            title: "Add a model".to_string(),
-            fields: vec![
-                FormField::new("alias", FormRow::Text, ""),
-                FormField::new("api", FormRow::ApiKind, "anthropic-messages"),
-                FormField::new("provider", FormRow::Text, ""),
-                FormField::new("base url", FormRow::Text, ""),
-                FormField::new("model", FormRow::Text, ""),
-                FormField::new("api key env", FormRow::Text, ""),
-                FormField::new("context tokens", FormRow::Count, ""),
-                FormField::new("max output", FormRow::Count, ""),
-                FormField::new("thinking", FormRow::List, ""),
-                FormField::new("input modalities", FormRow::List, "text"),
-                FormField::new("output modalities", FormRow::List, "text"),
-            ],
-            active: 0,
+            title: "Model wizard".to_string(),
+            step: WIZARD_ORDER[0],
+            provider,
+            api,
+            base_url,
+            api_key,
+            model_id: String::new(),
+            alias: String::new(),
+            context: SizeChoice::new(&CONTEXT_PRESETS),
+            max_output: SizeChoice::new(&MAX_OUTPUT_PRESETS),
+            thinking: MultiSelect::new(&THINKING_PRESETS, &[]),
+            input_mods: MultiSelect::new(&INPUT_MOD_PRESETS, &["text"]),
+            output_mods: MultiSelect::new(&OUTPUT_MOD_PRESETS, &["text"]),
+            entries: Vec::new(),
             error: None,
         }
     }
 
-    fn api_kinds() -> [&'static str; 3] {
-        ["anthropic-messages", "openai-chat", "openai-responses"]
+    fn step_title(&self) -> &'static str {
+        match self.step {
+            WizardStep::ProviderName => "Provider name",
+            WizardStep::ApiKind => "API format (←/→ to cycle)",
+            WizardStep::BaseUrl => "Base URL",
+            WizardStep::ApiKey => "API key (env:NAME stores the variable name, blank skips)",
+            WizardStep::ModelId => "Model name (the wire id)",
+            WizardStep::Alias => "Display name (the /model alias)",
+            WizardStep::ContextWindow => "Context window",
+            WizardStep::MaxOutput => "Max output tokens",
+            WizardStep::Thinking => "Thinking levels (space toggles, + adds custom)",
+            WizardStep::InputMods => "Input modalities",
+            WizardStep::OutputMods => "Output modalities",
+            WizardStep::Review => "Review — ↵ saves, a adds another model on this provider",
+        }
     }
 
-    /// Compose the spec from the form values; `Err` names the problem
-    /// and points at the offending field.
-    fn resolve(&self) -> Result<(String, wavecode_config::ModelSpec), (usize, String)> {
-        let value = |index: usize| self.fields[index].value.trim();
-        for index in [0, 2, 3, 4] {
-            if value(index).is_empty() {
-                return Err((index, format!("{} is required", self.fields[index].label)));
-            }
+    /// Compose the current model's spec; `Err` names the field problem.
+    fn resolve_model(&self) -> Result<(String, wavecode_config::ModelSpec), String> {
+        if self.model_id.trim().is_empty() {
+            return Err("model name is required".to_string());
         }
-        let context_window = match value(6).parse::<u64>() {
-            Ok(parsed) => Some(parsed),
-            Err(_) if value(6).is_empty() => None,
-            Err(_) => return Err((6, "context tokens must be a number".to_string())),
-        };
-        let max_output = match value(7).parse::<u32>() {
-            Ok(parsed) => Some(parsed),
-            Err(_) if value(7).is_empty() => None,
-            Err(_) => return Err((7, "max output must be a number".to_string())),
-        };
-        let kind = match value(1) {
+        if self.alias.trim().is_empty() {
+            return Err("display name is required".to_string());
+        }
+        if self.provider.trim().is_empty() {
+            return Err("provider is required".to_string());
+        }
+        if self.base_url.trim().is_empty() {
+            return Err("base url is required".to_string());
+        }
+        let context_window = parse_size(&self.context.value())
+            .ok_or_else(|| "context window must be a size (256k / 1M / digits)".to_string())?;
+        let max_output = parse_size(&self.max_output.value())
+            .and_then(|size| u32::try_from(size).ok())
+            .ok_or_else(|| "max output must be a size (64k / 128k / digits)".to_string())?;
+        let kind = match API_KINDS[self.api] {
             "openai-chat" => wavecode_config::ApiKind::OpenaiChat,
             "openai-responses" => wavecode_config::ApiKind::OpenaiResponses,
             _ => wavecode_config::ApiKind::AnthropicMessages,
         };
-        // Thinking: a variant list enables the control, the first
-        // variant is the default effort.
-        let variants: Vec<String> = value(8)
-            .split(',')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .map(str::to_string)
-            .collect();
+        let variants = self.thinking.selected();
         let reasoning = wavecode_config::ReasoningSpec {
             enabled: !variants.is_empty(),
             default: variants.first().cloned(),
             variants,
         };
-        let split_list = |raw: &str| -> Vec<String> {
-            raw.split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(str::to_string)
-                .collect()
+        let key = self.api_key.trim();
+        let (api_key_env, api_key) = if let Some(env) = key.strip_prefix("env:") {
+            ((!env.is_empty()).then(|| env.to_string()), None)
+        } else {
+            (None, (!key.is_empty()).then(|| key.to_string()))
         };
         let spec = wavecode_config::ModelSpec {
-            provider: value(2).to_string(),
-            model: value(4).to_string(),
+            provider: self.provider.trim().to_string(),
+            model: self.model_id.trim().to_string(),
             kind,
-            base_url: value(3).to_string(),
-            api_key_env: (!value(5).is_empty()).then(|| value(5).to_string()),
-            api_key: None,
-            context_window,
-            max_output,
+            base_url: self.base_url.trim().to_string(),
+            api_key_env,
+            api_key,
+            context_window: Some(context_window),
+            max_output: Some(max_output),
             reasoning,
             modalities: wavecode_config::ModalitiesSpec {
-                input: split_list(value(9)),
-                output: split_list(value(10)),
+                input: self.input_mods.selected(),
+                output: self.output_mods.selected(),
             },
         };
-        Ok((value(0).to_string(), spec))
+        Ok((self.alias.trim().to_string(), spec))
+    }
+
+    /// Reset the per-model fields for the next entry on this provider.
+    fn reset_model_fields(&mut self) {
+        self.model_id.clear();
+        self.alias.clear();
+        self.context = SizeChoice::new(&CONTEXT_PRESETS);
+        self.max_output = SizeChoice::new(&MAX_OUTPUT_PRESETS);
+        self.thinking = MultiSelect::new(&THINKING_PRESETS, &[]);
+        self.input_mods = MultiSelect::new(&INPUT_MOD_PRESETS, &["text"]);
+        self.output_mods = MultiSelect::new(&OUTPUT_MOD_PRESETS, &["text"]);
     }
 
     fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
-        let last = self.fields.len() - 1;
+        let index = WIZARD_ORDER
+            .iter()
+            .position(|step| *step == self.step)
+            .unwrap_or(0);
+        // Multiselect steps own their keys first.
+        let nav = match self.step {
+            WizardStep::Thinking => self.thinking.handle_key(&event.key, &event.mods),
+            WizardStep::InputMods => self.input_mods.handle_key(&event.key, &event.mods),
+            WizardStep::OutputMods => self.output_mods.handle_key(&event.key, &event.mods),
+            WizardStep::ContextWindow => self.context.handle_key(&event.key, &event.mods),
+            WizardStep::MaxOutput => self.max_output.handle_key(&event.key, &event.mods),
+            _ => Nav::Stay,
+        };
+        match nav {
+            Nav::Prev => {
+                if index > 0 {
+                    self.step = WIZARD_ORDER[index - 1];
+                }
+                return None;
+            }
+            Nav::Next => {
+                if index + 1 < WIZARD_ORDER.len() {
+                    self.step = WIZARD_ORDER[index + 1];
+                }
+                return None;
+            }
+            Nav::Stay => {
+                // The choice and multiselect steps own the keyboard:
+                // their component advances them (Nav::Next), and a Stay
+                // here — e.g. the Enter that opens a custom-entry
+                // field — must not also fall through to the generic
+                // step advance. Text and api steps stay fallible on
+                // purpose: their Enter rides the generic advance below.
+                if matches!(
+                    self.step,
+                    WizardStep::ContextWindow
+                        | WizardStep::MaxOutput
+                        | WizardStep::Thinking
+                        | WizardStep::InputMods
+                        | WizardStep::OutputMods
+                ) {
+                    return None;
+                }
+            }
+        }
         match event.key {
-            Key::Esc => return Some(Answer::Dismissed),
-            Key::Up => {
-                self.active = self.active.saturating_sub(1);
+            Key::Char('s')
+                if !event.mods.ctrl && !event.mods.alt && self.step == WizardStep::Review =>
+            {
+                // Save everything: stage the current model when it
+                // resolves, then submit all staged entries. A broken
+                // current model with nothing staged keeps the wizard
+                // open with the error; staged work survives a broken
+                // draft.
+                match self.resolve_model() {
+                    Ok((alias, spec)) => self.entries.push((alias, spec)),
+                    Err(message) if self.entries.is_empty() => {
+                        self.error = Some(message);
+                        return None;
+                    }
+                    Err(_) => {}
+                }
+                return Some(Answer::ModelForm {
+                    entries: std::mem::take(&mut self.entries),
+                });
             }
-            Key::Down => {
-                self.active = (self.active + 1).min(last);
+            Key::Esc => {
+                if self.entries.is_empty() {
+                    return Some(Answer::Dismissed);
+                }
+                // Entries already staged: Esc submits them (the wizard
+                // never throws away confirmed work).
+                return Some(Answer::ModelForm {
+                    entries: std::mem::take(&mut self.entries),
+                });
             }
-            Key::Left | Key::Right if self.fields[self.active].kind == FormRow::ApiKind => {
-                let kinds = Self::api_kinds();
-                let current = self.fields[self.active].value.clone();
-                let position = kinds.iter().position(|kind| *kind == current).unwrap_or(0);
+            Key::Backspace => {
+                let active_text = match self.step {
+                    WizardStep::ProviderName => &mut self.provider,
+                    WizardStep::BaseUrl => &mut self.base_url,
+                    WizardStep::ApiKey => &mut self.api_key,
+                    WizardStep::ModelId => &mut self.model_id,
+                    WizardStep::Alias => &mut self.alias,
+                    _ => {
+                        if index > 0 {
+                            self.step = WIZARD_ORDER[index - 1];
+                        }
+                        return None;
+                    }
+                };
+                if active_text.pop().is_none() && index > 0 {
+                    self.step = WIZARD_ORDER[index - 1];
+                }
+                self.error = None;
+            }
+            Key::Left | Key::Right if self.step == WizardStep::ApiKind => {
                 let step = if event.key == Key::Right {
                     1
                 } else {
-                    kinds.len() - 1
+                    API_KINDS.len() - 1
                 };
-                self.fields[self.active].value = kinds[(position + step) % kinds.len()].to_string();
-            }
-            Key::Backspace => {
-                self.fields[self.active].value.pop();
-                self.error = None;
+                self.api = (self.api + step) % API_KINDS.len();
             }
             Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
-                let field = &mut self.fields[self.active];
-                // The dialect cycles, it does not take typed text; count
-                // fields only take digits.
-                let editable = field.kind != FormRow::ApiKind;
-                if editable && (field.kind != FormRow::Count || c.is_ascii_digit()) {
-                    field.value.push(c);
+                let field = match self.step {
+                    WizardStep::ProviderName => Some(&mut self.provider),
+                    WizardStep::BaseUrl => Some(&mut self.base_url),
+                    WizardStep::ApiKey => Some(&mut self.api_key),
+                    WizardStep::ModelId => Some(&mut self.model_id),
+                    WizardStep::Alias => Some(&mut self.alias),
+                    _ => None,
+                };
+                if let Some(field) = field {
+                    field.push(c);
                 }
                 self.error = None;
             }
-            Key::Enter => {
-                if self.active < last {
-                    self.active += 1;
-                } else {
-                    match self.resolve() {
-                        Ok((alias, spec)) => return Some(Answer::ModelForm { alias, spec }),
-                        Err((index, message)) => {
-                            self.active = index;
-                            self.error = Some(message);
-                        }
+            Key::Enter if self.step == WizardStep::Review => {
+                // Stage the model and reset the per-model fields: the
+                // review page doubles as the add-another-model loop.
+                match self.resolve_model() {
+                    Ok((alias, spec)) => {
+                        self.entries.push((alias, spec));
+                        self.reset_model_fields();
+                        // The loop continues at the model steps: the
+                        // provider fields carry over untouched.
+                        self.step = WizardStep::ModelId;
+                        self.error = None;
                     }
+                    Err(message) => self.error = Some(message),
                 }
+            }
+            Key::Enter if index + 1 < WIZARD_ORDER.len() => {
+                self.step = WIZARD_ORDER[index + 1];
             }
             _ => {}
         }
@@ -2650,38 +3118,198 @@ impl ModelFormDialog {
 
     fn render(&mut self, columns: usize) -> Vec<String> {
         let theme = theme::current();
-        let label_width = self
-            .fields
+        let index = WIZARD_ORDER
             .iter()
-            .map(|field| field.label.len())
-            .max()
+            .position(|step| *step == self.step)
             .unwrap_or(0);
-        let mut body = Vec::new();
-        for (index, field) in self.fields.iter().enumerate() {
-            let label = format!("{:>width$}:", field.label, width = label_width);
-            let value = if index == self.active {
-                let mut text = field.value.clone();
-                text.push('▏');
-                theme.bold(Token::TextStrong, &text)
-            } else if field.value.is_empty() {
-                theme.paint(Token::TextMuted, "(unset)")
-            } else {
-                theme.paint(Token::Text, &field.value)
-            };
-            let label = if index == self.active {
-                theme.bold(Token::Accent, &label)
-            } else {
-                theme.paint(Token::TextDim, &label)
-            };
-            body.push(format!("{label} {value}"));
+        let mut body = vec![theme.paint(
+            Token::TextDim,
+            &format!(
+                "provider {} · {} · step {}/{}",
+                if self.provider.is_empty() {
+                    "(new)"
+                } else {
+                    &self.provider
+                },
+                API_KINDS[self.api],
+                index + 1,
+                WIZARD_ORDER.len()
+            ),
+        )];
+        body.push(theme.bold(Token::Text, self.step_title()));
+        body.push(String::new());
+        let text = |value: &str| {
+            let mut shown = value.to_string();
+            if !value.is_empty() && self.step == WizardStep::ApiKey {
+                shown = "*".repeat(value.len().min(24));
+            }
+            shown
+        };
+        match self.step {
+            WizardStep::ProviderName => {
+                body.push(theme.bold(Token::TextStrong, &format!("{}▏", text(&self.provider))));
+            }
+            WizardStep::ApiKind => {
+                for (position, kind) in API_KINDS.iter().enumerate() {
+                    if position == self.api {
+                        body.push(theme.bold(Token::TextStrong, &format!("❯ {kind}")));
+                    } else {
+                        body.push(theme.paint(Token::TextDim, &format!("  {kind}")));
+                    }
+                }
+            }
+            WizardStep::BaseUrl | WizardStep::ApiKey => {
+                let value = if self.step == WizardStep::BaseUrl {
+                    &self.base_url
+                } else {
+                    &self.api_key
+                };
+                body.push(theme.bold(Token::TextStrong, &format!("{}▏", text(value))));
+            }
+            WizardStep::ModelId | WizardStep::Alias => {
+                let value = if self.step == WizardStep::ModelId {
+                    &self.model_id
+                } else {
+                    &self.alias
+                };
+                body.push(theme.bold(Token::TextStrong, &format!("{}▏", text(value))));
+            }
+            WizardStep::ContextWindow => self.context.render(&theme, &mut body),
+            WizardStep::MaxOutput => self.max_output.render(&theme, &mut body),
+            WizardStep::Thinking => self.thinking.render(&theme, &mut body),
+            WizardStep::InputMods => self.input_mods.render(&theme, &mut body),
+            WizardStep::OutputMods => self.output_mods.render(&theme, &mut body),
+            WizardStep::Review => {
+                let rows = [
+                    ("provider", self.provider.clone()),
+                    ("api", API_KINDS[self.api].to_string()),
+                    ("base url", self.base_url.clone()),
+                    (
+                        "api key",
+                        if self.api_key.starts_with("env:") {
+                            format!("env {}", &self.api_key[4..])
+                        } else if self.api_key.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            "*".repeat(self.api_key.len().min(12))
+                        },
+                    ),
+                    ("model", self.model_id.clone()),
+                    ("alias", self.alias.clone()),
+                    ("context", self.context.value()),
+                    ("max output", self.max_output.value()),
+                    ("thinking", self.thinking.selected().join(",")),
+                    ("input", self.input_mods.selected().join(",")),
+                    ("output", self.output_mods.selected().join(",")),
+                ];
+                for (label, value) in rows {
+                    body.push(format!(
+                        "{} {}",
+                        theme.paint(Token::TextDim, &format!("{label:>10}:")),
+                        theme.paint(Token::Text, &value)
+                    ));
+                }
+                if !self.entries.is_empty() {
+                    body.push(theme.paint(
+                        Token::Success,
+                        &format!("{} model(s) staged", self.entries.len()),
+                    ));
+                }
+            }
         }
         if let Some(error) = &self.error {
             body.push(theme.paint(Token::Warning, error));
         }
         body.push(String::new());
+        let hint = match self.step {
+            WizardStep::Review => "↵ save · a add another model here · esc cancel",
+            WizardStep::Thinking | WizardStep::InputMods | WizardStep::OutputMods => {
+                "↑/↓ move · space toggle · + custom · ↵ next · esc cancel"
+            }
+            WizardStep::ContextWindow | WizardStep::MaxOutput => {
+                "↑/↓ pick · ↵ next (custom asks for a value) · esc cancel"
+            }
+            _ => "↵ next · backspace back · esc cancel",
+        };
+        body.push(theme.paint(Token::TextDim, hint));
+        border::frame(
+            body,
+            columns,
+            theme.style(Token::BorderFocus),
+            Some(self.title.clone()),
+        )
+    }
+}
+
+/// The `/provider` opening view: providers already in the catalog
+/// (with their model counts), plus the new-provider row. Picking one
+/// opens the wizard seeded from it.
+pub struct ProviderPickerDialog {
+    title: String,
+    rows: Vec<(String, usize)>,
+    selected: usize,
+}
+
+impl ProviderPickerDialog {
+    /// Build over the catalog's distinct providers and model counts.
+    pub fn new(rows: Vec<(String, usize)>) -> Self {
+        Self {
+            title: "Providers".to_string(),
+            rows,
+            selected: 0,
+        }
+    }
+
+    fn handle_key(&mut self, event: KeyEvent) -> Option<Answer> {
+        let count = self.rows.len() + 1; // + the add-new row
+        match event.key {
+            Key::Esc => Some(Answer::Dismissed),
+            Key::Up => {
+                self.selected = if self.selected == 0 {
+                    count.saturating_sub(1)
+                } else {
+                    self.selected - 1
+                };
+                None
+            }
+            Key::Down => {
+                self.selected = (self.selected + 1) % count.max(1);
+                None
+            }
+            Key::Enter => {
+                let name = if self.selected < self.rows.len() {
+                    Some(self.rows[self.selected].0.clone())
+                } else {
+                    None
+                };
+                Some(Answer::ProviderPicked { name })
+            }
+            _ => None,
+        }
+    }
+
+    fn render(&mut self, columns: usize) -> Vec<String> {
+        let theme = theme::current();
+        let mut body = Vec::new();
+        for (index, (name, models)) in self.rows.iter().enumerate() {
+            let line = format!("{name} · {models} model(s)");
+            if index == self.selected {
+                body.push(theme.bold(Token::TextStrong, &format!("❯ {line}")));
+            } else {
+                body.push(theme.paint(Token::Text, &format!("  {line}")));
+            }
+        }
+        let add_row = self.rows.len();
+        let line = "＋ add a new provider";
+        if add_row == self.selected {
+            body.push(theme.bold(Token::Accent, &format!("❯ {line}")));
+        } else {
+            body.push(theme.paint(Token::Primary, &format!("  {line}")));
+        }
+        body.push(String::new());
         body.push(theme.paint(
             Token::TextDim,
-            "↑/↓ field · ←/→ api · ↵ next / save · esc cancel",
+            "↑/↓ choose · ↵ configure (an existing provider preseeds the wizard) · esc cancel",
         ));
         border::frame(
             body,

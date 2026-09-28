@@ -18,14 +18,13 @@
 //! This crate depends only on `wavecode-llm`; trigger
 //! timing is orchestrated by core.
 //!
-//! Two auxiliary passes share the same history model: the cache-preserving
+//! One auxiliary pass shares the same history model: the cache-preserving
 //! micro-compaction pass ([`evict_old_tool_results`], which stubs the payloads
 //! of old tool results while leaving an anchored prefix and a recent window
-//! untouched) and the system-reminder injection channel
-//! ([`ReminderChannel`], the single channel for compaction notices, plan
-//! nudges, and similar meta text).
+//! untouched). Harness meta text reaches the model through the loop's
+//! transient notes or direct history pushes, not through this crate.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -859,7 +858,7 @@ pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<
 }
 
 // ---------------------------------------------------------------------------
-// system-reminder injection channel
+// system-reminder vocabulary
 // ---------------------------------------------------------------------------
 
 /// Opening tag of an injected system reminder.
@@ -867,110 +866,6 @@ pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<
 /// Re-exported from `wavecode-wire`, which holds the single definition (the
 /// loop needs the same marker and may not depend on this crate).
 pub use wavecode_wire::{SYSTEM_REMINDER_CLOSE, SYSTEM_REMINDER_OPEN, wrap_system_reminder};
-
-/// Default cap on pending (not yet injected) reminders. At the cap new
-/// reminders are dropped rather than queued — a bounded channel, never a
-/// silent queue growth.
-pub const DEFAULT_MAX_PENDING_REMINDERS: usize = 8;
-
-/// True when `wrapped` is still present as a whole text block in
-/// `history`'s trailing user-role entry (i.e. not yet consumed by a model
-/// turn).
-fn reminder_still_present(history: &[Message], wrapped: &str) -> bool {
-    history
-        .last()
-        .filter(|m| m.role == Role::User)
-        .is_some_and(|m| {
-            m.content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::Text { text } if text == wrapped))
-        })
-}
-
-/// FIFO queue of `<system-reminder>` blocks waiting for the next user-role
-/// entry. The single channel future callers (compaction notices, plan
-/// nudges, …) use to reach the model:
-///
-/// 1. `enqueue` a reminder text at any time (deduplicated while it is still
-///    pending or still present in the trailing user entry; capped);
-/// 2. `flush` right before the next user-role entry enters the history — the
-///    reminders merge into that entry (appended as text blocks) instead of
-///    each spawning its own message.
-#[derive(Debug, Clone)]
-pub struct ReminderChannel {
-    pending: VecDeque<String>,
-    max_pending: usize,
-}
-
-impl ReminderChannel {
-    /// Queue with the [`DEFAULT_MAX_PENDING_REMINDERS`] cap.
-    pub fn new() -> Self {
-        Self::with_cap(DEFAULT_MAX_PENDING_REMINDERS)
-    }
-
-    /// Queue with an explicit cap; a cap of 0 rejects every enqueue (kept
-    /// literal rather than clamped — a caller asking for no queue gets one).
-    pub fn with_cap(max_pending: usize) -> Self {
-        Self {
-            pending: VecDeque::new(),
-            max_pending,
-        }
-    }
-
-    /// Number of reminders waiting for injection.
-    pub fn pending(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// Queue `text` for injection into the next user-role entry. Returns
-    /// `false` (no change) when an identical reminder is already pending,
-    /// when it is still present in `history`'s trailing user entry (injected
-    /// but not yet consumed by a model turn), or when the pending cap is
-    /// reached.
-    pub fn enqueue(&mut self, text: &str, history: &[Message]) -> bool {
-        let wrapped = wrap_system_reminder(text);
-        if self.pending.iter().any(|p| *p == wrapped) || reminder_still_present(history, &wrapped) {
-            return false;
-        }
-        if self.pending.len() >= self.max_pending {
-            return false;
-        }
-        self.pending.push_back(wrapped);
-        true
-    }
-
-    /// Drain all pending reminders into `history`: merged into the trailing
-    /// user-role entry when there is one (each reminder appended as a whole
-    /// text block), otherwise pushed as a fresh user-role entry carrying just
-    /// the reminders. Returns the number of reminders injected (0 leaves the
-    /// history untouched). Call this right before the next user-role entry
-    /// enters the history.
-    pub fn flush(&mut self, history: &mut Vec<Message>) -> usize {
-        let drained: Vec<String> = self.pending.drain(..).collect();
-        if drained.is_empty() {
-            return 0;
-        }
-        let blocks: Vec<ContentBlock> = drained
-            .into_iter()
-            .map(|text| ContentBlock::Text { text })
-            .collect();
-        let count = blocks.len();
-        match history.last_mut() {
-            Some(m) if m.role == Role::User => m.content.extend(blocks),
-            _ => history.push(Message {
-                role: Role::User,
-                content: blocks,
-            }),
-        }
-        count
-    }
-}
-
-impl Default for ReminderChannel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1767,88 +1662,5 @@ Concurrent stock-deduction test; settlement ledger integration.";
             wrap_system_reminder("hi"),
             "<system-reminder>\nhi\n</system-reminder>"
         );
-    }
-
-    #[test]
-    fn reminder_dedup_while_pending_and_while_present() {
-        let mut ch = ReminderChannel::new();
-        let mut history: Vec<Message> = Vec::new();
-        assert!(ch.enqueue("plan nudge", &history));
-        assert!(
-            !ch.enqueue("plan nudge", &history),
-            "identical reminder must not re-queue while pending"
-        );
-        // Empty history: flush pushes a fresh user entry carrying the block.
-        assert_eq!(ch.flush(&mut history), 1);
-        assert_eq!(ch.pending(), 0);
-        assert_eq!(history.len(), 1);
-        assert!(
-            !ch.enqueue("plan nudge", &history),
-            "identical reminder must not re-queue while still present in the trailing user entry"
-        );
-        // A model turn consumes the trailing entry; the same reminder may be
-        // queued again (recurring nudges stay possible).
-        history.push(assistant_text("ok"));
-        assert!(ch.enqueue("plan nudge", &history));
-    }
-
-    #[test]
-    fn reminder_cap_rejects_new_reminders() {
-        let mut history = vec![user_text("hi")];
-        let mut ch = ReminderChannel::with_cap(2);
-        assert!(ch.enqueue("a", &history));
-        assert!(ch.enqueue("b", &history));
-        assert!(
-            !ch.enqueue("c", &history),
-            "cap reached: new reminder dropped"
-        );
-        assert_eq!(ch.pending(), 2);
-        // Dedup does not consume cap capacity.
-        assert!(!ch.enqueue("a", &history));
-        assert_eq!(ch.pending(), 2);
-        // A literal cap of 0 rejects everything.
-        assert!(!ReminderChannel::with_cap(0).enqueue("x", &history));
-        // Flushing frees capacity.
-        assert_eq!(ch.flush(&mut history), 2);
-        assert_eq!(ch.pending(), 0);
-        assert!(ch.enqueue("c", &history));
-    }
-
-    #[test]
-    fn reminder_flush_merges_into_trailing_user_entry() {
-        let mut ch = ReminderChannel::new();
-        let mut history = vec![user_text("question"), assistant_text("answer")];
-        assert!(ch.enqueue("compaction notice", &history));
-        assert_eq!(ch.flush(&mut history), 1);
-        // Trailing entry is assistant: reminders arrive as a fresh user entry.
-        assert_eq!(history.len(), 3);
-        assert!(matches!(
-            &history[2].content[0],
-            ContentBlock::Text { text } if text == &wrap_system_reminder("compaction notice")
-        ));
-        assert_eq!(find_pairing_violations(&history), Vec::<String>::new());
-
-        // Trailing entry is user: reminders merge into it as extra text
-        // blocks; existing content is kept.
-        assert!(ch.enqueue("second notice", &history));
-        assert_eq!(ch.flush(&mut history), 1);
-        let last = history.last().unwrap();
-        assert_eq!(last.content.len(), 2);
-        assert!(matches!(
-            &last.content[0],
-            ContentBlock::Text { text } if text == &wrap_system_reminder("compaction notice")
-        ));
-        assert!(matches!(
-            &last.content[1],
-            ContentBlock::Text { text } if text == &wrap_system_reminder("second notice")
-        ));
-    }
-
-    #[test]
-    fn reminder_flush_empty_is_noop() {
-        let mut ch = ReminderChannel::new();
-        let mut history = vec![user_text("hi")];
-        assert_eq!(ch.flush(&mut history), 0);
-        assert_eq!(history.len(), 1, "empty flush must not add a message");
     }
 }

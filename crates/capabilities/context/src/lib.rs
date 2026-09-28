@@ -700,36 +700,6 @@ fn evicted_result_stub(tool_use_id: &str, tool_name: Option<&str>) -> String {
     }
 }
 
-/// Cache-preserving micro-compaction: replace the payload of old tool results
-/// with a one-line eviction stub, keeping everything else verbatim.
-///
-/// What is never touched:
-/// - the first `cfg.anchored_prefix` messages (anchored prefix — with
-///   Anthropic prompt caching the cache prefix extends up to the first changed
-///   message, so a stable head keeps the prefix cacheable);
-/// - the last `cfg.recent_window` messages (recent window; defaults to
-///   [`DEFAULT_KEEP_RECENT`], matching full compaction's verbatim tail);
-/// - non-tool-result content: user/assistant text, images, and any text
-///   blocks sharing a message with an evicted result.
-///
-/// Tool results are recognized structurally (`ContentBlock::ToolResult`
-/// blocks in user messages) — never via text heuristics. Only `content` is
-/// replaced; the block keeps its `tool_use_id` and `is_error`, so pairing
-/// integrity ([`find_pairing_violations`]) is unaffected.
-///
-/// How much is evicted is demand-driven, not all-or-nothing (see
-/// [`eviction_frontier`]): the pass reclaims oldest-first only until the stubs
-/// free `total - cfg.soft_threshold_tokens` tokens (the threshold doubles as
-/// the reclamation target, so no caller has to pass it twice), and the
-/// frontier only advances in `cfg.batch_messages` groups. A history already
-/// under the threshold therefore passes through byte-for-byte even when the
-/// caller invokes the pass.
-///
-/// Idempotent: the stub is a pure function of `(tool_use_id, tool name)`, so
-/// running the pass again reproduces the same stubs and changes nothing
-/// further. When the anchored prefix and the recent window overlap (short
-/// history), the evictable range is empty and the history passes through
-/// unchanged (saturating arithmetic, never panics).
 /// Estimated tokens of one text, using the same split accounting as
 /// [`estimate_tokens`] without its per-message overhead. Only ever used
 /// as a difference of two such values, so dropping the flat +4 framing
@@ -812,6 +782,36 @@ fn eviction_frontier(
     frontier
 }
 
+/// Cache-preserving micro-compaction: replace the payload of old tool results
+/// with a one-line eviction stub, keeping everything else verbatim.
+///
+/// What is never touched:
+/// - the first `cfg.anchored_prefix` messages (anchored prefix — with
+///   Anthropic prompt caching the cache prefix extends up to the first changed
+///   message, so a stable head keeps the prefix cacheable);
+/// - the last `cfg.recent_window` messages (recent window; defaults to
+///   [`DEFAULT_KEEP_RECENT`], matching full compaction's verbatim tail);
+/// - non-tool-result content: user/assistant text, images, and any text
+///   blocks sharing a message with an evicted result.
+///
+/// Tool results are recognized structurally (`ContentBlock::ToolResult`
+/// blocks in user messages) — never via text heuristics. Only `content` is
+/// replaced; the block keeps its `tool_use_id` and `is_error`, so pairing
+/// integrity ([`find_pairing_violations`]) is unaffected.
+///
+/// How much is evicted is demand-driven, not all-or-nothing (see
+/// [`eviction_frontier`]): the pass reclaims oldest-first only until the stubs
+/// free `total - cfg.soft_threshold_tokens` tokens (the threshold doubles as
+/// the reclamation target, so no caller has to pass it twice), and the
+/// frontier only advances in `cfg.batch_messages` groups. A history already
+/// under the threshold therefore passes through byte-for-byte even when the
+/// caller invokes the pass.
+///
+/// Idempotent: the stub is a pure function of `(tool_use_id, tool name)`, so
+/// running the pass again reproduces the same stubs and changes nothing
+/// further. When the anchored prefix and the recent window overlap (short
+/// history), the evictable range is empty and the history passes through
+/// unchanged (saturating arithmetic, never panics).
 pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<Message> {
     let end = history.len().saturating_sub(cfg.recent_window);
     let start = cfg.anchored_prefix.min(end);

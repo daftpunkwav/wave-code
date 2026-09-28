@@ -806,6 +806,7 @@ mod tests {
         assert!(out.is_error);
         assert!(out.content.contains("404"));
     }
+
     /// Windows-1252 keeps its distinct C1-range glyphs (the euro sign,
     /// curly quotes): decoding it as plain latin-1 would turn those
     /// bytes into invisible control characters.

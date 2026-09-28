@@ -40,6 +40,10 @@ use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use wavecode_wire::{EventMsg, Op, Submission};
 
+use crate::jsonrpc::{
+    INVALID_REQUEST, IncomingLine, error_response, id_or_null, read_line_capped, success_response,
+};
+
 /// Protocol version advertised at `initialize` (subset pin, not negotiated).
 const ACP_PROTOCOL_VERSION: &str = "0.1.0";
 
@@ -988,10 +992,6 @@ where
         _ => None,
     }
 }
-
-use crate::jsonrpc::{
-    INVALID_REQUEST, IncomingLine, error_response, id_or_null, read_line_capped, success_response,
-};
 
 /// Notification envelope (no id, never answered).
 fn notification(method: &str, params: serde_json::Value) -> serde_json::Value {

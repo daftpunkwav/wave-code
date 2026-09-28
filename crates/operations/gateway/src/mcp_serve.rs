@@ -29,6 +29,10 @@ use std::sync::Arc;
 use runtime_runner::{ToolCall, ToolExecutor};
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 
+use crate::jsonrpc::{
+    INVALID_REQUEST, IncomingLine, error_response, id_or_null, read_line_capped, success_response,
+};
+
 // The composition root's executor converts implementation faults into
 // error results prefixed with `wavecode_tools::TOOL_FAULT_PREFIX` (so
 // transcripts stay distinguishable from business failures); the serve
@@ -181,10 +185,6 @@ async fn handle_line<E: ToolExecutor>(
         )),
     }
 }
-
-use crate::jsonrpc::{
-    INVALID_REQUEST, IncomingLine, error_response, id_or_null, read_line_capped, success_response,
-};
 
 /// `initialize` result: negotiated version plus server identity.
 fn initialize_result() -> serde_json::Value {

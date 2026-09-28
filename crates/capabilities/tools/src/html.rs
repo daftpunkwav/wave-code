@@ -164,8 +164,8 @@ fn split_tag(inner: &str) -> (String, String) {
 /// `href`, and the raw value lands in the model context, so: any explicit
 /// scheme other than http/https/mailto (`javascript:`, `data:`, vendor
 /// schemes) degrades the anchor to plain text, scheme-less relative
-/// targets stay links, and whitespace/parenthesis characters that would
-/// break `](target)` syntax degrade too.
+/// targets stay links, and whitespace, parenthesis, or angle-bracket
+/// characters that would break `](target)` syntax degrade too.
 fn markdown_link_target(href: &str) -> Option<String> {
     if let Some(colon) = href.find(':') {
         let head = &href[..colon];

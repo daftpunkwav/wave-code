@@ -769,16 +769,18 @@ impl SnapshotStore {
         // or a Windows rename-over-existing-directory failure — can never
         // leave the label without a recovery point.
         let final_dir = self.snapshot_dir(label);
-        let trash = self.root.join(format!("{label}.old"));
-        let _ = tokio::fs::remove_dir_all(&trash).await;
-        if tokio::fs::rename(&final_dir, &trash).await.is_ok() {
+        // The previous snapshot, parked aside while the swap runs: it is
+        // restored if the staging rename fails, and discarded otherwise.
+        let previous = self.root.join(format!("{label}.old"));
+        let _ = tokio::fs::remove_dir_all(&previous).await;
+        if tokio::fs::rename(&final_dir, &previous).await.is_ok() {
             if let Err(e) = tokio::fs::rename(&staging, &final_dir).await {
                 // Keep the old snapshot: restore it and surface the failure.
-                let _ = tokio::fs::rename(&trash, &final_dir).await;
-                let _ = tokio::fs::remove_dir_all(&trash).await;
+                let _ = tokio::fs::rename(&previous, &final_dir).await;
+                let _ = tokio::fs::remove_dir_all(&previous).await;
                 return Err(e.into());
             }
-            let _ = tokio::fs::remove_dir_all(&trash).await;
+            let _ = tokio::fs::remove_dir_all(&previous).await;
         } else {
             // First save under this label: nothing to protect.
             tokio::fs::rename(&staging, &final_dir).await?;

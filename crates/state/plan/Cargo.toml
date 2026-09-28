@@ -6,6 +6,8 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Crash-safe file replace (`atomic_write`) for the durable plan file.
+infrastructure-base = { path = "../../infrastructure/base" }
 # The `tool` module renders the machine model-invokable via the shared
 # Tool trait; the async runtime bridges persistence off the executor.
 async-trait.workspace = true

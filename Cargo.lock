@@ -1008,6 +1008,9 @@ dependencies = [
 [[package]]
 name = "infrastructure-base"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "infrastructure-ratelimit"
@@ -1669,6 +1672,7 @@ dependencies = [
 name = "runtime-scheduler"
 version = "0.1.0"
 dependencies = [
+ "infrastructure-base",
  "serde",
  "serde_json",
  "tempfile",
@@ -2012,6 +2016,7 @@ name = "state-goal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "infrastructure-base",
  "serde",
  "serde_json",
  "tempfile",
@@ -2025,6 +2030,7 @@ dependencies = [
 name = "state-persistence"
 version = "0.1.0"
 dependencies = [
+ "infrastructure-base",
  "serde",
  "serde_json",
  "tempfile",
@@ -2037,6 +2043,7 @@ name = "state-plan"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "infrastructure-base",
  "serde",
  "serde_json",
  "tempfile",
@@ -2720,6 +2727,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "infrastructure-base",
  "serde_json",
  "tempfile",
  "thiserror",

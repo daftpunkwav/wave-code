@@ -27,7 +27,6 @@
 //! back as interrupted ([`Scheduler::interrupted`]), never as resumed.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::CronSpec;
 
@@ -106,13 +105,6 @@ impl Default for Scheduler {
             interrupted: false,
         }
     }
-}
-
-/// Per-process staging sequence: two writers in this process never share
-/// a temp file (and the process id separates the processes).
-fn staging_seq() -> u64 {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Scheduler {
@@ -243,16 +235,7 @@ impl Scheduler {
         };
         let text = serde_json::to_string_pretty(&stored)
             .map_err(|e| SchedulePersistError::Corrupt(e.to_string()))?;
-        let staging = path.with_extension(format!(
-            "json.staging-{}-{}",
-            std::process::id(),
-            staging_seq()
-        ));
-        std::fs::write(&staging, text)?;
-        if let Err(e) = std::fs::rename(&staging, path) {
-            let _ = std::fs::remove_file(&staging);
-            return Err(e.into());
-        }
+        infrastructure_base::atomic_write(path, text.as_bytes())?;
         Ok(())
     }
 }

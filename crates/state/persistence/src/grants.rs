@@ -59,12 +59,6 @@ pub struct GrantsRead {
     pub malformed: usize,
 }
 
-/// Per-process staging sequence: concurrent writers in this process
-/// never share one temp file, and the process id separates processes
-/// (a fixed staging name lets two writers clobber each other's bytes
-/// mid-write and rename half a file into place).
-static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Where the table lives, for status and doctor output.
 pub fn grants_path(home: &Path) -> PathBuf {
     home.join(".wavecode").join(GRANTS_FILE)
@@ -183,13 +177,7 @@ fn rewrite(home: &Path, grants: &[Grant]) -> Result<(), GrantError> {
         text.push_str(&line);
         text.push('\n');
     }
-    let tmp = path.with_extension(format!(
-        "jsonl.staging-{}-{}",
-        std::process::id(),
-        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, &path)?;
+    infrastructure_base::atomic_write(&path, text.as_bytes())?;
     Ok(())
 }
 

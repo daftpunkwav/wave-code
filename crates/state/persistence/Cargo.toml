@@ -6,6 +6,8 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
+# Crash-safe file replace (`atomic_write`) for the index and grants store.
+infrastructure-base = { path = "../../infrastructure/base" }
 thiserror.workspace = true
 serde_json.workspace = true
 serde.workspace = true

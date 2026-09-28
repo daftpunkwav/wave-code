@@ -61,12 +61,6 @@ pub enum SessionError {
     InvalidId(String),
 }
 
-/// Per-process staging sequence: concurrent writers in this process
-/// never share one temp file, and the process id separates processes
-/// (a fixed staging name lets two writers clobber each other's bytes
-/// mid-write and rename half a file into place).
-static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Sessions root: `~/.wavecode/sessions/`.
 pub fn sessions_dir(home: &Path) -> PathBuf {
     home.join(".wavecode").join(SESSIONS_DIR)
@@ -224,13 +218,7 @@ fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     // Write-then-rename keeps a crash mid-write from truncating the
     // index: a truncated index reads as empty, and the next write would
     // then drop every other session's entry for good.
-    let tmp = index_path(home).with_extension(format!(
-        "json.staging-{}-{}",
-        std::process::id(),
-        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, index_path(home))?;
+    infrastructure_base::atomic_write(&index_path(home), text.as_bytes())?;
     Ok(())
 }
 

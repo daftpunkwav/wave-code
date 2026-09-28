@@ -11,6 +11,7 @@
  *   assembly and the loop's midnight-rollover notice).
  * - Resolve the platform command-string shell once for every layer that
  *   spawns one (shell tool, PTY shell, hooks, jobs).
+ * - Own the crash-safe file-replace primitive shared by the durable stores.
  *
  * This module must not depend on: any other workspace crate.
  */
@@ -114,6 +115,40 @@ pub fn shell_invocation() -> (String, &'static str) {
     } else {
         ("sh".to_owned(), "-c")
     }
+}
+
+/// Atomic file replace: write `contents` to a unique sibling staging file,
+/// then rename it over `path`, so a crash mid-write leaves the target with
+/// either the old or the new content — never a half-written mix.
+///
+/// The staging name carries the process id plus a per-process sequence
+/// number: a fixed staging name lets two writers clobber each other's bytes
+/// mid-write and rename half a file into place. A failed rename removes the
+/// staging file best-effort (no litter; the error still propagates). Sync
+/// `std::fs` only — stores needing stronger durability (fsync before the
+/// rename) keep their own write path on purpose.
+pub fn atomic_write(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let staging = match path.extension() {
+        Some(ext) => path.with_extension(format!(
+            "{}.staging-{}-{}",
+            ext.to_string_lossy(),
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        )),
+        None => path.with_extension(format!(
+            "staging-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        )),
+    };
+    std::fs::write(&staging, contents)?;
+    if let Err(e) = std::fs::rename(&staging, path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Weekday names indexed by `days_since_epoch % 7` with 1970-01-01 =
@@ -271,6 +306,49 @@ mod tests {
                 std::env::set_var("WAVECODE_SHELL", v);
             }
         }
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_staging_litter() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        atomic_write(&path, b"first").expect("first write");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        // An overwrite swaps wholesale: the destination always holds the
+        // old or the new content, and the staging file is gone once the
+        // rename lands.
+        atomic_write(&path, b"second").expect("overwrite");
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        let litter: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".staging-"))
+            .collect();
+        assert!(litter.is_empty(), "staging files must not linger: {litter:?}");
+    }
+
+    /// A failed rename must clean up its staging file instead of littering
+    /// the store directory: callers fail loudly with the destination left
+    /// untouched.
+    #[test]
+    fn failed_atomic_write_removes_its_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        // A directory at the destination makes the final rename fail on
+        // every platform (a file cannot replace a directory).
+        std::fs::create_dir(&path).expect("blocker dir");
+        assert!(
+            atomic_write(&path, b"new").is_err(),
+            "renaming onto a directory must fail"
+        );
+        let litter: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".staging-"))
+            .collect();
+        assert!(litter.is_empty(), "the staging file must be removed: {litter:?}");
     }
 
     #[test]

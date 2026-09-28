@@ -80,8 +80,7 @@ impl Tool for CompactContextTool {
             Some(reason) if !reason.trim().is_empty() => reason.trim(),
             _ => {
                 return Ok(ToolOutput {
-                    content: "missing or empty parameter 'reason' (string required)"
-                        .to_string(),
+                    content: "missing or empty parameter 'reason' (string required)".to_string(),
                     is_error: true,
                 });
             }
@@ -135,7 +134,11 @@ mod tests {
         let tool = tool();
         for payload in [json!({}), json!({"reason": ""}), json!({"reason": "   "})] {
             let output = tool.execute(payload.clone(), &ctx()).await.unwrap();
-            assert!(output.is_error, "{payload:?} must fail: {:?}", output.content);
+            assert!(
+                output.is_error,
+                "{payload:?} must fail: {:?}",
+                output.content
+            );
             assert!(output.content.contains("reason"));
         }
     }

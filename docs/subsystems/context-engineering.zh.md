@@ -22,7 +22,17 @@
 
 `crates/capabilities/context/src/lib.rs` 拥有 `Thresholds`（同样的 20k/13k/3k 余量，`check` 从最深优先探测，`validate` 拒绝倒置的余量）和 `CompactionStrategy`。目前唯一发布的策略是 `ModelSummary`：一次模型调用产出五节摘要，节标题逐字固定——`## Goal` / `## Progress` / `## Key decisions` / `## File inventory` / `## Todo`——保留具体文件名、命令与错误。新历史是摘要消息加上最近 `DEFAULT_KEEP_RECENT = 10` 条逐字消息（`compact_history`），并重新规范化以保证配对。
 
-`crates/operations/bootstrap/src/compactor.rs` 把它适配到 runner 的 `Compactor` 接缝（`ContextCompactor`）：过滤空文本、映射角色、把失败上报为 `CompactError::Failed`、为 `CompactCompleted` 估算摘要 token。触发时机（auto / blocking / reactive / manual）留在循环里——一条触发管线，可替换的策略。
+`crates/operations/bootstrap/src/compactor.rs` 把它适配到 runner 的 `Compactor` 接缝（`ContextCompactor`）：过滤空文本、映射角色、把失败上报为 `CompactError::Failed`、为 `CompactCompleted` 估算摘要 token。触发时机（auto / blocking / reactive / manual / model）留在循环里——一条触发管线，可替换的策略。
+
+## 模型请求的压缩（`compact_context`）
+
+模型可以主动申请压缩，而不必等待阈值：`compact_context` 工具（`crates/operations/bootstrap/src/compaction_tool.rs`）把理由排入共享的 `CompactionRequests` 槽（`crates/runtime/runner`），循环在下一个 loop head 评审每一条申请——绝不在工具执行内部评审，因为在那里批准会重写工具结果尚未落位的历史。
+
+评审门（`review_model_compact`）按递进顺序拒绝，每条拒绝以瞬态 `<system-reminder>` note 加一条 `Warning` 事件送达下一个样本：会话批准上限（`MAX_MODEL_COMPACTS = 4`）、与阈值路径共享的每回合一次旗标（`compact_context` 的批准与预算压缩取自同一个"每回合一次"的预算，掐断"填满再压"的循环）、以及占用下限（`MODEL_COMPACT_MIN_USED_PCT = 50`——近乎空窗的申请会被带着实测比例拒绝）。批准则走标准 `do_compact`，触发器为 `CompactTrigger::Model`（上报为 `compact_started { trigger: "model" }`），并重启 loop head——重写使本次迭代的用量数字失效。压缩失败降级为一条拒绝 note；回合继续。未接线时（未调用 `RunLoop::with_compaction_requests`）模型完全没有压缩通道。
+
+## 瞬态样本附注（`SampleRequest.notes`）
+
+每个采样请求携带 `notes`：由 harness 构造、投影为末尾一条 user 消息、永不落库的文本。常驻成员是实时占用行——`Context usage: {pct}% ({used}/{window} tokens)`，包在 `<system-reminder>` 里，与预算门使用同一个 `used` 数字——压缩评审的拒绝追加于其后。循环每次迭代重建该列表，所以一条 note 到下一个样本即消失；投影就是 note 的全部生命周期。提供方提示缓存不受影响：尾部断点本来就落在最新的消息上，无论有没有 note，它每回合都会变。
 
 ## 逐出 pass（`evict_old_tool_results`）
 

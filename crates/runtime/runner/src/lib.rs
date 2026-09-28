@@ -1502,7 +1502,9 @@ where
                     }
                     let _ = reason;
                     match self.review_model_compact(used, window, compacted) {
-                        Ok(()) => match self.do_compact(conv, CompactTrigger::Model, &emit_msg).await
+                        Ok(()) => match self
+                            .do_compact(conv, CompactTrigger::Model, &emit_msg)
+                            .await
                         {
                             Ok(()) => {
                                 self.model_compactions
@@ -4580,9 +4582,17 @@ mod run_loop_tests {
             ..Usage::default()
         });
         let events = fx.events.clone();
-        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
-            fx.interrupt.clone()
-        })
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            { fx.interrupt.clone() },
+        )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
@@ -4590,13 +4600,22 @@ mod run_loop_tests {
         .await;
         assert_eq!(outcome, StopReason::Completed);
         assert_eq!(
-            trigger_log.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            trigger_log
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_slice(),
             &[CompactTrigger::Model]
         );
         let started = fx.lock_events().iter().any(|e| {
-            serde_json::to_value(&e.msg).unwrap().get("type").and_then(|t| t.as_str())
+            serde_json::to_value(&e.msg)
+                .unwrap()
+                .get("type")
+                .and_then(|t| t.as_str())
                 == Some("compact_started")
-                && serde_json::to_value(&e.msg).unwrap().get("trigger").and_then(|t| t.as_str())
+                && serde_json::to_value(&e.msg)
+                    .unwrap()
+                    .get("trigger")
+                    .and_then(|t| t.as_str())
                     == Some("model")
         });
         assert!(started, "compact_started names the model trigger");
@@ -4606,7 +4625,10 @@ mod run_loop_tests {
             .map(|entry| entry.text())
             .collect::<Vec<_>>()
             .join("\n");
-        assert_eq!(history, "summary", "a grant rewrites history to the summary");
+        assert_eq!(
+            history, "summary",
+            "a grant rewrites history to the summary"
+        );
     }
 
     /// Below the usage floor the request is denied and the denial rides
@@ -4624,9 +4646,17 @@ mod run_loop_tests {
         slot.request("too eager".to_string());
         let conv = &mut Conversation::new();
         let events = fx.events.clone();
-        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
-            fx.interrupt.clone()
-        })
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            { fx.interrupt.clone() },
+        )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
@@ -4676,9 +4706,17 @@ mod run_loop_tests {
             ..Usage::default()
         });
         let events = fx.events.clone();
-        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
-            fx.interrupt.clone()
-        })
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            { fx.interrupt.clone() },
+        )
         .with_compaction_requests(slot)
         .with_model_compact_limit(0)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
@@ -4716,9 +4754,17 @@ mod run_loop_tests {
             ..Usage::default()
         });
         let events = fx.events.clone();
-        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
-            fx.interrupt.clone()
-        })
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            { fx.interrupt.clone() },
+        )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
@@ -4731,7 +4777,10 @@ mod run_loop_tests {
             "one grant per batch"
         );
         assert!(fx.lock_events().iter().any(|e| {
-            serde_json::to_value(&e.msg).unwrap().get("type").and_then(|t| t.as_str())
+            serde_json::to_value(&e.msg)
+                .unwrap()
+                .get("type")
+                .and_then(|t| t.as_str())
                 == Some("warning")
                 && serde_json::to_value(&e.msg)
                     .unwrap()
@@ -4765,15 +4814,27 @@ mod run_loop_tests {
             ..Usage::default()
         });
         let events = fx.events.clone();
-        let outcome = build_loop(exec, policy, hooks, model, approvals, plans, compactor, 8, {
-            fx.interrupt.clone()
-        })
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            { fx.interrupt.clone() },
+        )
         .with_compaction_requests(slot)
         .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
             events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
         })
         .await;
-        assert_eq!(outcome, StopReason::Completed, "a failed grant is not fatal");
+        assert_eq!(
+            outcome,
+            StopReason::Completed,
+            "a failed grant is not fatal"
+        );
         let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
         assert!(
             log[0]

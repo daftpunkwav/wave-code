@@ -22,7 +22,17 @@ Budgets are three levels of remaining tokens (`check_budget`):
 
 `crates/capabilities/context/src/lib.rs` owns `Thresholds` (the same 20k/13k/3k margins, `check` probes deepest-first, `validate` rejects inverted margins) and `CompactionStrategy`. The only shipped strategy is `ModelSummary`: one model call producing a five-section summary with titles pinned verbatim — `## Goal` / `## Progress` / `## Key decisions` / `## File inventory` / `## Todo` — keeping concrete filenames, commands, and errors. The new history is the summary message plus the most recent `DEFAULT_KEEP_RECENT = 10` verbatim messages (`compact_history`), re-normalized for pairing.
 
-`crates/operations/bootstrap/src/compactor.rs` adapts this to the runner's `Compactor` seam (`ContextCompactor`): filters empty texts, maps roles, reports failures as `CompactError::Failed`, and estimates summary tokens for `CompactCompleted`. Trigger timing (auto / blocking / reactive / manual) stays in the loop — one trigger pipeline, replaceable strategy.
+`crates/operations/bootstrap/src/compactor.rs` adapts this to the runner's `Compactor` seam (`ContextCompactor`): filters empty texts, maps roles, reports failures as `CompactError::Failed`, and estimates summary tokens for `CompactCompleted`. Trigger timing (auto / blocking / reactive / manual / model) stays in the loop — one trigger pipeline, replaceable strategy.
+
+## Model-requested compaction (`compact_context`)
+
+The model can ask for compaction instead of waiting for the thresholds: the `compact_context` tool (`crates/operations/bootstrap/src/compaction_tool.rs`) queues a reason into a shared `CompactionRequests` slot (`crates/runtime/runner`), and the loop reviews each request at the next loop head — never inside tool execution, where a grant would rewrite the history the tool result still rides.
+
+The review gate (`review_model_compact`) denies in escalation order, each denial riding the next sample as a transient `<system-reminder>` note plus a `Warning` event: the session grant cap (`MAX_MODEL_COMPACTS = 4`), the per-turn once flag shared with the threshold path (a `compact_context` grant and a budget compaction draw from the same one-per-turn budget, which caps refill-then-compact loops), and the usage floor (`MODEL_COMPACT_MIN_USED_PCT = 50` — a request on a nearly empty window is refused with the measured ratio). A grant runs the standard `do_compact` with `CompactTrigger::Model` (reported as `compact_started { trigger: "model" }`) and restarts the loop head, because the rewrite invalidates the iteration's usage figure. A failed compaction downgrades to a denial note; the turn continues. Without the wiring (`RunLoop::with_compaction_requests` unset) the model has no compaction channel at all.
+
+## Transient per-sample notes (`SampleRequest.notes`)
+
+Every sample request carries `notes`: harness-built text projected as one trailing user message and never stored. The standing member is the live usage line — `Context usage: {pct}% ({used}/{window} tokens)`, wrapped in `<system-reminder>`, computed from the same `used` figure the budget gates reason with — and compaction-review denials append to it. The loop rebuilds the list every iteration, so a note is gone by the next sample; the projection is the note's whole lifetime. Provider prompt caching is unaffected: the trailing breakpoint already sits on the newest message, which changes every turn with or without the note.
 
 ## The eviction pass (`evict_old_tool_results`)
 

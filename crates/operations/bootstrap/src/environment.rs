@@ -76,7 +76,12 @@ mod tests {
 
     #[test]
     fn describe_lists_os_shell_model_cwd_date() {
-        let text = describe(Path::new("/tmp/project"), epoch_days(0), "demo-model", 200_000);
+        let text = describe(
+            Path::new("/tmp/project"),
+            epoch_days(0),
+            "demo-model",
+            200_000,
+        );
         assert!(text.contains("OS: "), "{text}");
         assert!(text.contains("Shell: "), "{text}");
         assert!(text.contains("Working directory: /tmp/project"), "{text}");

@@ -12,6 +12,12 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `/fork`, `/title`, `/new`, text-level turn journal for replay.
 - Tool surface: background tasks, goal tracking, todo panels,
   `ask_user`, file snapshots with rewind, memory, skills, plan mode.
+- Context surface: the environment section states the serving model and
+  its context window; every sample carries transient notes (the live
+  `Context usage` line, never stored); and the model can request
+  compaction via `compact_context` — the loop reviews each request
+  (session grant cap, per-turn once, usage floor) and denies ride back
+  as transient notes, so a nearly empty window never burns a summary.
 - Security: deny-first path sandbox with OS-level confinement on all
   three platforms, permission modes (`plan` / `auto` / `wave`),
   persisted "always allow" grants with a `grants` audit command,

@@ -276,6 +276,11 @@ pub struct SampleRequest {
     /// gateway's own default. The runner wires `RunConfig::max_output_tokens`
     /// through so the config knob actually reaches the wire.
     pub output_cap: u32,
+    /// Harness notes attached to this request only: the live context-usage
+    /// line and transient gate verdicts. The adapters project them as one
+    /// trailing user message, and the loop rebuilds them every iteration
+    /// without storing them, so a note is gone by the next sample.
+    pub notes: Vec<String>,
 }
 
 /// Response of one model sample.
@@ -1098,6 +1103,23 @@ where
             .unwrap_or(self.cfg.context_window)
     }
 
+    /// Transient notes attached to one sample request: the live context-
+    /// usage line, plus any pending transient verdicts handed in by the
+    /// loop head. Rebuilt every iteration and never stored, so a note
+    /// reads as an instrument panel for the upcoming call and is gone by
+    /// the next one. A zero window (degenerate config) notes nothing.
+    fn sample_notes(&self, used: u64, window: u64, denials: &[String]) -> Vec<String> {
+        let mut notes = Vec::new();
+        if window > 0 {
+            let pct = used.saturating_mul(100) / window;
+            notes.push(wavecode_wire::wrap_system_reminder(&format!(
+                "Context usage: {pct}% ({used}/{window} tokens)"
+            )));
+        }
+        notes.extend(denials.iter().cloned());
+        notes
+    }
+
     /// Run one turn to a terminal [`StopReason`].
     ///
     /// Every tool call — including read-only ones — passes through the
@@ -1370,6 +1392,7 @@ where
                     .filter(|tool| self.run_allowlist.is_allowed(&ctx.run_id, &tool.name))
                     .collect(),
                 output_cap: self.cfg.max_output_tokens,
+                notes: self.sample_notes(used, window, &[]),
             };
             // Live deltas stream to frontends ahead of the assembled
             // message; ordering (deltas before AgentMessageComplete) is
@@ -4272,6 +4295,97 @@ mod run_loop_tests {
             .iter()
             .map(|entry| entry.text())
             .collect()
+    }
+
+    /// Notes-recording scripted model for transient-note tests.
+    type NotesLog = std::sync::Arc<Mutex<Vec<Vec<String>>>>;
+
+    struct NotesModel {
+        steps: Mutex<VecDeque<ModelStep>>,
+        notes: NotesLog,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelGateway for NotesModel {
+        async fn sample(&self, request: SampleRequest) -> Result<SampleResponse, SampleError> {
+            self.notes
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(request.notes.clone());
+            match self
+                .steps
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pop_front()
+            {
+                Some(ModelStep::Answer(response)) => Ok(response),
+                _ => Ok(text_response("done")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn context_usage_note_rides_each_sample_but_never_history() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _, approvals, plans, compactor) = default_parts();
+        let notes_log: NotesLog = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let mut steps = VecDeque::new();
+        steps.push_back(ModelStep::Answer(SampleResponse {
+            blocks: vec![SampleBlock::ToolUse {
+                call_id: "c1".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::Value::Null,
+            }],
+            input_tokens: Some(50_000),
+            output_tokens: Some(1),
+            truncated: false,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }));
+        steps.push_back(ModelStep::Answer(text_response("done")));
+        let model = NotesModel {
+            steps: Mutex::new(steps),
+            notes: notes_log.clone(),
+        };
+        let conv = &mut Conversation::new();
+        let events = fx.events.clone();
+        let outcome = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let log = notes_log.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(log.len(), 2, "two samples drove the turn: {log:?}");
+        for sample_notes in log.iter() {
+            assert_eq!(sample_notes.len(), 1, "{sample_notes:?}");
+            assert!(
+                sample_notes[0].contains("Context usage: 25% (50001/200000 tokens)")
+                    || sample_notes[0].contains("Context usage:"),
+                "{sample_notes:?}"
+            );
+            assert!(sample_notes[0].starts_with("<system-reminder>"));
+        }
+        // The first sample reported the pre-tool estimate; the second saw
+        // the provider-billed usage. Both were request-scoped: nothing
+        // landed in the stored conversation.
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!history.contains("Context usage"), "{history}");
     }
 
     #[tokio::test]

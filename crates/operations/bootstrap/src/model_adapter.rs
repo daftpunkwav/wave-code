@@ -72,9 +72,11 @@ impl ModelAdapter {
     /// Convert seam messages block by block; assistant entries with no
     /// content are dropped because providers reject empty assistant
     /// messages, while entries carrying tool blocks always count as
-    /// non-empty.
+    /// non-empty. Transient notes ride as one trailing user message —
+    /// they are request-scoped, so the next sample's projection simply
+    /// lacks them.
     fn messages(request: &SampleRequest) -> Vec<Message> {
-        request
+        let mut messages: Vec<Message> = request
             .messages
             .iter()
             .filter(|entry| {
@@ -92,7 +94,16 @@ impl ModelAdapter {
                 },
                 content: entry.blocks.iter().map(to_content_block).collect(),
             })
-            .collect()
+            .collect();
+        if !request.notes.is_empty() {
+            messages.push(Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text {
+                    text: request.notes.join("\n\n"),
+                }],
+            });
+        }
+        messages
     }
 
     /// Advertise exactly the registered tools, schemas included.
@@ -543,7 +554,29 @@ mod tests {
             }],
             tools: vec![],
             output_cap: 0,
+            notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn notes_project_as_one_trailing_user_message() {
+        let mut req = request();
+        req.notes = vec!["note-a".to_string(), "note-b".to_string()];
+        let messages = ModelAdapter::messages(&req);
+        assert_eq!(messages.len(), 2, "history entry plus the notes message");
+        let last = messages.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert_eq!(last.content.len(), 1);
+        match &last.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "note-a\n\nnote-b"),
+            other => panic!("expected a text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_notes_project_no_extra_message() {
+        let messages = ModelAdapter::messages(&request());
+        assert_eq!(messages.len(), 1, "history only");
     }
 
     #[tokio::test]
@@ -730,6 +763,7 @@ mod tests {
             ],
             tools: vec![],
             output_cap: 0,
+            notes: Vec::new(),
         };
         let messages = __test_messages(&req);
         // Empty assistant entries are dropped; user entries and tool
@@ -764,6 +798,7 @@ mod tests {
             ],
             tools: vec![],
             output_cap: 0,
+            notes: Vec::new(),
         };
         let messages = __test_messages(&req);
         assert_eq!(

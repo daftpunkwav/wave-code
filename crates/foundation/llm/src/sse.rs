@@ -300,6 +300,44 @@ pub(crate) async fn send_with_idle_bound(
     }
 }
 
+/// Hard cap on one non-2xx error body read (64 KiB). Only the first
+/// [`crate::MAX_ERROR_BODY_CHARS`] characters are ever retained for the
+/// error text, so reading is stopped at the cap and the response dropped:
+/// an endpoint answering an error with an endless body must not balloon
+/// memory (the same bound the SSE buffer and the MCP transport's body
+/// cap enforce).
+pub(crate) const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Read one non-2xx error response body with a hard byte cap. Reading
+/// stops at [`MAX_ERROR_BODY_BYTES`]; a transport failure mid-body keeps
+/// whatever arrived, so the status error still carries the server's
+/// message (and its `Retry-After` hint) instead of the read failure
+/// replacing it.
+///
+/// Each chunk read carries the same idle bound as the stream path
+/// ([`STREAM_IDLE_TIMEOUT`]): the clients never set a global request
+/// timeout (healthy SSE streams are long-lived), so a server that answers
+/// the error headers and then stalls would otherwise hang the sampling
+/// turn forever with no retry policy in sight.
+pub(crate) async fn read_error_body_capped(mut response: reqwest::Response) -> String {
+    let mut body: Vec<u8> = Vec::new();
+    while body.len() < MAX_ERROR_BODY_BYTES {
+        match tokio::time::timeout(STREAM_IDLE_TIMEOUT, response.chunk()).await {
+            // A chunk may straddle the cap: only the fitting prefix is kept,
+            // so the buffer never exceeds the bound by one chunk.
+            Ok(Ok(Some(chunk))) => {
+                let room = MAX_ERROR_BODY_BYTES - body.len();
+                let end = room.min(chunk.len());
+                body.extend_from_slice(&chunk[..end]);
+            }
+            // EOF, transport failure, or a stalled body: keep whatever
+            // arrived (the status error still explains the failure).
+            Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&body).into_owned()
+}
+
 /// Byte-stream stall guard: wraps each `next()` with an idle timeout; a timeout ends the stream with
 /// [`LlmError::Timeout`]. It sits upstream of [`decode_sse_frames`] rather than inside it,
 /// keeping frame-parsing logic orthogonal to the timeout policy (tests can drive each independently).
@@ -373,6 +411,37 @@ where
             scanned = buf.len();
         }
         // A trailing incomplete frame at end of stream is dropped per SSE convention.
+    }
+}
+
+/// Torn-EOF guard shared by every provider's decode loop: a clean end that
+/// never delivered a terminal [`StreamEvent::MessageComplete`] is a torn
+/// stream, not a success — the run loop would otherwise read the sample as
+/// completed with no billing data. All events pass through unchanged; the
+/// guard only appends one error at EOF. An error already seen on the stream
+/// suppresses the guard (that failure already explains the truncation).
+/// `eof_error` names the provider-specific missing terminal frame.
+pub(crate) fn reject_torn_eof<S>(
+    inner: S,
+    eof_error: &'static str,
+) -> impl Stream<Item = Result<StreamEvent>> + Send
+where
+    S: Stream<Item = Result<StreamEvent>> + Send,
+{
+    async_stream::stream! {
+        tokio::pin!(inner);
+        let mut saw_completion = false;
+        let mut failed = false;
+        while let Some(item) = inner.next().await {
+            if matches!(&item, Ok(StreamEvent::MessageComplete { .. })) {
+                saw_completion = true;
+            }
+            failed |= item.is_err();
+            yield item;
+        }
+        if !saw_completion && !failed {
+            yield Err(LlmError::Sse(eof_error.to_string()));
+        }
     }
 }
 
@@ -735,5 +804,98 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         server.await.unwrap();
+    }
+
+    /// The error-body reader stops at the byte cap, not at EOF: a server
+    /// answering an error with an endless body must not balloon memory
+    /// (the response is dropped once the cap is hit, closing the read).
+    #[tokio::test]
+    async fn error_body_read_stops_at_the_cap() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            // Announce far more body than the cap; the extra bytes never
+            // need to arrive for the reader to give up.
+            let _ = tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100000000\r\n\r\n",
+            )
+            .await;
+            // Keep the connection open: EOF must not be what ends the read.
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, &vec![b'x'; 1024 * 1024])
+                .await;
+            let _ = tokio::io::AsyncWriteExt::flush(&mut socket).await;
+        });
+        let client = reqwest::Client::new();
+        let response = client.get(format!("http://{addr}/")).send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = read_error_body_capped(response).await;
+        assert_eq!(
+            body.chars().count(),
+            MAX_ERROR_BODY_BYTES,
+            "the cap, not the server, ends the read"
+        );
+        server.await.unwrap();
+    }
+
+    /// A server that answers the error headers, delivers a partial body,
+    /// and then stalls must not hang the read forever: the per-chunk idle
+    /// bound ends it with whatever arrived (time is frozen and advanced
+    /// manually, so the 120s bound fires instantly).
+    #[tokio::test]
+    async fn stalled_error_body_read_ends_with_the_partial_body() {
+        // Manual time control from the start: the loopback IO below runs on
+        // the real reactor, while every timer waits for an explicit advance
+        // (a `start_paused` test cannot switch to manual mode afterwards —
+        // time is already frozen there, with auto-advance racing the first
+        // chunk out of the socket buffer).
+        tokio::time::pause();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            // Announce far more body than is ever sent, then stall with the
+            // connection open: only the idle bound can end the read.
+            let _ = tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 1000000\r\n\r\npartial",
+            )
+            .await;
+            let _ = tokio::io::AsyncWriteExt::flush(&mut socket).await;
+            // Hold the socket open well past the idle bound.
+            tokio::time::sleep(STREAM_IDLE_TIMEOUT * 4).await;
+        });
+        let client = reqwest::Client::new();
+        let response = client.get(format!("http://{addr}/")).send().await.unwrap();
+        let read = tokio::spawn(read_error_body_capped(response));
+        // Let the reader take the already-written chunk: small advances
+        // pump real IO while staying far below the idle bound.
+        for _ in 0..40 {
+            tokio::time::advance(Duration::from_millis(50)).await;
+        }
+        // Past the bound the read must be finished: the yields pump the
+        // executor WITHOUT advancing time, so the server's sleep stays
+        // pending, the socket stays open, and the only way the read can
+        // end is the inner idle bound (a missing bound fails the
+        // assertion instead of hanging the test).
+        tokio::time::advance(STREAM_IDLE_TIMEOUT).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            read.is_finished(),
+            "the idle bound must end the stalled read"
+        );
+        let body = read.await.unwrap();
+        assert_eq!(body, "partial", "whatever arrived is kept");
+        server.abort();
     }
 }

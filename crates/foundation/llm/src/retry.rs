@@ -554,7 +554,7 @@ mod tests {
         for attempt in 1..=20 {
             let j = policy.jittered(delay, attempt);
             assert!(
-                j >= delay / 2 && j < delay + delay / 2,
+                j >= delay / 2 && j < delay,
                 "attempt {attempt}: {j:?} out of range"
             );
         }

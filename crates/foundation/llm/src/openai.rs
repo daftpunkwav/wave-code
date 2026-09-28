@@ -140,10 +140,7 @@ impl ChatModel for OpenAIClient {
         if !status.is_success() {
             // Read before the body: Retry-After rides the 429 headers.
             let retry_after = crate::parse_retry_after(response.headers());
-            let body = response
-                .text()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            let body = crate::sse::read_error_body_capped(response).await;
             return Err(api_error_with_retry_after(
                 format!("http_{}", status.as_u16()),
                 crate::truncate_error_body(&body, crate::MAX_ERROR_BODY_CHARS),
@@ -447,23 +444,7 @@ where
     // A clean EOF with no `[DONE]` frame is a torn stream, not a success:
     // the run loop would otherwise treat the sample as completed with no
     // billing data (and no MessageComplete ever closing the turn).
-    async_stream::stream! {
-        tokio::pin!(inner);
-        let mut saw_completion = false;
-        let mut failed = false;
-        while let Some(item) = inner.next().await {
-            if matches!(&item, Ok(StreamEvent::MessageComplete { .. })) {
-                saw_completion = true;
-            }
-            failed |= item.is_err();
-            yield item;
-        }
-        if !saw_completion && !failed {
-            yield Err(LlmError::Sse(
-                "stream ended before the terminal [DONE] frame".to_string(),
-            ));
-        }
-    }
+    sse::reject_torn_eof(inner, "stream ended before the terminal [DONE] frame")
 }
 
 /// Feeds one SSE `data` payload, returning zero or more stream events.

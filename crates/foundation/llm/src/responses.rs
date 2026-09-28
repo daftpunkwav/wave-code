@@ -127,10 +127,7 @@ impl ChatModel for ResponsesClient {
         if !status.is_success() {
             // Read before the body: Retry-After rides the 429 headers.
             let retry_after = crate::parse_retry_after(response.headers());
-            let body = response
-                .text()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
+            let body = crate::sse::read_error_body_capped(response).await;
             return Err(crate::classify_api_error_with_retry_after(
                 format!("http_{}", status.as_u16()),
                 crate::truncate_error_body(&body, crate::MAX_ERROR_BODY_CHARS),
@@ -388,9 +385,15 @@ where
     S: futures::Stream<Item = std::result::Result<bytes::Bytes, LlmError>> + Send + 'static,
 {
     let mut state = ResponsesStreamState::default();
-    crate::sse::decode_sse_frames(byte_stream, crate::sse::MAX_SSE_BUF, move |data| {
+    let inner = crate::sse::decode_sse_frames(byte_stream, crate::sse::MAX_SSE_BUF, move |data| {
         feed_responses_data(&mut state, data)
-    })
+    });
+    // A clean EOF with no `response.completed` / `response.incomplete` is a
+    // torn stream, not a success — same wrapper as the Anthropic and chat
+    // paths: the run loop must never read a cut stream as a finished sample.
+    // Only those two events yield `MessageComplete`; the tolerated
+    // chat-style `[DONE]` terminator sets no flag of its own.
+    crate::sse::reject_torn_eof(inner, "stream ended without a response.completed frame")
 }
 
 /// One function call under assembly, identified by the item's `output_index`.
@@ -892,6 +895,24 @@ mod tests {
         let error = too_long.into_iter().next().expect("one event");
         assert!(matches!(error, Err(LlmError::PromptTooLong { .. })));
     }
+
+    /// A clean EOF that never delivers `response.completed` is a torn
+    /// stream: the wrapper ends it with an error, not silent success.
+    #[tokio::test]
+    async fn clean_eof_without_completion_is_an_error() {
+        let results = run_decode(vec![
+            b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        ])
+        .await;
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], Ok(StreamEvent::TextDelta { .. })));
+        assert!(
+            matches!(&results[1], Err(LlmError::Sse(msg)) if msg.contains("response.completed")),
+            "EOF without a completion must surface as an error: {:?}",
+            results[1]
+        );
+    }
+
     /// A provider-side `output_index` beyond the slot cap must fail the
     /// stream instead of growing the slot table (allocation bomb).
     #[tokio::test]

@@ -352,9 +352,13 @@ impl Editor {
     /// Insert a paste; large pastes collapse into an atomic marker.
     /// The content is sanitized first: clipboard text can carry ANSI /
     /// OSC sequences that would render straight into the terminal from
-    /// the editor rows (newlines and tabs are kept).
+    /// the editor rows (newlines are kept). Tabs expand to four spaces
+    /// here rather than in the renderer: their zero display width would
+    /// desync every wrap and cursor computation from what a terminal
+    /// advancing to a real tab stop shows.
     pub fn insert_paste(&mut self, text: &str) {
-        let text = crate::sanitize::sanitize_terminal(text);
+        let expanded = text.replace('\t', "    ");
+        let text = crate::sanitize::sanitize_terminal(&expanded);
         let line_count = text.split('\n').count();
         let char_count = text.chars().count();
         if line_count > 10 || char_count > 1000 {
@@ -743,6 +747,14 @@ impl Editor {
         }
         match (event.key, event.mods) {
             (Key::Enter, m) if m.ctrl || m.shift => {
+                self.undo_push();
+                self.split_at_cursor();
+                self.refresh_popup();
+                EditorAction::Handled
+            }
+            // Ctrl+J is LF: the same newline the help panel advertises
+            // alongside shift+enter.
+            (Key::Char('j'), m) if m.ctrl && !m.alt => {
                 self.undo_push();
                 self.split_at_cursor();
                 self.refresh_popup();
@@ -1178,10 +1190,19 @@ impl Editor {
         out
     }
 
-    /// Visual row index containing the cursor.
+    /// Visual row index containing the cursor. The break a soft wrap
+    /// drops (the space at `row.end`) belongs to no `[start, end)`
+    /// range; a cursor parked there must resolve to the row it ends,
+    /// not fall through to `rposition`'s last row.
     fn cursor_row_index(&self, rows: &[VisualRow]) -> usize {
         for (index, row) in rows.iter().enumerate() {
-            if row.line == self.row && row.start <= self.col && self.col < row.end {
+            if row.line != self.row {
+                continue;
+            }
+            if row.start <= self.col
+                && (self.col < row.end
+                    || (self.col == row.end && self.graphemes(row.line).get(row.end) == Some(&" ")))
+            {
                 return index;
             }
         }
@@ -1197,6 +1218,7 @@ impl Editor {
         let row = &rows[index];
         self.graphemes(row.line)
             .iter()
+            .skip(row.start)
             .take(self.col.saturating_sub(row.start))
             .map(|g| g.width())
             .sum()
@@ -1569,12 +1591,14 @@ mod tests {
 
     /// Clipboard text can carry ANSI/OSC sequences: they are stripped
     /// at insert time (small and collapsed pastes alike) so the editor
-    /// rows never render them into the terminal. Newlines and tabs stay.
+    /// rows never render them into the terminal. Newlines stay; tabs
+    /// expand to four spaces (their zero display width would desync
+    /// wrap and cursor math from a tab-stop-advancing terminal).
     #[test]
     fn paste_strips_escape_sequences_keeps_layout() {
         let mut ed = editor();
         ed.insert_paste("a\x1b[2Jb\tn");
-        assert_eq!(ed.text(), "ab\tn");
+        assert_eq!(ed.text(), "ab    n");
         let mut ed = editor();
         let big = format!("x\x1b]0;t\x07y\n{}", "line\n".repeat(15));
         ed.insert_paste(&big);

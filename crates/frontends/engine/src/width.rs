@@ -253,10 +253,12 @@ pub fn pad_to_width(line: &str, total: usize) -> String {
 /// Word-wrap one styled line to `max_width` visible columns. Escape
 /// sequences carry no width; the active SGR state is re-emitted at the
 /// start of every continuation line. Spaces are dropped at breaks.
-/// A `max_width` of 0 yields the line unchanged; a line that fits is
-/// returned unmodified so callers can cache by content.
+/// Tabs expand to a fixed four-column indent, whether or not the line
+/// actually wraps. A `max_width` of 0 yields the line unchanged; a
+/// line that fits is returned unmodified so callers can cache by
+/// content.
 pub fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 || width(line) <= max_width {
+    if max_width == 0 || (!line.contains('\t') && width(line) <= max_width) {
         return vec![line.to_string()];
     }
     let mut lines: Vec<String> = Vec::new();
@@ -271,6 +273,16 @@ pub fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
                 current.push_str(seq);
             }
             Token::Grapheme(g) => {
+                // Tabs render at a fixed four-column indent: their zero
+                // display width would desync the wrap math from what
+                // the terminal shows (it advances to a tab stop).
+                let expanded;
+                let g = if g == "\t" {
+                    expanded = "    ";
+                    &expanded[..4]
+                } else {
+                    g
+                };
                 let w = unicode_width::UnicodeWidthStr::width(g);
                 let overflow = used + w > max_width;
                 if g == " " && (used == 0 || overflow) {
@@ -294,6 +306,17 @@ pub fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
         lines.push(current);
     }
     lines
+}
+
+/// Word-wrap multiline text: splits on newlines first — a bare LF is a
+/// hard break, not a zero-width grapheme — and wraps each line to
+/// `max_width`. Empty lines survive as empty entries.
+pub fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.split('\n') {
+        out.extend(wrap_line(line, max_width));
+    }
+    out
 }
 
 #[cfg(test)]

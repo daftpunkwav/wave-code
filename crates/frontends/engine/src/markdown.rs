@@ -125,9 +125,16 @@ fn frame_width(columns: usize) -> usize {
 }
 
 impl InlineState {
-    fn compose(&self, base: MarkdownStyle) -> Style {
+    /// Compose the span style. `quote` layers the block-quote look
+    /// (dim italic) onto every span individually: an outer paint over
+    /// the whole line would be cut at the first span's own reset.
+    fn compose(&self, base: MarkdownStyle, quote: bool) -> Style {
         if self.code {
-            return base.code;
+            return if quote {
+                base.code.dim().italic()
+            } else {
+                base.code
+            };
         }
         // Plain prose rides the text style (near-white in the console
         // themes); emphasis only adds flags on top.
@@ -140,6 +147,9 @@ impl InlineState {
         }
         if self.strike {
             style = style.strikethrough();
+        }
+        if quote {
+            style = style.dim().italic();
         }
         style
     }
@@ -245,6 +255,14 @@ impl Markdown {
         self.cache = None;
     }
 
+    /// Swap the syntax highlighter (theme switches rebuild it: the
+    /// syntax theme bakes into highlighted code at construction, and a
+    /// stale highlighter repaints old code blocks in the old palette).
+    pub fn set_highlighter(&mut self, highlighter: Box<dyn SyntaxHighlighter>) {
+        self.highlighter = highlighter;
+        self.cache = None;
+    }
+
     /// Paint a ```diff fence: whole lines ride the diff colors —
     /// additions green, removals red, file headers and `@@` hunks in
     /// the metadata tone, context plain. Generic syntax highlighting
@@ -303,7 +321,12 @@ impl Markdown {
                     let prefix = if in_quote { "│ " } else { "" };
                     for line in width::wrap_line(&inline, columns.saturating_sub(prefix.width())) {
                         if in_quote {
-                            out.push(format!("{prefix}{}", self.style.quote.paint(&line)));
+                            // Each span already carries the quote look
+                            // (compose layers it per span); only the
+                            // bar prefix needs its own paint here — an
+                            // outer paint would be cut at the first
+                            // inner reset.
+                            out.push(format!("{}{}", self.style.quote.paint(prefix), line));
                         } else {
                             out.push(line);
                         }
@@ -396,15 +419,25 @@ impl Markdown {
                             ensure_blank(&mut out);
                             let text = std::mem::take(&mut inline);
                             let style = self.style.heading.bold();
-                            if let Some(HeadingLevel::H1) = level {
-                                out.push(style.paint(&text));
-                                let rule = self
-                                    .style
-                                    .rule
-                                    .paint(&"─".repeat(columns.min(width::width(&text))));
-                                out.push(rule);
-                            } else {
-                                out.push(style.paint(&text));
+                            // Headings wrap like any other block: an
+                            // overlong heading left unwrapped would be
+                            // hard-truncated by the screen layer and
+                            // lose its tail.
+                            let lines: Vec<String> = width::wrap_line(&text, columns);
+                            let last = lines.len().saturating_sub(1);
+                            for (index, line) in lines.into_iter().enumerate() {
+                                out.push(style.paint(&line));
+                                if let Some(HeadingLevel::H1) = level
+                                    && index == last
+                                {
+                                    // The rule sits under the heading's
+                                    // last line, as wide as that line.
+                                    let rule = self
+                                        .style
+                                        .rule
+                                        .paint(&"─".repeat(columns.min(width::width(&line))));
+                                    out.push(rule);
+                                }
                             }
                         }
                     }
@@ -501,7 +534,9 @@ impl Markdown {
                         inline.push_str(text_event.as_ref());
                         continue;
                     }
-                    let styled = state.compose(self.style).paint(text_event.as_ref());
+                    let styled = state
+                        .compose(self.style, in_quote)
+                        .paint(text_event.as_ref());
                     if state.link {
                         // Hyperlink targets must be control-character free
                         // or the link degrades to plain styled text.
@@ -540,7 +575,11 @@ impl Markdown {
                     ensure_blank(&mut out);
                     out.push(self.style.rule.paint("─".repeat(columns.min(80)).as_str()));
                 }
-                Event::Html(html) | Event::InlineHtml(html) => inline.push_str(html.as_ref()),
+                Event::Html(html) | Event::InlineHtml(html) => {
+                    // Pass-through HTML renders as literal text; paint it
+                    // so it never inherits the terminal default color.
+                    inline.push_str(&self.style.text.paint(html.as_ref()));
+                }
                 Event::InlineMath(math) => {
                     let converted = crate::math::render(math.as_ref());
                     inline.push_str(&self.style.text.paint(&converted));
@@ -557,7 +596,10 @@ impl Markdown {
                 }
                 Event::TaskListMarker(checked) => {
                     // Lands right after the item bullet, before the text.
-                    inline.push_str(if checked { "[x] " } else { "[ ] " });
+                    // Painted like every other marker: unpainted text
+                    // inherits the terminal default foreground, which a
+                    // recolored (light) background leaves unreadable.
+                    inline.push_str(&self.style.text.paint(if checked { "[x] " } else { "[ ] " }));
                 }
                 Event::FootnoteReference(name) => {
                     // Footnote markers render as bracketed references;
@@ -910,9 +952,14 @@ fn render_table(
                 _ => (0, pad),
             };
             let styled = if header {
-                style.heading.bold().paint(&cut)
+                // Header cells repaint as one block: inner spans (code,
+                // emphasis) would cut the heading emphasis at their
+                // first reset, so they flatten to plain text here.
+                style.heading.bold().paint(&width::strip_ansi(&cut))
             } else {
-                style.text.paint(&cut)
+                // Body cells keep their inner span styling; an outer
+                // paint would die at the first inner reset.
+                cut
             };
             line.push_str(&format!(
                 " {}{}{} ",

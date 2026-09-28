@@ -200,11 +200,16 @@ impl Screen {
         self.place_hardware_cursor(out, &view, height);
     }
 
-    /// Repaint every physical viewport row: physical row 1 shows
-    /// logical [`Self::base`], so rows past the shrunken frame's end
-    /// erase and the rest rewrite in place. Scrollback above the
-    /// viewport is untouched. Leaves the cursor at the physical bottom
-    /// row ([`Self::place_hardware_cursor`] refines it).
+    /// Repaint every physical viewport row. The base re-anchors first:
+    /// a shrunken frame must end at the physical bottom row, or this
+    /// repaint and the pinned-tail pass below would paint the input
+    /// region at two different offsets, stranding a dead copy of the
+    /// editor mid-screen (the two-input-boxes artifact). Rows the
+    /// smaller base re-exposes above the old one already live in
+    /// scrollback; they repaint identically, so the only cost is a
+    /// duplicated stretch when scrolling back. Leaves the cursor at
+    /// the physical bottom row ([`Self::place_hardware_cursor`]
+    /// refines it).
     fn viewport_redraw(
         &mut self,
         out: &mut impl std::io::Write,
@@ -212,6 +217,7 @@ impl Screen {
         columns: usize,
         height: usize,
     ) {
+        self.base = view.total.saturating_sub(height);
         for row in 0..height {
             let _ = write!(out, "\x1b[{};1H\x1b[K", row + 1);
             if let Some(line) = view.get(self.base + row) {

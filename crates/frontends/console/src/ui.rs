@@ -3328,4 +3328,7 @@ mod showcase;
 mod catalog_tests;
 
 #[cfg(test)]
+mod vt_repro;
+
+#[cfg(test)]
 mod tests;

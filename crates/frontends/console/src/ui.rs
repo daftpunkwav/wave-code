@@ -3281,6 +3281,13 @@ verify from the repository.";
 /// Run `command` on `path` as a foreground external editor, returning
 /// the file contents afterwards. The command runs under the platform
 /// shell so multi-word editors (`code -w`) work as configured.
+///
+/// Deliberately no timeout (audited): the editor is interactive and
+/// user-owned — a word limit would kill a working session mid-edit. The
+/// user controls the lifetime (close the editor, or kill a hung one from
+/// another terminal; the CLI resumes on exit). While the editor runs the
+/// session actor keeps streaming into the bounded event channel, whose
+/// drop policy covers the gap.
 async fn edit_with_command(command: &str, path: &std::path::Path) -> anyhow::Result<String> {
     let script = format!("{command} \"{}\"", path.display());
     let mut cmd = tokio::process::Command::new(crate::controllers::shell::platform_shell());

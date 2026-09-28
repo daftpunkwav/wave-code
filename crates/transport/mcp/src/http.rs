@@ -26,6 +26,36 @@ use super::{FIRST_REQUEST_ID, TransportError};
 /// Per-request timeout applied to every HTTP round trip (send + body read).
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// One bounded re-dial when a request provably never left the process.
+///
+/// A connection-establishment failure (`is_connect`) means no request byte
+/// was written, so re-issuing cannot double a side effect — but only for
+/// the read-only methods below. `tools/call` is deliberately absent: it
+/// may execute a write server-side, and one failed dial proves nothing
+/// about whether a later attempt succeeded, so it must surface instead of
+/// retry. Fixed short backoff, no jitter: exactly one retry for a
+/// single-user client cannot form a retry storm.
+const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// Methods safe to re-issue after a connect-phase failure. Handshake,
+/// pings, and list/read calls are idempotent; `notifications/initialized`
+/// never left the process, so the repeat delivery is impossible.
+const CONNECT_RETRYABLE_METHODS: &[&str] = &[
+    "initialize",
+    "ping",
+    "tools/list",
+    "resources/list",
+    "resources/read",
+    "prompts/list",
+    "prompts/get",
+    "notifications/initialized",
+];
+
+/// Whether one connect-phase failure may be re-dialed for `method`.
+fn is_connect_retryable(method: Option<&str>) -> bool {
+    method.is_some_and(|method| CONNECT_RETRYABLE_METHODS.contains(&method))
+}
+
 /// Freshness skew for cached OAuth tokens: a token is reused only while it
 /// stays valid longer than this skew, otherwise it is refreshed proactively.
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 30;
@@ -206,35 +236,63 @@ impl HttpMcp {
         } else {
             self.bearer_token().await?
         };
-        let mut request = self
-            .client
-            .post(&self.endpoint)
-            .header(
-                reqwest::header::ACCEPT,
-                "application/json, text/event-stream",
-            )
-            .header(reqwest::header::CONTENT_TYPE, "application/json");
-        for (name, value) in &self.headers {
-            let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
-                TransportError::Protocol(format!("invalid static header {name:?}: {e}"))
-            })?;
-            let value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
-                TransportError::Protocol(format!("invalid static header value for {name}: {e}"))
-            })?;
-            request = request.header(name, value);
-        }
-        if let Some(session) = session.as_deref() {
-            request = request.header(MCP_SESSION_ID_HEADER, session);
-        }
-        if let Some(token) = bearer.as_deref() {
-            request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
-        }
-        request = request.body(raw);
+        // Built per attempt: a sent reqwest builder is consumed.
+        let build_request = || -> Result<reqwest::RequestBuilder, TransportError> {
+            let mut request = self
+                .client
+                .post(&self.endpoint)
+                .header(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/event-stream",
+                )
+                .header(reqwest::header::CONTENT_TYPE, "application/json");
+            for (name, value) in &self.headers {
+                let name =
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                        TransportError::Protocol(format!("invalid static header {name:?}: {e}"))
+                    })?;
+                let value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+                    TransportError::Protocol(format!("invalid static header value for {name}: {e}"))
+                })?;
+                request = request.header(name, value);
+            }
+            if let Some(session) = session.as_deref() {
+                request = request.header(MCP_SESSION_ID_HEADER, session);
+            }
+            if let Some(token) = bearer.as_deref() {
+                request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
+            }
+            Ok(request.body(raw.clone()))
+        };
         let recall = Duration::from_secs(REQUEST_TIMEOUT_SECS);
-        let response = tokio::time::timeout(recall, request.send())
-            .await
-            .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))?
-            .map_err(|e| TransportError::Http(format!("MCP HTTP request failed: {e}")))?;
+        let method = body.get("method").and_then(serde_json::Value::as_str);
+        let response = {
+            let mut attempt = 0usize;
+            loop {
+                let sent = tokio::time::timeout(recall, build_request()?.send()).await;
+                match sent {
+                    // Timed out before a response: the server may have
+                    // received and acted on the request — never retried.
+                    Err(_elapsed) => return Err(TransportError::Timeout(REQUEST_TIMEOUT_SECS)),
+                    Ok(Ok(response)) => break response,
+                    Ok(Err(error)) => {
+                        let may_retry =
+                            attempt == 0 && error.is_connect() && is_connect_retryable(method);
+                        if !may_retry {
+                            return Err(TransportError::Http(format!(
+                                "MCP HTTP request failed: {error}"
+                            )));
+                        }
+                        tracing::warn!(
+                            method = method.unwrap_or(""),
+                            "MCP connect failed before the request was sent; retrying once"
+                        );
+                    }
+                }
+                attempt += 1;
+                tokio::time::sleep(CONNECT_RETRY_BACKOFF).await;
+            }
+        };
         let status = response.status();
         let headers = response.headers().clone();
         self.store_session_id(&headers);
@@ -1277,5 +1335,62 @@ mod tests {
             scope: None,
         });
         assert!(HttpMcp::new(oauth).is_err(), "empty client id rejected");
+    }
+
+    /// The connect-retry gate is a read-only allowlist: handshake, pings,
+    /// list/read calls, and the never-sent notification may re-dial;
+    /// everything with a side effect (`tools/call`) and unknown methods
+    /// must surface instead of retrying.
+    #[test]
+    fn connect_retry_gate_is_a_read_only_allowlist() {
+        for method in [
+            "initialize",
+            "ping",
+            "tools/list",
+            "resources/list",
+            "resources/read",
+            "prompts/list",
+            "prompts/get",
+            "notifications/initialized",
+        ] {
+            assert!(
+                is_connect_retryable(Some(method)),
+                "{method} may re-dial after a connect-phase failure"
+            );
+        }
+        for method in [
+            "tools/call",
+            "resources/subscribe",
+            "logging/setLevel",
+            "unknown/method",
+        ] {
+            assert!(
+                !is_connect_retryable(Some(method)),
+                "{method} must never re-dial"
+            );
+        }
+        assert!(!is_connect_retryable(None), "methodless body never retries");
+    }
+
+    /// A connect-refused endpoint fails both attempts for a retriable
+    /// method and surfaces the transport error (bounded retry, no hang).
+    #[tokio::test]
+    async fn connect_refused_surfaces_after_bounded_retry() {
+        let transport = HttpMcp::new(HttpMcpConfig {
+            // Port 1 refuses connections; the dial never leaves the process,
+            // so the retry fires and the second failure surfaces.
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        })
+        .unwrap();
+        let error = transport
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TransportError::Http(_)),
+            "connect refusal surfaces as an HTTP transport error, got: {error}"
+        );
     }
 }

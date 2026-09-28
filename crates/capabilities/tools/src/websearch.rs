@@ -30,6 +30,13 @@ use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
 /// per-call client build. Redirects stay disabled (policy is per-call
 /// unchanged) and the timeout rides each request, since callers pass
 /// one per search.
+///
+/// Accepted limitation (audited): a build failure here is memoized in
+/// the `LazyLock` and every later search reports the same error until
+/// process restart — there is no in-process rebuild retry. Rebuilds are
+/// configuration-independent (no builder inputs), so a retry within the
+/// process would almost certainly fail the same way; restart is the
+/// recovery path.
 static SEARCH_CLIENT: LazyLock<std::result::Result<reqwest::Client, reqwest::Error>> =
     LazyLock::new(|| {
         reqwest::Client::builder()

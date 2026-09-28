@@ -38,7 +38,11 @@ impl<M> RateLimitedModel<M> {
     }
 
     /// Wait until a token is available (or the wait ceiling expires).
-    fn acquire(&self) -> bool {
+    ///
+    /// Async on purpose: `stream` runs on a tokio worker, and a blocking
+    /// wait here could park that worker for up to [`MAX_WAIT`]. The
+    /// bucket lock is never held across the sleep.
+    async fn acquire(&self) -> bool {
         let deadline = std::time::Instant::now() + MAX_WAIT;
         loop {
             {
@@ -50,7 +54,7 @@ impl<M> RateLimitedModel<M> {
             if std::time::Instant::now() >= deadline {
                 return false;
             }
-            std::thread::sleep(POLL);
+            tokio::time::sleep(POLL).await;
         }
     }
 }
@@ -68,7 +72,10 @@ impl<M: wavecode_llm::ChatModel> wavecode_llm::ChatModel for RateLimitedModel<M>
         &self,
         req: wavecode_llm::ChatRequest,
     ) -> wavecode_llm::Result<wavecode_llm::EventStream> {
-        self.acquire();
+        // The ceiling verdict is deliberately ignored: exhausting the wait
+        // budget lets the request through, so the provider-side throttle
+        // (not this bucket) has the final say — established semantics.
+        self.acquire().await;
         self.inner.stream(req).await
     }
 

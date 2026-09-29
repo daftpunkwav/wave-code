@@ -1713,7 +1713,12 @@ impl ConsoleUi {
                 self.push_status(&format!("session renamed: {title}"), false);
             }
             Ok(None) => {
-                self.push_status("usage: /title <title>", false);
+                // The session index entry appears with the first completed
+                // turn; until then there is nothing to rename.
+                self.push_status(
+                    "no journal yet — /title works after the first turn completes",
+                    false,
+                );
             }
             Err(error) => self.push_status(&format!("rename failed: {error}"), true),
         }

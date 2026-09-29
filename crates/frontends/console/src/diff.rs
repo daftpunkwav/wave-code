@@ -142,9 +142,27 @@ pub fn render(
 
     let bar = theme.paint(Token::DiffGutter, "│ ");
     let total_body = marked.iter().filter(|m| **m).count();
+    // Elision accounting, decided before any body row is rendered so a
+    // zero budget yields zero body rows. Only Added/Removed rows count as
+    // "changed lines": the window around a cluster includes context rows,
+    // and counting those as changes overstates what was hidden.
+    let mut hidden_changed = 0usize;
+    let mut marked_rank = 0usize;
+    for (row, m) in rows.iter().zip(&marked) {
+        if !m {
+            continue;
+        }
+        if marked_rank >= max_rows
+            && matches!(row, DiffRow::Added(_) | DiffRow::Removed(_))
+        {
+            hidden_changed += 1;
+        }
+        marked_rank += 1;
+    }
     let mut body: Vec<String> = Vec::new();
     let mut old_number = 0usize;
     let mut new_number = 0usize;
+    let mut shown = 0usize;
     for (index, row) in rows.iter().enumerate() {
         let keep = marked[index];
         // The fixed grid: bar, old cell, new cell, marker, content.
@@ -187,22 +205,26 @@ pub fn render(
                 )
             }
         };
+        if shown >= max_rows {
+            break;
+        }
         body.push(format!(
             "{bar}{old_cell} {new_cell} {} {}",
             theme.paint(token, marker),
             theme.paint(token, &truncate_content(row_text(row), content_budget)),
         ));
-        if body.len() >= max_rows && total_body > max_rows {
-            // One elision row replaces the rest of the body.
-            body.push(theme.paint(
-                Token::DiffMeta,
-                &format!(
-                    "│ … {} more changed lines (ctrl+o to expand)",
-                    total_body - max_rows
-                ),
-            ));
-            break;
-        }
+        shown += 1;
+    }
+    if total_body > max_rows {
+        // One elision row replaces the rest of the body: the hidden
+        // changed-line count, or the plain hidden count when the cut
+        // lands inside trailing context only.
+        let hint = if hidden_changed > 0 {
+            format!("│ … {hidden_changed} more changed lines (ctrl+o to expand)")
+        } else {
+            format!("│ … {} more lines (ctrl+o to expand)", total_body - max_rows)
+        };
+        body.push(theme.paint(Token::DiffMeta, &hint));
     }
     out.extend(body);
 
@@ -350,6 +372,42 @@ mod tests {
         assert!(
             plain.iter().any(|l| l.contains("more changed lines")),
             "{plain:?}"
+        );
+    }
+
+    /// A zero budget yields zero body rows: the cap is checked before the
+    /// first push, so the card is header + elision hint, never one leaked
+    /// body row.
+    #[test]
+    fn zero_row_budget_renders_no_body_rows() {
+        theme::set(theme::Theme::dark());
+        let lines = render("a\nb\nc", "1\n2\n3", None, false, 0, 80);
+        let plain_lines = plain(&lines);
+        assert_eq!(plain_lines.len(), 2, "{plain_lines:?}");
+        assert!(plain_lines[0].contains("+3"), "{plain_lines:?}");
+        assert!(
+            plain_lines[1].contains("more changed lines"),
+            "{plain_lines:?}"
+        );
+    }
+
+    /// The elision count only covers real changes: context rows beyond
+    /// the cap are not "changed lines", so a cut landing in trailing
+    /// context reports plain lines instead.
+    #[test]
+    fn elision_count_excludes_context_rows() {
+        theme::set(theme::Theme::dark());
+        // One addition with context on both sides: marked = C C C A C,
+        // total_body = 5. A cap of 4 hides exactly one context row.
+        let lines = render("k1\nk2\nk3\nend", "k1\nk2\nk3\nNEW\nend", None, false, 4, 80);
+        let plain_lines = plain(&lines);
+        assert!(
+            plain_lines.iter().any(|l| l.contains("1 more lines")),
+            "context-only remainder reports plain lines: {plain_lines:?}"
+        );
+        assert!(
+            !plain_lines.iter().any(|l| l.contains("more changed lines")),
+            "a context row is not a changed line: {plain_lines:?}"
         );
     }
 

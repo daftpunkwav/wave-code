@@ -102,7 +102,11 @@ impl Transcript {
     /// Drop the newest `turns` turns (everything at or after turn id
     /// `next_turn - turns`). Returns the number of entries dropped so
     /// callers can report the visual impact. Older entries (including
-    /// the welcome card) are never touched.
+    /// the welcome card) are never touched. `next_turn` is rebased to
+    /// the cut so a later rewind counts only turns that still exist —
+    /// leaving the counter stale made a second rewind cut into a
+    /// numbered gap and silently drop fewer groups than the dialogue
+    /// rewound.
     pub fn rewind_turns(&mut self, turns: usize) -> usize {
         if turns == 0 {
             return 0;
@@ -113,7 +117,9 @@ impl Transcript {
             .iter()
             .position(|entry| entry.turn >= cut_from)
             .unwrap_or(self.entries.len());
-        self.entries.drain(keep..).count()
+        let dropped = self.entries.drain(keep..).count();
+        self.next_turn = cut_from;
+        dropped
     }
 
     /// Render every entry to frame segments at `columns` (one shared
@@ -218,6 +224,36 @@ mod tests {
         assert_eq!(turns, vec![0, 1, 1], "welcome and turn one remain");
         // Zero turns is a no-op.
         assert_eq!(transcript.rewind_turns(0), 0);
+    }
+
+    /// The turn counter follows a rewind: a later rewind spanning the
+    /// first one must drop every group the dialogue rewound, not just
+    /// the groups pushed after it (the counter used to stay stale, so
+    /// the cut landed in an id gap and silently kept stale cards).
+    #[test]
+    fn rewind_rebases_the_turn_counter() {
+        let mut transcript = Transcript::new();
+        transcript.push_new_turn(status("welcome"));
+        for turn in 1..=3 {
+            transcript.push_new_turn(status(&format!("u{turn}")));
+            transcript.push(status(&format!("a{turn}")));
+        }
+        // Drop turns 2 and 3 (4 entries).
+        assert_eq!(transcript.rewind_turns(2), 4);
+        // A new turn reuses the freed numbering.
+        transcript.push_new_turn(status("u4"));
+        transcript.push(status("a4"));
+        let turns: Vec<usize> = transcript.entries.iter().map(|e| e.turn).collect();
+        assert_eq!(turns, vec![0, 1, 1, 2, 2], "numbering is dense again");
+        // Rewinding both remaining turns drops u1/a1 AND u4/a4 — the
+        // whole dialogue, not only the newest group.
+        assert_eq!(transcript.rewind_turns(2), 4);
+        let turns: Vec<usize> = transcript.entries.iter().map(|e| e.turn).collect();
+        assert_eq!(turns, vec![0], "only the welcome card remains");
+        // And the next turn keeps counting from there.
+        transcript.push_new_turn(status("u5"));
+        let turns: Vec<usize> = transcript.entries.iter().map(|e| e.turn).collect();
+        assert_eq!(turns, vec![0, 1]);
     }
 
     #[test]

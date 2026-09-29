@@ -507,7 +507,8 @@ async fn main() -> anyhow::Result<()> {
         redactor: None,
     });
     let mut handle = assemble_session(AssembleOptions {
-        config_path: args.config,
+        // Cloned: the resume surface below re-passes the same override.
+        config_path: args.config.clone(),
         model_override,
         provider_override,
         permission_override: permission_mode.clone(),
@@ -563,7 +564,7 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(Outcome::Completed.exit_code())
         }
         Some(Command::Resume { thread_id }) => {
-            run_resume(thread_id, permission_mode, home).await?;
+            run_resume(thread_id, permission_mode, args.config, home).await?;
             std::process::exit(Outcome::Completed.exit_code())
         }
         // Mcp/Plugin/Acp/Doctor/Metrics/Grants/Eval/Update/Serve return

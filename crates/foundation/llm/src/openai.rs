@@ -630,7 +630,11 @@ struct OpenAiDelta {
     /// `reasoning_content` (Moonshot, most gateways), OpenRouter's
     /// `reasoning_details` (array shape, ignored), or `reasoning` (current
     /// vLLM, gpt-oss guidance). Surfaced as text only when `content` is
-    /// absent so chat models never duplicate output.
+    /// absent or empty — reasoning-only frames on these dialects
+    /// commonly carry `content: ""`, and treating that as present would
+    /// drop the whole reasoning stream. Chat models never duplicate
+    /// output either way, because a frame with real content never also
+    /// carries reasoning text.
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
@@ -1248,12 +1252,53 @@ mod tests {
         );
     }
 
+    /// Reasoning-only frames on the DeepSeek/gateway dialects carry
+    /// `content: ""` beside the reasoning text: an empty content string
+    /// counts as absent, so the reasoning still surfaces. A frame with
+    /// real content never doubles as reasoning.
+    #[test]
+    fn reasoning_frames_with_empty_content_still_surface_reasoning() {
+        let mut state = OpenAiStreamState::default();
+        let events = feed_openai_data(
+            &mut state,
+            r#"{"choices":[{"delta":{"content":"","reasoning_content":"thinking…"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            events,
+            vec![StreamEvent::TextDelta {
+                text: "thinking…".to_string()
+            }]
+        );
+        let events = feed_openai_data(
+            &mut state,
+            r#"{"choices":[{"delta":{"content":"","reasoning":"more"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            events,
+            vec![StreamEvent::TextDelta {
+                text: "more".to_string()
+            }]
+        );
+        let events = feed_openai_data(
+            &mut state,
+            r#"{"choices":[{"delta":{"content":"answer","reasoning":"ignored"}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            events,
+            vec![StreamEvent::TextDelta {
+                text: "answer".to_string()
+            }]
+        );
+    }
+
     /// The OpenAI stream path wires the shared read-stall guard: an upstream
     /// that stops producing bytes ends the stream with a Timeout error
     /// instead of hanging forever (parity with the Anthropic client).
     #[tokio::test]
-    async fn openai_stream_ends_with_timeout_when_upstream_stalls() {
-        use futures::StreamExt;
+    async fn openai_stream_ends_with_timeout_when_upstream_stalls() {        use futures::StreamExt;
         let first = Ok::<_, LlmError>(bytes::Bytes::from_static(b"data: {\"choices\":[]}\n\n"));
         let hang: futures::stream::Pending<Result<bytes::Bytes>> = futures::stream::pending();
         let guarded = sse::stall_guard(

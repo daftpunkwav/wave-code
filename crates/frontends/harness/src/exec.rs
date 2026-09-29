@@ -334,8 +334,9 @@ impl ExecSession {
 /// Returns `None` for unrecognized decision tokens so a malformed line can
 /// be re-sent instead of misread as a denial. The verb matches
 /// case-insensitively; the deny reason is user content and keeps its
-/// original casing (ASCII lowercasing preserves byte offsets, so the
-/// reason is sliced from the untouched token).
+/// original casing, with leading whitespace after the separator trimmed
+/// (ASCII lowercasing preserves byte offsets, so the reason is sliced from
+/// the untouched token).
 fn parse_approval_line(line: &str) -> Option<(String, WireDecision)> {
     let trimmed = line.trim();
     let (call_id, token) = trimmed.split_once(char::is_whitespace)?;
@@ -355,6 +356,7 @@ fn parse_approval_line(line: &str) -> Option<(String, WireDecision)> {
             let rest = other.strip_prefix("deny")?;
             let reason = token[token.len() - rest.len()..]
                 .strip_prefix([':', ' '])?
+                .trim_start()
                 .to_string();
             WireDecision::Deny { reason }
         }
@@ -670,13 +672,23 @@ mod tests {
             ))
         );
         // The verb matches case-insensitively, but the reason is user
-        // content: its casing must survive the trip.
+        // content: its casing must survive the trip. The space-separated
+        // `deny: reason` spelling trims like the contracted `deny:reason`.
         assert_eq!(
             parse_approval_line("c4 DENY:Keep Original Case"),
             Some((
                 "c4".to_string(),
                 WireDecision::Deny {
                     reason: "Keep Original Case".to_string()
+                }
+            ))
+        );
+        assert_eq!(
+            parse_approval_line("c5 deny: spaced reason"),
+            Some((
+                "c5".to_string(),
+                WireDecision::Deny {
+                    reason: "spaced reason".to_string()
                 }
             ))
         );

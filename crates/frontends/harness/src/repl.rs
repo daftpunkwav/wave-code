@@ -25,6 +25,7 @@ use crate::exec::{approval_what, decide_approval, render_event};
 pub(crate) async fn run_resume(
     thread_id: Option<String>,
     permission_mode: Option<String>,
+    config_path: Option<PathBuf>,
     home: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     use state_persistence::legacy::{default_root, list_threads, load_history};
@@ -59,7 +60,9 @@ pub(crate) async fn run_resume(
     println!("resumed {id} ({} messages)", history.len());
     let cwd = std::env::current_dir()?;
     let mut handle = assemble_session(AssembleOptions {
-        config_path: None,
+        // Like exec/repl/TUI: an explicit `--config` wins over the
+        // user-level default.
+        config_path,
         model_override: None,
         provider_override: None,
         permission_override: permission_mode,

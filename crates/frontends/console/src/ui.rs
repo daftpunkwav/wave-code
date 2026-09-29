@@ -952,7 +952,10 @@ impl ConsoleUi {
                         card.finish(*is_error, preview);
                     }
                 } else if *is_error {
-                    self.push_status("tool call failed", true);
+                    // No matching card (the call predates a rewind, or the
+                    // begin was never seen): name the call so the failure
+                    // stays attributable. push_status sanitizes the id.
+                    self.push_status(&format!("tool call {call_id} failed"), true);
                 }
                 true
             }

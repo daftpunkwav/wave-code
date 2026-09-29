@@ -381,6 +381,7 @@ dependencies = [
  "two-face",
  "uuid",
  "wavecode-config",
+ "wavecode-protocol",
  "wavecode-wire",
 ]
 
@@ -783,6 +784,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wavecode-config",
+ "wavecode-protocol",
  "wavecode-wire",
 ]
 

@@ -172,28 +172,24 @@ pub fn dispatch(invocation: &Invocation, _state: &AppState) -> Effect {
     }
 }
 
-/// Cycle plan → auto → wave → plan.
+/// Cycle plan → auto → wave → plan (the shared protocol rotation).
 pub fn cycle_mode(current: &str) -> String {
-    match current {
-        "plan" => "auto".to_string(),
-        "auto" => "wave".to_string(),
-        _ => "plan".to_string(),
-    }
+    wavecode_protocol::PermissionMode::cycle_from_str(current)
+        .as_str()
+        .to_string()
 }
 
-/// Normalize a user-supplied mode onto the canonical wire names
-/// (legacy aliases included; mirrors `PermissionMode::parse`).
+/// Normalize a user-supplied mode onto the canonical wire names through
+/// the shared protocol parser (legacy aliases included).
 ///
 /// Unknown inputs pass through unchanged instead of silently widening to
 /// `auto`: the actor rejects unparseable names with a visible warning and
 /// the mode stays put, so a typo in `/permissions <name>` can never flip a
 /// plan session into auto.
 pub fn normalize_mode(input: &str) -> String {
-    match input.to_lowercase().as_str() {
-        "plan" => "plan".to_string(),
-        "auto" | "guarded" | "default" | "acceptedits" => "auto".to_string(),
-        "wave" | "yolo" | "bypasspermissions" => "wave".to_string(),
-        other => other.to_string(),
+    match wavecode_protocol::PermissionMode::parse(input) {
+        Some(mode) => mode.as_str().to_string(),
+        None => input.to_string(),
     }
 }
 
@@ -361,14 +357,17 @@ mod tests {
         assert_eq!(cycle_mode("plan"), "auto");
         assert_eq!(cycle_mode("auto"), "wave");
         assert_eq!(cycle_mode("wave"), "plan");
-        assert_eq!(normalize_mode("YOLO"), "wave");
-        assert_eq!(normalize_mode("plan"), "plan");
+        // Unknown names restart the cycle at plan (the shared protocol
+        // rotation's defensive front).
+        assert_eq!(cycle_mode("nonsense"), "plan");
+        // Legacy aliases map like PermissionMode::parse (case-sensitive:
+        // the wire vocabulary spells them exactly this way).
         assert_eq!(normalize_mode("guarded"), "auto");
-        // The remaining legacy aliases map like PermissionMode::parse.
         assert_eq!(normalize_mode("acceptEdits"), "auto");
         assert_eq!(normalize_mode("bypassPermissions"), "wave");
         // Unknown names pass through so the actor's rejection warning
         // fires and the mode stays, instead of silently widening to auto.
         assert_eq!(normalize_mode("nonsense"), "nonsense");
+        assert_eq!(normalize_mode("YOLO"), "YOLO");
     }
 }

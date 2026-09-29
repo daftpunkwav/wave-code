@@ -9,11 +9,13 @@ license.workspace = true
 # wire protocol and the actor client, with rendering delegated to
 # tui-engine. Session identity/journaling for the pickers rides
 # state-persistence; user paths resolve through the shared
-# wavecode-config home definition. Internal dependencies are exactly
-# those five; tests::dependency_matrix_locked locks the set.
+# wavecode-config home definition; permission-mode vocabulary (mode
+# cycle, aliases) comes from wavecode-protocol. Internal dependencies
+# are exactly those six; tests::dependency_matrix_locked locks the set.
 [dependencies]
 tui-engine = { path = "../engine" }
 wavecode-wire = { path = "../../foundation/wire" }
+wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-config = { path = "../../foundation/config" }
 operations-actor = { path = "../../operations/actor" }
 state-persistence = { path = "../../state/persistence" }

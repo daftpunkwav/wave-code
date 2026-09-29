@@ -16,6 +16,7 @@ operations-gateway = { path = "../../operations/gateway" }
 operations-eval = { path = "../../operations/eval" }
 operations-observe = { path = "../../operations/observe" }
 wavecode-wire = { path = "../../foundation/wire" }
+wavecode-protocol = { path = "../../foundation/protocol" }
 state-persistence = { path = "../../state/persistence" }
 wavecode-config = { path = "../../foundation/config" }
 console-ui = { path = "../console" }

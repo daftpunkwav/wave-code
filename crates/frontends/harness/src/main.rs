@@ -2248,17 +2248,11 @@ fn skill_request(name: &str, args: &str) -> String {
     }
 }
 
-/// Permission modes in `/permissions` cycle order (wire names; legacy
-/// names such as `guarded` are input aliases, not cycle steps).
-const PERMISSION_CYCLE: &[&str] = &["plan", "auto", "wave"];
-
-/// Next mode in the cycle order, wrapping around.
+/// Next mode in the shared Shift+Tab cycle order (plan → auto → wave
+/// → plan), wrapping around. The rotation lives in wavecode-protocol
+/// so the REPL cannot drift from the TUI.
 fn next_mode(current: &str) -> &'static str {
-    let pos = PERMISSION_CYCLE
-        .iter()
-        .position(|m| *m == current)
-        .unwrap_or(0);
-    PERMISSION_CYCLE[(pos + 1) % PERMISSION_CYCLE.len()]
+    wavecode_protocol::PermissionMode::cycle_from_str(current).as_str()
 }
 
 /// Write everything appended to `buffered` since the last call, then
@@ -3274,9 +3268,10 @@ model = "m2"
 
     /// Crate boundary: the binary's workspace edges stay exactly the
     /// composition it was assembled against (actor, bootstrap, gateway,
-    /// observe, eval, wire, persistence, config, tui). Concrete capability
-    /// crates are reached only through bootstrap surfaces; new internal
-    /// deps need a deliberate matrix update, not a silent Cargo.toml line.
+    /// observe, eval, wire, protocol, persistence, config, tui).
+    /// Concrete capability crates are reached only through bootstrap
+    /// surfaces; new internal deps need a deliberate matrix update, not
+    /// a silent Cargo.toml line.
     #[test]
     fn dependency_matrix_locked() {
         let mut in_deps = false;
@@ -3303,6 +3298,8 @@ model = "m2"
                 "operations-observe",
                 "state-persistence",
                 "wavecode-config",
+                // Mode cycle vocabulary shared with the TUI.
+                "wavecode-protocol",
                 "wavecode-wire",
             ],
             "harness internal deps changed; update the matrix deliberately",
@@ -3395,9 +3392,8 @@ model = "m2"
         assert_eq!(next_mode("plan"), "auto");
         assert_eq!(next_mode("auto"), "wave");
         assert_eq!(next_mode("wave"), "plan");
-        // Unknown names re-enter the cycle at the front (plan) and get
-        // its successor.
-        assert_eq!(next_mode("garbage"), "auto");
+        // Unknown names re-enter the cycle at the front (plan).
+        assert_eq!(next_mode("garbage"), "plan");
     }
 
     #[test]

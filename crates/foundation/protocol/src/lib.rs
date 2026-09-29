@@ -73,6 +73,26 @@ impl PermissionMode {
             Self::Wave => "wave",
         }
     }
+
+    /// The successor in the Shift+Tab rotation: plan → auto → wave →
+    /// plan. Owned here so every frontend rotates identically.
+    pub fn next_in_cycle(self) -> Self {
+        match self {
+            Self::Plan => Self::Auto,
+            Self::Auto => Self::Wave,
+            Self::Wave => Self::Plan,
+        }
+    }
+
+    /// [`Self::next_in_cycle`] for the current mode's wire name;
+    /// unparseable input re-enters the cycle at the front (plan).
+    /// Callers pass the effective mode, which is always a wire name —
+    /// the fallback is defensive, not policy.
+    pub fn cycle_from_str(current: &str) -> Self {
+        Self::parse(current)
+            .map(Self::next_in_cycle)
+            .unwrap_or(Self::Plan)
+    }
 }
 
 impl std::fmt::Display for PermissionMode {
@@ -167,5 +187,27 @@ mod tests {
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(json, format!(r#""{tag}""#), "ApprovalKind tag drifted");
         }
+    }
+
+    /// The Shift+Tab rotation every frontend shares: plan → auto →
+    /// wave → plan; unparseable names re-enter at the front.
+    #[test]
+    fn mode_cycle_rotates_plan_auto_wave() {
+        assert_eq!(PermissionMode::Plan.next_in_cycle(), PermissionMode::Auto);
+        assert_eq!(PermissionMode::Auto.next_in_cycle(), PermissionMode::Wave);
+        assert_eq!(PermissionMode::Wave.next_in_cycle(), PermissionMode::Plan);
+        assert_eq!(
+            PermissionMode::cycle_from_str("wave"),
+            PermissionMode::Plan
+        );
+        // A legacy alias still parses, so it cycles from its successor.
+        assert_eq!(
+            PermissionMode::cycle_from_str("guarded"),
+            PermissionMode::Wave
+        );
+        assert_eq!(
+            PermissionMode::cycle_from_str("garbage"),
+            PermissionMode::Plan
+        );
     }
 }

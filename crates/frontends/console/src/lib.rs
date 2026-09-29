@@ -54,11 +54,14 @@ mod dependency_matrix_locked {
     /// test deliberately.
     #[test]
     fn console_ui_internal_dependencies_are_locked() {
-        const INTERNAL: [&str; 5] = [
+        const INTERNAL: [&str; 6] = [
             "tui-engine",
             "wavecode-wire",
             // User paths resolve through the shared home definition.
             "wavecode-config",
+            // Mode cycle and legacy aliases come from the shared
+            // vocabulary crate, not a local mirror.
+            "wavecode-protocol",
             "operations-actor",
             "state-persistence",
         ];

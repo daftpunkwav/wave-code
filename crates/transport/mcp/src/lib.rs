@@ -464,9 +464,15 @@ mod tests {
             return;
         }
         let (program, args): (&str, Vec<String>) = if cfg!(windows) {
-            ("cmd", vec!["/C".into(), format!("type {}", script.display())])
+            (
+                "cmd",
+                vec!["/C".into(), format!("type {}", script.display())],
+            )
         } else {
-            ("sh", vec!["-c".into(), format!("cat '{}'", script.display())])
+            (
+                "sh",
+                vec!["-c".into(), format!("cat '{}'", script.display())],
+            )
         };
         let mut transport = match ChildTransport::spawn(program, args, 10).await {
             Ok(transport) => transport,

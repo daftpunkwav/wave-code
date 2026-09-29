@@ -174,7 +174,7 @@ where
             mut durability,
         } = self;
 
-        finish_lifecycle(&driver, &event_tx, HookPoint::SessionStart).await;
+        run_lifecycle_hook(&driver, &event_tx, HookPoint::SessionStart).await;
 
         // Offer resume-from-checkpoint: when durable labels exist, name
         // the newest so the frontend can restore it.
@@ -268,13 +268,13 @@ where
                 Op::ExecApproval { call_id, decision } => {
                     if !approvals.decide(&call_id, map_decision(decision)) {
                         // No parked waiter: the turn ended or never asked.
-                        warn_late_approval(&event_tx, &sub.id, &call_id);
+                        warn_late_decision(&event_tx, &sub.id, &call_id);
                     }
                 }
                 Op::QuestionAnswer { call_id, answer } => {
                     if !questions.answer(&call_id, answer) {
                         // No parked waiter: the turn ended or never asked.
-                        warn_late_approval(&event_tx, &sub.id, &call_id);
+                        warn_late_decision(&event_tx, &sub.id, &call_id);
                     }
                 }
                 Op::Compact { instruction } => {
@@ -437,8 +437,9 @@ fn rewind_conversation(conv: &mut Conversation, turns: u32) -> u32 {
     drop as u32
 }
 
-/// Run session lifecycle hooks, tagging warnings with the synthetic id.
-async fn finish_lifecycle<D: TurnDriver>(
+/// Run one session lifecycle hook point, tagging events with the
+/// synthetic lifecycle id.
+async fn run_lifecycle_hook<D: TurnDriver>(
     driver: &D,
     event_tx: &mpsc::Sender<Event>,
     point: HookPoint,
@@ -518,7 +519,7 @@ async fn end_session_lifecycle<D: TurnDriver>(
     event_tx: &mpsc::Sender<Event>,
     conv: &Conversation,
 ) {
-    finish_lifecycle(driver, event_tx, HookPoint::SessionEnd).await;
+    run_lifecycle_hook(driver, event_tx, HookPoint::SessionEnd).await;
     end_session(driver, conv).await;
 }
 
@@ -631,12 +632,12 @@ fn route_extra(
         }
         Op::ExecApproval { call_id, decision } => {
             if !approvals.decide(&call_id, map_decision(decision)) {
-                warn_late_approval(event_tx, &sub.id, &call_id);
+                warn_late_decision(event_tx, &sub.id, &call_id);
             }
         }
         Op::QuestionAnswer { call_id, answer } => {
             if !questions.answer(&call_id, answer) {
-                warn_late_approval(event_tx, &sub.id, &call_id);
+                warn_late_decision(event_tx, &sub.id, &call_id);
             }
         }
         Op::Shutdown => {
@@ -676,11 +677,12 @@ fn queue_or_reject(
     }
 }
 
-/// Warn the frontend about a late approval decision with no parked waiter.
+/// Warn the frontend about a late approval or question answer with no
+/// parked waiter.
 ///
 /// Decisions are one-shot slots, so dropping is safe; staying silent is
 /// not: without this, a stale or mistyped call id fails invisibly.
-fn warn_late_approval(event_tx: &mpsc::Sender<Event>, id: &str, call_id: &str) {
+fn warn_late_decision(event_tx: &mpsc::Sender<Event>, id: &str, call_id: &str) {
     tracing::warn!(%call_id, "late approval with no parked waiter; dropped");
     try_send_event(
         event_tx,

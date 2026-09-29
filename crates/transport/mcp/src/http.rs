@@ -321,7 +321,7 @@ impl HttpMcp {
         let bytes = tokio::time::timeout(recall, read_capped(response, MAX_BODY_BYTES))
             .await
             .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
-        parse_response_body_for(&bytes, expected_id)
+        parse_response_body_for_request(&bytes, expected_id)
     }
 
     /// Persist the `mcp-session-id` response header for later requests.
@@ -516,18 +516,18 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>,
 /// notification); otherwise try single-JSON first, then the SSE-stream path.
 ///
 /// Production always parses with a known request id (the transport calls
-/// [`parse_response_body_for`] directly); this uncorrelated form exists
+/// [`parse_response_body_for_request`] directly); this uncorrelated form exists
 /// only so tests exercise the shared path the way a caller without a
 /// pending id would.
 #[cfg(test)]
 fn parse_response_body(body: &[u8]) -> Result<Option<serde_json::Value>, TransportError> {
-    parse_response_body_for(body, None)
+    parse_response_body_for_request(body, None)
 }
 
 /// `parse_response_body` narrowed to one request id (see
-/// [`parse_sse_stream_for`]): the single-JSON path is the whole body, so
+/// [`parse_sse_stream_for_request`]): the single-JSON path is the whole body, so
 /// correlation happens on the SSE branch.
-fn parse_response_body_for(
+fn parse_response_body_for_request(
     body: &[u8],
     expected_id: Option<u64>,
 ) -> Result<Option<serde_json::Value>, TransportError> {
@@ -540,7 +540,7 @@ fn parse_response_body_for(
     let text = std::str::from_utf8(body).map_err(|e| {
         TransportError::Protocol(format!("MCP response is neither JSON nor UTF-8 SSE: {e}"))
     })?;
-    match parse_sse_stream_for(text, expected_id) {
+    match parse_sse_stream_for_request(text, expected_id) {
         Some(value) => Ok(Some(value)),
         None => Err(TransportError::Protocol(format!(
             "MCP response is neither a JSON-RPC object nor an SSE stream: {:?}",
@@ -574,7 +574,7 @@ fn sse_candidates(text: &str) -> Vec<serde_json::Value> {
 /// payload that parses as JSON is a candidate and the last candidate wins, so
 /// interleaved progress events never shadow the final JSON-RPC message.
 ///
-/// Production parses with a known request id (`parse_sse_stream_for`) so a
+/// Production parses with a known request id (`parse_sse_stream_for_request`) so a
 /// stale or interleaved frame cannot be mistaken for the response; this
 /// uncorrelated form is the test-only variant of that same parse.
 #[cfg(test)]
@@ -587,7 +587,7 @@ fn parse_sse_stream(text: &str) -> Option<serde_json::Value> {
 /// are server-initiated notifications, never responses, and a stale or
 /// interleaved id can never be mistaken for this response. `None` means
 /// the stream held no frame for this request.
-fn parse_sse_stream_for(text: &str, expected: Option<u64>) -> Option<serde_json::Value> {
+fn parse_sse_stream_for_request(text: &str, expected: Option<u64>) -> Option<serde_json::Value> {
     sse_candidates(text)
         .into_iter()
         .rev()
@@ -662,10 +662,10 @@ mod tests {
 
 ",
         );
-        let value = parse_sse_stream_for(text, Some(9)).unwrap();
+        let value = parse_sse_stream_for_request(text, Some(9)).unwrap();
         assert_eq!(value["id"], 9, "the stale id-7 frame must be skipped");
         assert!(
-            parse_sse_stream_for(text, Some(8)).is_none(),
+            parse_sse_stream_for_request(text, Some(8)).is_none(),
             "no frame matches request 8"
         );
     }

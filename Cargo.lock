@@ -1337,6 +1337,7 @@ dependencies = [
  "tokio",
  "wavecode-config",
  "wavecode-llm",
+ "wavecode-mcp",
  "wavecode-tools",
  "wavecode-wire",
 ]

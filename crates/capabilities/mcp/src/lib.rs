@@ -297,6 +297,46 @@ impl McpServerConfig {
         }
     }
 
+    /// Convert one raw `[mcp_servers.<name>]` entry into the validated
+    /// config shape, enforcing the full entry contract in one place:
+    /// the server name must be valid ([`is_valid_server_name`]), exactly
+    /// one of `command` / `url` must be set, and the endpoint details
+    /// must pass [`Self::validate`]. `Err` carries the skip reason.
+    ///
+    /// Single definition of the raw→typed conversion: the connect path
+    /// (`bridge::connect_one`) and `doctor` report from the same
+    /// function, so their verdicts cannot drift.
+    pub fn from_raw(name: &str, raw: &wavecode_config::McpServerRaw) -> Result<Self, String> {
+        if !is_valid_server_name(name) {
+            return Err(format!(
+                "invalid MCP server name {name:?}: must be non-empty without `__`"
+            ));
+        }
+        let config = match (&raw.command, &raw.url) {
+            (Some(_), Some(_)) => {
+                return Err(format!("MCP server {name:?} sets both command and url; use one"));
+            }
+            (Some(command), None) => Self::Stdio {
+                command: command.clone(),
+                args: raw.args.clone(),
+                env: raw.env.clone(),
+            },
+            (None, Some(url)) => Self::Http {
+                url: url.clone(),
+                headers: raw.headers.clone(),
+                oauth_token_url: raw.oauth_token_url.clone(),
+                oauth_client_id: raw.oauth_client_id.clone(),
+                oauth_client_secret: raw.oauth_client_secret.clone(),
+                oauth_scope: raw.oauth_scope.clone(),
+            },
+            (None, None) => {
+                return Err(format!("MCP server {name:?} sets neither command nor url"));
+            }
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Validate the server endpoint configuration: stdio requires a
     /// non-empty `command`; http requires a non-empty `url` starting with
     /// `http://` or `https://`. Returns `Err` with the reason so the
@@ -475,6 +515,55 @@ mod tests {
         let qualified = def.qualified_name("playwright").expect("valid server");
         assert_eq!(parse_tool_name(&qualified), Some(("playwright", "click")));
         assert_eq!(def.qualified_name("a__b"), None);
+    }
+
+    /// `from_raw` enforces the full entry contract (name, either-or,
+    /// endpoint validation) with the exact skip reasons the connect path
+    /// has always surfaced — the wording is part of the startup-warning
+    /// and doctor surfaces, so it is locked here.
+    #[test]
+    fn from_raw_validates_name_either_or_and_endpoint() {
+        let raw = |command: Option<&str>, url: Option<&str>| wavecode_config::McpServerRaw {
+            command: command.map(|s| s.to_string()),
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: url.map(|s| s.to_string()),
+            headers: HashMap::new(),
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_scope: None,
+        };
+        // Well-formed stdio and http entries convert unchanged.
+        assert_eq!(
+            McpServerConfig::from_raw("srv", &raw(Some("npx"), None)).unwrap(),
+            McpServerConfig::Stdio {
+                command: "npx".into(),
+                args: vec![],
+                env: HashMap::new(),
+            }
+        );
+        assert!(McpServerConfig::from_raw("srv", &raw(None, Some("https://mcp.example.com")))
+            .is_ok());
+        // The three skip reasons, byte-identical to the connect path's.
+        assert_eq!(
+            McpServerConfig::from_raw("bad__name", &raw(Some("cmd"), None)).unwrap_err(),
+            "invalid MCP server name \"bad__name\": must be non-empty without `__`"
+        );
+        assert_eq!(
+            McpServerConfig::from_raw("both", &raw(Some("cmd"), Some("http://x"))).unwrap_err(),
+            "MCP server \"both\" sets both command and url; use one"
+        );
+        assert_eq!(
+            McpServerConfig::from_raw("neither", &raw(None, None)).unwrap_err(),
+            "MCP server \"neither\" sets neither command nor url"
+        );
+        // Endpoint validation rides the same path (non-http scheme).
+        assert!(
+            McpServerConfig::from_raw("srv", &raw(None, Some("ftp://mcp.example.com")))
+                .unwrap_err()
+                .contains("must start with http:// or https://")
+        );
     }
 
     /// Server config validation rejects empty commands, empty urls, and

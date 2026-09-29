@@ -193,6 +193,14 @@ impl ChildTransport {
 
     /// Spawn with extra environment variables over the inherited set.
     ///
+    /// **Append, not replace**: `env` entries are added on top of this
+    /// process' inherited environment (a duplicate key in `env` wins),
+    /// mirroring `tokio::process::Command::envs` and the
+    /// `McpServerConfig::Stdio.env` field semantics. The child keeps
+    /// every inherited variable that is not explicitly overridden —
+    /// callers that need secrets out of the child must strip them here
+    /// (the bridge passes only its configured server `env` block).
+    ///
     /// The child dies with the transport (`kill_on_drop`): a failed
     /// handshake never leaks a server process behind a dropped handle.
     pub async fn spawn_with_env(

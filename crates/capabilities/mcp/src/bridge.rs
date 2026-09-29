@@ -1374,36 +1374,13 @@ async fn connect_one(
     raw: &wavecode_config::McpServerRaw,
     registry: &Arc<wavecode_tools::Registry>,
 ) -> (String, Option<String>) {
-    if !crate::is_valid_server_name(name) {
-        let reason = format!("invalid MCP server name {name:?}: must be non-empty without `__`");
-        return (format!("{name} — skipped ({reason})"), Some(reason));
-    }
-    let config = match (&raw.command, &raw.url) {
-        (Some(_), Some(_)) => {
-            let reason = format!("MCP server {name:?} sets both command and url; use one");
-            return (format!("{name} — skipped ({reason})"), Some(reason));
-        }
-        (Some(command), None) => crate::McpServerConfig::Stdio {
-            command: command.clone(),
-            args: raw.args.clone(),
-            env: raw.env.clone(),
-        },
-        (None, Some(url)) => crate::McpServerConfig::Http {
-            url: url.clone(),
-            headers: raw.headers.clone(),
-            oauth_token_url: raw.oauth_token_url.clone(),
-            oauth_client_id: raw.oauth_client_id.clone(),
-            oauth_client_secret: raw.oauth_client_secret.clone(),
-            oauth_scope: raw.oauth_scope.clone(),
-        },
-        (None, None) => {
-            let reason = format!("MCP server {name:?} sets neither command nor url");
-            return (format!("{name} — skipped ({reason})"), Some(reason));
-        }
+    // Name validity, the either-or rule, and endpoint validation all live
+    // in one place (`McpServerConfig::from_raw`) so this connect path and
+    // doctor report the same verdicts.
+    let config = match crate::McpServerConfig::from_raw(name, raw) {
+        Ok(config) => config,
+        Err(reason) => return (format!("{name} — skipped ({reason})"), Some(reason)),
     };
-    if let Err(reason) = config.validate() {
-        return (format!("{name} — skipped ({reason})"), Some(reason));
-    }
     match config {
         crate::McpServerConfig::Http {
             url,

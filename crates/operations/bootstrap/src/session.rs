@@ -323,6 +323,28 @@ fn validate_entries(
         .collect()
 }
 
+/// Validate every `[mcp_servers.<name>]` entry the way a session's
+/// connect path will: name validity, the either-or rule, and endpoint
+/// validation all run through the mcp crate's single conversion
+/// (`McpServerConfig::from_raw`), so this report cannot drift from what
+/// a session actually enforces at startup. One line per broken entry;
+/// an empty result means every configured server would connect.
+///
+/// Doctor-facing helper (same pattern as [`load_permissions`] /
+/// [`confinement_status`]): frontends call it through the composition
+/// root instead of naming the mcp crate.
+pub fn mcp_config_findings(config: &wavecode_config::Config) -> Vec<String> {
+    config
+        .mcp_servers
+        .iter()
+        .filter_map(|(name, raw)| {
+            wavecode_mcp::McpServerConfig::from_raw(name, raw)
+                .err()
+                .map(|reason| format!("{name}: {reason}"))
+        })
+        .collect()
+}
+
 /// One line on the OS confinement a session's shell spawns will get.
 ///
 /// Frontends read this through the composition root so they never name the
@@ -557,6 +579,15 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
 /// prompt paths run hermetically. Changing these fields must not change
 /// what production assembles for the same inputs. Public only so the
 /// gateway's server tests can assemble sessions the production way.
+///
+/// Version policy (on record, deliberate): workspace-internal seam, no
+/// `#[non_exhaustive]`, no builder. Every constructor lives in this repo
+/// (this crate plus the gateway's test assemblies) and builds it by
+/// exhaustive literal, so adding a field breaks compilation at each site
+/// and forces same-commit review — the guarantee the struct doc above
+/// depends on. Fields have no meaningful defaults (`model`, `cwd`), so
+/// `Default`-based construction would only hide mistakes; renaming or
+/// re-typing a field is a breaking change updated in the same commit.
 pub struct WithModel {
     /// Full config for hooks, permission mode, and MCP descriptions.
     pub config: wavecode_config::Config,

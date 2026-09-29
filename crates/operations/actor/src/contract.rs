@@ -43,6 +43,18 @@ pub enum SessionError {
 }
 
 /// Assembly inputs, all caller-owned.
+///
+/// Version policy (on record, deliberate): this is a **workspace-internal**
+/// seam, not a published-stable API — every constructor lives in this repo
+/// (harness frontends, gateway servers, and this crate's tests), and each
+/// builds the struct by exhaustive literal. Adding a field therefore breaks
+/// compilation at every construction site on purpose: the compiler, not a
+/// changelog, drives the same-commit review of each caller, and there is no
+/// out-of-tree consumer a break could surprise. `#[non_exhaustive]` or a
+/// builder would trade that compile-time exhaustiveness for defaults that
+/// have no meaningful value here (`cwd`, `identity`), so neither is used;
+/// renaming or re-typing a field remains a breaking change for the
+/// workspace and is updated in the same commit.
 pub struct AssembleOptions {
     /// Config file path; `None` loads the user-level config.
     pub config_path: Option<PathBuf>,

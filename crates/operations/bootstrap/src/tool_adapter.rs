@@ -46,6 +46,16 @@ impl ToolAdapter {
     /// hygiene: the provider `env_key` names ([`serve_deny_env`]) are
     /// stripped from tool child environments, so a secret never rides into
     /// a shell spawned through MCP.
+    ///
+    /// Session-surface degradation (accepted scope, on record): the shell
+    /// tool here holds a serve-lifetime spill store (shell and `spill`
+    /// share one instance, so spilling and reading back work within the
+    /// server process) but **no job service** — a timed-out shell command
+    /// kills its process tree instead of promoting to a background job —
+    /// and `todowrite` state is process-local, never a session's store.
+    /// Both are inherent to a stateless serve surface with no session
+    /// behind it; revisiting means serving a real session, not patching
+    /// this constructor.
     pub fn mcp_serve_tools(cwd: PathBuf) -> (Arc<wavecode_tools::Registry>, Self) {
         let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
         let registry = Arc::new(registry);

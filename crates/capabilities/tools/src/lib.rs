@@ -212,6 +212,19 @@ pub trait Tool: Send + Sync {
     /// Execute. `Err` is only for implementation-level failures (io errors, etc.); business failures return
     /// `Ok(ToolOutput { is_error: true, .. })` and must never panic.
     ///
+    /// # Environment responsibility (implementation-side contract)
+    ///
+    /// An implementation that spawns child processes **owns the child's
+    /// environment**: it must strip [`ToolCtx::deny_env`] itself (the
+    /// assembly layer cannot reach into a tool's spawn) and should route
+    /// the scrub through the shared helpers so every spawn path matches —
+    /// [`is_sensitive_env_name`] for the shape fallback and
+    /// `shell_tool::sanitize_env` (crate-private) for the combined strip.
+    /// Built-in spawns comply (`shell`, `python`, `node`, and the job
+    /// handoff); the LSP tools are the documented exception: their child
+    /// is a user-registered local language server command and inherits
+    /// the process environment.
+    ///
     /// All built-in tools are truly async: file tools use `tokio::fs`, shell uses
     /// `tokio::process`; grep/glob directory traversal is the `glob` crate's sync API,
     /// wrapped in `spawn_blocking` inside each tool.
@@ -399,6 +412,13 @@ impl Registry {
 
     /// Register a tool (from M3 on, MCP and other dynamic tools register here too); takes `&self` to support
     /// late registration during late assembly (see the struct docs).
+    ///
+    /// **Replace semantics** (declared contract): a tool whose name is
+    /// already registered is silently replaced — re-registration is the
+    /// sanctioned way session assembly upgrades a late-wired entry (the
+    /// shell tool re-registers with the job service wired), so this is
+    /// insert-or-replace, never an error. Register nothing you cannot
+    /// afford to have swapped.
     pub fn register(&self, tool: Arc<dyn Tool>) {
         lock(&self.tools).insert(tool.name().to_owned(), tool);
     }

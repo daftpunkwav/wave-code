@@ -360,9 +360,13 @@ async fn dispatch_line<W, F, S>(
 /// Assemble one headless session and answer with its id.
 ///
 /// `cwd` overrides the server default; `mcpServers` is accepted and
-/// ignored (servers come from the config file). Assembly failures
-/// (missing config, provider, credentials) fail this request, never
-/// the server: later requests with a fixed environment can retry.
+/// ignored (servers come from the config file) — the spec-grade
+/// disclosure for this is the `mcpCapabilities: false` in the
+/// `initialize` reply above, which tells conforming clients not to send
+/// servers; sending them anyway degrades to this documented no-op rather
+/// than an error. Assembly failures (missing config, provider,
+/// credentials) fail this request, never the server: later requests with
+/// a fixed environment can retry.
 #[allow(clippy::too_many_arguments)]
 async fn new_session<W, F, S>(
     id: &serde_json::Value,

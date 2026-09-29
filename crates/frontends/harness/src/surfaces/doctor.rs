@@ -143,6 +143,24 @@ pub(crate) fn doctor_checks(
                     checks.push(fail(format!("permissions: {finding}")));
                 }
             }
+            // MCP servers: validated through the same conversion the session
+            // connect path runs (`operations_bootstrap::mcp_config_findings`
+            // -> `McpServerConfig::from_raw`), so a misconfigured entry is
+            // visible here instead of only surfacing as a skipped server at
+            // startup.
+            let mcp_findings = operations_bootstrap::mcp_config_findings(&config);
+            if config.mcp_servers.is_empty() {
+                checks.push(ok("mcp: none configured"));
+            } else if mcp_findings.is_empty() {
+                checks.push(ok(format!(
+                    "mcp: {} server(s) configured, entries valid",
+                    config.mcp_servers.len()
+                )));
+            } else {
+                for finding in mcp_findings {
+                    checks.push(fail(format!("mcp: {finding}")));
+                }
+            }
         }
     }
 
@@ -430,6 +448,91 @@ model = "m2"
             "{failed:?}"
         );
         assert!(failed.iter().any(|l| l.contains("settings:")), "{failed:?}");
+    }
+
+    /// The MCP section runs the session connect path's own validation: a
+    /// misconfigured `[mcp_servers]` entry fails here with the same
+    /// reason a session would skip it for, and a valid entry passes.
+    #[test]
+    fn doctor_reports_misconfigured_mcp_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "m"
+model_provider = "p"
+
+[model_providers.p]
+type = "anthropic"
+base_url = "https://api.example.com"
+api_key = "k"
+
+[mcp_servers."bad__name"]
+command = "npx"
+
+[mcp_servers.both]
+command = "npx"
+url = "https://mcp.example.com"
+"#,
+        )
+        .unwrap();
+        let checks = doctor_checks(None, Some(dir.path()));
+        let mcp_lines: Vec<&str> = checks
+            .iter()
+            .filter(|check| check.line.starts_with("mcp:"))
+            .map(|check| check.line.as_str())
+            .collect();
+        assert_eq!(mcp_lines.len(), 2, "{mcp_lines:?}");
+        assert!(
+            mcp_lines
+                .iter()
+                .all(|line| line.contains("must be non-empty without `__`")
+                    || line.contains("sets both command and url")),
+            "{mcp_lines:?}"
+        );
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|check| !check.ok)
+            .map(|check| check.line.as_str())
+            .collect();
+        assert_eq!(failed.len(), 2, "{failed:?}");
+    }
+
+    /// A well-formed `[mcp_servers]` entry reads as healthy.
+    #[test]
+    fn doctor_passes_valid_mcp_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "m"
+model_provider = "p"
+
+[model_providers.p]
+type = "anthropic"
+base_url = "https://api.example.com"
+api_key = "k"
+
+[mcp_servers.playwright]
+command = "npx"
+args = ["@playwright/mcp@latest"]
+"#,
+        )
+        .unwrap();
+        let lines: Vec<String> = doctor_checks(None, Some(dir.path()))
+            .into_iter()
+            .map(|check| check.line)
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "mcp: 1 server(s) configured, entries valid"),
+            "{lines:?}"
+        );
     }
 
     /// An empty-but-valid session index is healthy; a broken one fails.

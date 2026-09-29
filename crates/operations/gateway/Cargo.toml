@@ -22,6 +22,9 @@ serde_json.workspace = true
 # Test-only: the hermetic assembly seam (`WithModel`) lives beside the
 # composition root's own tests.
 operations-bootstrap = { path = "../bootstrap" }
+# Test-only: locks the serve loop's advertised protocol version against
+# the client bridge's copy (see mcp_serve::MCP_PROTOCOL_VERSION).
+wavecode-mcp = { path = "../../capabilities/mcp" }
 async-trait.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true

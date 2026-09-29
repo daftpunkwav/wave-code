@@ -434,6 +434,19 @@ mod tests {
         }
     }
 
+    /// The two directions of one product must speak the same MCP dialect:
+    /// the serve side's advertised version and the client bridge's offered
+    /// version are separate constants on purpose (this serving skin names
+    /// no client-crate types) — this test keeps the copies byte-equal so
+    /// one cannot drift without the other.
+    #[test]
+    fn protocol_version_matches_the_client_bridge() {
+        assert_eq!(
+            MCP_PROTOCOL_VERSION,
+            wavecode_mcp::bridge::MCP_PROTOCOL_VERSION
+        );
+    }
+
     #[tokio::test]
     async fn initialize_replies_with_version_and_server_info() {
         let (mut client, _server) = TestClient::start().await;

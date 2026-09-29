@@ -124,15 +124,6 @@ impl Thinking {
     pub fn is_live(&self) -> bool {
         self.live
     }
-
-    /// True when collapsed content hides rows (drives the footer hint).
-    pub fn has_hidden(&self) -> bool {
-        !self.live && !self.expanded_flag.get() && self.wrapped_lines() > PREVIEW_LINES
-    }
-
-    fn wrapped_lines(&self) -> usize {
-        self.text.split('\n').count()
-    }
 }
 
 impl Component for Thinking {

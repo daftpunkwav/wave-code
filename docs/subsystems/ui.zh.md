@@ -78,7 +78,7 @@ footer row 2             (transient exit hint ... context: N% (used/max))
   /model /provider /doctor /agents /hooks /release-notes /effort
   /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
-  /undo /editor /reload /copy /export /exit`），带模糊补全；未知的 `/tokens` 作为用户输入落空穿透（技能）。每个带参数的命令在裸调用时打开其交互面——`/theme` 打开主题选择器，`/effort` 打开级别列表，`/title`、`/editor`、`/export` 与 `/compact` 打开预填的自由文本提示，`/undo` 打开回退选择器，`/btw` 询问问题——而即时动作（`/clear`、`/new`、`/fork`、`/auto`、`/copy` 等）与纯信息命令（`/usage`、`/status`、`/mcp` 等）保持直接执行。
+  /undo /editor /reload /copy /export /exit /quit`），带模糊补全；未知的 `/tokens` 作为用户输入落空穿透（技能）。每个带参数的命令在裸调用时打开其交互面——`/theme` 打开主题选择器，`/effort` 打开级别列表，`/title`、`/editor`、`/export` 与 `/compact` 打开预填的自由文本提示，`/undo` 打开回退选择器，`/btw` 询问问题——而即时动作（`/clear`、`/new`、`/fork`、`/auto`、`/copy` 等）与纯信息命令（`/usage`、`/status`、`/mcp` 等）保持直接执行。
   `/usage` 渲染按严重性着色的上下文条加从 `TokenCount` 样本累计的 token 拆分。`/copy` 经 OSC 52 把最后一条助手消息放进剪贴板；`/export` 把完整未修剪的用户/助手对话写成 markdown（会提示输入路径；直接传一个则跳过提示）。模式与模型命令立即更新本地 chrome（没有 mode-changed wire 事件）。
 - `/compact` 立即压缩上下文；提示接受可选指令来引导摘要（`CompactTrigger::Manual` 把焦点带给模型摘要器）。转录显示一张活动压缩卡片（锯齿波脉冲、已用秒数），落定为
   `● compacted: context <before>, summary <N> tokens`，其中 `before`

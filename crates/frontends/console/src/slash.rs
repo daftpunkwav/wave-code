@@ -17,11 +17,10 @@
 //! the REPL's contract.
 
 use crate::state::AppState;
-use operations_actor::StatusQueries;
 use wavecode_wire::Op;
 
 /// The commands offered in slash completion.
-pub const COMMANDS: [&str; 36] = [
+pub const COMMANDS: [&str; 37] = [
     "help",
     "btw",
     "new",
@@ -58,6 +57,7 @@ pub const COMMANDS: [&str; 36] = [
     "copy",
     "export",
     "exit",
+    "quit",
 ];
 
 /// One command invocation: `/name args…`.
@@ -98,16 +98,18 @@ pub enum Effect {
     Fallthrough,
 }
 
-/// Dispatch a command against the current state and status queries.
-pub fn dispatch(invocation: &Invocation, _state: &AppState, status: &dyn StatusQueries) -> Effect {
+/// Dispatch a command against the current state.
+pub fn dispatch(invocation: &Invocation, _state: &AppState) -> Effect {
     match invocation.name.as_str() {
         "help" => Effect::Ops(Vec::new()),
         "clear" | "new" => Effect::Ops(Vec::new()), // handled by the UI caller
         "copy" | "export" | "settings" => Effect::Ops(Vec::new()), // UI caller
         "usage" | "version" => Effect::Ops(Vec::new()), // rendered by the caller
         "btw" | "sessions" | "resume" | "fork" | "title" | "init" | "mcp" | "status" | "undo"
-        | "editor" | "reload" | "doctor" | "agents" | "hooks" | "release-notes" => {
-            // Dialogs and local panels: the caller owns the behavior.
+        | "editor" | "reload" | "doctor" | "agents" | "hooks" | "release-notes" | "memory"
+        | "snapshots" | "goal" => {
+            // Dialogs, panels, and local displays: the caller owns the
+            // behavior.
             Effect::Ops(Vec::new())
         }
         "compact" => {
@@ -166,18 +168,6 @@ pub fn dispatch(invocation: &Invocation, _state: &AppState, status: &dyn StatusQ
         }]),
         "theme" => Effect::Ops(Vec::new()), // applied by the caller (local)
         "exit" | "quit" => Effect::Exit,
-        "memory" => {
-            let _ = status.plan_status();
-            Effect::Ops(Vec::new())
-        }
-        "snapshots" => {
-            let _ = status.snapshot_labels();
-            Effect::Ops(Vec::new())
-        }
-        "goal" => {
-            let _ = status.goal_status();
-            Effect::Ops(Vec::new())
-        }
         _ => Effect::Fallthrough,
     }
 }
@@ -267,9 +257,7 @@ pub fn help_lines() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::test_support as support;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     fn state() -> AppState {
         AppState::new(
@@ -293,13 +281,11 @@ mod tests {
 
     #[test]
     fn dispatch_maps_to_ops() {
-        let status = Arc::new(support::NullStatus);
-        let effect = dispatch(&parse("/compact").unwrap(), &state(), status.as_ref());
+        let effect = dispatch(&parse("/compact").unwrap(), &state());
         assert_eq!(effect, Effect::Ops(vec![Op::Compact { instruction: None }]));
         let effect = dispatch(
             &parse("/compact keep the api decisions").unwrap(),
             &state(),
-            status.as_ref(),
         );
         assert_eq!(
             effect,
@@ -308,25 +294,21 @@ mod tests {
             }])
         );
 
-        let effect = dispatch(&parse("/clear").unwrap(), &state(), status.as_ref());
+        let effect = dispatch(&parse("/clear").unwrap(), &state());
         assert_eq!(effect, Effect::Ops(Vec::new()));
 
         // Caller-handled commands dispatch as no-ops on the wire.
         for name in ["copy", "export", "theme", "usage", "version"] {
-            let effect = dispatch(
-                &parse(&format!("/{name}")).unwrap(),
-                &state(),
-                status.as_ref(),
-            );
+            let effect = dispatch(&parse(&format!("/{name}")).unwrap(), &state());
             assert_eq!(effect, Effect::Ops(Vec::new()), "{name}");
         }
 
         // `/model <name>` is caller-owned (picker semantics and the
         // catalog subcommands); dispatch carries no op.
-        let effect = dispatch(&parse("/model fast").unwrap(), &state(), status.as_ref());
+        let effect = dispatch(&parse("/model fast").unwrap(), &state());
         assert_eq!(effect, Effect::Ops(Vec::new()));
 
-        let effect = dispatch(&parse("/plan").unwrap(), &state(), status.as_ref());
+        let effect = dispatch(&parse("/plan").unwrap(), &state());
         assert_eq!(
             effect,
             Effect::Ops(vec![Op::SetPermissionMode {
@@ -336,7 +318,7 @@ mod tests {
 
         // Direct mode shortcuts.
         for (name, mode) in [("/auto", "auto"), ("/wave", "wave")] {
-            let effect = dispatch(&parse(name).unwrap(), &state(), status.as_ref());
+            let effect = dispatch(&parse(name).unwrap(), &state());
             assert_eq!(
                 effect,
                 Effect::Ops(vec![Op::SetPermissionMode {
@@ -347,7 +329,7 @@ mod tests {
         }
 
         // Reasoning-effort shortcut reaches the new wire op.
-        let effect = dispatch(&parse("/effort HIGH").unwrap(), &state(), status.as_ref());
+        let effect = dispatch(&parse("/effort HIGH").unwrap(), &state());
         assert_eq!(
             effect,
             Effect::Ops(vec![Op::SetThinking {
@@ -360,26 +342,17 @@ mod tests {
             "btw", "new", "sessions", "resume", "fork", "title", "init", "mcp", "status", "undo",
             "editor", "reload",
         ] {
-            let effect = dispatch(
-                &parse(&format!("/{name}")).unwrap(),
-                &state(),
-                status.as_ref(),
-            );
+            let effect = dispatch(&parse(&format!("/{name}")).unwrap(), &state());
             assert_eq!(effect, Effect::Ops(Vec::new()), "{name}");
         }
 
-        let effect = dispatch(&parse("/exit").unwrap(), &state(), status.as_ref());
+        let effect = dispatch(&parse("/exit").unwrap(), &state());
         assert_eq!(effect, Effect::Exit);
     }
 
     #[test]
     fn unknown_commands_fall_through() {
-        let status = Arc::new(support::NullStatus);
-        let effect = dispatch(
-            &parse("/skill:something").unwrap(),
-            &state(),
-            status.as_ref(),
-        );
+        let effect = dispatch(&parse("/skill:something").unwrap(), &state());
         assert_eq!(effect, Effect::Fallthrough);
     }
 

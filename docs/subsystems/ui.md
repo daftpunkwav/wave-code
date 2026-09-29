@@ -132,7 +132,7 @@ receivers remain compatible.
   /model /provider /doctor /agents /hooks /release-notes /effort
   /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
-  /undo /editor /reload /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
+  /undo /editor /reload /copy /export /exit /quit`) with fuzzy completion; unknown `/tokens` fall
   through as user input (skills). Every command that takes a parameter
   opens its interactive surface when invoked bare — `/theme` picks from
   the theme selector, `/effort` from the level list, `/title`, `/editor`,

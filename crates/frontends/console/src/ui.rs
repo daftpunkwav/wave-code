@@ -1384,7 +1384,7 @@ impl ConsoleUi {
                     _ => {}
                 }
             }
-            return match slash::dispatch(&invocation, &self.state, self.status.as_ref()) {
+            return match slash::dispatch(&invocation, &self.state) {
                 slash::Effect::Ops(ops) => {
                     if invocation.name == "clear" {
                         self.clear_screen();

@@ -10,11 +10,14 @@ WaveCode 是一个无头优先（headless-first）的 Rust AI 编程 agent。单
 
 1. **任何 crate 都可以依赖 `infrastructure/`。** 这些 crate 是零内部依赖的叶子原语。
 2. **`runtime/runner` 只依赖 trait 接缝（trait seams）和数据传输对象**（`state-store`、`wavecode-wire`、`infrastructure-base`）。它不得依赖 tools、sandbox、hooks、memory、skills、MCP 或 transport；具体实现从上层注入。
-3. **`operations/bootstrap` 是组合根（composition root）。** 它是唯一允许把具体能力适配到 runner 的 trait 接缝上的 crate。策略放在能力 crate 里；bootstrap 只承载接线与映射。除前端外没有任何 crate 依赖 bootstrap（其测试除外：gateway 的服务器测试以 dev-dependency 的方式使用它的密封装配接缝）。gateway 的 MCP-serve 模块是一个只引用 `wavecode_tools` 注册表类型的服务表皮；executor 的构造仍留在 bootstrap。bootstrap 独占能力消费的唯一已记录例外是：模型工具与其引擎同居——`state-goal`、`state-plan`、`action-jobs`、`action-workflow`、`wavecode-skills` 与 `wavecode-memory` 直接引用 `wavecode_tools`，以便在共享的 `Tool` 抽象上托管各自的工具（bootstrap 仍逐一注册它们）；此外 `wavecode-tools` 消费词汇层的 `action-tasks` 接缝来实现委派工具。
+3. **`operations/bootstrap` 是组合根（composition root）。** 它是唯一允许把具体能力适配到 runner 的 trait 接缝上的 crate。策略放在能力 crate 里；bootstrap 只承载接线与映射。除前端外没有任何 crate 依赖 bootstrap（其测试除外：gateway 的服务器测试以 dev-dependency 的方式使用它的密封装配接缝）。gateway 的 MCP-serve 模块是一个只引用 `wavecode_tools` 注册表类型的服务表皮；executor 的构造仍留在 bootstrap。bootstrap 独占能力消费的已记录例外有：模型工具与其引擎同居——`state-goal`、`state-plan`、`action-jobs`、`action-workflow`、`wavecode-skills` 与 `wavecode-memory` 直接引用 `wavecode_tools`，以便在共享的 `Tool` 抽象上托管各自的工具（bootstrap 仍逐一注册它们）；`wavecode-tools` 消费词汇层的 `action-tasks` 接缝来实现委派工具；`wavecode-tools` 还引用 `wavecode-context` 以使用共享的 `SpillStore`（shell 工具把截断输出落盘到其中，bootstrap 构造并注入唯一的共享实例）。
 4. **策略永不匹配工具名。** 工具携带声明式属性（`wavecode_tools::Tool::is_read_only` / `is_destructive` / `kind`，即 `wavecode-protocol` 的 `ToolKind` 分类），策略决策消费这些属性（`operations_bootstrap::policy_adapter`），因此新增一个工具不会让策略层悄悄漂移。
 5. **新行为落在扩展点上，而不是改循环。** 修改 `runtime/runner` 必须同步更新本文档。
 
 ## 分层图
+
+这张分组图是示意性的，不是严格的 DAG 渲染——依赖规则 3 例外清单里记录的
+跨组边与 `cargo metadata` 才是两者不一致时的依据。
 
 ```
 frontends      wavecode 二进制（exec / repl / resume / console 启动）与
@@ -103,7 +106,7 @@ infrastructure channels + interrupts + limits、TTL/LRU 缓存、分层配置、
 
 ### `foundation/` + `capabilities/` — 能力栈
 
-旧式命名的 `wavecode-*` crate。bootstrap 是它们的默认消费者；已记录的例外是依赖规则 3 中列出的工具宿主引擎——它们消费 `wavecode-tools`（并经由它消费 `action-tasks` 接缝）来托管各自的模型工具。
+旧式命名的 `wavecode-*` crate。bootstrap 是它们的默认消费者；已记录的例外是依赖规则 3 中列出的工具宿主引擎——它们消费 `wavecode-tools`（并经由它消费 `action-tasks` 接缝）来托管各自的模型工具；另有 `wavecode-tools` 自身指向 `wavecode-context` 的共享 spill 存储边。
 
 | Crate | 职责 |
 | --- | --- |

@@ -82,6 +82,11 @@ pub struct SessionHandle {
     pub skill_names: Vec<String>,
     /// Persistent memory index text (empty when memory degraded).
     pub memory_index: String,
+    /// Instruction files actually loaded into context (`AGENTS.md`,
+    /// `AGENTS.local.md`, `.wavecode/rules/*.md` tiers), in concat
+    /// order — the display source of truth for frontends, so a
+    /// `/memory` view can never drift from what the session injected.
+    pub instruction_sources: Vec<PathBuf>,
     /// Configured MCP servers as one display line each.
     pub mcp_servers: Vec<String>,
     /// Startup warnings in assembly order.
@@ -660,7 +665,8 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         wavecode_sandbox::Sandbox::from_rules(permission_mode, permissions.allow, permissions.deny);
 
     // 4. Context sources with warn-and-continue degradation.
-    let (instruction_memory, memory_index) = assemble_memory(home.as_deref(), &cwd, &mut warnings);
+    let (instruction_memory, memory_index, instruction_sources) =
+        assemble_memory(home.as_deref(), &cwd, &mut warnings);
     let (skill_catalog, skill_names, skill_set) =
         assemble_skills(home.as_deref(), &cwd, &mut warnings);
     let hooks = assemble_hooks(&config, &mut warnings);
@@ -1133,6 +1139,7 @@ pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
         permission_mode: permission_mode_raw,
         skill_names,
         memory_index,
+        instruction_sources,
         mcp_servers,
         warnings,
         tools_registry: registry.clone(),
@@ -1309,15 +1316,17 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
         });
 }
 
-/// Assemble instruction memory and the persistent index with degradation.
+/// Assemble instruction memory and the persistent index with
+/// degradation, returning the combined text, the index text, and the
+/// files that went into the concatenation.
 fn assemble_memory(
     home: Option<&Path>,
     cwd: &Path,
     warnings: &mut Vec<String>,
-) -> (String, String) {
+) -> (String, String, Vec<PathBuf>) {
     let Some(home) = home else {
         warnings.push("home directory unavailable; memory disabled".to_string());
-        return (String::new(), String::new());
+        return (String::new(), String::new(), Vec::new());
     };
     let instruction = wavecode_memory::collect(Some(home), cwd);
     let store_root = wavecode_memory::MemoryStore::default_root(home);
@@ -1329,7 +1338,7 @@ fn assemble_memory(
             ));
             String::new()
         });
-    (instruction.combined, index)
+    (instruction.combined, index, instruction.sources)
 }
 
 /// Assemble the skill catalog text with discovery warnings preserved,

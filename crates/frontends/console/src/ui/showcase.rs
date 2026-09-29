@@ -26,6 +26,7 @@ pub(super) fn showcase_ui() -> ConsoleUi {
             permission_mode: "auto".to_string(),
             skill_names: Vec::new(),
             mcp_servers: vec!["fs".to_string()],
+            memory_files: Vec::new(),
             status: Arc::new(NullStatus),
             session_id: "session-0001".to_string(),
             session_title: None,

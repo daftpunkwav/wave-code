@@ -29,6 +29,7 @@ fn ui_with_home(name: &str) -> (ConsoleUi, PathBuf) {
             permission_mode: "auto".to_string(),
             skill_names: Vec::new(),
             mcp_servers: Vec::new(),
+            memory_files: Vec::new(),
             status: Arc::new(NullStatus),
             session_id: "session-0001".to_string(),
             session_title: None,
@@ -204,23 +205,36 @@ fn malformed_catalog_cancels_the_subcommands() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// `/memory` lists the AGENTS.md instruction chain for the session:
-/// every file from the working directory upward, each with its line
-/// count.
+/// `/memory` lists the instruction files the bootstrap assembled into
+/// the session — AGENTS.md, its local supplement, and the rules tier —
+/// in concat order, each with its line count.
 #[test]
 fn memory_lists_the_agents_chain() {
     let (mut ui, home) = ui_with_home("memory");
     let cwd = std::env::temp_dir().join("wavecode-memory-cwd");
     let _ = std::fs::remove_dir_all(&cwd);
-    std::fs::create_dir_all(cwd.join("nested")).unwrap();
+    std::fs::create_dir_all(cwd.join(".wavecode").join("rules")).unwrap();
     std::fs::write(cwd.join("AGENTS.md"), "# root\nrules here\n").unwrap();
-    std::fs::write(cwd.join("nested").join("AGENTS.md"), "# nested\n").unwrap();
-    ui.state.cwd = cwd.join("nested");
+    std::fs::write(cwd.join("AGENTS.local.md"), "# local\n").unwrap();
+    std::fs::write(
+        cwd.join(".wavecode").join("rules").join("01-x.md"),
+        "# rule\n",
+    )
+    .unwrap();
+    // The assembled source list is the display truth, not a rescan:
+    // files that never loaded would never show.
+    ui.memory_files = vec![
+        cwd.join("AGENTS.md"),
+        cwd.join("AGENTS.local.md"),
+        cwd.join(".wavecode").join("rules").join("01-x.md"),
+    ];
     ui.user_submit("/memory");
     let text = transcript_plain(&mut ui);
-    assert!(text.contains("AGENTS.md"), "{text}");
+    assert!(text.contains("AGENTS.md ·"), "{text}");
+    assert!(text.contains("AGENTS.local.md ·"), "local tier shown: {text}");
+    assert!(text.contains("01-x.md ·"), "rules tier shown: {text}");
     assert!(text.contains("(2 lines)"), "root file counted: {text}");
-    assert!(text.contains("(1 lines)"), "nested file counted: {text}");
+    assert!(text.contains("(1 lines)"), "local file counted: {text}");
     let _ = std::fs::remove_dir_all(&home);
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -231,7 +245,7 @@ fn memory_without_files_reports_empty() {
     let (mut ui, home) = ui_with_home("memory-empty");
     ui.user_submit("/memory");
     let text = transcript_plain(&mut ui);
-    assert!(text.contains("no AGENTS.md in scope"), "{text}");
+    assert!(text.contains("no instruction files in scope"), "{text}");
     let _ = std::fs::remove_dir_all(&home);
 }
 

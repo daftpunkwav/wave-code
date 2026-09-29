@@ -127,6 +127,10 @@ pub struct UiContext {
     pub skill_names: Vec<String>,
     /// Connected MCP server names.
     pub mcp_servers: Vec<String>,
+    /// Instruction files assembled into the session's context
+    /// (`AGENTS.md` tiers and rules), in concat order — the display
+    /// source of truth for `/memory`, never a local rescan.
+    pub memory_files: Vec<std::path::PathBuf>,
     /// Session status queries (plan, goal, snapshots).
     pub status: Arc<dyn StatusQueries>,
     /// Session id (journal identity; rotates on `/new`).
@@ -258,6 +262,8 @@ pub struct ConsoleUi {
     factory: Option<std::sync::Arc<SessionFactory>>,
     /// Model catalog for the `/model` picker.
     model_entries: Vec<ModelEntryView>,
+    /// Assembled instruction files for `/memory` (see [`UiContext`]).
+    memory_files: Vec<std::path::PathBuf>,
     /// Thinking levels the picker offers (empty hides the row).
     thinking_levels: Vec<String>,
     /// Active `/btw` side session, when present.
@@ -374,6 +380,7 @@ impl ConsoleUi {
             pending_launch: None,
             factory: None,
             model_entries: ctx.model_entries.clone(),
+            memory_files: ctx.memory_files.clone(),
             thinking_levels: ctx.thinking_levels.clone(),
             btw: None,
             btw_log: Vec::new(),
@@ -2672,51 +2679,29 @@ verify from the repository.";
         }
     }
 
-    /// `/memory`: the AGENTS.md instruction files in scope for this
-    /// session — the working-directory chain upward plus the home-level
-    /// file the bootstrap reads. Each line names the file and its size,
-    /// so "what is the model reading" is one command away.
+    /// `/memory`: the instruction files the bootstrap actually loaded
+    /// into this session's context (`AGENTS.md` plus `AGENTS.local.md`
+    /// tiers and `.wavecode/rules/*.md`), in concat order. The assembled
+    /// list — not a local rescan — is the source of truth, so "what is
+    /// the model reading" can never drift from what was injected. Each
+    /// line names the file and its size.
     fn show_memory_files(&mut self) {
-        let mut found = 0;
-        let mut dir = Some(self.state.cwd.clone());
-        while let Some(current) = dir {
-            let candidate = current.join("AGENTS.md");
-            if candidate.is_file()
-                && let Ok(meta) = std::fs::metadata(&candidate)
-            {
-                found += 1;
-                self.push_status(
-                    &format!(
-                        "AGENTS.md · {} ({} lines)",
-                        candidate.display(),
-                        std::fs::read_to_string(&candidate)
-                            .map(|text| text.lines().count())
-                            .unwrap_or(0)
-                            .max(if meta.len() > 0 { 1 } else { 0 })
-                    ),
-                    false,
-                );
-            }
-            dir = current.parent().map(PathBuf::from);
-        }
-        if let Some(home) = self.state.home.clone() {
-            let candidate = home.join(".wavecode").join("AGENTS.md");
-            if candidate.is_file() {
-                found += 1;
-                let lines = std::fs::read_to_string(&candidate)
-                    .map(|text| text.lines().count())
-                    .unwrap_or(0);
-                self.push_status(
-                    &format!("AGENTS.md · {} ({lines} lines)", candidate.display()),
-                    false,
-                );
-            }
-        }
-        if found == 0 {
+        if self.memory_files.is_empty() {
             self.push_status(
-                "no AGENTS.md in scope (/init writes one for this repo)",
+                "no instruction files in scope (/init writes an AGENTS.md for this repo)",
                 false,
             );
+            return;
+        }
+        for path in self.memory_files.clone() {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("?");
+            let lines = std::fs::read_to_string(&path)
+                .map(|text| text.lines().count())
+                .unwrap_or(0);
+            self.push_status(&format!("{name} · {} ({lines} lines)", path.display()), false);
         }
     }
 

@@ -1198,6 +1198,7 @@ fn ui_ctx_of(
         permission_mode: handle.permission_mode.clone(),
         skill_names: handle.skill_names.clone(),
         mcp_servers: handle.mcp_servers.clone(),
+        memory_files: handle.instruction_sources.clone(),
         status: handle.status.clone(),
         session_id,
         session_title: title,

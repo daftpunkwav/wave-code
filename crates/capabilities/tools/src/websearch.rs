@@ -330,11 +330,15 @@ fn resolve_count(input: &Value) -> std::result::Result<usize, ToolOutput> {
     }
 }
 
-/// Parse `timeout_ms` (default 15 s, clamped to 60 s).
+/// Parse `timeout_ms` (default 15 s, clamped to 60 s). Zero is rejected:
+/// a zero-length bound times the search out before it starts.
 fn resolve_timeout_ms(input: &Value) -> std::result::Result<u64, ToolOutput> {
     match input.get("timeout_ms") {
         None | Some(Value::Null) => Ok(DEFAULT_TIMEOUT_MS),
         Some(v) => match v.as_u64() {
+            Some(0) => Err(err_output(
+                "invalid parameter 'timeout_ms' (positive integer required; omit it for the default)",
+            )),
             Some(n) => Ok(n.min(MAX_TIMEOUT_MS)),
             None => Err(err_output(
                 "invalid parameter 'timeout_ms' (non-negative integer required)",
@@ -478,6 +482,24 @@ mod tests {
         assert_eq!(hits[0].snippet, "snippet with <tags> here");
         assert_eq!(hits[1].title, "Second 'Result'");
         assert_eq!(hits[1].url, "https://example.com/second");
+    }
+
+    /// `timeout_ms` resolution: default, ceiling clamp, and a rejected
+    /// zero (it would time the search out before it starts).
+    #[test]
+    fn zero_timeout_is_rejected() {
+        assert_eq!(
+            resolve_timeout_ms(&serde_json::json!({})).unwrap(),
+            DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolve_timeout_ms(&serde_json::json!({"timeout_ms": 999_999_999})).unwrap(),
+            MAX_TIMEOUT_MS
+        );
+        let zero = resolve_timeout_ms(&serde_json::json!({"timeout_ms": 0}))
+            .expect_err("zero must be rejected");
+        assert!(zero.is_error);
+        assert!(zero.content.contains("timeout_ms"), "{}", zero.content);
     }
 
     #[test]

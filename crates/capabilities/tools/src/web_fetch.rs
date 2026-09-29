@@ -62,11 +62,15 @@ fn resolve_max_bytes(input: &Value) -> std::result::Result<usize, ToolOutput> {
     }
 }
 
-/// Parse `timeout_ms` (default 30 s, clamped to 300 s).
+/// Parse `timeout_ms` (default 30 s, clamped to 300 s). Zero is rejected:
+/// a zero-length request timeout fires before the request is sent.
 fn resolve_timeout_ms(input: &Value) -> std::result::Result<u64, ToolOutput> {
     match input.get("timeout_ms") {
         None | Some(Value::Null) => Ok(DEFAULT_TIMEOUT_MS),
         Some(v) => match v.as_u64() {
+            Some(0) => Err(err_output(
+                "invalid parameter 'timeout_ms' (positive integer required; omit it for the default)",
+            )),
             Some(n) => Ok(n.min(MAX_TIMEOUT_MS)),
             None => Err(err_output(
                 "invalid parameter 'timeout_ms' (non-negative integer required)",
@@ -544,6 +548,8 @@ mod tests {
             resolve_timeout_ms(&serde_json::json!({"timeout_ms": 999_999_999})).unwrap(),
             MAX_TIMEOUT_MS
         );
+        // Zero would fire the request timeout before the request is sent.
+        assert!(resolve_timeout_ms(&serde_json::json!({"timeout_ms": 0})).is_err());
         assert!(resolve_timeout_ms(&serde_json::json!({"timeout_ms": "fast"})).is_err());
     }
 

@@ -28,11 +28,10 @@ fn tokens(segment: &str) -> Vec<String> {
 }
 
 /// True when the `rm`-style flags request both recursion and force.
-fn recursive_and_force(flags: &[String]) -> bool {
+fn recursive_and_force<'a>(flags: impl IntoIterator<Item = &'a str>) -> bool {
     let mut recursive = false;
     let mut force = false;
-    for flag in flags {
-        if flag == "--recursive" {
+    for flag in flags {        if flag == "--recursive" {
             recursive = true;
         } else if flag == "--force" {
             force = true;
@@ -158,16 +157,16 @@ fn segment_reason(segment: &str) -> Option<&'static str> {
             None
         }
         // Recursive forced deletion of a system root: the classic
-        // unrecoverable-data-loss shape.
+        // unrecoverable-data-loss shape. Flags and operands are scanned
+        // over the whole argument list independently: a trailing-flag
+        // spelling (`rm x -rf /`) must not dodge the screen the way a
+        // single split at the first operand would allow.
         "rm" => {
-            let split = rest
-                .iter()
-                .position(|t| !t.starts_with('-'))
-                .unwrap_or(rest.len());
-            let (flags, operands) = rest.split_at(split);
-            (recursive_and_force(flags)
-                && operands.iter().any(|o| {
-                    PROTECTED_ROOTS.contains(&o.as_str()) || protected_drive_root(o)
+            let flags: Vec<&String> = rest.iter().filter(|t| t.starts_with('-')).collect();
+            (recursive_and_force(flags.iter().map(|flag| flag.as_str()))
+                && rest.iter().any(|o| {
+                    !o.starts_with('-')
+                        && (PROTECTED_ROOTS.contains(&o.as_str()) || protected_drive_root(o))
                 }))
             .then_some("rm -rf targets a system root")
         }
@@ -251,6 +250,13 @@ mod tests {
             Some("rm -rf targets a system root")
         );
         assert_eq!(reason("rm -rf \"C:/\""), Some("rm -rf targets a system root"));
+        // Trailing flags are scanned like leading ones: the operand-first
+        // spelling must not dodge the screen.
+        assert_eq!(reason("rm /etc -rf"), Some("rm -rf targets a system root"));
+        assert_eq!(
+            reason("rm missing.txt -r -f /"),
+            Some("rm -rf targets a system root")
+        );
     }
 
     #[test]

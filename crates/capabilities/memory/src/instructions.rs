@@ -117,13 +117,17 @@ pub fn collect(home: Option<&Path>, cwd: &Path) -> InstructionMemory {
             };
             seen.push(key);
             let base = file.parent().map(Path::to_path_buf).unwrap_or_default();
-            let expanded = expand_at_refs(&content, &base, 0, &mut Vec::new());
+            let mut nested: Vec<PathBuf> = Vec::new();
+            let expanded = expand_at_refs(&content, &base, 0, &mut Vec::new(), &mut nested);
             if !mem.combined.is_empty() {
                 mem.combined.push_str("\n\n");
             }
             mem.combined.push_str(&format!("## {}\n\n", file.display()));
             mem.combined.push_str(expanded.trim_end());
             mem.sources.push(file);
+            // @ref-expanded files ride along: `/memory` must list every
+            // file whose content was injected, not just the tier heads.
+            mem.sources.extend(nested);
         }
     };
 
@@ -157,13 +161,17 @@ pub fn collect(home: Option<&Path>, cwd: &Path) -> InstructionMemory {
 /// replaces the marker in place (with a source title), recursing up to
 /// [`MAX_INCLUDE_DEPTH`]; `visited` records already-expanded files
 /// (canonicalized paths) so repeated / cyclic references stay literal
-/// (cycle-safe, duplicate-safe). References to missing / unreadable files are
-/// likewise kept literal — shown honestly, never silently dropped.
+/// (cycle-safe, duplicate-safe). Every successfully expanded file is
+/// appended to `expanded` (raw paths, in expansion order) so the caller
+/// can account for the injected content. References to missing /
+/// unreadable files are likewise kept literal — shown honestly, never
+/// silently dropped.
 fn expand_at_refs(
     content: &str,
     base_dir: &Path,
     depth: usize,
     visited: &mut Vec<PathBuf>,
+    expanded: &mut Vec<PathBuf>,
 ) -> String {
     let mut out = String::with_capacity(content.len());
     for token in content.split_inclusive(char::is_whitespace) {
@@ -178,19 +186,23 @@ fn expand_at_refs(
                 // keeping it literal is the same outcome.
                 let in_bounds = canonicalized_in_bounds(&path, base_dir);
                 let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                let expanded = if in_bounds && depth < MAX_INCLUDE_DEPTH && !visited.contains(&key)
+                let expanded_text = if in_bounds
+                    && depth < MAX_INCLUDE_DEPTH
+                    && !visited.contains(&key)
                 {
                     std::fs::read_to_string(&path).ok().map(|inner| {
                         visited.push(key);
+                        expanded.push(path.clone());
                         let inner_base = path.parent().unwrap_or(base_dir);
-                        let inner = expand_at_refs(&inner, inner_base, depth + 1, visited);
+                        let inner =
+                            expand_at_refs(&inner, inner_base, depth + 1, visited, expanded);
                         format!("### {reference}\n\n{}", inner.trim_end())
                     })
                 } else {
                     None // Out of bounds (incl. link escape) / over depth /
                     // already expanded (cycle): keep literal.
                 };
-                match expanded {
+                match expanded_text {
                     Some(text) => {
                         out.push_str(&text);
                         out.push_str(trail_ws);
@@ -452,6 +464,44 @@ mod tests {
         assert!(mem.combined.contains("B-CONTENT"));
         // The back reference to a inside b stays literal (a is in visited).
         assert!(mem.combined.contains("@a.md"));
+    }
+
+    /// Successfully expanded `@ref` targets register as sources: `/memory`
+    /// must list every file whose content was injected, while references
+    /// kept literal (missing or trust-boundary-rejected; they inject
+    /// nothing) must not appear.
+    #[test]
+    fn expanded_refs_register_as_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        write(&root.join(".git/HEAD"), "x\n");
+        write(&root.join("docs/extra.md"), "EXTRA-CONTENT");
+        write(&root.join("f0.md"), "LV0\n@f1.md");
+        write(&root.join("f1.md"), "LV1");
+        write(&dir.path().join("outside.md"), "OUTSIDE-CONTENT");
+        write(
+            &root.join("AGENTS.md"),
+            "see @docs/extra.md and @f0.md, but @docs/missing.md and @../outside.md stay literal",
+        );
+
+        let mem = collect(None, &root);
+        let names: Vec<String> = mem
+            .sources
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // AGENTS.md first, then its expanded refs in expansion order.
+        assert_eq!(names[0], "AGENTS.md", "{names:?}");
+        assert!(names.contains(&"extra.md".to_string()), "{names:?}");
+        assert!(names.contains(&"f0.md".to_string()), "{names:?}");
+        assert!(names.contains(&"f1.md".to_string()), "{names:?}");
+        // Injected content really came from those files.
+        assert!(mem.combined.contains("EXTRA-CONTENT"));
+        assert!(mem.combined.contains("LV1"));
+        // Kept-literal references register nothing: the missing file and
+        // the trust-rejected parent escape inject no content.
+        assert!(!names.contains(&"missing.md".to_string()), "{names:?}");
+        assert!(!mem.combined.contains("OUTSIDE-CONTENT"), "{}", mem.combined);
     }
 
     /// Rules-dir merge `.wavecode/rules/*.md` concatenated

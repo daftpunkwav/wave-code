@@ -62,11 +62,16 @@ fn discover(candidates: &[&str]) -> Option<String> {
     None
 }
 
-/// Parse `timeout_ms` (default 60 s, clamped to 300 s).
+/// Parse `timeout_ms` (default 60 s, clamped to 300 s). Zero is rejected:
+/// a zero-length bound kills the script before any output, so it surfaces
+/// as a business error the model can fix.
 fn resolve_timeout(input: &Value) -> std::result::Result<u64, ToolOutput> {
     match input.get("timeout_ms") {
         None | Some(Value::Null) => Ok(DEFAULT_TIMEOUT_MS),
         Some(v) => match v.as_u64() {
+            Some(0) => Err(err_output(
+                "invalid parameter 'timeout_ms' (positive integer required; omit it for the default)",
+            )),
             Some(n) => Ok(n.min(MAX_TIMEOUT_MS)),
             None => Err(err_output(
                 "invalid parameter 'timeout_ms' (non-negative integer required)",
@@ -354,6 +359,12 @@ mod tests {
             resolve_timeout(&serde_json::json!({"timeout_ms": 999_999_999})).unwrap(),
             MAX_TIMEOUT_MS
         );
+        // Zero is rejected: it cannot bound a run (the kill fires before
+        // any output), so it must not silently pass as a valid bound.
+        let zero = resolve_timeout(&serde_json::json!({"timeout_ms": 0}))
+            .expect_err("zero must be rejected");
+        assert!(zero.is_error);
+        assert!(zero.content.contains("timeout_ms"), "{}", zero.content);
         assert!(resolve_timeout(&serde_json::json!({"timeout_ms": -1})).is_err());
         assert!(resolve_timeout(&serde_json::json!({"timeout_ms": "fast"})).is_err());
         assert!(resolve_timeout(&serde_json::json!({"timeout_ms": 1.5})).is_err());

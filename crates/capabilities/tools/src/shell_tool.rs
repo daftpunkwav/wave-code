@@ -23,6 +23,25 @@ use crate::{Result, Tool, ToolCtx, ToolOutput, err_output, lock};
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 /// Timeout cap: 300 s, clamped to the cap when exceeded.
 const MAX_TIMEOUT_MS: u64 = 300_000;
+
+/// Parse `timeout_ms` (default 60 s, clamped to 300 s). Zero is rejected:
+/// a zero-length bound cannot run a command (the kill path would fire
+/// before any output, and the promotion path would promote every run
+/// immediately), so it surfaces as a business error the model can fix.
+fn resolve_timeout(input: &Value) -> std::result::Result<u64, ToolOutput> {
+    match input.get("timeout_ms") {
+        None | Some(Value::Null) => Ok(DEFAULT_TIMEOUT_MS),
+        Some(v) => match v.as_u64() {
+            Some(0) => Err(err_output(
+                "invalid parameter 'timeout_ms' (positive integer required; omit it for the default)",
+            )),
+            Some(n) => Ok(n.min(MAX_TIMEOUT_MS)),
+            None => Err(err_output(
+                "invalid parameter 'timeout_ms' (non-negative integer required)",
+            )),
+        },
+    }
+}
 /// Per-stream stdout / stderr output cap: 30 KB.
 pub(crate) const MAX_OUTPUT_BYTES: usize = 30 * 1024;
 
@@ -441,16 +460,9 @@ impl Tool for Shell {
                 ));
             }
         };
-        let timeout_ms = match input.get("timeout_ms") {
-            None | Some(Value::Null) => DEFAULT_TIMEOUT_MS,
-            Some(v) => match v.as_u64() {
-                Some(n) => n.min(MAX_TIMEOUT_MS),
-                None => {
-                    return Ok(err_output(
-                        "invalid parameter 'timeout_ms' (non-negative integer required)",
-                    ));
-                }
-            },
+        let timeout_ms = match resolve_timeout(&input) {
+            Ok(timeout_ms) => timeout_ms,
+            Err(output) => return Ok(output),
         };
 
         // Promotion path: with a handoff wired (and confinement off — its
@@ -733,6 +745,39 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+    }
+
+    /// `timeout_ms` resolution: absent/null mean the default, the cap
+    /// clamps, and zero is rejected — a zero bound cannot run anything
+    /// (the kill path fires before any output), so it must surface as a
+    /// business error instead of a guaranteed-dead command.
+    #[test]
+    fn zero_timeout_is_rejected_not_accepted() {
+        use super::resolve_timeout;
+        assert_eq!(
+            resolve_timeout(&serde_json::json!({})).unwrap(),
+            DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolve_timeout(&serde_json::json!({"timeout_ms": null})).unwrap(),
+            DEFAULT_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolve_timeout(&serde_json::json!({"timeout_ms": 1000})).unwrap(),
+            1000
+        );
+        assert_eq!(
+            resolve_timeout(&serde_json::json!({"timeout_ms": 999_999_999})).unwrap(),
+            MAX_TIMEOUT_MS
+        );
+        let zero = resolve_timeout(&serde_json::json!({"timeout_ms": 0}))
+            .expect_err("zero must be rejected");
+        assert!(zero.is_error);
+        assert!(zero.content.contains("timeout_ms"), "{}", zero.content);
+        assert!(
+            resolve_timeout(&serde_json::json!({"timeout_ms": -1})).is_err(),
+            "negative stays rejected"
+        );
     }
 
     #[tokio::test]

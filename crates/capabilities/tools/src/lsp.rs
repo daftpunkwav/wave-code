@@ -781,11 +781,17 @@ fn path_to_uri(path: &std::path::Path) -> String {
     }
 }
 
-/// Parse `timeout_ms` (default 30 s, clamped to 300 s).
+/// Parse `timeout_ms` (default 30 s, clamped to 300 s). Zero is rejected:
+/// a zero-length bound aborts the request before the server can answer.
 fn resolve_timeout(input: &Value) -> std::result::Result<Duration, ToolOutput> {
     let ms = match input.get("timeout_ms") {
         None | Some(Value::Null) => DEFAULT_TIMEOUT_MS,
         Some(v) => match v.as_u64() {
+            Some(0) => {
+                return Err(err_output(
+                    "invalid parameter 'timeout_ms' (positive integer required; omit it for the default)",
+                ));
+            }
             Some(n) => n.min(MAX_TIMEOUT_MS),
             None => {
                 return Err(err_output(
@@ -1357,6 +1363,22 @@ impl Tool for LspDiagnostics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `timeout_ms` resolution: default, ceiling clamp, and a rejected
+    /// zero (it would abort the request before the server can answer).
+    #[test]
+    fn zero_timeout_is_rejected() {
+        assert_eq!(
+            resolve_timeout(&serde_json::json!({})).unwrap(),
+            Duration::from_millis(DEFAULT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            resolve_timeout(&serde_json::json!({"timeout_ms": 999_999_999})).unwrap(),
+            Duration::from_millis(MAX_TIMEOUT_MS)
+        );
+        assert!(resolve_timeout(&serde_json::json!({"timeout_ms": 0})).is_err());
+        assert!(resolve_timeout(&serde_json::json!({"timeout_ms": -1})).is_err());
+    }
 
     /// Fake language server: answers initialize/symbol requests, errors hover,
     /// quits on `exit`. Returns the client-side stream end.

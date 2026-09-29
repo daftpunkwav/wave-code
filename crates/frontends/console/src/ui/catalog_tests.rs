@@ -290,3 +290,69 @@ fn agents_without_jobs_reports_empty() {
     assert!(text.contains("no background jobs"), "{text}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// Bare `/provider` opens the picker over the saved catalog, and Enter
+/// on a saved provider preseeds the wizard with that provider's preset
+/// (name, dialect, endpoint) instead of starting a blank new-provider
+/// wizard — the wiring between slash dispatch, the picker answer, and
+/// `provider_preset`.
+#[test]
+fn bare_provider_opens_the_picker_and_picking_preseeds_the_wizard() {
+    let (mut ui, home) = ui_with_home("bare-provider");
+    seed(&home);
+    ui.user_submit("/provider");
+    assert!(
+        matches!(ui.dialog, Some(Dialog::ProviderPick(_))),
+        "bare /provider opens the picker"
+    );
+    // The picker lists the catalog's provider with its model count.
+    let mut picker_text = String::new();
+    if let Some(dialog) = ui.dialog.as_mut() {
+        for line in dialog.render(80) {
+            picker_text.push_str(&strip_ansi(&line));
+            picker_text.push('\n');
+        }
+    }
+    assert!(
+        picker_text.contains("bigmodel · 1 model(s)"),
+        "picker lists the saved provider: {picker_text}"
+    );
+    // Enter on the saved provider (row 0) resolves the answer and the
+    // UI opens the wizard seeded from the provider's first spec.
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    assert!(
+        matches!(ui.dialog, Some(Dialog::ModelForm(_))),
+        "picking a provider opens the wizard"
+    );
+    let wizard_text: String = ui
+        .dialog
+        .as_mut()
+        .unwrap()
+        .render(80)
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        wizard_text.contains("provider bigmodel · anthropic-messages"),
+        "the wizard is preseeded from the saved spec: {wizard_text}"
+    );
+    // Two steps forward (provider name, API format) the base-url step
+    // shows the saved endpoint, not a blank field.
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    ui.handle_key(KeyEvent::plain(Key::Enter));
+    let wizard_text: String = ui
+        .dialog
+        .as_mut()
+        .unwrap()
+        .render(80)
+        .iter()
+        .map(|line| strip_ansi(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        wizard_text.contains("https://open.bigmodel.cn/api/anthropic"),
+        "the endpoint preseeds the base-url step: {wizard_text}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

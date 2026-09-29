@@ -668,6 +668,82 @@ mod tests {
         assert_eq!(sub, back);
     }
 
+    /// Wire tag of every `Op` variant. The match is exhaustive on
+    /// purpose: adding or renaming a variant breaks this compile and
+    /// forces the table below (and every wire consumer) to be updated.
+    fn op_tag(op: &Op) -> &'static str {
+        match op {
+            Op::UserInput { .. } => "user_input",
+            Op::Interrupt => "interrupt",
+            Op::ExecApproval { .. } => "exec_approval",
+            Op::QuestionAnswer { .. } => "question_answer",
+            Op::Compact { .. } => "compact",
+            Op::Rewind { .. } => "rewind",
+            Op::SetPermissionMode { .. } => "set_permission_mode",
+            Op::SetModel { .. } => "set_model",
+            Op::SetThinking { .. } => "set_thinking",
+            Op::Shutdown => "shutdown",
+        }
+    }
+
+    /// Every `Op` variant round-trips through JSON unchanged and keeps
+    /// its locked snake_case wire tag: frontends and the gateway depend
+    /// on both the shape and the spelling, and a variant that silently
+    /// loses a field on the wire is a cross-process contract break.
+    #[test]
+    fn every_op_variant_round_trips_with_its_locked_tag() {
+        let variants: Vec<Op> = vec![
+            Op::UserInput {
+                text: "hi".to_string(),
+                images: vec![UserImage {
+                    id: Some("img-1".to_string()),
+                    mime: "image/png".to_string(),
+                    base64: "aGk=".to_string(),
+                }],
+            },
+            Op::Interrupt,
+            Op::ExecApproval {
+                call_id: "call-1".to_string(),
+                decision: WireDecision::AllowAlways,
+            },
+            Op::ExecApproval {
+                call_id: "call-2".to_string(),
+                decision: WireDecision::Deny {
+                    reason: "no".to_string(),
+                },
+            },
+            Op::QuestionAnswer {
+                call_id: "call-3".to_string(),
+                answer: "option two".to_string(),
+            },
+            Op::Compact {
+                instruction: Some("keep the plan".to_string()),
+            },
+            Op::Compact { instruction: None },
+            Op::Rewind { turns: 2 },
+            Op::SetPermissionMode {
+                mode: "plan".to_string(),
+            },
+            Op::SetModel {
+                name: "claude-sonnet-4-5".to_string(),
+            },
+            Op::SetThinking {
+                effort: "low".to_string(),
+            },
+            Op::Shutdown,
+        ];
+        for op in variants {
+            let json = serde_json::to_value(&op).unwrap();
+            assert_eq!(
+                json.get("type").and_then(serde_json::Value::as_str),
+                Some(op_tag(&op)),
+                "{op:?} must keep its wire tag"
+            );
+            let back: Op = serde_json::from_value(json).unwrap();
+            assert_eq!(op, back, "{op:?} must round-trip unchanged");
+        }
+    }
+
     #[test]
     fn extended_fields_are_backward_compatible() {
         // Legacy senders omit the optional compaction instruction.

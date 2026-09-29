@@ -1404,4 +1404,94 @@ mod tests {
             "connect refusal surfaces as an HTTP transport error, got: {error}"
         );
     }
+
+    /// A per-request timeout is never retried: the server may have
+    /// received and acted on the request, so one re-issue could double a
+    /// side effect. Paused time drives the full request timeout instantly
+    /// while the real loopback connection hangs unanswered; the dial count
+    /// proves no second attempt was made.
+    #[tokio::test(start_paused = true)]
+    async fn timeout_is_never_retried() {
+        let dials = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = dials.clone();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Hold the connection open; never answer.
+                held.push(socket);
+            }
+        });
+        let transport = HttpMcp::new(HttpMcpConfig {
+            endpoint: format!("http://{addr}/mcp"),
+            headers: HashMap::new(),
+            oauth: None,
+        })
+        .unwrap();
+        let error = transport
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TransportError::Timeout(REQUEST_TIMEOUT_SECS)),
+            "an unanswered server surfaces as the request timeout, got: {error}"
+        );
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            1,
+            "a timeout must never be retried, even for a read-only method"
+        );
+    }
+
+    /// A send failure outside the connect phase never retries, not even
+    /// for a retriable method: the server closes after reading the
+    /// request, so the bytes definitely left the process and a re-issue
+    /// could double a side effect. The dial count locks the negative path.
+    #[tokio::test]
+    async fn non_connect_send_failure_is_never_retried() {
+        use tokio::io::AsyncReadExt;
+        let dials = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let counter = dials.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                // Consume part of the request (proving the connection and
+                // the write succeeded), then drop without answering: the
+                // client fails in the response phase, which is never a
+                // connect error.
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                drop(socket);
+            }
+        });
+        let transport = HttpMcp::new(HttpMcpConfig {
+            endpoint: format!("http://{addr}/mcp"),
+            headers: HashMap::new(),
+            oauth: None,
+        })
+        .unwrap();
+        let error = transport
+            .rpc("tools/list", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            dials.load(Ordering::SeqCst),
+            1,
+            "a non-connect send failure must not retry"
+        );
+        assert!(
+            matches!(error, TransportError::Http(_)),
+            "the failure surfaces as an HTTP transport error, got: {error}"
+        );
+    }
 }

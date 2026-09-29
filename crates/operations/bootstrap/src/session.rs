@@ -1861,6 +1861,95 @@ api_key = "k-inline"
             .unwrap();
     }
 
+    /// A fallback that cannot resolve (unknown name, missing key) is
+    /// skipped with one warning each while the session still assembles:
+    /// a broken fallback entry must never brick startup, the surviving
+    /// fallback stays silent (it joined the chain), and the primary's
+    /// identity is untouched.
+    #[tokio::test]
+    async fn unresolvable_fallback_providers_warn_and_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+model = "m1"
+model_provider = "p1"
+
+[model_providers.p1]
+type = "anthropic"
+base_url = "https://api.example.com/anthropic"
+api_key = "k-inline"
+fallback_providers = ["fb-good", "fb-no-key", "fb-unknown"]
+
+[model_providers.fb-good]
+type = "anthropic"
+base_url = "https://fb.example.com/anthropic"
+api_key = "k-good"
+
+[model_providers.fb-no-key]
+type = "anthropic"
+base_url = "https://fb.example.com/anthropic"
+"#,
+        )
+        .unwrap();
+        let handle = assemble_session(AssembleOptions {
+            config_path: Some(path),
+            model_override: None,
+            provider_override: None,
+            permission_override: None,
+            thinking_override: None,
+            wave_denylist: Vec::new(),
+            cwd: dir.path().to_path_buf(),
+            home: None,
+            identity: DEFAULT_IDENTITY.to_string(),
+            headless: true,
+            initial_history: Vec::new(),
+            session_id: None,
+        })
+        .unwrap();
+        // Exactly the two broken fallbacks are named, one warning each.
+        let skips: Vec<&String> = handle
+            .warnings
+            .iter()
+            .filter(|w| w.contains("skipping fallback provider"))
+            .collect();
+        assert_eq!(
+            skips.len(),
+            2,
+            "both broken fallbacks warn individually: {:?}",
+            handle.warnings
+        );
+        assert!(
+            skips
+                .iter()
+                .any(|w| w.contains("\"fb-no-key\"") && w.contains("missing an api key")),
+            "the keyless fallback names its cause: {skips:?}"
+        );
+        assert!(
+            skips
+                .iter()
+                .any(|w| w.contains("\"fb-unknown\"") && w.contains("undefined provider")),
+            "the unknown fallback names its cause: {skips:?}"
+        );
+        assert!(
+            !handle.warnings.iter().any(|w| w.contains("fb-good")),
+            "the resolvable fallback joins the chain without a warning: {:?}",
+            handle.warnings
+        );
+        // The primary identity is untouched by the fallback detour.
+        assert_eq!(handle.provider_id, "p1");
+        assert_eq!(handle.model_name, "m1");
+        handle
+            .client
+            .submit(Submission {
+                id: "s-end".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .unwrap();
+    }
+
     #[test]
     fn cli_permission_override_wins_over_config() {
         let mut warnings = Vec::new();

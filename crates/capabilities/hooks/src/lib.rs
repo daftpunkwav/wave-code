@@ -1162,4 +1162,48 @@ mod tests {
             None
         );
     }
+
+    /// The stdin payload every hook process receives is a locked JSON
+    /// shape — `{event, tool, input, output}` — because hook scripts in
+    /// user configs parse these exact field names. A prompt hook echoes
+    /// its stdin back on stdout (captured as context), making the exact
+    /// bytes handed to the hook process observable.
+    #[tokio::test]
+    async fn stdin_payload_json_shape_is_locked() {
+        // Platform stdin-to-stdout copy for a piped hook.
+        let echo = if cfg!(windows) { "more" } else { "cat" };
+        let tool_input = serde_json::json!({"command": "ls -la", "cwd": "/tmp"});
+        let hook_input = HookInput {
+            cwd: Path::new("."),
+            tool_name: Some("shell"),
+            tool_input: Some(&tool_input),
+            tool_output: Some("total 4"),
+        };
+        let engine = HookEngine::new(HashMap::new());
+        engine.register_prompt_hook(HookEventPoint::PreToolUse, def(echo));
+        let report = engine.run(HookEventPoint::PreToolUse, &hook_input).await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        let payload: serde_json::Value =
+            serde_json::from_str(&report.context).unwrap_or_else(|error| {
+                panic!("stdin is one JSON value: {error}: {:?}", report.context)
+            });
+        assert_eq!(payload["event"], "PreToolUse", "{payload}");
+        assert_eq!(payload["tool"], "shell", "{payload}");
+        assert_eq!(payload["input"], tool_input, "{payload}");
+        assert_eq!(payload["output"], "total 4", "{payload}");
+
+        // A non-tool point carries null tool/input/output fields.
+        let engine = HookEngine::new(HashMap::new());
+        engine.register_prompt_hook(HookEventPoint::Stop, def(echo));
+        let report = engine.run(HookEventPoint::Stop, &input(None)).await;
+        let payload: serde_json::Value =
+            serde_json::from_str(&report.context).unwrap_or_else(|error| {
+                panic!("stdin is one JSON value: {error}: {:?}", report.context)
+            });
+        assert_eq!(payload["event"], "Stop", "{payload}");
+        assert!(payload["tool"].is_null(), "{payload}");
+        assert!(payload["input"].is_null(), "{payload}");
+        assert!(payload["output"].is_null(), "{payload}");
+    }
 }

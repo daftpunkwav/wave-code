@@ -831,4 +831,60 @@ mod tests {
             "the retroactive notice must fire: {notes:?}"
         );
     }
+
+    /// Filling the table to its cap with a mix of running and finished
+    /// jobs, then spawning one more, prunes only the finished entries:
+    /// query history is dropped, every live job stays tracked (a pruned
+    /// running job would orphan its notice and lose `wait`/`cancel`).
+    #[tokio::test]
+    async fn table_cap_prunes_finished_and_keeps_running() {
+        let (_runtime, jobs) = harness();
+        // Six long-running jobs under one owner (below the per-owner
+        // cap) survive the prune.
+        let mut running_ids = Vec::new();
+        for _ in 0..6 {
+            running_ids.push(jobs.spawn(request("bg", LONG_CMD)).unwrap());
+        }
+        // Fifty-eight quick jobs fill the rest of the table and finish;
+        // ten fit per owner while all ten drivers are still Running.
+        let mut finished_ids = Vec::new();
+        for owner in 0..6 {
+            let owner = format!("w{owner}");
+            let count = if owner == "w5" { 8 } else { 10 };
+            for _ in 0..count {
+                finished_ids.push(jobs.spawn(request(&owner, "echo done")).unwrap());
+            }
+        }
+        assert_eq!(jobs.overview().len(), MAX_TRACKED_JOBS);
+        // Every filler reached its terminal state, so the prune has no
+        // in-flight filler to spare.
+        for id in &finished_ids {
+            let end = poll_finished(&jobs, id).await;
+            assert_eq!(end.exit_code, Some(0), "{id} must finish cleanly");
+        }
+        // The 65th spawn trips the cap: finished entries prune, the new
+        // job is admitted, and every running job keeps its slot.
+        let probe = jobs.spawn(request("bg", "echo probe")).unwrap();
+        for id in &running_ids {
+            let snap = jobs.read(id).unwrap_or_else(|| panic!("{id} pruned"));
+            assert_eq!(snap.state, JobState::Running, "{id} must survive");
+        }
+        for id in &finished_ids {
+            assert!(jobs.read(id).is_none(), "{id} must be pruned");
+        }
+        let probe_end = poll_finished(&jobs, &probe).await;
+        assert_eq!(probe_end.exit_code, Some(0));
+        assert_eq!(
+            jobs.overview().len(),
+            running_ids.len() + 1,
+            "only the running jobs plus the probe remain"
+        );
+        // Cleanup: release the live jobs so no process outlives the test.
+        for id in &running_ids {
+            assert!(jobs.cancel(id));
+        }
+        for id in &running_ids {
+            assert!(poll_finished(&jobs, id).await.cancelled);
+        }
+    }
 }

@@ -22,3 +22,5 @@ async-trait.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+# test-util: paused-clock tests for the shutdown drain window.
+tokio = { workspace = true, features = ["test-util"] }

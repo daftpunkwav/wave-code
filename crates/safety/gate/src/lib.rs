@@ -250,4 +250,40 @@ mod tests {
         assert!(rx.await.is_err());
         let _fresh = gate.wait_for("call-1").unwrap();
     }
+
+    /// `clear` (run teardown) drops every parked waiter at once: late
+    /// decisions find no waiter and every parked receiver resolves as
+    /// dropped, and the ids park fresh afterwards.
+    #[tokio::test]
+    async fn approval_clear_drops_all_parked_waiters() {
+        let gate = ApprovalGate::new();
+        let first = gate.wait_for("call-1").unwrap();
+        let second = gate.wait_for("call-2").unwrap();
+        assert_eq!(gate.pending_count(), 2);
+        gate.clear();
+        assert_eq!(gate.pending_count(), 0);
+        assert!(!gate.decide("call-1", ApprovalDecision::AllowOnce));
+        assert!(!gate.cancel("call-2"), "nothing left to withdraw");
+        assert!(first.await.is_err());
+        assert!(second.await.is_err());
+        // The emptied table parks fresh waiters again.
+        let _fresh = gate.wait_for("call-1").unwrap();
+        assert_eq!(gate.pending_count(), 1);
+    }
+
+    /// QuestionGate::clear mirrors ApprovalGate::clear: all waiters
+    /// dropped, late answers rejected, fresh parking afterwards.
+    #[tokio::test]
+    async fn question_clear_drops_all_parked_waiters() {
+        let gate = QuestionGate::new();
+        let rx = gate.wait_for("call-1").unwrap();
+        gate.wait_for("call-2").unwrap();
+        assert_eq!(gate.pending_count(), 2);
+        gate.clear();
+        assert_eq!(gate.pending_count(), 0);
+        assert!(!gate.answer("call-1", "late".to_string()));
+        assert!(rx.await.is_err());
+        let _fresh = gate.wait_for("call-1").unwrap();
+        assert_eq!(gate.pending_count(), 1);
+    }
 }

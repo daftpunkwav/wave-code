@@ -504,6 +504,52 @@ fn shrink_onto_the_base_repaints_the_frame() {
     assert!(text.contains("C") && !text.contains("\x1b[2J"), "{text:?}");
 }
 
+/// A frame emptied entirely (total 0 over a non-empty previous frame,
+/// e.g. a closed picker above an empty transcript) routes through the
+/// viewport repaint — not the full erase, which would wipe native
+/// scrollback: every physical row clears, the old lines never rewrite,
+/// and the next non-empty frame diffs incrementally again.
+#[test]
+fn fully_emptied_frame_clears_rows_without_a_full_erase() {
+    let mut screen = Screen::with_options(ScreenOptions {
+        synchronized: false,
+        clear_scrollback: false,
+    });
+    let mut out = Vec::new();
+    draw(&mut screen, &mut out, &["alpha", "beta"], 40, 4);
+    out.clear();
+    draw(&mut screen, &mut out, &[], 40, 4);
+    let text = String::from_utf8(out.clone()).unwrap();
+    assert!(
+        !text.contains("\x1b[2J"),
+        "an empty frame must not wipe the screen: {text:?}"
+    );
+    // Every viewport row erases in place (total 0 re-anchors the base
+    // to physical row 1).
+    assert_eq!(
+        text.matches("\x1b[K").count(),
+        4,
+        "each of the 4 rows clears: {text:?}"
+    );
+    assert!(
+        text.contains("\x1b[1;1H\x1b[K"),
+        "clearing starts at physical row 1: {text:?}"
+    );
+    assert!(
+        !text.contains("alpha") && !text.contains("beta"),
+        "the emptied lines are erased, not rewritten: {text:?}"
+    );
+    // Renderer state stays sane afterwards: the next frame diffs again.
+    out.clear();
+    draw(&mut screen, &mut out, &["gamma"], 40, 4);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("gamma"), "{text:?}");
+    assert!(
+        !text.contains("\x1b[2J"),
+        "back to incremental drawing: {text:?}"
+    );
+}
+
 #[test]
 fn cursor_marker_positions_hardware_cursor() {
     let mut screen = Screen::with_options(ScreenOptions {

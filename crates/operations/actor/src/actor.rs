@@ -1639,4 +1639,79 @@ mod tests {
             "disabled policy performs zero IO, not even mkdir"
         );
     }
+
+    /// The `supervised` drain: when the last client drops mid-operation,
+    /// the actor interrupts the work and waits at most `SHUTDOWN_DRAIN`
+    /// for it to settle — an operation that never settles holds the exit
+    /// for the full window, not forever. Paused time makes the window
+    /// exact without real sleeping.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_clients_drain_for_at_most_the_shutdown_window() {
+        let (submit_tx, mut submit_rx) = mpsc::channel::<Submission>(CONTROL_CHANNEL_CAP);
+        drop(submit_tx); // every client is gone
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAP);
+        let interrupt = InterruptHandle::new();
+        let mut pending = VecDeque::new();
+        let approvals = Arc::new(ApprovalGate::new());
+        let questions = Arc::new(QuestionGate::new());
+
+        let started = tokio::time::Instant::now();
+        let exit = supervised(
+            std::future::pending(),
+            &mut submit_rx,
+            &mut pending,
+            &event_tx,
+            &interrupt,
+            &approvals,
+            &questions,
+        )
+        .await;
+        assert!(exit, "dropped clients must end the actor");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= SHUTDOWN_DRAIN,
+            "the drain holds for the full window: {elapsed:?}"
+        );
+        assert!(
+            elapsed < SHUTDOWN_DRAIN * 2,
+            "the drain exits after the window, not much later: {elapsed:?}"
+        );
+        assert!(
+            interrupt.is_triggered(),
+            "the drain interrupts the in-flight work"
+        );
+    }
+
+    /// An operation that settles inside the drain window ends the actor
+    /// as soon as it completes — the drain never waits out the clock
+    /// when the work has already stopped.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_clients_exit_as_soon_as_the_operation_settles() {
+        let (submit_tx, mut submit_rx) = mpsc::channel::<Submission>(CONTROL_CHANNEL_CAP);
+        drop(submit_tx);
+        let (event_tx, _event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAP);
+        let interrupt = InterruptHandle::new();
+        let mut pending = VecDeque::new();
+        let approvals = Arc::new(ApprovalGate::new());
+        let questions = Arc::new(QuestionGate::new());
+
+        let half_window = SHUTDOWN_DRAIN / 2;
+        let started = tokio::time::Instant::now();
+        let exit = supervised(
+            tokio::time::sleep(half_window),
+            &mut submit_rx,
+            &mut pending,
+            &event_tx,
+            &interrupt,
+            &approvals,
+            &questions,
+        )
+        .await;
+        assert!(exit, "dropped clients must end the actor");
+        assert_eq!(
+            started.elapsed(),
+            half_window,
+            "the actor exits when the operation settles, not at the window end"
+        );
+    }
 }

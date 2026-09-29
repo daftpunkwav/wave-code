@@ -16,3 +16,7 @@ tracing.workspace = true
 # Test-only build switch: compiles the in-crate HTTP stub (test_support)
 # for downstream test suites; never enabled by production builds.
 test-support = []
+
+[dev-dependencies]
+# test-util: paused-clock test for the never-retried request timeout.
+tokio = { workspace = true, features = ["test-util"] }

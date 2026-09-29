@@ -1338,15 +1338,16 @@ fn model_no_args_opens_picker_and_alt_s_switches_live() {
     );
 }
 
-/// Bare `/provider add` opens the spec form; `/model` is a switching
-/// command and points at /provider for its retired subcommands.
+/// Bare `/provider add` opens the step-at-a-time model wizard;
+/// `/model` is a switching command and points at /provider for its
+/// retired subcommands.
 #[test]
-fn provider_add_bare_opens_the_spec_form() {
+fn provider_add_bare_opens_the_wizard() {
     let mut ui = ui();
     ui.user_submit("/provider add");
     assert!(
         matches!(ui.dialog, Some(Dialog::ModelForm(_))),
-        "spec form opens"
+        "wizard dialog opens"
     );
     ui.handle_key(KeyEvent::plain(Key::Esc));
     assert!(ui.dialog.is_none(), "esc dismisses");

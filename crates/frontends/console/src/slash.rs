@@ -125,8 +125,11 @@ pub fn dispatch(invocation: &Invocation, _state: &AppState, status: &dyn StatusQ
             Effect::Ops(Vec::new())
         }
         "provider" => {
-            // The UI caller owns /provider entirely: bare/add open the
-            // spec form, list/set/remove edit the saved catalog.
+            // The UI caller owns /provider entirely: bare opens the
+            // provider surface (picking a saved provider preseeds the
+            // wizard), bare `add` opens the wizard while the positional
+            // form inserts directly, and list/set/remove edit the saved
+            // catalog.
             Effect::Ops(Vec::new())
         }
         "effort" => {

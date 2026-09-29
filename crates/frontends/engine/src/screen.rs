@@ -162,9 +162,10 @@ impl Screen {
         let size_changed = self.size != (columns, height);
         // A frame that shrank to (or below) the base has no
         // rewrite-eligible rows: the whole viewport is stale scrollback
-        // and only a full repaint can re-show the surviving rows. An
-        // empty frame (total 0) stays on the diff path, where the stale
-        // rows clear without an erase.
+        // and only a repaint from physical row 1 can re-show the
+        // surviving rows. An empty frame (total 0) skips the full
+        // erase — it falls through to the shrink repaint below, which
+        // clears the stale rows without touching scrollback.
         let shrank_to_base = view.total <= self.base && view.total > 0;
         if !self.started || size_changed || shrank_to_base || height == 0 || columns == 0 {
             self.synchronized_start(out);

@@ -111,6 +111,26 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   tips, confirm-exit, history limit, wave denylist).
 
 ### Fixed
+- Leaving the console TUI runs the SessionEnd hooks and the memory
+  pass inside a bounded drain, matching `exec`; previously neither
+  fired on TUI exit.
+- The wave denylist is enforced on every session surface: it moved to
+  `~/.wavecode/wave-denylist.json` (owned by the config layer, with a
+  one-time migration from `console-settings.json`), and ACP and HTTP
+  serve sessions — which silently ran without the configured rules —
+  load the same store as the TUI, exec, and the REPL.
+- `/memory` lists the instruction files the session actually assembled
+  (AGENTS.md tiers, local supplements, and rules) instead of
+  re-walking directories, so the view cannot drift from the injected
+  context.
+- `/title <name>` before the first completed turn reports the missing
+  journal instead of printing a usage line, and settings-panel changes
+  to tool/edit display refresh already-rendered tool cards; `/quit`
+  completes like `/exit`.
+- `/permissions <name>` parses the shared protocol vocabulary exactly:
+  legacy aliases must be spelled as documented (`acceptEdits`,
+  `bypassPermissions`); unknown names warn and keep the mode instead
+  of matching case-insensitively.
 - Web fetch refuses redirect hops onto link-local hosts at every hop,
   so a public server cannot 302 the tool into cloud metadata or
   local-link addresses.

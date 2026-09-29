@@ -59,11 +59,11 @@ const TIER_MEMBERS: &[&str] = &[
 const FRONTEND_ALLOWLIST: &[(&str, &str)] = &[
     (
         "console-ui",
-        "operations-actor state-persistence tui-engine wavecode-config wavecode-wire",
+        "operations-actor state-persistence tui-engine wavecode-config wavecode-protocol wavecode-wire",
     ),
     (
         "harness-cli",
-        "console-ui operations-actor operations-bootstrap operations-eval operations-gateway operations-observe state-persistence wavecode-config wavecode-wire",
+        "console-ui operations-actor operations-bootstrap operations-eval operations-gateway operations-observe state-persistence wavecode-config wavecode-protocol wavecode-wire",
     ),
     ("tui-engine", ""),
 ];

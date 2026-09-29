@@ -20,7 +20,8 @@ pub fn render_todos(todos: &[TodoEntry], expanded: bool, columns: usize) -> Vec<
     }
     let theme = theme::current();
     let mut out = Vec::new();
-    out.push(theme.paint(Token::Border, &"─".repeat(columns.min(80))));
+    // Full-width rule, matching the queue pane's top border.
+    out.push(theme.paint(Token::Border, &"─".repeat(columns)));
     out.push(format!("  {}", theme.bold(Token::TextStrong, "Todo")));
 
     let rows: Vec<String> = todos

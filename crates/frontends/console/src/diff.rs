@@ -16,8 +16,9 @@ use tui_engine::width;
 
 /// Context lines shown around each change cluster.
 pub const CONTEXT_LINES: usize = 3;
-/// Per-side line budget for the O(n*m) LCS table; larger inputs render
-/// as a truncated summary instead of computing a diff.
+/// Per-side line budget for the O(n*m) LCS table (a flat u32 buffer,
+/// ~16 MiB at the cap); larger inputs render as a truncated summary
+/// instead of computing a diff.
 pub const MAX_DIFF_LINES: usize = 2000;
 
 /// One diff row.
@@ -36,15 +37,19 @@ pub enum DiffRow {
 pub fn compute_rows(old: &str, new: &str, incomplete: bool) -> Vec<DiffRow> {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
-    // LCS table.
-    let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
-    for (i, ai) in a.iter().enumerate() {
-        for (j, bj) in b.iter().enumerate() {
-            table[i + 1][j + 1] = if ai == bj {
-                table[i][j] + 1
+    // LCS table as one flat row-major u32 buffer: values never exceed
+    // MAX_DIFF_LINES, the single allocation avoids a Vec header per
+    // row, and the whole table stays bounded at ~16 MiB at the cap.
+    let width = b.len() + 1;
+    let mut table = vec![0u32; (a.len() + 1) * width];
+    for i in 0..a.len() {
+        for j in 0..b.len() {
+            let best = if a[i] == b[j] {
+                table[i * width + j] + 1
             } else {
-                table[i][j + 1].max(table[i + 1][j])
+                table[i * width + j + 1].max(table[(i + 1) * width + j])
             };
+            table[(i + 1) * width + j + 1] = best;
         }
     }
     // Backtrack to rows.
@@ -56,7 +61,7 @@ pub fn compute_rows(old: &str, new: &str, incomplete: bool) -> Vec<DiffRow> {
             rows.push(DiffRow::Context(a[i - 1].to_string()));
             i -= 1;
             j -= 1;
-        } else if j > 0 && (i == 0 || table[i][j] == table[i][j - 1]) {
+        } else if j > 0 && (i == 0 || table[i * width + j] == table[i * width + j - 1]) {
             rows.push(DiffRow::Added(b[j - 1].to_string()));
             j -= 1;
         } else {

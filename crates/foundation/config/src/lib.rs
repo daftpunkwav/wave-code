@@ -20,6 +20,8 @@ mod model_catalog;
 mod permissions;
 mod provider;
 
+pub mod denylist;
+
 /// Top-level config.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {

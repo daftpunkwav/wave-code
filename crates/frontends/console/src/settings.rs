@@ -48,9 +48,6 @@ pub struct UiSettings {
     pub tool_display: ToolDisplay,
     /// Edit-style tool rendering.
     pub edit_display: EditDisplay,
-    /// `wave`-mode command denylist: any shell command whose text
-    /// contains one of these substrings is denied outright (no prompt).
-    pub wave_denylist: Vec<String>,
     /// Saved default model (wire name) from the `/model` picker; applied
     /// by the harness at startup (CLI `--model` still wins).
     pub default_model: Option<String>,
@@ -96,7 +93,6 @@ impl Default for UiSettings {
             render_user_markdown: true,
             tool_display: ToolDisplay::Summary,
             edit_display: EditDisplay::Diff,
-            wave_denylist: Vec::new(),
             default_model: None,
             default_provider: None,
             default_effort: None,
@@ -135,15 +131,45 @@ impl UiSettings {
     }
 
     /// Load from the default path; missing or broken files yield the
-    /// defaults.
+    /// defaults. Legacy `wave_denylist` entries migrate once into the
+    /// config-owned store (see [`load_at`]).
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-            Err(_) => Self::default(),
+        let dir = wavecode_config::denylist::default_dir();
+        Self::load_at(&path, dir.as_deref())
+    }
+
+    /// [`Self::load`] against explicit paths (tests inject both).
+    fn load_at(path: &std::path::Path, denylist_dir: Option<&std::path::Path>) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        let settings: UiSettings = serde_json::from_str(&text).unwrap_or_default();
+        // One-time migration: the denylist used to live beside these UI
+        // preferences, which only the console surfaces read. It moved to
+        // the config-owned store every surface (TUI, exec, REPL, ACP,
+        // serve) enforces, so the entries move once and the legacy key
+        // is dropped from this file. The store side wins on conflicts;
+        // a failed store write leaves the file (and key) untouched.
+        let legacy = serde_json::from_str::<LegacySettings>(&text)
+            .map(|legacy| legacy.wave_denylist)
+            .unwrap_or_default();
+        if !legacy.is_empty()
+            && let Some(dir) = denylist_dir
+        {
+            let mut entries = wavecode_config::denylist::load_from(dir);
+            for entry in legacy {
+                if !entries.contains(&entry) {
+                    entries.push(entry);
+                }
+            }
+            if wavecode_config::denylist::save_to(dir, &entries).is_ok() {
+                settings.save_at(path);
+            }
         }
+        settings
     }
 
     /// Persist to the default path (best effort; a missing home just
@@ -152,6 +178,11 @@ impl UiSettings {
         let Some(path) = Self::path() else {
             return;
         };
+        self.save_at(&path);
+    }
+
+    /// [`Self::save`] to an explicit path (tests, migration).
+    fn save_at(&self, path: &std::path::Path) {
         if let Some(parent) = path.parent()
             && std::fs::create_dir_all(parent).is_ok()
             && let Ok(text) = serde_json::to_string_pretty(self)
@@ -159,6 +190,14 @@ impl UiSettings {
             let _ = std::fs::write(path, text);
         }
     }
+}
+
+/// The denylist's former storage shape, parsed only to migrate old
+/// files into the config-owned store.
+#[derive(serde::Deserialize, Default)]
+struct LegacySettings {
+    #[serde(default)]
+    wave_denylist: Vec<String>,
 }
 
 /// The shared handle every component reads at render time, so
@@ -224,5 +263,45 @@ impl SharedSettings {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One-time migration: legacy `wave_denylist` entries in the
+    /// settings file move into the config-owned store, merge with
+    /// entries already there, and the legacy key is dropped from the
+    /// file. The loaded settings never carry the field again.
+    #[test]
+    fn legacy_denylist_migrates_to_the_config_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        wavecode_config::denylist::save_to(&wave, &["already-there".to_string()]).unwrap();
+        let settings_path = wave.join("console-settings.json");
+        std::fs::write(
+            &settings_path,
+            r#"{"render_user_markdown": true, "wave_denylist": ["rm -rf", "already-there"]}"#,
+        )
+        .unwrap();
+
+        let settings = UiSettings::load_at(&settings_path, Some(&wave));
+        assert_eq!(
+            wavecode_config::denylist::load_from(&wave),
+            vec!["already-there".to_string(), "rm -rf".to_string()]
+        );
+        // The rewritten file carries no denylist key, so a second load
+        // cannot re-import and resurrect deliberately emptied entries.
+        let text = std::fs::read_to_string(&settings_path).unwrap();
+        assert!(!text.contains("wave_denylist"), "{text}");
+        assert!(settings.render_user_markdown);
+        let reloaded = UiSettings::load_at(&settings_path, Some(&wave));
+        assert_eq!(
+            wavecode_config::denylist::load_from(&wave),
+            vec!["already-there".to_string(), "rm -rf".to_string()]
+        );
+        drop(reloaded);
     }
 }

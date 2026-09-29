@@ -145,8 +145,7 @@ footer row 2             (transient exit hint ... context: N% (used/max))
   重染编辑器边框（plan = primary，wave = warning）。
 - 权限模式：`plan` 只读（非只读工具直接
   拒绝，无提示）、`auto` 放行编辑、仅对命令执行与破坏性工具询问、`wave` 允许
-  一切。wave 拒绝清单（`~/.wavecode/console-settings.json` 中的
-  `wave_denylist`，`Bash(pattern)` 规则语法或裸命令）在所有模式下作为 sandbox deny 规则强制执行：被禁命令无提示直接拒绝。
+  一切。wave 拒绝清单（`~/.wavecode/wave-denylist.json`，`Bash(pattern)` 规则语法或裸命令；所有会话表面都加载这个由配置层持有的存储）在所有模式下作为 sandbox deny 规则强制执行：被禁命令无提示直接拒绝。
 - `/settings` 打开交互面板（Up/Down 移动、Left/Right
   或 Enter 循环、更改持久化到
   `~/.wavecode/console-settings.json` 并应用到活动组件）：

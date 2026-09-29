@@ -473,7 +473,8 @@ async fn main() -> anyhow::Result<()> {
             cwd,
             home: home.clone(),
             identity: DEFAULT_IDENTITY.to_string(),
-            wave_denylist: settings.wave_denylist,
+            // None: every surface loads the shared denylist store.
+            wave_denylist: None,
             headless: false,
             initial_history: Vec::new(),
             // The REPL keeps its history in memory and records no journal.
@@ -662,7 +663,8 @@ async fn main() -> anyhow::Result<()> {
         thinking_override: settings.default_effort.clone(),
         cwd: cwd.clone(),
         home: home.clone(),
-        wave_denylist: settings.wave_denylist,
+        // None: every surface loads the shared denylist store.
+        wave_denylist: None,
         identity: DEFAULT_IDENTITY.to_string(),
         headless,
         initial_history: Vec::new(),
@@ -1286,7 +1288,8 @@ fn make_tui_factory(
                         permission_mode
                     },
                     thinking_override,
-                    wave_denylist: settings.wave_denylist,
+                    // None: every surface loads the shared denylist store.
+                    wave_denylist: None,
                     cwd: cwd.clone(),
                     home: home.clone(),
                     identity: DEFAULT_IDENTITY.to_string(),
@@ -1398,7 +1401,8 @@ async fn run_tui_new(
         identity: DEFAULT_IDENTITY.to_string(),
         headless: false,
         initial_history,
-        wave_denylist: settings.wave_denylist,
+        // None: every surface loads the shared denylist store.
+        wave_denylist: None,
         session_id: Some(session_id.clone()),
     }) {
         Ok(handle) => handle,
@@ -1860,18 +1864,14 @@ fn fail(line: impl Into<String>) -> DoctorCheck {
     }
 }
 
-/// The `wave` denylist stored in the console settings under `home`.
+/// The `wave` denylist store under `home` — the same file session
+/// assembly loads, so the report cannot name rules a session ignores.
 ///
-/// Missing or unreadable settings yield no entries: the settings check in
-/// [`doctor_checks`] is what reports why, rather than every consumer
-/// repeating the warning.
+/// Missing or unreadable stores yield no entries: the surrounding
+/// checks are what report why, rather than every consumer repeating
+/// the warning.
 fn settings_denylist(home: &Path) -> Vec<String> {
-    let path = home.join(".wavecode").join("console-settings.json");
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<console_ui::settings::UiSettings>(&text).ok())
-        .map(|settings| settings.wave_denylist)
-        .unwrap_or_default()
+    wavecode_config::denylist::load_from(&home.join(".wavecode"))
 }
 
 /// `doctor`: validate every local file a session depends on — config,
@@ -2151,7 +2151,8 @@ async fn run_resume(
         // inline answers instead of denying them openly.
         headless: false,
         initial_history: history,
-        wave_denylist: console_ui::settings::UiSettings::load().wave_denylist,
+        // None: every surface loads the shared denylist store.
+        wave_denylist: None,
         // Legacy thread import; the new session records under its own id.
         session_id: None,
     })
@@ -3116,18 +3117,14 @@ deny = ["Bash(*)"]
         );
     }
 
-    /// The denylist lives in console settings, so the grant report has to
-    /// read that file to agree with what a session will enforce.
+    /// The denylist lives in the config-owned store, so the grant
+    /// report reads that file to agree with what a session enforces.
     #[test]
     fn doctor_sees_the_settings_denylist() {
         let dir = tempfile::tempdir().unwrap();
         let wave = dir.path().join(".wavecode");
         std::fs::create_dir_all(&wave).unwrap();
-        std::fs::write(
-            wave.join("console-settings.json"),
-            r#"{"wave_denylist":["rm -rf"]}"#,
-        )
-        .unwrap();
+        wavecode_config::denylist::save_to(&wave, &["rm -rf".to_string()]).unwrap();
         assert_eq!(settings_denylist(dir.path()), vec!["rm -rf".to_string()]);
         assert!(settings_denylist(&std::path::PathBuf::from("/no/such/home")).is_empty());
     }

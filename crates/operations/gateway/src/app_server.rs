@@ -256,7 +256,9 @@ async fn create_session(
         identity: DEFAULT_IDENTITY.to_string(),
         headless: false,
         initial_history: Vec::new(),
-        wave_denylist: Vec::new(),
+        // `None` loads the user's denylist store, so configured deny
+        // rules hold on served sessions too.
+        wave_denylist: None,
     }) {
         Ok(handle) => handle,
         Err(e) => {
@@ -606,7 +608,7 @@ mod tests {
                     home: options.home,
                     identity: options.identity.clone(),
                     initial_history: options.initial_history,
-                    wave_denylist: options.wave_denylist,
+                    wave_denylist: options.wave_denylist.unwrap_or_default(),
                     warnings: Vec::new(),
                 },
             ))

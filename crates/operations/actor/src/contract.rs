@@ -74,13 +74,18 @@ pub struct AssembleOptions {
     /// `wave`-mode denylist entries (`Bash(pattern)` rule syntax): parsed
     /// into sandbox deny rules so a banned command is refused in every
     /// mode without a prompt. Malformed entries land in the startup
-    /// warnings instead of failing assembly.
-    pub wave_denylist: Vec<String>,
-    /// Session id whose turn journal this assembly will be recorded to, when
-    /// the caller already minted one. Compaction appends a pointer to that
-    /// journal so a post-compaction turn can look up exact earlier output
-    /// instead of guessing; `None` (unknown id, no home) keeps the pointer
-    /// out.
+    /// warnings instead of failing assembly. `None` loads the shared
+    /// store every surface reads (`~/.wavecode/wave-denylist.json`,
+    /// owned by the config layer); `Some` overrides explicitly (tests,
+    /// embedders).
+    pub wave_denylist: Option<Vec<String>>,
+    /// Session id the frontends record the turn journal under, when they
+    /// minted one. Journaling itself is a frontend duty today (console
+    /// and exec journal their own turns; RPC-served sessions do not
+    /// persist) — the id lets compaction append a pointer to that
+    /// journal so a post-compaction turn can look up exact earlier
+    /// output instead of guessing; `None` (unknown id, no home) keeps
+    /// the pointer out.
     #[doc(hidden)]
     pub session_id: Option<String>,
 }

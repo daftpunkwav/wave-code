@@ -252,16 +252,17 @@ receivers remain compatible.
 - Permission modes: `plan` is read-only (non-read-only tools are
   denied outright, no prompts), `auto` lets edits through and asks
   only for command execution and destructive tools, `wave` allows
-  everything. The wave denylist (`wave_denylist` in
-  `~/.wavecode/console-settings.json`, `Bash(pattern)` rule syntax or
-  bare commands) is enforced as sandbox deny rules in every mode: a
-  banned command is refused without a prompt.
+  everything. The wave denylist (`~/.wavecode/wave-denylist.json`,
+  `Bash(pattern)` rule syntax or bare commands — every session surface
+  loads this config-owned store) is enforced as sandbox deny rules in
+  every mode: a banned command is refused without a prompt.
 - `/settings` opens an interactive panel (Up/Down to move, Left/Right
   or Enter to cycle, changes persist to
   `~/.wavecode/console-settings.json` and apply to live components):
   user-input markdown rendering on/off, tool-call verbosity
   (names/summary/full), edit rendering (tool only/diff), the
-  wave-denylist entry count, thinking-starts-expanded, streaming
+  wave-denylist entry count (read from the store),
+  thinking-starts-expanded, streaming
   assistant draft on/off, the footer context meter, footer tip
   rotation, confirm-before-exit, and the input-history limit.
 - Submitted user input renders as markdown in the transcript by

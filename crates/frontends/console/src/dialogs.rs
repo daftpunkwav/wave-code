@@ -1402,7 +1402,12 @@ impl SettingsDialog {
             },
             SettingsRow {
                 label: "wave denylist",
-                value: format!("{} entries (edit settings file)", view.wave_denylist.len()),
+                value: format!(
+                    "{} entries (wave-denylist.json)",
+                    wavecode_config::denylist::default_dir()
+                        .map(|dir| wavecode_config::denylist::load_from(&dir).len())
+                        .unwrap_or(0)
+                ),
             },
             SettingsRow {
                 label: "thinking starts expanded",

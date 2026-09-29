@@ -343,10 +343,21 @@ pub fn confinement_status() -> String {
 /// cannot drift into overstating what the platform boundary holds.
 const JOB_GAP: &str = "process-tree lifetime control and process-count limits only: no filesystem write boundary, no network policy";
 
+/// Resolve the effective denylist: an explicit override wins; `None`
+/// loads the shared store under `home` so every surface (TUI, exec,
+/// REPL, ACP, serve) enforces the same user rules — a hardcoded empty
+/// here once left RPC-served sessions silently unguarded. No home
+/// means no store, hence no entries.
+fn resolve_denylist(override_list: Option<Vec<String>>, home: Option<&Path>) -> Vec<String> {
+    override_list.unwrap_or_else(|| {
+        home.map(|home| wavecode_config::denylist::load_from(&home.join(".wavecode")))
+            .unwrap_or_default()
+    })
+}
+
 /// Bare denylist entries get the Bash scope; already-scoped ones pass
 /// through untouched.
-fn bash_scope(entry: &str) -> String {
-    let trimmed = entry.trim();
+fn bash_scope(entry: &str) -> String {    let trimmed = entry.trim();
     if trimmed.starts_with("Bash(") || trimmed.starts_with("File(") {
         entry.to_string()
     } else {
@@ -375,6 +386,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         session_id,
     } = options;
     let mut warnings = Vec::new();
+    let wave_denylist = resolve_denylist(wave_denylist, home.as_deref());
 
     // 1. Configuration and provider resolution (hard failure surface).
     let config = match config_path {
@@ -1445,6 +1457,26 @@ api_key = "k-inline"
         rules.iter().map(|rule| rule.to_string()).collect()
     }
 
+    /// `None` falls back to the shared denylist store under `home`, an
+    /// explicit override wins, and no home means no store entries.
+    #[test]
+    fn denylist_resolution_prefers_the_explicit_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        wavecode_config::denylist::save_to(&wave, &["rm -rf".to_string()]).unwrap();
+
+        assert_eq!(
+            resolve_denylist(None, Some(dir.path())),
+            vec!["rm -rf".to_string()]
+        );
+        assert_eq!(
+            resolve_denylist(Some(vec!["git push".to_string()]), Some(dir.path())),
+            vec!["git push".to_string()]
+        );
+        assert!(resolve_denylist(None, None).is_empty());
+    }
+
     /// The one-line status copy must not claim more (or less) than the
     /// backend's own documented limitation.
     #[test]
@@ -1629,7 +1661,7 @@ deny = ["Bash(git *)"]
             provider_override: None,
             permission_override: None,
             thinking_override: None,
-            wave_denylist: Vec::new(),
+            wave_denylist: None,
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
@@ -1692,7 +1724,7 @@ deny = ["Bash(git *)"]
             provider_override: None,
             permission_override: None,
             thinking_override: None,
-            wave_denylist: Vec::new(),
+            wave_denylist: None,
             cwd: dir.path().to_path_buf(),
             home: Some(dir.path().to_path_buf()),
             identity: DEFAULT_IDENTITY.to_string(),
@@ -1770,7 +1802,7 @@ api_key = "k-inline"
             provider_override: None,
             permission_override: None,
             thinking_override: None,
-            wave_denylist: Vec::new(),
+            wave_denylist: None,
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
@@ -1833,7 +1865,7 @@ api_key = "k-inline"
             provider_override: Some("ghost".to_string()),
             permission_override: None,
             thinking_override: None,
-            wave_denylist: Vec::new(),
+            wave_denylist: None,
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),
@@ -1899,7 +1931,7 @@ base_url = "https://fb.example.com/anthropic"
             provider_override: None,
             permission_override: None,
             thinking_override: None,
-            wave_denylist: Vec::new(),
+            wave_denylist: None,
             cwd: dir.path().to_path_buf(),
             home: None,
             identity: DEFAULT_IDENTITY.to_string(),

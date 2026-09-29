@@ -402,8 +402,9 @@ async fn new_session<W, F, S>(
         headless: true,
         initial_history: Vec::new(),
         // ACP sessions start unconstrained; constraint rules arrive
-        // through the protocol layer instead of the console settings.
-        wave_denylist: Vec::new(),
+        // through the protocol layer. `None` still loads the user's
+        // denylist store, so configured deny rules hold here too.
+        wave_denylist: None,
     }) {
         Ok(handle) => handle,
         Err(e) => {

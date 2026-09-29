@@ -37,7 +37,8 @@ Allow 有两个来源，deny 有两个。被扩大的权限只会出自人手：
 | --- | --- | --- |
 | `[permissions] allow` / `deny` | `~/.wavecode/config.toml` | 人写的规则条目，允许通配（`Bash(cargo test *)`） |
 | 持久化 grant | `~/.wavecode/grants.jsonl` | 人回答"总是允许"时追加的字面条目 |
-| `permission_mode` / `wave_denylist` | `~/.wavecode/console-settings.json` | 模式加裸命令片段，加载时按 Bash 作用域处理 |
+| `permission_mode` | `~/.wavecode/console-settings.json` | 启动时展示的已保存模式 |
+| `wave_denylist` | `~/.wavecode/wave-denylist.json` | 裸命令片段 / `Bash(pattern)` 规则，加载时按 Bash 作用域处理；所有会话表面都加载此存储 |
 
 两条边界防止持久化的一半变成无意间的权限放大：
 

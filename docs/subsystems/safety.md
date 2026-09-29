@@ -37,7 +37,8 @@ Allow has two sources, deny two. Widened authority is only ever human-authored:
 | --- | --- | --- |
 | `[permissions] allow` / `deny` | `~/.wavecode/config.toml` | rule entries a human wrote, wildcards allowed (`Bash(cargo test *)`) |
 | persisted grants | `~/.wavecode/grants.jsonl` | literal entries appended when a human answers "always allow" |
-| `permission_mode` / `wave_denylist` | `~/.wavecode/console-settings.json` | mode plus bare command fragments, Bash-scoped on load |
+| `permission_mode` | `~/.wavecode/console-settings.json` | the saved mode shown at startup |
+| `wave_denylist` | `~/.wavecode/wave-denylist.json` | bare command fragments / `Bash(pattern)` rules, Bash-scoped on load; every session surface loads this store |
 
 Two bounds keep the persistent half from becoming a way to widen authority by accident:
 

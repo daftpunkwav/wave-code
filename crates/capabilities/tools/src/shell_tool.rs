@@ -2,12 +2,13 @@
 //! Failure semantics match the `fs` file tools: business failures (non-zero exit code, timeout, spawn failure, missing/mistyped params)
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level failures.
 //!
-//! Known limitation: `kill_on_drop` only kills the shell process itself; grandchildren already
-//! inherited copies of cmd's pipe handles at spawn (command-line redirection cannot prevent that) and survive as
-//! orphans after the shell is killed -- the real variable is how long those orphaned grandchildren live.
-//! Production risk: when wavecode exits and drops the tokio runtime it may block for an arbitrarily long time
-//! (e.g. when a grandchild is a dev server). The proper fix is process-group-level reaping (Windows Job
-//! Object / Unix killpg); it is not implemented yet.
+//! Process-tree lifetime: every child spawns as its own process group
+//! (Unix `process_group(0)`, Windows `CREATE_NEW_PROCESS_GROUP`), so the
+//! timeout kill in [`spawn_collect_bounded`] takes the shell *and* its
+//! descendants via [`infrastructure_base::kill_tree`] (Unix group signal,
+//! Windows `taskkill /T`). `kill_on_drop` stays as the drop-path backstop
+//! but only reaches the shell itself — the orphan window is therefore
+//! limited to wavecode's own abnormal exit, not every timeout.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -48,10 +49,10 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 30 * 1024;
 /// Post-run drain grace: how long the reader tasks may take to reach EOF
 /// after the child exited or was killed, before the capture-so-far is
 /// returned anyway. Death normally closes the pipe write ends and EOF lands
-/// within milliseconds; a grandchild that inherited the write ends and
-/// outlives the shell (see the module limitation note) must not extend the
-/// run past its own bound — the detached readers keep draining (buffering
-/// stays capped) until real EOF.
+/// within milliseconds; the timeout path's tree kill (see
+/// [`spawn_collect_bounded`]) closes inherited write ends too, so the grace
+/// is a backstop for platforms where the tree kill could not land — the
+/// detached readers keep draining (buffering stays capped) until real EOF.
 const KILL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
 /// Whether OS-level confinement applies to shell spawns.
@@ -262,20 +263,31 @@ pub(crate) struct Collected {
 /// Spawn `cmd` and collect its piped streams into at most `cap` bytes each,
 /// bounded by `timeout` across the whole run (spawn + reads + wait).
 ///
-/// Reads run to EOF so the child never blocks on a full pipe; bytes past
-/// the cap are drained and discarded. Read errors degrade to a truncated
-/// capture (the exit code still surfaces) instead of failing the call.
-/// On timeout the child is killed and [`Collected::status`] comes back
-/// `None` with the partial streams attached. The post-run reader join is
-/// grace-bounded ([`KILL_DRAIN_GRACE`]) so a pipe-inheriting grandchild
-/// that outlives the shell cannot stretch the run past its bound. Shared
-/// by `Shell` and the script tools so no child-output path buffers
-/// unbounded or leaks a killed process's captured output.
+/// `cmd` is rewritten to lead its own process group (Unix
+/// `process_group(0)`, Windows `CREATE_NEW_PROCESS_GROUP`), so the timeout
+/// kill below takes the shell and every descendant through
+/// [`infrastructure_base::kill_tree`] instead of orphaning grandchildren
+/// that inherited the pipe handles. Reads run to EOF so the child never
+/// blocks on a full pipe; bytes past the cap are drained and discarded.
+/// Read errors degrade to a truncated capture (the exit code still
+/// surfaces) instead of failing the call. On timeout the tree is killed
+/// and [`Collected::status`] comes back `None` with the partial streams
+/// attached. The post-run reader join is grace-bounded
+/// ([`KILL_DRAIN_GRACE`]) as the backstop for platforms where the tree
+/// kill could not land. Shared by `Shell` and the script tools so no
+/// child-output path buffers unbounded or leaks a killed process's
+/// captured output.
 pub(crate) async fn spawn_collect_bounded(
     cmd: &mut tokio::process::Command,
     cap: usize,
     timeout: Duration,
 ) -> std::io::Result<Collected> {
+    // Own group (see the doc above) so the timeout kill covers descendants;
+    // applied before spawn like the job service's spawn path.
+    #[cfg(unix)]
+    cmd.process_group(0);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
     let mut child = cmd.spawn()?;
     // The capture buffers live outside the reader tasks so the bounded
     // wait below can return the partial streams without depending on the
@@ -285,13 +297,18 @@ pub(crate) async fn spawn_collect_bounded(
     let stderr = Arc::new(Mutex::new(Vec::new()));
     let out_task = tokio::spawn(collect_capped(child.stdout.take(), cap, stdout.clone()));
     let err_task = tokio::spawn(collect_capped(child.stderr.take(), cap, stderr.clone()));
-    // Tokio's kill awaits the child's exit (reaping it); killing an
-    // already-exited child degrades to Err here, which changes nothing —
-    // its pipe ends are closed either way.
+    // Timeout: tree-kill first so pipe-inheriting grandchildren die with
+    // the shell (their write ends close, the readers reach EOF), then the
+    // ordinary kill + await reaps the direct child. Killing an
+    // already-exited tree degrades to Err/no-op here, which changes
+    // nothing — its pipe ends are closed either way.
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => Some(status),
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
+            if let Some(pid) = child.id() {
+                infrastructure_base::kill_tree(pid);
+            }
             let _ = child.kill().await;
             None
         }
@@ -907,42 +924,63 @@ mod tests {
     }
 
     /// A grandchild that inherits the pipes and outlives the killed shell
-    /// must not extend the run past the post-kill drain grace: the partial
-    /// capture comes back instead of waiting on the orphan. Unix-only: the
-    /// orphan shape needs real grandchild pipe inheritance, which cmd's
-    /// `start` does not model deterministically.
+    /// dies with it: the timeout path's tree kill takes the whole process
+    /// group, so the grandchild is gone from the process table (not merely
+    /// ignored) once the run returns. Unix-only: the orphan shape needs
+    /// real grandchild pipe inheritance, which cmd's `start` does not model
+    /// deterministically.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn timeout_does_not_wait_for_orphaned_grandchildren() {
+    async fn timeout_kills_the_orphaned_grandchild() {
         if cfg!(windows) {
             return;
         }
         // Spawns a child: held under ENV_LOCK (see its docs).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_d, c) = ctx();
-        // sleep is a grandchild holding the pipe write ends; killing the
-        // shell cannot close them until it exits (30s) — the grace must
-        // bound the run first.
+        // `sleep` runs as a grandchild (the shell forks it and `wait` keeps
+        // the shell alive); `$!` echoes the grandchild pid so the test can
+        // verify it is actually dead after the timeout kill.
         let started = std::time::Instant::now();
         let out = Shell::default()
             .execute(
-                serde_json::json!({"command": "echo started; sleep 30", "timeout_ms": 300}),
+                serde_json::json!({"command": "sleep 30 & echo $!; wait", "timeout_ms": 300}),
                 &c,
             )
             .await
             .unwrap();
-        let elapsed = started.elapsed();
         assert!(out.is_error, "{}", out.content);
         assert!(
-            out.content.contains("started"),
-            "partial capture survives the orphaned grandchild: {}",
+            out.content.contains("timeout after 300ms"),
+            "{}",
             out.content
         );
-        // Bounded by timeout + drain grace, not by the 30s orphan.
+        // Bounded by timeout + drain grace, not by the 30s grandchild.
         assert!(
-            elapsed < Duration::from_secs(15),
-            "the run waited on the orphaned grandchild: {elapsed:?}"
+            started.elapsed() < Duration::from_secs(15),
+            "the run waited on the grandchild: {:?}",
+            started.elapsed()
         );
+        let pid: u32 = out
+            .content
+            .lines()
+            .find_map(|line| line.trim().parse().ok())
+            .expect("grandchild pid echoed before the kill");
+        // The tree kill landed when the pid is gone from the process table
+        // (`kill -0` fails); poll briefly to absorb signal-delivery delay.
+        for _ in 0..50 {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|probe| probe.success());
+            if !alive {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("grandchild {pid} survived the timeout tree kill");
     }
 
     /// A truncated stream's full text lands in the spill store and the

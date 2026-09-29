@@ -386,35 +386,12 @@ fn shell_command(command: &str) -> tokio::process::Command {
     cmd
 }
 
-/// Kill a job's whole process tree by leader pid.
-///
-/// Unix spawns each job as its own process group, so one `killpg` takes
-/// the shell and every descendant. Windows has no group primitive here;
-/// `taskkill /T` is the tree-kill analogue. Best-effort by design: a pid
-/// that already exited reports success without effect.
-#[cfg(unix)]
+/// Kill a job's whole process tree by leader pid: the shared
+/// [`infrastructure_base::kill_tree`] (jobs spawn as their own process
+/// group, the precondition that helper documents).
 fn kill_tree(pid: u32) {
-    // SAFETY: killpg with SIGKILL takes no callbacks and touches no Rust
-    // state; ESRCH (already exited) and EPERM need no handling.
-    unsafe {
-        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-    }
+    infrastructure_base::kill_tree(pid)
 }
-
-/// Kill a job's whole process tree by leader pid (Windows analogue).
-#[cfg(windows)]
-fn kill_tree(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Kill a job's whole process tree by leader pid (fallback platforms).
-#[cfg(not(any(unix, windows)))]
-fn kill_tree(_pid: u32) {}
 
 /// Driver future: spawn, capture, reap, then file the shared notice.
 async fn drive_job(

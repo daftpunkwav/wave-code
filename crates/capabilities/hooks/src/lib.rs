@@ -490,11 +490,11 @@ enum ExecOutcome {
 
 /// Run one command hook: platform shell + stdin payload JSON + timeout kill.
 ///
-/// Timeout killing relies on `kill_on_drop`: the timeout branch drops the
-/// `wait_with_output` future, which drops the child, and tokio sends the kill;
-/// the known grandchild-reaping limitation matches the shell tool (process-
-/// group-level reaping is not implemented yet, see the tools/shell_tool.rs
-/// notes).
+/// The hook spawns as its own process group (same convention as the shell
+/// tool and the job service), and the timeout path tree-kills by recorded
+/// pid ([`infrastructure_base::kill_tree`]) so grandchildren die with the
+/// shell; the dropped future's `kill_on_drop` stays as the reap backstop
+/// for the direct child.
 async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>) -> ExecOutcome {
     let payload = serde_json::json!({
         "event": point.as_str(),
@@ -503,19 +503,26 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         "output": input.tool_output,
     });
     let (prog, flag) = shell_invocation();
-    let mut child = match tokio::process::Command::new(prog)
-        .arg(flag)
+    let mut cmd = tokio::process::Command::new(prog);
+    cmd.arg(flag)
         .arg(&def.command)
         .current_dir(input.cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => return ExecOutcome::SpawnFailed(e.to_string()),
     };
+    // Recorded before the child moves into the wait below: the timeout
+    // branch needs it for the tree kill (the child handle itself is
+    // dropped there, and kill_on_drop only reaches the shell).
+    let pid = child.id();
     // Write the payload to stdin, then close it (hooks that read stdin see
     // EOF); a write failure (the command exited early without reading stdin)
     // is not an error — still wait for the exit code.
@@ -534,7 +541,14 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
     })
     .await;
     match waited {
-        Err(_) => ExecOutcome::Timeout, // future dropped -> kill_on_drop kills the process
+        Err(_) => {
+            // Timeout: the future was dropped (kill_on_drop kills the
+            // shell); the recorded pid takes the whole tree with it.
+            if let Some(pid) = pid {
+                infrastructure_base::kill_tree(pid);
+            }
+            ExecOutcome::Timeout
+        }
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();

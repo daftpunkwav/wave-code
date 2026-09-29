@@ -120,6 +120,40 @@ pub fn shell_invocation() -> (String, &'static str) {
     }
 }
 
+/// Kill a spawned process tree by leader pid (best effort).
+///
+/// Precondition: the caller spawned `pid` as its own process-group leader
+/// (Unix `Command::process_group(0)`; Windows `CREATE_NEW_PROCESS_GROUP`),
+/// so the Unix branch's group signal cannot land outside that spawn. The
+/// pid may have exited already — `killpg` reports ESRCH and `taskkill`
+/// fails — and both degrade to no-ops; the narrow pid-reuse window this
+/// leaves matches the accepted race in the job service's cancel path. The
+/// caller still reaps the direct child itself (kill/await on its handle).
+pub fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: killpg with SIGKILL takes no callbacks and touches no
+        // Rust state; ESRCH (already exited) and EPERM need no handling.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Windows has no group-kill primitive here; `taskkill /T /F` is
+        // the tree-kill analogue (the sandbox backend's kill-on-close Job
+        // Object is the stronger confinement-side mechanism).
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = pid;
+}
+
 /// Atomic file replace: write `contents` to a unique sibling staging file,
 /// then rename it over `path`, so a crash mid-write leaves the target with
 /// either the old or the new content — never a half-written mix.

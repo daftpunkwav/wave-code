@@ -19,8 +19,5 @@ tokio.workspace = true
 wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-tools = { path = "../../capabilities/tools" }
 
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true

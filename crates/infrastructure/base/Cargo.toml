@@ -5,5 +5,11 @@ rust-version.workspace = true
 version.workspace = true
 license.workspace = true
 
+[dependencies]
+# Process-group kill for `kill_tree` (Unix only; Windows routes through
+# `taskkill`, other platforms degrade to a no-op).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

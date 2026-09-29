@@ -362,7 +362,8 @@ fn resolve_denylist(override_list: Option<Vec<String>>, home: Option<&Path>) -> 
 
 /// Bare denylist entries get the Bash scope; already-scoped ones pass
 /// through untouched.
-fn bash_scope(entry: &str) -> String {    let trimmed = entry.trim();
+fn bash_scope(entry: &str) -> String {
+    let trimmed = entry.trim();
     if trimmed.starts_with("Bash(") || trimmed.starts_with("File(") {
         entry.to_string()
     } else {

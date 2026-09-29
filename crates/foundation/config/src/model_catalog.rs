@@ -1,8 +1,8 @@
 //! The model catalog: a single `~/.wavecode/models.json` file holding
 //! every model the `/model` picker and slash commands can see.
 //!
-//! One file, one format (shaped after the zcod-e-style provider/model
-//! catalogs): per model — provider id, wire name, API kind, endpoint,
+//! One file, one format (shaped after common provider/model catalogs):
+//! per model — provider id, wire name, API kind, endpoint,
 //! credentials, context/output limits, reasoning variants, and the
 //! input/output modalities. The catalog is the user-facing source of
 //! truth; loading merges it into the runtime [`Config`] as `[models]`

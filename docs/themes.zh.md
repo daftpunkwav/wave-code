@@ -31,7 +31,7 @@ WaveCode 主题就是**一个 JSON 文件——没有别的**。内置主题位�
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `colors` | object | 下面 23 个 token 的任意子集，值为 `#rrggbb`。缺失的 token 从 `base` 继承。 |
+| `colors` | object | 下面 24 个 token 的任意子集，值为 `#rrggbb`。缺失的 token 从 `base` 继承。 |
 | `base` | string | 起始内置主题：`dark`、`deepwave` 或 `light`（默认 `dark`）。内置文件从不使用 `base`——它们是完整的。 |
 | `dark` | bool | 主题的明暗类别。可选：有显式 `background` 覆盖时按其亮度判定，否则跟随 base 的类别，再否则为 `true`。 |
 | `syntax_theme` | string | 代码高亮主题：`synthwave-84`、`ocean-dark` 或 `ocean-light`。默认继承 base 的。 |
@@ -40,7 +40,7 @@ WaveCode 主题就是**一个 JSON 文件——没有别的**。内置主题位�
 未知字段、未知颜色名、畸形颜色和未知别名都会被拒绝——一个拼写错误
 绝不会无声地渲染成 base 的样子。
 
-## 23 个颜色 token
+## 24 个颜色 token
 
 UI 从不硬编码颜色；每个界面都请求这些语义 token 之一（见
 `theme/tokens.rs`）：
@@ -54,7 +54,7 @@ UI 从不硬编码颜色；每个界面都请求这些语义 token 之一（见
   `diff_gutter`、`diff_meta`。
 - **语义带**（绝不作装饰用）：`success` / `diff_added`、
   `warning` / `shell_mode`、`error` / `diff_removed`、
-  `diff_added_strong`、`diff_removed_strong`。
+  `diff_added_strong`、`diff_removed_strong`、`wave`（wave 模式徽章）。
 - **表面**：`background`（墨色所校准的终端背景；light 主题还会把它
   应用到终端本身）、`input_bg`（用户输入的高亮条带）。
 

@@ -33,7 +33,7 @@ override are inherited from `base`, so a theme can be three lines.
 
 | Field | Kind | Meaning |
 | --- | --- | --- |
-| `colors` | object | Any subset of the 23 tokens below, `#rrggbb` values. Missing tokens inherit from `base`. |
+| `colors` | object | Any subset of the 24 tokens below, `#rrggbb` values. Missing tokens inherit from `base`. |
 | `base` | string | Built-in to start from: `dark`, `deepwave`, or `light` (default `dark`). Built-in files never use `base` — they are complete. |
 | `dark` | bool | The theme's kind. Optional: an explicit `background` override decides by its luminance, otherwise the base's kind, otherwise `true`. |
 | `syntax_theme` | string | Code-highlighting theme: `synthwave-84`, `ocean-dark`, or `ocean-light`. Defaults to the base's. |
@@ -42,7 +42,7 @@ override are inherited from `base`, so a theme can be three lines.
 Unknown fields, unknown color names, malformed colors, and unknown
 aliases are rejected — a typo never silently renders as the base.
 
-## The 23 color tokens
+## The 24 color tokens
 
 The UI never hardcodes colors; every surface requests one of these
 semantic tokens (see `theme/tokens.rs`):
@@ -57,7 +57,7 @@ semantic tokens (see `theme/tokens.rs`):
   `diff_gutter`, `diff_meta`.
 - **Semantic band** (never decorative): `success` / `diff_added`,
   `warning` / `shell_mode`, `error` / `diff_removed`,
-  `diff_added_strong`, `diff_removed_strong`.
+  `diff_added_strong`, `diff_removed_strong`, `wave` (the wave-mode badge).
 - **Surfaces**: `background` (the terminal background the ink is tuned
   against; the light theme also applies it to the terminal itself),
   `input_bg` (the user input highlight band).

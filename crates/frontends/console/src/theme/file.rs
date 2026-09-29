@@ -17,7 +17,7 @@
 //! }
 //! ```
 //!
-//! - `colors` may override any subset of the 23 semantic tokens
+//! - `colors` may override any subset of the 24 semantic tokens
 //!   (`#rrggbb`); entries missing here inherit from `base`.
 //! - `base` names a built-in theme to start from (default `dark`);
 //!   built-in files are complete and never use it.

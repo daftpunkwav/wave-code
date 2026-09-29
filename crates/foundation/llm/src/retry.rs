@@ -180,6 +180,12 @@ pub fn is_auth_error(error: &LlmError) -> bool {
 /// kinds, the well-known overload markers, and rate limiting (429) — all
 /// carriers are checked because providers split status and message across
 /// them inconsistently.
+///
+/// Consulted only after [`is_auth_error`] and [`is_quota_error`] rejected
+/// the error (see [`RetryPolicy::is_retryable`]): the three marker tables
+/// are kept deliberately disjoint, and this one must never grow a billing
+/// marker — a quota shape that lands here would burn the retry budget on
+/// an error only a human can fix.
 fn is_transient_error(kind: &str, message: &str) -> bool {
     const MARKERS: &[&str] = &[
         "http_500",
@@ -208,6 +214,11 @@ fn is_transient_error(kind: &str, message: &str) -> bool {
 /// retrying cannot succeed and only burns the backoff budget. Marker
 /// list is deliberately narrow (billing-specific shapes) to avoid
 /// fail-fast on an ordinary rate limit, which IS worth retrying.
+///
+/// Priority contract: checked before [`is_transient_error`] in
+/// [`RetryPolicy::is_retryable`], so a billing marker added here takes
+/// precedence over any retryable marker an error also carries — keep the
+/// two tables disjoint or extend `quota_errors_fail_fast` first.
 pub fn is_quota_error(error: &LlmError) -> bool {
     const MARKERS: &[&str] = &[
         "insufficient_quota",

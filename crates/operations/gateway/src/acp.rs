@@ -170,6 +170,10 @@ where
     S: SessionSurface + 'static,
 {
     let writer = Arc::new(Mutex::new(writer));
+    // Unbounded on purpose: producers emit one `TaskMsg` per finished
+    // prompt, and this loop drains the receiver on every iteration, so
+    // the queue holds at most a handful of completions. A bounded channel
+    // would let one wedged session task stall the whole reader loop.
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<TaskMsg>();
     let mut sessions: HashMap<String, SessionEntry> = HashMap::new();
     let mut next_session: u64 = 1;
@@ -414,6 +418,11 @@ async fn new_session<W, F, S>(
         }
     };
     let mode = handle.permission_mode().to_string();
+    // Unbounded on purpose: the dispatch loop admits at most one prompt
+    // per session (`start_prompt` rejects while `in_flight` is set), so
+    // the queue never holds more than a couple of protocol frames
+    // (cancel / set_mode alongside the running prompt). Bounding it would
+    // only turn a slow session task into a hung JSON-RPC request.
     let (job_tx, job_rx) = mpsc::unbounded_channel();
     tokio::spawn(session_task(
         session_id.clone(),

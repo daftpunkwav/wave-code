@@ -100,7 +100,10 @@ impl std::fmt::Debug for ProviderConfig {
             .field("context_window", &self.context_window)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("fallback_providers", &self.fallback_providers)
+            .field("rpm_limit", &self.rpm_limit)
             .field("reasoning_effort", &self.reasoning_effort)
+            .field("thinking_budget_tokens", &self.thinking_budget_tokens)
+            .field("prompt_caching", &self.prompt_caching)
             .field("prompt_cache_ttl", &self.prompt_cache_ttl)
             .finish()
     }

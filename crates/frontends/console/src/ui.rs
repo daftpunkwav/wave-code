@@ -538,6 +538,10 @@ impl ConsoleUi {
         match answer {
             Some(Answer::Dismissed) => {
                 self.dialog = None;
+                // A closed dialog may have flipped rendering settings the
+                // finished-card cache cannot see (tool/edit display):
+                // drop the caches so the next frame re-renders.
+                self.transcript.invalidate_all();
             }
             Some(Answer::Approval { call_id, decision }) => {
                 self.enqueue(Op::ExecApproval { call_id, decision });

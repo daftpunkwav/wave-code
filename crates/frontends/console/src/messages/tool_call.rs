@@ -85,7 +85,9 @@ fn truncate_arg(value: &str, max: usize) -> String {
         }
     }
     let budget = max.saturating_sub(1);
-    let mut out: String = value.chars().take(budget).collect();
+    // Cut by display width, not chars: CJK counts two cells and a
+    // char-counted cut can overflow the budget twofold.
+    let mut out = width::truncate_to_width(&value, budget);
     out.push('…');
     out
 }
@@ -168,11 +170,12 @@ fn style_output_line(tool: &str, line: &str) -> String {
         && number.chars().all(|c| c.is_ascii_digit())
     {
         return format!(
-            "  {}{}{}{}",
+            "  {}{}{}{}{}",
             theme.style(Token::Text).paint(path),
             theme.style(Token::TextDim).paint(":"),
             theme.style(Token::Accent).paint(number),
-            theme.style(Token::TextDim).paint(&format!(":{content}")),
+            theme.style(Token::TextDim).paint(":"),
+            theme.style(Token::Text).paint(content),
         );
     }
     format!("  {}", body.paint(line))
@@ -231,16 +234,6 @@ impl ToolCall {
         };
         self.output = output;
         self.lines = None;
-    }
-
-    /// True when the collapsed body hides content (footer hint).
-    pub fn has_hidden(&self) -> bool {
-        self.output
-            .as_ref()
-            .map(|(text, _)| {
-                !self.expanded.get() && width::wrap_line(text, 80).len() > OUTCOME_MAX_LINES
-            })
-            .unwrap_or(false)
     }
 
     fn header(&self) -> String {

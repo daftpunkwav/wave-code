@@ -50,6 +50,23 @@ Out of scope:
   `wavecode doctor` reports the effective confinement.
 - Release archives and the self-update path verify sha256 checksums
   before install; a failed verification aborts without touching the
-  running binary.
+  running binary. The checksum ships with the same release (no
+  out-of-band signature chain) — the HTTPS github.com origin allowlist
+  plus the checksum are the accepted trust root for self-update.
 - Untrusted text is sanitized through one shared terminal gate before
   rendering; notifications ride tmux-safe wrappers.
+- Provider credentials resolve from the `env_key` environment variable
+  first; an inline `api_key` in config.toml is an accepted plaintext
+  convenience — `doctor` reports the key source and flags inline
+  storage, and the shell/script tools strip credential-shaped names
+  from child-process environments.
+- Private files (journals, grants, spill store) are written mode 0600
+  on Unix; on Windows no extra ACL is applied because files under the
+  user profile inherit owner-scoped default ACLs (accepted).
+- `wavecode mcp serve` exposes the full local tool registry to its
+  stdio client with no approval gate: the local MCP client is the
+  operator-configured, same-user process that spawned the server and is
+  trusted (MCP places tool-approval responsibility on the client).
+  Provider `env_key` names are still stripped from tool child
+  environments on this surface; the session `wave` denylist is not
+  consulted there (it is session-policy, not a serve-surface control).

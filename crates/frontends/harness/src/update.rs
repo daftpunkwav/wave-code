@@ -12,6 +12,13 @@
 //! against the published sha256 checksum before touching anything,
 //! refuses to touch source builds, and keeps a `.bak` of the replaced
 //! binary as the rollback copy.
+//!
+//! Accepted posture: the sha256 ships as an asset of the same release,
+//! so the trust root is the HTTPS github.com channel plus this origin
+//! allowlist — there is no out-of-band signature chain. That guards the
+//! download against tampering in transit and against a misbehaving API
+//! payload, not against a compromised release pipeline; if that threat
+//! model changes, signing (e.g. minisign/cosign) is the upgrade path.
 
 use anyhow::{Context as _, Result};
 use serde_json::Value;

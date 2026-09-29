@@ -331,8 +331,17 @@ impl ToolCall {
         let Some((text, truncated)) = &self.output else {
             return rows;
         };
-        if text.contains("<system-reminder>") {
-            return Vec::new(); // metadata envelope: never rendered
+        // A whole-envelope harness note is metadata: never rendered. The
+        // match is the exact canonical envelope shape (the same predicate
+        // the goal tracker's tests pin) and nothing looser: tool output is
+        // attacker-influenced text, and hiding every output that merely
+        // *mentions* the marker would let untrusted content vanish from
+        // the transcript while the model still sees it.
+        let trimmed = text.trim();
+        if trimmed.starts_with(wavecode_wire::SYSTEM_REMINDER_OPEN)
+            && trimmed.ends_with(wavecode_wire::SYSTEM_REMINDER_CLOSE)
+        {
+            return Vec::new();
         }
         let budget = columns.saturating_sub(4);
         let mut out_rows: Vec<String> = Vec::new();
@@ -675,5 +684,36 @@ mod tests {
         );
         let lines = card.render(80);
         assert_eq!(lines.len(), 2, "header + spacer only: {lines:?}");
+    }
+
+    /// Output that merely *mentions* the marker never hides: tool text is
+    /// attacker-influenced, and only the exact whole-envelope shape counts
+    /// as harness metadata (the mention stays visible in the transcript).
+    #[test]
+    fn output_mentioning_the_marker_still_renders() {
+        theme::set(theme::Theme::dark());
+        let mut card = ToolCall::running(
+            "shell",
+            &serde_json::json!({"command": "grep reminder notes.md"}),
+            ExpandedFlag::new(),
+            crate::settings::SharedSettings::new(crate::settings::UiSettings::default()),
+        );
+        card.finish(
+            false,
+            Some((
+                "docs say the <system-reminder> tag marks harness notes".to_string(),
+                false,
+            )),
+        );
+        let lines = card.render(80);
+        let plain: String = lines
+            .iter()
+            .map(|l| strip_ansi(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plain.contains("<system-reminder>"),
+            "mention must stay visible: {plain}"
+        );
     }
 }

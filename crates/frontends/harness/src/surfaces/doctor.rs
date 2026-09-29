@@ -75,12 +75,21 @@ pub(crate) fn doctor_checks(
                 )),
                 Err(error) => checks.push(fail(format!("provider: {error}"))),
                 Ok((provider, _key)) => {
+                    // The key source is named, never the value. An inline
+                    // api_key sits in plaintext in config.toml (an accepted
+                    // M1 surface — shell/script tools can read the file), so
+                    // the report says so and points at env_key instead of
+                    // presenting the setup as equivalent.
                     let source = provider
                         .env_key
                         .as_deref()
                         .filter(|name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty()))
                         .map(|name| format!("env {name}"))
-                        .unwrap_or_else(|| "inline api_key".to_string());
+                        .unwrap_or_else(|| {
+                            "inline api_key (stored in plaintext in config.toml; \
+                             prefer env_key)"
+                                .to_string()
+                        });
                     checks.push(ok(format!(
                         "provider {}: key from {source}",
                         config.model_provider
@@ -298,6 +307,13 @@ model = "test-model-fast"
         );
         assert!(
             lines.iter().any(|l| l.contains("key from inline api_key")),
+            "{lines:?}"
+        );
+        // The plaintext-storage acceptance is disclosed, not silent.
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("stored in plaintext") && l.contains("prefer env_key")),
             "{lines:?}"
         );
         // The key itself must never appear in doctor output.

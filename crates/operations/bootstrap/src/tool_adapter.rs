@@ -34,6 +34,18 @@ impl ToolAdapter {
     /// the composition root, so frontends keep depending on this crate
     /// instead of naming the tools crate directly; the serving loop
     /// itself lives in the gateway.
+    ///
+    /// Trust model (accepted posture, on record): a stdio MCP client is
+    /// the local process that spawned this server — the operator's own
+    /// choice of agent — so `tools/call` runs **without an approval gate**
+    /// and without the session policy layer (there is no human on the
+    /// server side of the stdio pipe to answer a prompt, and MCP places
+    /// tool-approval responsibility on the client). The configured `wave`
+    /// denylist is likewise a session-policy artifact and is not consulted
+    /// here. What is carried over from session assembly is credential
+    /// hygiene: the provider `env_key` names ([`serve_deny_env`]) are
+    /// stripped from tool child environments, so a secret never rides into
+    /// a shell spawned through MCP.
     pub fn mcp_serve_tools(cwd: PathBuf) -> (Arc<wavecode_tools::Registry>, Self) {
         let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
         let registry = Arc::new(registry);
@@ -41,11 +53,36 @@ impl ToolAdapter {
             registry.clone(),
             wavecode_tools::ToolCtx {
                 cwd,
-                deny_env: Vec::new(),
+                deny_env: serve_deny_env(),
             },
         );
         (registry, executor)
     }
+}
+
+/// Secret env names hidden from tools served over `mcp serve`.
+///
+/// `mcp serve` needs no model credentials, but the process environment it
+/// inherits may still carry provider keys. Session assembly strips the
+/// provider's `env_key` from tool children; this surface loads config
+/// best-effort for the same names so a configured key never reaches a
+/// shell child spawned through MCP. A missing or unreadable config
+/// degrades to an empty list — serving never fails on config here, and
+/// the shell tool's sensitive-shape fallback still strips common secret
+/// names without it.
+fn serve_deny_env() -> Vec<String> {
+    let Ok(config) = wavecode_config::Config::load() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = config
+        .model_providers
+        .values()
+        .filter_map(|provider| provider.env_key.clone())
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 #[async_trait::async_trait]
@@ -206,5 +243,77 @@ mod tests {
         let out = adapter().execute(call("faulty_tool")).await;
         assert!(out.is_error);
         assert!(out.content.starts_with(wavecode_tools::TOOL_FAULT_PREFIX));
+    }
+
+    // serve_deny_env reads the user-level config (home env vars); the
+    // env-touching tests run serialized like the config crate's ENV_LOCK.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The serve surface inherits session-assembly credential hygiene: the
+    /// configured `env_key` names (all providers, deduplicated) land in
+    /// the served executor's deny list.
+    #[test]
+    fn serve_deny_env_collects_provider_env_keys() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "m"
+model_provider = "a"
+
+[model_providers.a]
+type = "anthropic"
+base_url = "https://a.example"
+env_key = "A_KEY"
+
+[model_providers.b]
+type = "anthropic"
+base_url = "https://b.example"
+env_key = "A_KEY"
+"#,
+        )
+        .unwrap();
+        let saved_user = std::env::var_os("USERPROFILE");
+        let saved_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("USERPROFILE", dir.path());
+            std::env::set_var("HOME", dir.path());
+        }
+        let names = serve_deny_env();
+        unsafe {
+            if let Some(v) = saved_user {
+                std::env::set_var("USERPROFILE", v);
+            }
+            if let Some(v) = saved_home {
+                std::env::set_var("HOME", v);
+            }
+        }
+        assert_eq!(names, vec!["A_KEY".to_string()], "dedup across providers");
+    }
+
+    /// No config (or no providers): the serve surface stays credential-free
+    /// with an empty deny list instead of failing to serve.
+    #[test]
+    fn serve_deny_env_degrades_to_empty_without_config() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_user = std::env::var_os("USERPROFILE");
+        let saved_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("USERPROFILE", tempfile::tempdir().unwrap().path());
+            std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
+        }
+        let names = serve_deny_env();
+        unsafe {
+            if let Some(v) = saved_user {
+                std::env::set_var("USERPROFILE", v);
+            }
+            if let Some(v) = saved_home {
+                std::env::set_var("HOME", v);
+            }
+        }
+        assert!(names.is_empty());
     }
 }

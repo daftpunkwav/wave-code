@@ -187,7 +187,7 @@ async fn auth_and_host_guard(
         let authorized = headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|value| value == expected);
+            .is_some_and(|value| constant_time_eq(value, &expected));
         if !authorized {
             return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
         }
@@ -201,6 +201,26 @@ async fn auth_and_host_guard(
         return (StatusCode::FORBIDDEN, "loopback hosts only").into_response();
     }
     next.run(request).await
+}
+
+/// Constant-time equality for the bearer comparison.
+///
+/// Defense in depth: the token is a per-run 122-bit UUID served on the
+/// loopback interface with a Host-header guard, so a timing side channel
+/// has no realistic attacker path — but string `==` short-circuits on the
+/// first differing byte, and a comparison that does not is free. Only the
+/// content compare is constant time: differing lengths return early, and
+/// the `Bearer ` prefix plus the token's fixed shape make the length
+/// public anyway.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter()
+        .zip(b)
+        .fold(0u8, |diff, (x, y)| diff | (x ^ y))
+        == 0
 }
 
 /// True when the Host header names the loopback interface (with any
@@ -561,6 +581,19 @@ mod tests {
     use super::*;
     use crate::test_stubs::{CONFIG, OneShotModel, done_script};
     use std::collections::VecDeque;
+
+    /// The bearer comparison: equal content matches, a difference at any
+    /// byte position (first or last) fails, and length mismatches fail.
+    #[test]
+    fn constant_time_eq_matches_whole_content_only() {
+        assert!(constant_time_eq("Bearer t", "Bearer t"));
+        assert!(constant_time_eq("", ""));
+        assert!(!constant_time_eq("Bearer a", "Bearer b"));
+        // Differing last byte must not pass from a shared prefix.
+        assert!(!constant_time_eq("token-aa", "token-ab"));
+        assert!(!constant_time_eq("Bearer t", "Bearer "));
+        assert!(!constant_time_eq("Bearer t", "bearer t"));
+    }
 
     /// Assembly seam for tests: config from a tempdir, scripted model.
     #[derive(Clone)]

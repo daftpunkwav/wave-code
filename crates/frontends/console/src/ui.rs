@@ -71,6 +71,9 @@ const GUTTER: usize = 1;
 pub const EXIT_CONFIRM_WINDOW: Duration = Duration::from_millis(1500);
 /// Double-press window for Esc-Esc opening the rewind picker.
 pub const DOUBLE_ESC_WINDOW: Duration = Duration::from_millis(600);
+/// Bounded window for the exit-time shutdown drain: SessionEnd hooks
+/// speak during it, and a hung hook cannot hold exit open past it.
+pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(5);
 
 /// The session seam the UI drives. Implemented by [`ActorClient`] in
 /// production; tests substitute recorded links.
@@ -725,6 +728,32 @@ impl ConsoleUi {
     /// Await the next session event.
     pub async fn next_event(&mut self) -> Option<Event> {
         self.link.next_event().await
+    }
+
+    /// Graceful session teardown on UI exit: submit `Op::Shutdown` and
+    /// drain events inside [`SHUTDOWN_DRAIN`], so SessionEnd hooks and
+    /// the memory pass run in the actor instead of dying on client
+    /// drop (Drop aborts the actor task).
+    pub(crate) async fn shutdown_session(&mut self) {
+        self.shutdown_session_within(SHUTDOWN_DRAIN).await;
+    }
+
+    /// [`Self::shutdown_session`] with an explicit drain window (tests
+    /// shrink it; production uses the constant).
+    async fn shutdown_session_within(&mut self, window: Duration) {
+        let _ = self
+            .link
+            .submit(Submission {
+                id: "tui-shutdown".to_string(),
+                op: Op::Shutdown,
+            })
+            .await;
+        let deadline = tokio::time::Instant::now() + window;
+        while let Some(event) =
+            tokio::time::timeout_at(deadline, self.next_event()).await.ok().flatten()
+        {
+            self.handle_wire_event(&event.msg);
+        }
     }
 
     /// Steer the running turn with the queued message or editor text.
@@ -3701,6 +3730,12 @@ pub async fn run_with_factory(
             }
         }
     }
+    // Graceful teardown: SessionEnd hooks and the memory pass run
+    // during the bounded drain instead of dying on client drop (Drop
+    // aborts the actor). One last render lands their output in the
+    // final frame; a render failure cannot block exit.
+    ui.shutdown_session().await;
+    let _ = ui.render(&mut std::io::stdout().lock(), columns, rows);
     // Stop the tab progress even when the final frame never flushed;
     // the title stays so the pane keeps naming its session.
     notify::emit_raw(&title::progress_clear());
@@ -3767,6 +3802,24 @@ pub(crate) mod test_support {
                 .expect("test lock")
                 .push((text.to_string(), target));
             true
+        }
+    }
+
+    /// Shared-handle shape: tests keep a clone to read back what the UI
+    /// submitted after the box moved into [`ConsoleUi`].
+    #[async_trait]
+    impl SessionLink for std::sync::Arc<TestLink> {
+        async fn submit(&self, submission: Submission) -> Result<(), SubmitError> {
+            self.as_ref().submit(submission).await
+        }
+
+        async fn next_event(&mut self) -> Option<Event> {
+            // Same contract as the inner link: events never arrive.
+            std::future::pending().await
+        }
+
+        fn steer(&self, text: &str, target: SteerTarget) -> bool {
+            self.as_ref().steer(text, target)
         }
     }
 }

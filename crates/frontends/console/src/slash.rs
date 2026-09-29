@@ -236,7 +236,7 @@ pub fn help_lines() -> Vec<String> {
         "  /hooks — the configured hook table".to_string(),
         "  /release-notes — the newest changelog sections".to_string(),
         "  /status — session, model, mode, and context summary".to_string(),
-        "  /memory — the AGENTS.md instruction files in scope".to_string(),
+        "  /memory — the instruction files in scope (AGENTS.md tiers and rules)".to_string(),
         "  /snapshots — file-content snapshot labels".to_string(),
         "  /goal — durable goal status".to_string(),
         "  /compact — compact the context now; add text to steer the summary".to_string(),

@@ -2234,3 +2234,43 @@ fn confirm_exit_off_skips_the_double_press() {
     ));
     assert_eq!(flow, Flow::Exit, "first ctrl+c exits");
 }
+
+/// UI exit submits `Op::Shutdown` so the actor's teardown (SessionEnd
+/// hooks, memory pass) runs in a bounded drain instead of dying on
+/// client drop — same contract the exec surface already honors.
+#[tokio::test]
+async fn exit_submits_shutdown_to_the_session_link() {
+    theme::set(theme::Theme::dark());
+    let link = std::sync::Arc::new(TestLink::new());
+    let mut ui = ConsoleUi::new(
+        Box::new(link.clone()),
+        &UiContext {
+            model_name: "test-model".to_string(),
+            provider_id: String::new(),
+            thinking_effort: None,
+            thinking_levels: Vec::new(),
+            cwd: PathBuf::from("/home/user/work/proj/sub"),
+            permission_mode: "auto".to_string(),
+            skill_names: Vec::new(),
+            mcp_servers: Vec::new(),
+            status: Arc::new(NullStatus),
+            session_id: "session-0001".to_string(),
+            session_title: None,
+            model_entries: Vec::new(),
+            home: None,
+            update_notice: None,
+            redactor: None,
+        },
+        "0.1.0",
+    );
+    // Shrunken window: TestLink yields no events, so the drain ends on
+    // the deadline rather than a channel close.
+    ui.shutdown_session_within(std::time::Duration::from_millis(50)).await;
+    let submitted = link.submitted.lock().expect("test lock");
+    assert!(
+        submitted
+            .iter()
+            .any(|op| matches!(op, Op::Shutdown)),
+        "shutdown op missing: {submitted:?}"
+    );
+}

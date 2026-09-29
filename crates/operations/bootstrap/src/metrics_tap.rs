@@ -14,8 +14,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use infrastructure_base::now_secs;
 use operations_actor::EventTap;
 use operations_observe::{Ledger, Metrics, TurnSample};
 use wavecode_wire::{Event, EventMsg};
@@ -72,14 +72,6 @@ impl MetricsTap {
             tracing::warn!("metrics ledger write failed: {e}");
         }
     }
-}
-
-/// Unix seconds, saturating on pre-epoch clocks.
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
 }
 
 /// Build the tap for a session that journals under `home`.

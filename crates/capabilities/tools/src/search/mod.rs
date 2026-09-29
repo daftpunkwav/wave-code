@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, ok_output, req_str};
 
 /// grep match-line cap: stop scanning past it and mark truncation.
 const MAX_MATCHES: usize = 500;
@@ -24,14 +24,6 @@ const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 /// glob returned-path cap.
 const MAX_PATHS: usize = 1000;
-
-/// Build a success output.
-fn ok_output(content: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: content.into(),
-        is_error: false,
-    }
-}
 
 /// Parse and validate a path: escapes/invalid input become business-failure output for the model, while io failures still propagate as `Err`.
 fn resolve_path(ctx: &ToolCtx, path: &str) -> Result<std::result::Result<PathBuf, ToolOutput>> {

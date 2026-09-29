@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output, ok_output};
 
 /// Shared HTTP client for search requests. The connection pool, DNS
 /// cache, and TLS session state would otherwise be discarded with every
@@ -315,14 +315,6 @@ pub fn parse_ddg_html(html: &str, count: usize) -> Vec<SearchResult> {
             snippet: snippets.get(i).cloned().unwrap_or_default(),
         })
         .collect()
-}
-
-/// Build a success output.
-fn ok_output(content: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: content.into(),
-        is_error: false,
-    }
 }
 
 /// Parse `count` (default 5, max 10; over-max and zero are business errors).

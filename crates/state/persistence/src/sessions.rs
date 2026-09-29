@@ -15,6 +15,7 @@
 
 //! New-stack session registry: identity + index + per-turn snapshots.
 
+use infrastructure_base::now_secs;
 use std::path::{Path, PathBuf};
 
 use crate::JsonlJournal;
@@ -170,14 +171,6 @@ pub fn is_valid_session_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-/// Current unix seconds; 0 when the clock is before the epoch (tests).
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Derive a default title from the first user message: first line,

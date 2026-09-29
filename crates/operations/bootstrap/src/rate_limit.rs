@@ -10,6 +10,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use infrastructure_base::now_secs_f64;
 use infrastructure_ratelimit::TokenBucket;
 
 /// Hard ceiling on how long one request may wait for a token.
@@ -26,7 +27,7 @@ pub struct RateLimitedModel<M> {
 impl<M> RateLimitedModel<M> {
     /// Wrap `inner` with a `requests_per_minute` throttle.
     pub fn new(inner: M, requests_per_minute: u32) -> Self {
-        let now = now_secs();
+        let now = now_secs_f64();
         Self {
             inner,
             bucket: Mutex::new(TokenBucket::new(
@@ -47,7 +48,7 @@ impl<M> RateLimitedModel<M> {
         loop {
             {
                 let mut bucket = self.bucket.lock().unwrap_or_else(|e| e.into_inner());
-                if bucket.try_acquire(now_secs()) {
+                if bucket.try_acquire(now_secs_f64()) {
                     return true;
                 }
             }
@@ -57,13 +58,6 @@ impl<M> RateLimitedModel<M> {
             tokio::time::sleep(POLL).await;
         }
     }
-}
-
-fn now_secs() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
 }
 
 #[async_trait::async_trait]

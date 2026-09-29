@@ -14,6 +14,7 @@
 //! URI and a head excerpt. Reads go through the `spill_read` tool (tools
 //! crate), which resolves the same store root.
 
+use infrastructure_base::now_secs;
 use std::path::{Path, PathBuf};
 
 /// Total size cap for the spill store (32 MB); oldest entries evict first.
@@ -88,13 +89,6 @@ impl std::fmt::Display for ManifestEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} ({} bytes)", self.id, self.bytes)
     }
-}
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// Validate a spill id: `[A-Za-z0-9_-]{1,64}` (manifest/file-name safe).

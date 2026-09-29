@@ -147,6 +147,17 @@ pub(crate) fn err_output(reason: impl Into<String>) -> ToolOutput {
     }
 }
 
+/// Build a success output: plain content with `is_error` cleared.
+///
+/// Canonical crate-wide copy (like [`err_output`]): one definition instead
+/// of a per-module private copy of the `ToolOutput` shape.
+pub(crate) fn ok_output(content: impl Into<String>) -> ToolOutput {
+    ToolOutput {
+        content: content.into(),
+        is_error: false,
+    }
+}
+
 /// Extract a required string parameter; missing or mistyped params yield a business-failure output.
 pub(crate) fn req_str<'a>(
     input: &'a serde_json::Value,

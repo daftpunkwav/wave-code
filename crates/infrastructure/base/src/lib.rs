@@ -247,6 +247,30 @@ pub fn open_append_private(path: &std::path::Path) -> std::io::Result<std::fs::F
         .open(path)
 }
 
+/// Current unix time in whole seconds; 0 when the clock is before the
+/// epoch (a machine with an unset or badly set RTC).
+///
+/// One clock read for every layer that stamps wall-clock time (spill
+/// manifests, grant provenance, metric samples, the session index), so
+/// the saturate-to-zero convention cannot drift between stores. Stamp
+/// semantics are provenance-only by design: nothing orders work by these
+/// seconds. Callers needing sub-second resolution use [`now_secs_f64`].
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// [`now_secs`] with sub-second precision, for callers measuring elapsed
+/// time rather than stamping provenance (token-bucket refills).
+pub fn now_secs_f64() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 /// Weekday names indexed by `days_since_epoch % 7` with 1970-01-01 =
 /// Thursday (index 4).
 const WEEKDAYS: [&str; 7] = [
@@ -537,6 +561,14 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "append tightened the mode: {mode:o}");
         }
+    }
+
+    #[test]
+    fn now_secs_reads_a_plausible_clock() {
+        // 2023-01-01T00:00:00Z; anything older means a broken RTC, which
+        // the saturate-to-zero contract would surface here.
+        assert!(now_secs() > 1_672_531_200);
+        assert!(now_secs_f64() > 1_672_531_200.0);
     }
 
     #[test]

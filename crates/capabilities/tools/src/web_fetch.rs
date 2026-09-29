@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, err_output};
+use crate::{Result, Tool, ToolCtx, ToolOutput, err_output, ok_output};
 
 /// Shared HTTP client for fetches: the connection pool and TLS session
 /// state would otherwise be discarded with every per-call build. The
@@ -48,14 +48,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 const MAX_TIMEOUT_MS: u64 = 300_000;
 /// Maximum redirect hops followed before giving up.
 const MAX_REDIRECTS: u32 = 5;
-
-/// Build a success output.
-fn ok_output(content: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: content.into(),
-        is_error: false,
-    }
-}
 
 /// Parse `max_bytes` (default 256 KB, clamped to 1 MB).
 fn resolve_max_bytes(input: &Value) -> std::result::Result<usize, ToolOutput> {

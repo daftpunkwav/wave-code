@@ -204,8 +204,7 @@ where
             };
             let Some(sub) = sub else {
                 // All clients dropped: end the session best-effort.
-                finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
-                end_session(&driver, &conv).await;
+                end_session_lifecycle(&driver, &event_tx, &conv).await;
                 return;
             };
             match sub.op {
@@ -217,28 +216,16 @@ where
                     }
                     // Persist-then-act: the pre-turn snapshot is durable
                     // before the driver broadcasts or executes anything.
-                    turn_seq += 1;
-                    let label = turn_label(turn_seq);
-                    let snapshot = render_snapshot(&conv);
                     let checkpoint_on = durability
                         .as_ref()
                         .is_some_and(|dur| dur.policy.checkpoint_before_model_request);
-                    let warn_id = sub.id.clone();
-                    let warn_tx = event_tx.clone();
-                    checkpoint_turn(
+                    checkpoint_pre_turn(
                         &mut durability,
                         checkpoint_on,
-                        &label,
-                        &snapshot,
-                        &|message| {
-                            try_send_event(
-                                &warn_tx,
-                                Event {
-                                    id: warn_id.clone(),
-                                    msg: EventMsg::Warning { message },
-                                },
-                            );
-                        },
+                        &mut turn_seq,
+                        &conv,
+                        &event_tx,
+                        &sub.id,
                     );
                     let ctx = RunContext {
                         run_id: sub.id.clone(),
@@ -272,8 +259,7 @@ where
                     )
                     .await
                     {
-                        finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
-                        end_session(&driver, &conv).await;
+                        end_session_lifecycle(&driver, &event_tx, &conv).await;
                         return;
                     }
                 }
@@ -295,28 +281,16 @@ where
                     let id = sub.id.clone();
                     // Compaction rewrites shared history (a state side
                     // effect), so it honors the side-effect flag.
-                    turn_seq += 1;
-                    let label = turn_label(turn_seq);
-                    let snapshot = render_snapshot(&conv);
                     let checkpoint_on = durability
                         .as_ref()
                         .is_some_and(|dur| dur.policy.before_tool_side_effect);
-                    let warn_tx = event_tx.clone();
-                    let warn_id = id.clone();
-                    checkpoint_turn(
+                    checkpoint_pre_turn(
                         &mut durability,
                         checkpoint_on,
-                        &label,
-                        &snapshot,
-                        &|message| {
-                            try_send_event(
-                                &warn_tx,
-                                Event {
-                                    id: warn_id.clone(),
-                                    msg: EventMsg::Warning { message },
-                                },
-                            );
-                        },
+                        &mut turn_seq,
+                        &conv,
+                        &event_tx,
+                        &sub.id,
                     );
                     let tx = event_tx.clone();
                     let sink = move |event: Event| {
@@ -354,8 +328,7 @@ where
                     )
                     .await
                     {
-                        finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
-                        end_session(&driver, &conv).await;
+                        end_session_lifecycle(&driver, &event_tx, &conv).await;
                         return;
                     }
                 }
@@ -389,8 +362,7 @@ where
                 }
                 Op::Shutdown => {
                     interrupt.trigger();
-                    finish_lifecycle(&driver, &event_tx, HookPoint::SessionEnd).await;
-                    end_session(&driver, &conv).await;
+                    end_session_lifecycle(&driver, &event_tx, &conv).await;
                     return;
                 }
                 Op::SetPermissionMode { mode } => {
@@ -502,6 +474,52 @@ async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
         })
         .collect();
     driver.end_session(&transcript).await;
+}
+
+/// Persist the pre-turn durable checkpoint for one turn-driving op.
+///
+/// Shared by the two turn-carrying operations (`UserInput`, `Compact`):
+/// bump `turn_seq`, render the pre-turn snapshot, and save the
+/// checkpoint when `checkpoint_on` asks. The flag is resolved by the
+/// caller because each operation maps to a different policy hook point
+/// (`checkpoint_before_model_request` vs `before_tool_side_effect`).
+/// Warnings carry the submission's own id; a durable failure is loud
+/// but never aborts the turn (see [`checkpoint_turn`]).
+fn checkpoint_pre_turn(
+    durability: &mut Option<TurnDurability>,
+    checkpoint_on: bool,
+    turn_seq: &mut u64,
+    conv: &Conversation,
+    event_tx: &mpsc::Sender<Event>,
+    id: &str,
+) {
+    *turn_seq += 1;
+    let label = turn_label(*turn_seq);
+    let snapshot = render_snapshot(conv);
+    let warn_tx = event_tx.clone();
+    let warn_id = id.to_string();
+    checkpoint_turn(durability, checkpoint_on, &label, &snapshot, &|message| {
+        try_send_event(
+            &warn_tx,
+            Event {
+                id: warn_id.clone(),
+                msg: EventMsg::Warning { message },
+            },
+        );
+    });
+}
+
+/// Session teardown shared by every actor exit path (clients dropped,
+/// turn exit, explicit shutdown): SessionEnd hooks first, then the
+/// best-effort memory-extraction pass. One sequence so no exit path can
+/// run a half teardown.
+async fn end_session_lifecycle<D: TurnDriver>(
+    driver: &D,
+    event_tx: &mpsc::Sender<Event>,
+    conv: &Conversation,
+) {
+    finish_lifecycle(driver, event_tx, HookPoint::SessionEnd).await;
+    end_session(driver, conv).await;
 }
 
 /// Forwarding sink over the bounded event channel.

@@ -12,8 +12,8 @@
  */
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use infrastructure_base::now_secs;
 use state_persistence::grants::{self, Grant};
 use wavecode_sandbox::Rule;
 
@@ -63,14 +63,6 @@ impl GrantSink {
             }
         }
     }
-}
-
-/// Unix seconds, or 0 when the clock is before the epoch (provenance only).
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

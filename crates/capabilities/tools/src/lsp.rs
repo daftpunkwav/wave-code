@@ -36,7 +36,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, lock, req_str};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, lock, ok_output, req_str};
 
 /// Default per-read timeout: 30 s.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -50,14 +50,6 @@ const MAX_DIAGNOSTICS_PER_FILE: usize = 200;
 /// Cap on tracked files: the oldest-inserted file is evicted FIFO when a new
 /// file would push the count past the cap.
 const MAX_DIAGNOSTIC_FILES: usize = 32;
-
-/// Build a success output.
-fn ok_output(content: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: content.into(),
-        is_error: false,
-    }
-}
 
 /// Encode one JSON-RPC message with an LSP `Content-Length` header.
 fn encode_message(body: &Value) -> Vec<u8> {

@@ -151,7 +151,13 @@ impl Tool for ReadFile {
         // A tail read deliberately shows the end: name the skipped head so
         // the model knows earlier lines exist and how to reach them.
         if tail && start > 0 {
-            content = format!("[showing lines {}-{} of {}]\n{}", start + 1, end, total, content);
+            content = format!(
+                "[showing lines {}-{} of {}]\n{}",
+                start + 1,
+                end,
+                total,
+                content
+            );
         }
         let mut truncated = !tail && end < total;
         if content.len() > MAX_BYTES {
@@ -179,9 +185,10 @@ impl Tool for ReadFile {
 fn opt_offset(input: &Value, key: &str) -> std::result::Result<Option<i64>, ToolOutput> {
     match input.get(key) {
         None | Some(Value::Null) => Ok(None),
-        Some(v) => v.as_i64().map(Some).ok_or_else(|| {
-            err_output(format!("invalid parameter '{key}' (integer required)"))
-        }),
+        Some(v) => v
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| err_output(format!("invalid parameter '{key}' (integer required)"))),
     }
 }
 
@@ -197,10 +204,9 @@ const SUGGESTION_COUNT: usize = 3;
 /// degrade to the plain message.
 async fn missing_file_message(path: &std::path::Path) -> String {
     let message = format!("file not found: {}", path.display());
-    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name())
-        else {
-            return message;
-        };
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return message;
+    };
     let Some(file_name) = file_name.to_str() else {
         return message;
     };
@@ -307,9 +313,17 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
-        assert!(out.content.starts_with("[showing lines 98-100 of 100]\n"), "{}", out.content);
+        assert!(
+            out.content.starts_with("[showing lines 98-100 of 100]\n"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("line100"));
-        assert!(!out.content.contains("line1\n"), "head is skipped: {}", out.content);
+        assert!(
+            !out.content.contains("line1\n"),
+            "head is skipped: {}",
+            out.content
+        );
     }
 
     #[tokio::test]
@@ -317,12 +331,18 @@ mod tests {
         let (_d, c) = ctx();
         std::fs::write(c.cwd.join("log.txt"), hundred_lines()).unwrap();
         let out = ReadFile::default()
-            .execute(serde_json::json!({"path": "log.txt", "offset": -100_000}), &c)
+            .execute(
+                serde_json::json!({"path": "log.txt", "offset": -100_000}),
+                &c,
+            )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("line1\n") && out.content.contains("line100"));
-        assert!(!out.content.contains("[showing lines"), "no head was skipped");
+        assert!(
+            !out.content.contains("[showing lines"),
+            "no head was skipped"
+        );
     }
 
     #[tokio::test]
@@ -330,11 +350,18 @@ mod tests {
         let (_d, c) = ctx();
         std::fs::write(c.cwd.join("log.txt"), hundred_lines()).unwrap();
         let out = ReadFile::default()
-            .execute(serde_json::json!({"path": "log.txt", "offset": -30, "limit": 2}), &c)
+            .execute(
+                serde_json::json!({"path": "log.txt", "offset": -30, "limit": 2}),
+                &c,
+            )
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
-        assert!(out.content.starts_with("[showing lines 71-72 of 100]\n"), "{}", out.content);
+        assert!(
+            out.content.starts_with("[showing lines 71-72 of 100]\n"),
+            "{}",
+            out.content
+        );
         assert!(out.content.contains("line72\n") || out.content.ends_with("line72"));
     }
 

@@ -514,11 +514,17 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>,
 
 /// Parse one response body: empty means "no content" (e.g. 202 for a
 /// notification); otherwise try single-JSON first, then the SSE-stream path.
-pub fn parse_response_body(body: &[u8]) -> Result<Option<serde_json::Value>, TransportError> {
+///
+/// Production always parses with a known request id (the transport calls
+/// [`parse_response_body_for`] directly); this uncorrelated form exists
+/// only so tests exercise the shared path the way a caller without a
+/// pending id would.
+#[cfg(test)]
+fn parse_response_body(body: &[u8]) -> Result<Option<serde_json::Value>, TransportError> {
     parse_response_body_for(body, None)
 }
 
-/// [`parse_response_body`] narrowed to one request id (see
+/// `parse_response_body` narrowed to one request id (see
 /// [`parse_sse_stream_for`]): the single-JSON path is the whole body, so
 /// correlation happens on the SSE branch.
 fn parse_response_body_for(
@@ -567,11 +573,16 @@ fn sse_candidates(text: &str) -> Vec<serde_json::Value> {
 /// Parse an SSE stream (`event:` / `data:` / comment lines): every `data:`
 /// payload that parses as JSON is a candidate and the last candidate wins, so
 /// interleaved progress events never shadow the final JSON-RPC message.
-pub fn parse_sse_stream(text: &str) -> Option<serde_json::Value> {
+///
+/// Production parses with a known request id (`parse_sse_stream_for`) so a
+/// stale or interleaved frame cannot be mistaken for the response; this
+/// uncorrelated form is the test-only variant of that same parse.
+#[cfg(test)]
+fn parse_sse_stream(text: &str) -> Option<serde_json::Value> {
     sse_candidates(text).pop()
 }
 
-/// [`parse_sse_stream`] narrowed to one request id: when `expected` is
+/// `parse_sse_stream` narrowed to one request id: when `expected` is
 /// known, only a frame carrying exactly that id counts — null-id frames
 /// are server-initiated notifications, never responses, and a stale or
 /// interleaved id can never be mistaken for this response. `None` means

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, req_str};
+use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, ok_output, req_str};
 
 /// Per-session record of what the session last saw on disk for the files
 /// its file tools touched. `read` records a fingerprint when it returns
@@ -51,11 +51,7 @@ impl FileLedger {
     /// recorded fingerprint; `None` when the write may proceed (no recorded
     /// baseline, stat failure, or an unchanged file).
     pub(crate) async fn check_fresh(&self, path: &std::path::Path) -> Option<ToolOutput> {
-        let expected = *self
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(path)?;
+        let expected = *self.0.lock().unwrap_or_else(|e| e.into_inner()).get(path)?;
         let meta = tokio::fs::metadata(path).await.ok()?;
         let current = match meta.modified() {
             Ok(mtime) => Some((mtime, meta.len())),
@@ -78,14 +74,6 @@ const MAX_BYTES: usize = 50 * 1024;
 const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
 /// write content cap: content over 10 MB is rejected outright.
 const MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
-
-/// Build a success output.
-fn ok_output(content: impl Into<String>) -> ToolOutput {
-    ToolOutput {
-        content: content.into(),
-        is_error: false,
-    }
-}
 
 /// Parse an optional non-negative integer parameter; present-but-negative/float/non-numeric values yield a business-failure output.
 fn opt_usize(input: &Value, key: &str) -> std::result::Result<Option<usize>, ToolOutput> {
@@ -491,8 +479,15 @@ mod tests {
             .unwrap();
         assert!(out.is_error, "{:?}", out.content);
         assert!(out.content.contains("changed on disk"), "{}", out.content);
-        assert!(!out.content.contains("ALPHA"), "file untouched: {}", out.content);
-        assert_eq!(std::fs::read_to_string(c.cwd.join("f.txt")).unwrap(), "alpha beta GAMMA CHANGED\n");
+        assert!(
+            !out.content.contains("ALPHA"),
+            "file untouched: {}",
+            out.content
+        );
+        assert_eq!(
+            std::fs::read_to_string(c.cwd.join("f.txt")).unwrap(),
+            "alpha beta GAMMA CHANGED\n"
+        );
         // Re-read re-records the baseline; the same edit now applies.
         r.execute(serde_json::json!({"path": "f.txt"}), &c)
             .await
@@ -530,7 +525,10 @@ mod tests {
             .unwrap();
         assert!(out.is_error, "{:?}", out.content);
         assert!(out.content.contains("changed on disk"), "{}", out.content);
-        assert_eq!(std::fs::read_to_string(c.cwd.join("new.txt")).unwrap(), "v1 externally extended\n");
+        assert_eq!(
+            std::fs::read_to_string(c.cwd.join("new.txt")).unwrap(),
+            "v1 externally extended\n"
+        );
     }
 
     /// The session's own writes keep the ledger current: an edit following
@@ -558,6 +556,9 @@ mod tests {
             .await
             .unwrap();
         assert!(!out.is_error, "{}", out.content);
-        assert_eq!(std::fs::read_to_string(c.cwd.join("seq.txt")).unwrap(), "three");
+        assert_eq!(
+            std::fs::read_to_string(c.cwd.join("seq.txt")).unwrap(),
+            "three"
+        );
     }
 }

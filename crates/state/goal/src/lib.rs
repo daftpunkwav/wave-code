@@ -28,8 +28,8 @@
 
 pub mod tool;
 
+use infrastructure_base::now_secs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Directory name under `<home>/.wavecode` holding goal files.
 pub const GOALS_DIR: &str = "goals";
@@ -223,20 +223,13 @@ pub struct GoalState {
     pub sub_goals: Vec<SubGoal>,
 }
 
-/// Wall clock for `updated_at`; never fails the mutation when the clock
-/// misbehaves (falls back to zero instead of erroring the tool call).
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 impl GoalState {
     /// Record a successful mutation: bump the CAS version and stamp time.
+    /// The shared clock saturates to zero on a pre-epoch clock, so the
+    /// stamp never fails the mutation.
     fn touch(&mut self) {
         self.version = self.version.saturating_add(1);
-        self.updated_at = now_unix();
+        self.updated_at = now_secs();
     }
 
     /// Reject blank objectives shared by set and update.

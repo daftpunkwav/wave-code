@@ -79,9 +79,9 @@ model = "your-model-fast"
 # catalog holding full provider specs (endpoint, API kind, context/output
 # limits, thinking variants, modalities). Edit it in the console with
 # `/provider list` / `add` / `set` / `remove`, or by hand — bare
-# `/provider add` opens a fill-in form over every spec field (alias, API
-# dialect, provider, base URL, key env var, limits, thinking variants,
-# modalities); `/model` itself only switches. Its models merge into
+# `/provider add` walks a step-at-a-time guided wizard over every spec
+# field (alias, API dialect, provider, base URL, key env var, limits,
+# thinking variants, modalities); `/model` itself only switches. Its models merge into
 # `[models]` at startup, and a config.toml provider with the same id
 # wins over a catalog one.
 
@@ -132,10 +132,11 @@ model = "your-model-fast"
   审批提示内联渲染（文件写入审批把受影响的行显示为彩色 diff）、
   `/mcp` 状态行、`/btw` 旁路提问（只读，答案流式汇入面板而不触碰
   对话），以及 `/model`（provider 标签页、搜索、仅本会话的 Alt+S、
-  OpenAI 兼容 provider 的 thinking 档位行）加 `/provider`（覆盖
-  `~/.wavecode/models.json` 全字段的规格表单：API 方言、端点、key
-  环境变量、上下文/输出上限、思考档位、模态；`list` / `set` /
-  `remove` 编辑已存条目）、`/permissions`、`/theme`（内置主题加自
+  OpenAI 兼容 provider 的 thinking 档位行）加 `/provider`（逐步引导
+  的向导，覆盖 `~/.wavecode/models.json` 全部字段：API 方言、端点、
+  key 环境变量、上下文/输出上限、思考档位、模态；裸 `/provider`
+  列出已存 provider 并以其预填向导；`list` / `set` / `remove`
+  编辑已存条目）、`/permissions`、`/theme`（内置主题加自
   定义主题）、`/settings`（十项渲染与行为开关）、`/help`（可滚动的
   按键 + 命令参考）、`/doctor`（配置、凭据、catalog 与设置的一次性
   体检）、`/hooks`（已配置的 hook 表）、`/release-notes`（最新变更

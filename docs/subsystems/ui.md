@@ -128,10 +128,11 @@ receivers remain compatible.
   persistent JSONL history under `~/.wavecode/input-history/console.jsonl`.
 - Bracketed paste with large-paste collapse (`[paste #N +L lines]`
   markers expand atomically on submit).
-- Slash commands (`/help /new /clear /sessions /resume /fork /title
-  /model /effort /permissions /auto /wave /plan /init /mcp /settings
+- Slash commands (`/help /btw /new /clear /sessions /resume /fork /title
+  /model /provider /doctor /agents /hooks /release-notes /effort
+  /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
-  /undo /editor /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
+  /undo /editor /reload /copy /export /exit`) with fuzzy completion; unknown `/tokens` fall
   through as user input (skills). Every command that takes a parameter
   opens its interactive surface when invoked bare — `/theme` picks from
   the theme selector, `/effort` from the level list, `/title`, `/editor`,
@@ -208,14 +209,23 @@ receivers remain compatible.
   `SetThinking` live (same-provider picks only, so a picked model's
   effort never leaks onto the model still running). `/effort <level>`
   sets the level directly; `/model <name>` keeps direct name switching.
-  The catalog itself is edited through `/model` subcommands:
-  `/model list` prints every spec one status line each, `/model add
-  <alias> <kind> <provider> <base_url> <model> [context] [max_output]`
-  inserts one (the command never takes a credential; `api_key_env` or
-  an inline `api_key` can be set by editing the file, which stays
-  owner-only on Unix),
-  `/model set <alias> <context|output|thinking|input> <value>` patches
-  one field, and `/model remove <alias>` drops it. The catalog is
+  The catalog itself is edited through `/provider`: bare opens the
+  provider surface (saved providers with their model counts; picking
+  one preseeds the wizard; a new-provider row starts a fresh one),
+  and bare `/provider add` walks a step-at-a-time wizard over the
+  full spec (provider, API dialect, endpoint, key — `env:NAME` stores
+  the variable name, a bare value stores an inline key, blank skips —
+  model, alias, context/output limits, thinking variants,
+  input/output modalities, then a review; one pass can stage several
+  models sharing one provider). `/provider add <alias> <kind>
+  <provider> <base_url> <model> [context] [max_output]` inserts one
+  positionally (the command never takes a credential; `api_key_env`
+  or an inline `api_key` can be set through the wizard or by editing
+  the file, which stays owner-only on Unix),
+  `/provider set <alias> <context|output|thinking|input> <value>`
+  patches one field, and `/provider remove <alias>` drops it; the old
+  `/model add|list|set|remove` spellings point at `/provider` instead
+  of silently doing nothing. The catalog is
   optional: a missing file is an empty catalog, while a malformed one
   reports and leaves the subcommand cancelled (plain `/model <name>`
   switching never touches the file, so a broken catalog cannot take
@@ -250,8 +260,10 @@ receivers remain compatible.
   or Enter to cycle, changes persist to
   `~/.wavecode/console-settings.json` and apply to live components):
   user-input markdown rendering on/off, tool-call verbosity
-  (names/summary/full), edit rendering (tool only/diff), and the
-  wave-denylist entry count.
+  (names/summary/full), edit rendering (tool only/diff), the
+  wave-denylist entry count, thinking-starts-expanded, streaming
+  assistant draft on/off, the footer context meter, footer tip
+  rotation, confirm-before-exit, and the input-history limit.
 - Submitted user input renders as markdown in the transcript by
   default (the editor never renders); the setting turns it off.
 - Tables in assistant and user markdown render as box-drawing grids

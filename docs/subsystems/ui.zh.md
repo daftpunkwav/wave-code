@@ -74,10 +74,11 @@ footer row 2             (transient exit hint ... context: N% (used/max))
 
 - 多行编辑器，带字素正确的移动、CJK 感知换行、kill ring、撤销、输入历史（Up/Down 带草稿恢复），以及 `~/.wavecode/input-history/console.jsonl` 下的持久 JSONL 历史。
 - 括号粘贴，带大粘贴折叠（`[paste #N +L lines]` 标记在提交时原子展开）。
-- Slash 命令（`/help /new /clear /sessions /resume /fork /title
-  /model /effort /permissions /auto /wave /plan /init /mcp /settings
+- Slash 命令（`/help /btw /new /clear /sessions /resume /fork /title
+  /model /provider /doctor /agents /hooks /release-notes /effort
+  /permissions /auto /wave /plan /init /mcp /settings
   /theme /usage /version /status /memory /snapshots /goal /compact
-  /undo /editor /copy /export /exit`），带模糊补全；未知的 `/tokens` 作为用户输入落空穿透（技能）。每个带参数的命令在裸调用时打开其交互面——`/theme` 打开主题选择器，`/effort` 打开级别列表，`/title`、`/editor`、`/export` 与 `/compact` 打开预填的自由文本提示，`/undo` 打开回退选择器，`/btw` 询问问题——而即时动作（`/clear`、`/new`、`/fork`、`/auto`、`/copy` 等）与纯信息命令（`/usage`、`/status`、`/mcp` 等）保持直接执行。
+  /undo /editor /reload /copy /export /exit`），带模糊补全；未知的 `/tokens` 作为用户输入落空穿透（技能）。每个带参数的命令在裸调用时打开其交互面——`/theme` 打开主题选择器，`/effort` 打开级别列表，`/title`、`/editor`、`/export` 与 `/compact` 打开预填的自由文本提示，`/undo` 打开回退选择器，`/btw` 询问问题——而即时动作（`/clear`、`/new`、`/fork`、`/auto`、`/copy` 等）与纯信息命令（`/usage`、`/status`、`/mcp` 等）保持直接执行。
   `/usage` 渲染按严重性着色的上下文条加从 `TokenCount` 样本累计的 token 拆分。`/copy` 经 OSC 52 把最后一条助手消息放进剪贴板；`/export` 把完整未修剪的用户/助手对话写成 markdown（会提示输入路径；直接传一个则跳过提示）。模式与模型命令立即更新本地 chrome（没有 mode-changed wire 事件）。
 - `/compact` 立即压缩上下文；提示接受可选指令来引导摘要（`CompactTrigger::Manual` 把焦点带给模型摘要器）。转录显示一张活动压缩卡片（锯齿波脉冲、已用秒数），落定为
   `● compacted: context <before>, summary <N> tokens`，其中 `before`
@@ -114,12 +115,20 @@ footer row 2             (transient exit hint ... context: N% (used/max))
   （OpenAI 兼容供应商；预算驱动的 Anthropic thinking 会隐藏它）以 ←/→ 在 off/low/medium/high 间切换并实时派发
   `SetThinking`（仅限同供应商的选择，因此被选模型的 effort 不会泄漏到仍在运行的模型上）。`/effort <level>`
   直接设置级别；`/model <name>` 保留按名直接切换。
-  目录本身经 `/model` 子命令编辑：
-  `/model list` 逐行打印每个条目，`/model add
-  <alias> <kind> <provider> <base_url> <model> [context] [max_output]`
-  插入一条（命令不接受凭据；`api_key_env` 或内联
-  `api_key` 可通过编辑文件设置，文件在 Unix 上保持 owner-only），
-  `/model set <alias> <context|output|thinking|input> <value>` 修补单个字段，`/model remove <alias>` 删除条目。目录是可选的：文件缺失即空目录，而畸形的文件会报告并让子命令取消（普通 `/model <name>` 切换从不触碰该文件，因此坏目录无法连带弄坏活体切换）。
+  目录本身经 `/provider` 编辑：裸调用打开 provider 面
+  （已存 provider 及其模型数；选中一个会预填向导；新 provider 行
+  从零开始），裸 `/provider add` 走逐步向导覆盖全部规格
+  （provider、API 方言、端点、key——`env:NAME` 存环境变量名、裸值
+  存内联 key、留空跳过——模型、别名、上下文/输出上限、思考档位、
+  输入/输出模态，最后是复查；一次可通过"再加一个模型"在同一
+  provider 上暂存多个模型）。`/provider add <alias> <kind>
+  <provider> <base_url> <model> [context] [max_output]`
+  按位置参数直接插入一条（命令不接受凭据；`api_key_env` 或内联
+  `api_key` 可经向导或编辑文件设置，文件在 Unix 上保持
+  owner-only），`/provider set <alias>
+  <context|output|thinking|input> <value>` 修补单个字段，
+  `/provider remove <alias>` 删除条目；旧的
+  `/model add|list|set|remove` 拼写指向 `/provider` 而非静默无效。目录是可选的：文件缺失即空目录，而畸形的文件会报告并让子命令取消（普通 `/model <name>` 切换从不触碰该文件，因此坏目录无法连带弄坏活体切换）。
 - `/permissions` 打开模式选择器（plan/auto/wave 带
   描述）；`/plan`、`/auto`、`/wave` 直接应用。
 - `/help` 打开可滚动面板（键位绑定加每条命令及其描述；
@@ -142,8 +151,10 @@ footer row 2             (transient exit hint ... context: N% (used/max))
   或 Enter 循环、更改持久化到
   `~/.wavecode/console-settings.json` 并应用到活动组件）：
   用户输入 markdown 渲染开/关、工具调用详细程度
-  （names/summary/full）、edit 渲染（tool only/diff），以及
-  wave 拒绝清单的条目数。
+  （names/summary/full）、edit 渲染（tool only/diff）、
+  wave 拒绝清单条目数、thinking 默认展开、流式助手草稿开/关、
+  页脚上下文计量条、页脚提示轮换、退出前二次确认，以及
+  输入历史上限。
 - 提交的用户输入默认在转录中渲染为 markdown（编辑器从不渲染）；该设置可将其关闭。
 - 助手与用户 markdown 中的表格渲染为 box-drawing 网格，表头加粗、列均分收缩以适应宽度；参差的行填充到共享的显示宽度网格上，因此 CJK 单元格与对勾字形无法把边框拉歪。
 - `@` 文件提及，带有界的 workspace 清单（2 000 条目，

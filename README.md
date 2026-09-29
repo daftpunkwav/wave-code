@@ -77,9 +77,9 @@ model = "your-model-fast"
 # catalog holding full provider specs (endpoint, API kind, context/output
 # limits, thinking variants, modalities). Edit it in the console with
 # `/provider list` / `add` / `set` / `remove`, or by hand — bare
-# `/provider add` opens a fill-in form over every spec field (alias, API
-# dialect, provider, base URL, key env var, limits, thinking variants,
-# modalities); `/model` itself only switches. Its models merge into
+# `/provider add` walks a step-at-a-time guided wizard over every spec
+# field (alias, API dialect, provider, base URL, key env var, limits,
+# thinking variants, modalities); `/model` itself only switches. Its models merge into
 # `[models]` at startup, and a config.toml provider with the same id
 # wins over a catalog one.
 
@@ -135,9 +135,11 @@ model = "your-model-fast"
   status rows, `/btw` side questions (read-only, answers stream into a panel
   without touching the conversation), and dialogs for `/model` (provider tabs,
   search, session-only Alt+S, a thinking-level row on OpenAI-compatible
-  providers) plus `/provider` (spec form over the full `~/.wavecode/models.json`
-  entry: API dialect, endpoint, key env var, limits, thinking variants,
-  modalities; `list` / `set` / `remove` edit saved entries), `/permissions`,
+  providers) plus `/provider` (a step-at-a-time guided wizard over the
+  full `~/.wavecode/models.json` entry: API dialect, endpoint, key env
+  var, limits, thinking variants, modalities; bare `/provider` lists
+  saved providers and preseeds the wizard from one; `list` / `set` /
+  `remove` edit saved entries), `/permissions`,
   `/theme` (built-ins plus custom themes), `/settings` (ten rendering and
   behavior tunables), and
   `/help` (scrollable keybinding + command reference), `/doctor` (config,

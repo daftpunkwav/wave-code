@@ -38,7 +38,12 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   external status-line command (JSON snapshot contract), custom JSON
   themes, `/undo` rewind picker, `/editor` (Ctrl+G), `/reload`,
   `/btw` side questions, and a model catalog (`~/.wavecode/models.json`)
-  edited through `/model list|add|set|remove` beside the picker.
+  edited through `/provider` beside the picker. In-console surfaces:
+  `/provider` (a step-at-a-time guided wizard over the full catalog
+  spec, able to stage several models on one provider), `/doctor`
+  (one-pass config/credential/catalog/settings health check), `/agents`
+  (the background-job table), `/hooks` (the configured hook table), and
+  `/release-notes` (the newest changelog sections).
 - Markdown rendering: fenced mermaid blocks draw box-drawing diagrams
   (`graph`/`flowchart` TD/TB/LR with subgraphs, `stateDiagram`,
   `sequenceDiagram`, `classDiagram`, `erDiagram`, `requirementDiagram`,
@@ -98,6 +103,12 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `max_tool_rounds` config key.
 - Edit tool cards and edit settings render as a single unified diff
   column (the `diff layout` setting is gone).
+- Model catalog editing moved from `/model list|add|set|remove` to
+  `/provider`; the old spellings report the move instead of doing
+  nothing, bare `/provider` lists saved providers (picking one
+  preseeds the wizard), and the `/settings` panel expands to ten
+  tunables (thinking expansion, streaming draft, footer meter and
+  tips, confirm-exit, history limit, wave denylist).
 
 ### Fixed
 - Web fetch refuses redirect hops onto link-local hosts at every hop,
@@ -123,6 +134,15 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
 - Correctness: permission-mode typos are rejected instead of
   silently widening to `auto`; oversized `--image` inputs are
   rejected before loading into memory.
+- Console and engine: shell/tool child output decodes through the
+  Windows console code page instead of assuming UTF-8; a frame
+  shrink re-anchors the repaint base so no stale rows survive a
+  viewport resize; settings rows cycle correctly in both directions
+  and the provider wizard honors Esc; the welcome screen clamps to
+  narrow terminals.
+- The session event channel is bounded: a stalled frontend can no
+  longer grow the queue without limit during heavy streaming
+  (overflowing notices degrade to a warning, never a hang).
 
 ### Removed
 - The `ls` tool (redundant with `shell` / `glob` / `read`).

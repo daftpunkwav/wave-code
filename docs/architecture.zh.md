@@ -115,7 +115,7 @@ infrastructure channels + interrupts + limits、TTL/LRU 缓存、分层配置、
 | `wavecode-memory` | 指令记忆（`AGENTS.md` + `AGENTS.local.md` 分层，子目录首次触碰时发现）与每回合转录蒸馏，外加模型可调用的 `memory_write` 工具 |
 | `wavecode-mcp` | Model Context Protocol 客户端与接口边界：client/server trait、数据类型、服务器配置、`mcp__` 命名约定，以及把外部工具注入注册表的 stdio/streamable-HTTP 客户端桥（字节级组帧在 `transport-mcp`） |
 | `wavecode-sandbox` | 工具运行的权限与执行安全层 |
-| `wavecode-hooks` | 生命周期钩子（PreToolUse / PostToolUse / UserPromptSubmit / SessionStart） |
+| `wavecode-hooks` | 生命周期钩子（PreToolUse / PostToolUse / UserPromptSubmit / SessionStart / SessionEnd / Stop / PreCompact / PostCompact） |
 | `wavecode-context` | 上下文管理管线：压缩、spill、预算阶段 |
 
 ### `operations/` — 装配与运维

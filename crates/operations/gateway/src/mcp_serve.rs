@@ -253,9 +253,18 @@ async fn call_tool<E: ToolExecutor>(
             input: arguments,
         })
         .await;
-    if let Some(detail) = outcome
-        .content
-        .strip_prefix(wavecode_tools::TOOL_FAULT_PREFIX)
+    // The fault marker only maps back to a protocol error on an *error*
+    // result: the composition-root adapter stamps the prefix onto fault
+    // results (`is_error = true`) exclusively, so gating on the flag keeps
+    // a successful tool whose output merely opens with the same bytes (a
+    // shell `echo "tool fault: ..."` is a realistic collision) a plain
+    // result. Residual, accepted: a *business* failure whose reason
+    // coincidentally opens with the prefix still reads as an internal
+    // error here (see TOOL_FAULT_PREFIX).
+    if outcome.is_error
+        && let Some(detail) = outcome
+            .content
+            .strip_prefix(wavecode_tools::TOOL_FAULT_PREFIX)
     {
         // Implementation faults are server-side failures, not tool
         // results: surface them as internal errors (see
@@ -335,10 +344,41 @@ mod tests {
         }
     }
 
+    /// A successful tool whose plain output happens to open with the fault
+    /// marker: the prefix alone must not flip it into a protocol error.
+    struct PrefixSuccessTool;
+
+    #[async_trait::async_trait]
+    impl Tool for PrefixSuccessTool {
+        fn name(&self) -> &str {
+            "prefix_success_tool"
+        }
+        fn description(&self) -> &str {
+            "test tool echoing the fault marker on success"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &ToolCtx,
+        ) -> ToolResultAlias<ToolOutput> {
+            Ok(ToolOutput {
+                content: "tool fault: echoed by the tool itself".to_string(),
+                is_error: false,
+            })
+        }
+    }
+
     fn test_registry() -> Arc<wavecode_tools::Registry> {
         let registry = wavecode_tools::Registry::builtin();
         registry.register(Arc::new(EchoTool));
         registry.register(Arc::new(FaultyTool));
+        registry.register(Arc::new(PrefixSuccessTool));
         Arc::new(registry)
     }
 
@@ -523,6 +563,26 @@ mod tests {
             .await;
         assert_eq!(response["id"], 9);
         assert_eq!(response["error"]["code"], INTERNAL_ERROR);
+    }
+
+    /// A *successful* result whose content merely opens with the fault
+    /// marker stays a plain result (`isError: false`): the prefix maps to
+    /// a protocol error only on error results, so a tool echoing the
+    /// marker bytes is never misread as a server fault.
+    #[tokio::test]
+    async fn prefix_opening_success_stays_a_result() {
+        let (mut client, _server) = TestClient::start().await;
+        let response = client
+            .round_trip(
+                r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"prefix_success_tool"}}"#,
+            )
+            .await;
+        assert!(response.get("error").is_none(), "{response}");
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "tool fault: echoed by the tool itself"
+        );
     }
 
     #[tokio::test]

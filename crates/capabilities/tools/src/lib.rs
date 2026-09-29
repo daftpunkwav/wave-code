@@ -134,6 +134,14 @@ pub struct ToolOutput {
 /// protocol-level internal error. Canonical single definition: the producer
 /// (composition-root executor adapters) and the consumer (`operations-
 /// gateway`'s MCP serve) must agree on the exact bytes.
+///
+/// Cross-crate contract, both halves normative: the producer stamps the
+/// prefix onto **error results only** (`is_error = true`), and the
+/// consumer maps a result to a protocol internal error only when
+/// `is_error` *and* the prefix both hold — a successful output opening
+/// with the same bytes is never a fault. Residual, accepted: a business
+/// failure whose reason coincidentally opens with the prefix still reads
+/// as a protocol-level internal error on the serve surface.
 pub const TOOL_FAULT_PREFIX: &str = "tool fault:";
 
 /// Build a business-failure output: the reason is fed back to the model for self-correction.

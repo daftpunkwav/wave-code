@@ -48,7 +48,9 @@ pub struct ServeOptions {
     pub cwd: std::path::PathBuf,
     /// Home directory for the session journal.
     pub home: Option<std::path::PathBuf>,
-    /// Bearer token every authenticated route requires.
+    /// Bearer token every authenticated route requires. Must be
+    /// non-empty: an empty token would accept a bare `Bearer ` header
+    /// from any local process, so [`serve`] rejects it up front.
     pub token: String,
     /// Bind port; 0 picks an ephemeral port (the bound port is returned).
     pub port: u16,
@@ -115,11 +117,21 @@ impl ServerHandle {
 /// root's `assemble_session`; tests pass a scripted-model assembly.
 /// Sessions assemble with parking enabled so approvals and questions
 /// wait on the gates until the HTTP endpoints answer.
+///
+/// Fails with `InvalidInput` when `options.token` is empty: an empty
+/// token would make the guard accept a bare `Bearer ` header, so the
+/// server refuses to start without a real shared secret.
 pub async fn serve<F, S>(options: ServeOptions, assemble: F) -> std::io::Result<ServerHandle>
 where
     F: Fn(AssembleOptions) -> Result<S, SessionError> + Send + Sync + Clone + 'static,
     S: SessionSurface + 'static,
 {
+    if options.token.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "ServeOptions.token must not be empty: an empty token would authenticate any caller",
+        ));
+    }
     // Box at the seam: the router and handlers stay non-generic.
     let assemble: Assemble =
         Arc::new(move |options| assemble(options).map(|session| Box::new(session) as _));
@@ -433,6 +445,19 @@ async fn shutdown(State(state): State<AppState>) -> axum::response::Response {
 }
 
 /// SSE stream of one session's wire events.
+///
+/// Subscription lifecycle (the documented contract for SSE clients): the
+/// stream carries the session's wire events from the subscribe point on
+/// and **ends after the first `TurnCompleted` event** — one stream is one
+/// turn. Clients re-subscribe for the next turn (events raised between
+/// two subscriptions are not replayed; subscribe before prompting to
+/// miss nothing, exactly like the tests below). A subscriber that falls
+/// behind the broadcast buffer receives a synthetic `{"type": "warning",
+/// "message": "..."}` frame naming the skipped count instead of the lost
+/// events. Payloads are serialized `wavecode_wire::Event` JSON: the
+/// snake_case `type` tags are locked by the wire crate's tag tests, and
+/// field evolution there is additive (new fields are optional and
+/// omitted when unset), so consumers may ignore unknown fields.
 async fn stream_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -778,6 +803,29 @@ mod tests {
             StatusCode::OK
         );
         let _ = done;
+    }
+
+    /// An empty bearer token would make the guard accept a bare
+    /// `Bearer ` header: the server refuses to start instead.
+    #[tokio::test]
+    async fn serve_rejects_an_empty_token() {
+        let error = serve(
+            ServeOptions {
+                config_path: None,
+                model_override: None,
+                cwd: std::env::temp_dir(),
+                home: None,
+                token: String::new(),
+                port: 0,
+            },
+            |_options| -> Result<operations_bootstrap::SessionHandle, SessionError> {
+                unreachable!("no assembly before the token check")
+            },
+        )
+        .await
+        .err()
+        .expect("empty token must fail the bind");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test]

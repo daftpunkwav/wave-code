@@ -25,7 +25,16 @@
 //! multi-line strings), and a hand-rolled parser's edge cases (quotes,
 //! indented lists) would silently degrade; serde_yaml is already in the
 //! workspace-root `[workspace.dependencies]` at a unified version (SPEC
-//! discipline). The frontmatter table mixes kebab-case
+//! discipline).
+//!
+//! **Upstream status caveat**: `serde_yaml` is archived upstream and receives
+//! no further security patches. The risk is accepted for now: there is no open
+//! advisory against it, and frontmatter comes from local `SKILL.md` files
+//! (builtin pack, `~/.wavecode/skills`, `<cwd>/.wavecode/skills`) — the
+//! MCP-sourced prompt input is an unwired placeholder. Revisit the parser
+//! choice before any remote/untrusted content is fed into this path.
+//!
+//! The frontmatter table mixes kebab-case
 //! (`allowed-tools`) with snake_case (`when_to_use`) field names, so the
 //! parsing surface accepts both spellings (serde aliases) and constrains
 //! neither on the write side.

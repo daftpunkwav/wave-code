@@ -502,12 +502,16 @@ async fn checkpoint_pre_turn(
     event_tx: &mpsc::Sender<Event>,
     id: &str,
 ) {
-    *turn_seq += 1;
-    let label = turn_label(*turn_seq);
-    let snapshot = render_snapshot(conv);
+    // Disabled policy exits first: rendering the snapshot and deriving the
+    // label are a full O(history) walk that would otherwise be computed and
+    // dropped on every turn when no checkpoint can be written (the plain
+    // `spawn` path has no durability at all).
     if !checkpoint_on {
         return;
     }
+    *turn_seq += 1;
+    let label = turn_label(*turn_seq);
+    let snapshot = render_snapshot(conv);
     let warn_tx = event_tx.clone();
     let warn_id = id.to_string();
     // Take the store out so the blocking closure owns it ('static); the

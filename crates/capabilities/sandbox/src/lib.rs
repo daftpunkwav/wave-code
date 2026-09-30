@@ -64,7 +64,7 @@ pub use os::{
     detect_backend,
 };
 pub use seatbelt::SeatbeltBackend;
-pub use windows::{WINDOWS_UNAVAILABLE_REASON, WindowsJobBackend};
+pub use windows::{JOB_STATUS_GAP, WINDOWS_UNAVAILABLE_REASON, WindowsJobBackend};
 
 /// Unified lock-poisoning recovery policy (single decision point for this
 /// crate): the mode lock's critical section is a single read / write, so a

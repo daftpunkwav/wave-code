@@ -98,6 +98,16 @@ pub trait SandboxBackend: Send + Sync + std::fmt::Debug {
     fn enforcement(&self) -> EnforcementLevel {
         EnforcementLevel::Partial
     }
+    /// Appendix appended to the backend's status line when the plain
+    /// `name (enforcement: .., available)` rendering would overstate the
+    /// isolation the backend actually holds (known gaps, structural
+    /// limits). `None` keeps the bare status line. Declared by the
+    /// backend itself — consumers must never string-match
+    /// [`SandboxBackend::backend_name`] to decide an appendix, or a new
+    /// partial backend silently loses the disclosure.
+    fn status_appendix(&self) -> Option<&'static str> {
+        None
+    }
     /// Arm confinement on `cmd` for one spawn under `profile`.
     fn spawn_confined(
         &self,

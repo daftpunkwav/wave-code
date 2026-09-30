@@ -27,6 +27,14 @@ use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 /// running unconfined (the caller turns a backend failure into a hard error).
 pub const WINDOWS_UNAVAILABLE_REASON: &str = "no full-isolation Windows backend: the Job-Object backend (windows::WindowsJobBackend) enforces only process-tree lifetime control and process-count limits — no filesystem write boundary and no network policy; integrity-level / AppContainer isolation is not implemented, so confinement requests beyond that scope fail closed";
 
+/// Short-form gap summary the job backend appends to its status line (see
+/// [`SandboxBackend::status_appendix`]): the plain
+/// `job (enforcement: Partial, available)` rendering would otherwise
+/// overstate what the platform boundary holds. Pinned against
+/// [`WINDOWS_UNAVAILABLE_REASON`] (the long-form reason) by a test, so
+/// the two disclosures cannot drift apart.
+pub const JOB_STATUS_GAP: &str = "process-tree lifetime control and process-count limits only: no filesystem write boundary, no network policy";
+
 /// Hard cap on concurrently live processes inside one confined spawn's job:
 /// bounds fork-bomb style runaways; the job rejects further members with a
 /// spawn error inside the child instead of growing without bound.
@@ -104,6 +112,10 @@ impl SandboxBackend for WindowsJobBackend {
     fn enforcement(&self) -> EnforcementLevel {
         // Lifetime control and limits only: no filesystem, no network.
         EnforcementLevel::Partial
+    }
+
+    fn status_appendix(&self) -> Option<&'static str> {
+        Some(JOB_STATUS_GAP)
     }
 
     fn is_available(&self) -> bool {
@@ -606,6 +618,32 @@ mod tests {
         assert!(WINDOWS_UNAVAILABLE_REASON.contains("no filesystem write boundary"));
         assert!(WINDOWS_UNAVAILABLE_REASON.contains("no network policy"));
         assert!(WINDOWS_UNAVAILABLE_REASON.contains("fail closed"));
+    }
+
+    /// The status-line appendix is the short form of the long-form reason:
+    /// every claim it makes must stay backed by
+    /// [`WINDOWS_UNAVAILABLE_REASON`], so the one-liner cannot drift into
+    /// under- or overstating what the backend holds.
+    #[test]
+    fn status_gap_summary_agrees_with_the_backend_reason() {
+        assert_eq!(
+            WindowsJobBackend.status_appendix(),
+            Some(JOB_STATUS_GAP),
+            "the job backend must declare its own status appendix"
+        );
+        for phrase in [
+            "process-tree lifetime control",
+            "no filesystem write boundary",
+            "no network policy",
+        ] {
+            assert!(JOB_STATUS_GAP.contains(phrase), "summary omits {phrase:?}");
+            assert!(
+                WINDOWS_UNAVAILABLE_REASON.contains(phrase),
+                "the backend no longer documents {phrase:?}: update the summary"
+            );
+        }
+        // Full backends keep the bare status line (no appendix to append).
+        assert_eq!(crate::os::UnavailableBackend.status_appendix(), None);
     }
 
     // —— live behavior (Windows only; run on a real host) ——

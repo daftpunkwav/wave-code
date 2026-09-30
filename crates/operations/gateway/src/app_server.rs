@@ -497,16 +497,26 @@ async fn prompt_session(
     if text.is_empty() {
         return (StatusCode::BAD_REQUEST, "`text` must not be empty").into_response();
     }
-    let images: Vec<wavecode_wire::UserImage> = body
-        .get("images")
-        .and_then(serde_json::Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Images parse strictly: a malformed entry answers 400 instead of
+    // being silently dropped — a skipped image would otherwise leave the
+    // client with a 202 and a model that never saw the attachment, with
+    // nothing naming the loss. Unknown extra fields still pass (the wire
+    // `UserImage` shape stays additively evolvable).
+    let mut images = Vec::new();
+    if let Some(items) = body.get("images").and_then(serde_json::Value::as_array) {
+        for item in items {
+            match serde_json::from_value::<wavecode_wire::UserImage>(item.clone()) {
+                Ok(image) => images.push(image),
+                Err(_) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "`images` entries must carry string `mime` and `base64` fields",
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     submit(
         state,
         &session_id,
@@ -1061,6 +1071,47 @@ mod tests {
             "events: {types:?}"
         );
         assert_eq!(events[1]["text"], "hello");
+        let _ = done;
+    }
+
+    /// Image entries parse strictly: a malformed entry answers 400
+    /// (naming the required shape) instead of silently vanishing behind a
+    /// 202, while a well-formed entry is accepted and unknown extra
+    /// fields keep passing.
+    #[tokio::test]
+    async fn malformed_prompt_images_answer_400() {
+        let (token, port, done) = start(vec![]).await;
+        let http = client(&token);
+        let session_id = create_session_ok(&http, port).await;
+        let post = |body: serde_json::Value| {
+            let http = &http;
+            let url = format!("http://127.0.0.1:{port}/sessions/{session_id}/prompt");
+            async move {
+                http.post(url).json(&body).send().await.unwrap()
+            }
+        };
+        let bad = post(serde_json::json!({
+            "text": "look at this",
+            "images": [{"mime": "image/png"}],
+        }))
+        .await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        let text = bad.text().await.unwrap();
+        assert!(
+            text.contains("mime") && text.contains("base64"),
+            "the error must name the image shape: {text}"
+        );
+        // A well-formed entry (plus unknown extra fields) still queues.
+        let good = post(serde_json::json!({
+            "text": "look at this",
+            "images": [{
+                "mime": "image/png",
+                "base64": "aGk=",
+                "futureField": true,
+            }],
+        }))
+        .await;
+        assert_eq!(good.status(), StatusCode::ACCEPTED);
         let _ = done;
     }
 

@@ -348,27 +348,19 @@ pub fn mcp_config_findings(config: &wavecode_config::Config) -> Vec<String> {
 /// One line on the OS confinement a session's shell spawns will get.
 ///
 /// Frontends read this through the composition root so they never name the
-/// sandbox crate. The Windows job backend gets its documented gap appended:
-/// a status line saying "available" would otherwise overstate what the
-/// platform boundary actually holds.
+/// sandbox crate. A backend whose plain status line would overstate the
+/// isolation it holds declares its gap itself
+/// (`SandboxBackend::status_appendix`), so a new partial backend cannot
+/// silently lose the gap disclosure by falling out of a consumer-side
+/// backend-name check.
 pub fn confinement_status() -> String {
     let backend = wavecode_sandbox::Sandbox::detect_backend();
     let line = wavecode_sandbox::status_line(&backend);
-    if backend.backend_name() == "job"
-        && matches!(
-            backend.enforcement(),
-            wavecode_sandbox::EnforcementLevel::Partial
-        )
-    {
-        return format!("{line}; {JOB_GAP}");
+    match backend.status_appendix() {
+        Some(gap) => format!("{line}; {gap}"),
+        None => line,
     }
-    line
 }
-
-/// The job backend's gap, phrased for a status line. A test pins every claim
-/// here against the sandbox's own documented reason, so the short form
-/// cannot drift into overstating what the platform boundary holds.
-const JOB_GAP: &str = "process-tree lifetime control and process-count limits only: no filesystem write boundary, no network policy";
 
 /// Resolve the effective denylist: an explicit override wins; `None`
 /// loads the shared store under `home` so every surface (TUI, exec,
@@ -1522,23 +1514,6 @@ api_key = "k-inline"
             vec!["git push".to_string()]
         );
         assert!(resolve_denylist(None, None).is_empty());
-    }
-
-    /// The one-line status copy must not claim more (or less) than the
-    /// backend's own documented limitation.
-    #[test]
-    fn job_gap_summary_agrees_with_the_backend_reason() {
-        for phrase in [
-            "process-tree lifetime control",
-            "no filesystem write boundary",
-            "no network policy",
-        ] {
-            assert!(JOB_GAP.contains(phrase), "summary omits {phrase:?}");
-            assert!(
-                wavecode_sandbox::WINDOWS_UNAVAILABLE_REASON.contains(phrase),
-                "the backend no longer documents {phrase:?}: update the summary"
-            );
-        }
     }
 
     /// The text seed is journaled as its baseline, so a session created

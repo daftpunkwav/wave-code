@@ -210,8 +210,12 @@ pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
 /// One implementation for every model-facing spawn path in the crate (the
 /// shell tool, the script tools, the LSP tools): whichever tool the model
 /// drives, a child that reads or forwards its environment cannot recover a
-/// secret. User-configured spawn paths (hooks, the PTY shell) sit outside
-/// this boundary — they are operator-chosen commands.
+/// secret. User-configured spawn paths (hooks, the PTY shell, MCP stdio
+/// servers) sit outside this boundary — they are operator-chosen commands.
+/// The MCP server spawn follows its own contract
+/// (`transport_mcp::apply_child_env`: explicit strip list, configured
+/// entries win) instead of this shape fallback, so a server that must
+/// re-declare a secret-shaped variable keeps working.
 pub(crate) fn strip_child_env(cmd: &mut std::process::Command, deny_env: &[String]) {
     for name in deny_env {
         cmd.env_remove(name);

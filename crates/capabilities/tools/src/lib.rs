@@ -278,12 +278,14 @@ impl ToolAllowlist {
     }
 }
 
-/// Serializes tests that touch environment variables or spawn child
-/// processes: the OS-sandbox watcher pairs this process' new direct
-/// children with pending jobs, so such tests must run mutually exclusive —
-/// otherwise the watcher can pair another test's child with the sandbox
-/// test's job and leave the confined child suspended forever. One lock for
-/// the whole crate: separate per-module mutexes would not exclude each other.
+/// Serializes tests that touch environment variables: `set_var` /
+/// `remove_var` mutate process-global state, so parallel unit tests reading
+/// the same names (e.g. the sandbox routing check) must run mutually
+/// exclusive to stay deterministic. The OS-sandbox watcher itself needs no
+/// such exclusion anymore: it pairs only pids explicitly committed via
+/// `commit_confined_spawn`, so a child spawned by an unrelated test is never
+/// confined and a confined child is never left unpaired. One lock for the
+/// whole crate: separate per-module mutexes would not exclude each other.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

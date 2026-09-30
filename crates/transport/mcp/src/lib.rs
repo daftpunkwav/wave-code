@@ -175,6 +175,12 @@ pub enum TransportError {
 /// configured `env` entries (applied last, so a config entry deliberately
 /// wins over the strip — a server that genuinely needs a secret-shaped
 /// variable re-declares it through its config block).
+///
+/// Deliberately not the model-facing contract
+/// (`wavecode_tools::strip_child_env` adds a sensitive-shape fallback and
+/// lets nothing win): MCP servers are operator-configured commands, so the
+/// explicit config block is trusted here the same way as hook or PTY
+/// shell commands.
 pub fn apply_child_env(
     cmd: &mut std::process::Command,
     env: &HashMap<String, String>,

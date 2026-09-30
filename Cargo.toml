@@ -14,6 +14,9 @@ license = "MIT"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# "full" is deliberate: the workspace-wide union needs process, signal, net,
+# io, fs, time, sync and the multi-threaded runtime, so per-crate trimming
+# collapses to the same feature set once features unify across the build.
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
@@ -35,7 +38,7 @@ base64 = "0.22"
 regex = "1"
 glob = "0.3"
 # App server: HTTP+SSE over tokio (matches the workspace's async stack).
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
 # Parser/Event API only: the `html` renderer and its `getopts` CLI
@@ -48,7 +51,7 @@ landlock = "0.4"
 # Console code-page fallback for child-process output decoding: the
 # `cmd` builtins emit the ANSI code page, not UTF-8.
 encoding_rs = "0.8"
-windows-sys = "0.59"
+windows-sys = "0.61"
 # TUI rendering is the in-house tui-engine over crossterm (no ratatui);
 # crossterm's event-stream + bracketed-paste features are both in use.
 crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }

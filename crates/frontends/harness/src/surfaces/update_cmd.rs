@@ -46,6 +46,19 @@ pub(crate) async fn run_update_check() {
     }
 }
 
+/// Verify the downloaded bytes against the published checksum, then
+/// swap them in as the running binary. Verification failure returns
+/// before [`update::apply_swap`] runs, so mismatched bytes never touch
+/// the file on disk.
+fn verify_and_install(
+    exe: &std::path::Path,
+    bytes: &[u8],
+    checksum: &str,
+) -> anyhow::Result<()> {
+    update::verify_sha256(bytes, checksum)?;
+    update::apply_swap(exe, bytes)
+}
+
 /// Download the newest release and replace this binary with it.
 ///
 /// Refuses source builds (nothing installed to replace) and
@@ -133,27 +146,69 @@ pub(crate) async fn run_update_install() {
             std::process::exit(Outcome::Failed.exit_code())
         }
     };
-    if let Err(cause) = update::verify_sha256(&bytes, &checksum) {
+    if let Err(cause) = verify_and_install(&exe, &bytes, &checksum) {
         eprintln!("[fail] {cause:#}");
         std::process::exit(Outcome::Failed.exit_code())
     }
+    println!("installed {} -> {}", release.tag, exe.display());
+    #[cfg(windows)]
+    println!(
+        "the previous binary was kept as {}",
+        exe.with_file_name(format!(
+            "{}.bak",
+            exe.file_name().unwrap_or_default().to_string_lossy()
+        ))
+        .display()
+    );
+}
 
-    match update::apply_swap(&exe, &bytes) {
-        Ok(()) => {
-            println!("installed {} -> {}", release.tag, exe.display());
-            #[cfg(windows)]
-            println!(
-                "the previous binary was kept as {}",
-                exe.with_file_name(format!(
-                    "{}.bak",
-                    exe.file_name().unwrap_or_default().to_string_lossy()
-                ))
-                .display()
-            );
-        }
-        Err(cause) => {
-            eprintln!("[fail] install failed: {cause:#}");
-            std::process::exit(Outcome::Failed.exit_code())
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// sha256("abc") — the canonical test vector.
+    const ABC_CHECKSUM: &str =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  wavecode-bin\n";
+
+    /// The safety ordering of the install tail: a checksum mismatch
+    /// refuses the install before the swap runs, so the binary on disk
+    /// keeps its old bytes and no rollback copy or staging file
+    /// appears.
+    #[test]
+    fn checksum_mismatch_refuses_to_touch_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+
+        let error = verify_and_install(&target, b"tampered-bytes", ABC_CHECKSUM)
+            .expect_err("mismatched bytes must not install");
+        assert!(error.to_string().contains("checksum mismatch"), "{error}");
+
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"old-binary-bytes",
+            "the running binary must be untouched"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.ends_with(".bak") || name.contains(".download-")
+            })
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// The matching counterpart: verified bytes do install, so the
+    /// refusal above proves an ordering, not a dead no-op.
+    #[test]
+    fn verified_bytes_swap_the_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+
+        verify_and_install(&target, b"abc", ABC_CHECKSUM).expect("matching bytes install");
+        assert_eq!(std::fs::read(&target).unwrap(), b"abc");
     }
 }

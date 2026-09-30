@@ -708,6 +708,23 @@ mod tests {
         assert!(matches!(args.command, Some(Command::Acp)));
     }
 
+    /// `update` probes the release feed; the mutating self-install is
+    /// opt-in behind `--install`. Flipping that default would make a
+    /// bare `wavecode update` replace the running binary.
+    #[test]
+    fn update_install_is_opt_in() {
+        let args = Args::try_parse_from(["wavecode", "update"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Update { install: false })
+        ));
+        let args = Args::try_parse_from(["wavecode", "update", "--install"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Update { install: true })
+        ));
+    }
+
     #[test]
     fn outcomes_map_to_exit_codes() {
         assert_eq!(Outcome::Completed.exit_code(), 0);

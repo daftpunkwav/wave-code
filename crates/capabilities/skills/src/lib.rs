@@ -197,9 +197,15 @@ impl Skill {
     /// missing placeholder does not drop arguments.
     pub fn expand(&self, args: &str) -> String {
         let args = args.trim();
-        let mut out = self
-            .body
-            .replace(SKILL_DIR_VARIABLE, &self.dir.display().to_string());
+        // Copy the body as-is when the skill-dir variable is absent (the
+        // common shape): `replace` on a missing needle costs the same full
+        // scan plus a second allocation for nothing.
+        let mut out = if self.body.contains(SKILL_DIR_VARIABLE) {
+            self.body
+                .replace(SKILL_DIR_VARIABLE, &self.dir.display().to_string())
+        } else {
+            self.body.clone()
+        };
         if out.contains(ARGUMENTS_PLACEHOLDER) {
             out = out.replace(ARGUMENTS_PLACEHOLDER, args);
         } else if !args.is_empty() {

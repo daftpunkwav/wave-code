@@ -208,4 +208,18 @@ mod tests {
         adapter.remember_always(&ls);
         assert_eq!(adapter.decide(&ls).await, PolicyVerdict::Allow);
     }
+
+    /// The sandbox truncates an approval detail at production and the
+    /// wire side re-truncates here at [`APPROVAL_DETAIL_TRUNCATION`]. The
+    /// two crates share no dependency edge, so the equal budgets are
+    /// pinned in the composition root instead of by doc-comment discipline:
+    /// a one-sided bump must fail here, not silently double-truncate.
+    #[test]
+    fn approval_detail_budgets_match_across_the_seam() {
+        assert_eq!(
+            wavecode_sandbox::DETAIL_MAX_CHARS,
+            APPROVAL_DETAIL_TRUNCATION,
+            "approval detail budget drifted between sandbox and wire"
+        );
+    }
 }

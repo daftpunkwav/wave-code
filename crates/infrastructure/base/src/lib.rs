@@ -41,9 +41,9 @@ pub const HOOK_DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const EVENT_TEXT_TRUNCATION: usize = 2000;
 /// Character budget for approval detail strings; sized for the
 /// multi-line diff a file-write approval carries. Mirrored by the
-/// sandbox crate's `DETAIL_MAX_CHARS` (the producing side), kept in step
-/// by that constant's doc comment — no dependency edge exists between
-/// the crates.
+/// sandbox crate's `DETAIL_MAX_CHARS` (the producing side), pinned
+/// byte-equal by the composition root's policy-adapter test — no
+/// dependency edge exists between the crates.
 pub const APPROVAL_DETAIL_TRUNCATION: usize = 2000;
 
 /// Cooperative interrupt handle shared across spawned tasks.

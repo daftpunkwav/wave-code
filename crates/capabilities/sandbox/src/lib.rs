@@ -82,9 +82,10 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// multi-line diff of a file-write approval after line budgeting.
 /// Mirrors `infrastructure_base::APPROVAL_DETAIL_TRUNCATION` (the wire-side
 /// budget the composition root re-truncates with): the two budgets are the
-/// same 2000-char contract on the sandbox side and the wire side, kept in
-/// step by this comment pair (no dependency edge exists between the crates).
-const DETAIL_MAX_CHARS: usize = 2000;
+/// same 2000-char contract on the sandbox side and the wire side, pinned
+/// byte-equal by the composition root's policy-adapter test (no dependency
+/// edge exists between the crates).
+pub const DETAIL_MAX_CHARS: usize = 2000;
 
 /// Rule scope (the entry prefix): `Bash(...)` matches the full command,
 /// `File(...)` matches the path.

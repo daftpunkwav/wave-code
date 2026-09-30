@@ -270,7 +270,11 @@ async fn call_tool<E: ToolExecutor>(
         // results: surface them as internal errors (see
         // TOOL_FAULT_PREFIX). `detail` keeps the separating space, so
         // the reply reconstructs the adapter's original wording.
-        return error_response(id, INTERNAL_ERROR, format!("tool fault:{detail}"));
+        return error_response(
+            id,
+            INTERNAL_ERROR,
+            format!("{}{detail}", wavecode_tools::TOOL_FAULT_PREFIX),
+        );
     }
     // Unknown tools and business failures ride as results with
     // `isError`, matching the run-loop adapter semantics MCP clients

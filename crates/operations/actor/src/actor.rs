@@ -226,7 +226,8 @@ where
                         &conv,
                         &event_tx,
                         &sub.id,
-                    );
+                    )
+                    .await;
                     let ctx = RunContext {
                         run_id: sub.id.clone(),
                         submission_id: sub.id.clone(),
@@ -291,7 +292,8 @@ where
                         &conv,
                         &event_tx,
                         &sub.id,
-                    );
+                    )
+                    .await;
                     let tx = event_tx.clone();
                     let sink = move |event: Event| {
                         try_send_event(
@@ -486,7 +488,13 @@ async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
 /// (`checkpoint_before_model_request` vs `before_tool_side_effect`).
 /// Warnings carry the submission's own id; a durable failure is loud
 /// but never aborts the turn (see [`checkpoint_turn`]).
-fn checkpoint_pre_turn(
+///
+/// The fsynced write runs on the blocking pool: `durable_save` performs
+/// write + fsync + rename, and an NTFS fsync can take tens of milliseconds,
+/// which would otherwise hold a runtime worker once per turn. Ordering is
+/// unchanged — the await completes before the caller acts — and a panicking
+/// checkpoint still unwinds via `resume_unwind`, matching the inline call.
+async fn checkpoint_pre_turn(
     durability: &mut Option<TurnDurability>,
     checkpoint_on: bool,
     turn_seq: &mut u64,
@@ -497,17 +505,38 @@ fn checkpoint_pre_turn(
     *turn_seq += 1;
     let label = turn_label(*turn_seq);
     let snapshot = render_snapshot(conv);
+    if !checkpoint_on {
+        return;
+    }
     let warn_tx = event_tx.clone();
     let warn_id = id.to_string();
-    checkpoint_turn(durability, checkpoint_on, &label, &snapshot, &|message| {
-        try_send_event(
-            &warn_tx,
-            Event {
-                id: warn_id.clone(),
-                msg: EventMsg::Warning { message },
+    // Take the store out so the blocking closure owns it ('static); the
+    // actor task is the only accessor, so nothing observes the transient
+    // `None` across the await.
+    let mut taken = durability.take();
+    match tokio::task::spawn_blocking(move || {
+        checkpoint_turn(
+            &mut taken,
+            checkpoint_on,
+            &label,
+            &snapshot,
+            &|message| {
+                try_send_event(
+                    &warn_tx,
+                    Event {
+                        id: warn_id.clone(),
+                        msg: EventMsg::Warning { message },
+                    },
+                );
             },
         );
-    });
+        taken
+    })
+    .await
+    {
+        Ok(returned) => *durability = returned,
+        Err(join_error) => std::panic::resume_unwind(join_error.into_panic()),
+    }
 }
 
 /// Session teardown shared by every actor exit path (clients dropped,

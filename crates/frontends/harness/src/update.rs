@@ -245,7 +245,7 @@ pub fn pick_assets<'a>(
 }
 
 /// Check `bytes` against the contents of a published `.sha256` file
-/// (`"<hex>  <filename>"; only the hex token is compared).
+/// (`"<hex>  <filename>"`; only the hex token is compared).
 pub fn verify_sha256(bytes: &[u8], checksum_file: &str) -> Result<()> {
     let expected = checksum_file
         .split_whitespace()

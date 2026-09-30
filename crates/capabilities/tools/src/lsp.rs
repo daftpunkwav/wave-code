@@ -353,7 +353,7 @@ impl LspProviders {
     }
 
     /// Render the diagnostics store's contents (see
-    /// [`DiagnosticsStore::render`]) — the read side of the sink that pooled
+    /// `DiagnosticsStore::render`) — the read side of the sink that pooled
     /// clients feed (the `lsp_diagnostics` tool).
     pub fn diagnostics_text(&self, uri_filter: Option<&str>) -> String {
         lock(&self.diagnostics).render(uri_filter)

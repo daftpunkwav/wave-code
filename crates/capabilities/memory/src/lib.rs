@@ -12,9 +12,10 @@
 //!   merge run at session end — near-duplicate entries (Jaccard >= 0.6 on
 //!   lowercased word sets) within a category fold into their newest wording.
 //!
-//! This crate has no workspace-internal dependencies:
-//! the `memory_write` tool, approval wiring, prompt injection, and extraction
-//! orchestration all live on the core side (the core->memory edge is allowed).
+//! This crate depends on `wavecode-tools` only for the shared `Tool` trait
+//! (the `memory_write` tool lives in [`tool`]); approval, prompt injection,
+//! and extraction orchestration all live in the composition root
+//! (`operations-bootstrap`).
 //!
 //! Consolidation is heuristic v1 (see [`consolidate`] for the exact limits).
 //! Still unimplemented: the 24h + 5-session gate

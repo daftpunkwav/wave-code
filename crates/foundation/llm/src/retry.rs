@@ -215,7 +215,7 @@ fn is_transient_error(kind: &str, message: &str) -> bool {
 /// list is deliberately narrow (billing-specific shapes) to avoid
 /// fail-fast on an ordinary rate limit, which IS worth retrying.
 ///
-/// Priority contract: checked before [`is_transient_error`] in
+/// Priority contract: checked before `is_transient_error` in
 /// [`RetryPolicy::is_retryable`], so a billing marker added here takes
 /// precedence over any retryable marker an error also carries — keep the
 /// two tables disjoint or extend `quota_errors_fail_fast` first.

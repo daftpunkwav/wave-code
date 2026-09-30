@@ -1,6 +1,6 @@
 /*!
  * @file PlanTrackerAdapter
- * @description Exposes the legacy todo store as plan-steering state.
+ * @description Exposes the todo store as plan-steering state.
  *
  * Responsibilities:
  * - Report unfinished plan item counts.
@@ -9,7 +9,7 @@
  * This module must not depend on: runtime internals beyond its trait seam.
  */
 
-//! [`runtime_runner::PlanTracker`] implemented over the legacy todo store.
+//! [`runtime_runner::PlanTracker`] implemented over the todo store.
 
 use runtime_runner::PlanTracker;
 

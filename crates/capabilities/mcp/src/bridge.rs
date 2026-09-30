@@ -1230,7 +1230,7 @@ impl Tool for McpResourceBridge {
 /// `mcp__{server}__get_prompt` bridge: renders one MCP prompt by name.
 ///
 /// V1 discovery surface for the `prompts` capability (the inline-skill
-/// conversion stays on the core side); the prompt
+/// conversion is not wired into the composition root yet); the prompt
 /// catalog is embedded in the description.
 pub struct McpPromptBridge {
     name: String,

@@ -1,6 +1,6 @@
 /*!
  * @file HookAdapter
- * @description Adapts the legacy hook engine to the HookGateway seam.
+ * @description Adapts the hook engine to the HookGateway seam.
  *
  * Responsibilities:
  * - Map lifecycle points onto hook event points one to one.
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use runtime_runner::{HookGateway, HookPoint, HookReport as GatewayReport};
 
-/// Runs legacy hooks for run loop lifecycle points.
+/// Runs hooks for run loop lifecycle points.
 pub struct HookAdapter {
     engine: Arc<wavecode_hooks::HookEngine>,
     cwd: PathBuf,
@@ -45,7 +45,7 @@ impl HookAdapter {
     /// Run hooks for tool-scoped points with full call context.
     ///
     /// The seam-level [`HookGateway::run`] cannot carry tool context (its
-    /// payload has no tool slot in the legacy input shape), so tool points
+    /// payload has no tool slot in the plain input shape), so tool points
     /// must go through this method to preserve matcher filtering.
     pub async fn run_for_tool(
         &self,
@@ -63,7 +63,7 @@ impl HookAdapter {
         Self::translate(self.engine.run(Self::event_point(point), &input).await)
     }
 
-    /// Translate a legacy hook report into a gateway report.
+    /// Translate a hook report into a gateway report.
     fn translate(report: wavecode_hooks::HookReport) -> GatewayReport {
         let context = report.context;
         match report.verdict {

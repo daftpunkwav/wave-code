@@ -14,7 +14,7 @@
 //!
 //! Transport framing matches `mcp_serve` (plain NDJSON lines, one
 //! JSON-RPC message each). The subset served here is `initialize`
-//! (replying [`ACP_PROTOCOL_VERSION`] plus agent capabilities),
+//! (replying `ACP_PROTOCOL_VERSION` plus agent capabilities),
 //! `session/new` (assembling one headless session per id),
 //! `session/prompt` (one turn, streaming `session/update`
 //! notifications), and `session/cancel` (interrupting the in-flight

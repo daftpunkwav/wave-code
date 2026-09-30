@@ -16,7 +16,7 @@
 //!    [`normalize_history`] guaranteeing pairing integrity.
 //!
 //! This crate depends only on `wavecode-llm`; trigger
-//! timing is orchestrated by core.
+//! timing is orchestrated by the run loop (`runtime-runner`).
 //!
 //! One auxiliary pass shares the same history model: the cache-preserving
 //! micro-compaction pass ([`evict_old_tool_results`], which stubs the payloads
@@ -199,10 +199,10 @@ impl Thresholds {
 
     /// Validate margin ordering: `warning >= auto_compact >= blocking`.
     ///
-    /// [`check`] probes the deepest level first, so inverted margins silently
+    /// [`Self::check`] probes the deepest level first, so inverted margins silently
     /// make an outer level unreachable (e.g. `warning_margin < blocking_margin`
     /// means `Warning` can never fire). Returns a human-readable reason on
-    /// misconfiguration; [`check`] itself stays total and never panics.
+    /// misconfiguration; [`Self::check`] itself stays total and never panics.
     pub fn validate(&self) -> std::result::Result<(), String> {
         if self.warning_margin < self.auto_compact_margin {
             return Err(format!(
@@ -231,8 +231,8 @@ pub const DEFAULT_KEEP_RECENT: usize = 10;
 /// Default output budget (max_tokens) for summary calls.
 pub const DEFAULT_SUMMARY_MAX_TOKENS: u32 = 4096;
 
-/// Context pipeline config (core embeds one in SessionConfig, frozen after
-/// construction).
+/// Context pipeline config (assembled by the composition root
+/// `operations-bootstrap` for the compactor; fixed after construction).
 #[derive(Debug, Clone)]
 pub struct ContextConfig {
     /// Three-level thresholds.
@@ -287,7 +287,7 @@ pub type Result<T> = std::result::Result<T, ContextError>;
 /// (`summarize(history, budget) -> summary`).
 ///
 /// Strategies are replaceable (local summary / stronger-model summary, …),
-/// but there is exactly one trigger pipeline (core orchestration: the
+/// but there is exactly one trigger pipeline (run-loop orchestration: the
 /// threshold line / reactive compact / `/compact` share one entry point).
 #[async_trait::async_trait]
 pub trait CompactionStrategy: Send + Sync {
@@ -393,8 +393,8 @@ pub struct CompactOutcome {
     pub summary: String,
 }
 
-/// The compaction pipeline's single entry point (shared by core's three
-/// trigger kinds): the summary message plus the most recent
+/// The compaction pipeline's single entry point (shared by every compaction
+/// trigger the run loop routes): the summary message plus the most recent
 /// `cfg.keep_recent` verbatim messages form the new history.
 ///
 /// Pairing policy at the truncation boundary (two options; this implementation
@@ -798,7 +798,7 @@ fn eviction_frontier(
 /// integrity ([`find_pairing_violations`]) is unaffected.
 ///
 /// How much is evicted is demand-driven, not all-or-nothing (see
-/// [`eviction_frontier`]): the pass reclaims oldest-first only until the stubs
+/// `eviction_frontier`): the pass reclaims oldest-first only until the stubs
 /// free `total - cfg.soft_threshold_tokens` tokens (the threshold doubles as
 /// the reclamation target, so no caller has to pass it twice), and the
 /// frontier only advances in `cfg.batch_messages` groups. A history already

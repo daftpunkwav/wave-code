@@ -12,11 +12,12 @@
  * capabilities, or any lower layer. It is the top of the DAG.
  */
 
-//! Bootstrap adapters between legacy capabilities and the new run loop.
+//! Bootstrap adapters between the run loop's trait seams and the concrete
+//! capability crates.
 //!
 //! Each adapter implements one `runtime-runner` trait by delegating to a
-//! concrete legacy crate. Policy stays in the legacy crates; mapping stays
-//! here, so neither side names the other directly.
+//! concrete capability crate. Policy stays in the capability crates; mapping
+//! stays here, so neither side names the other directly.
 
 pub mod agents_instructions;
 pub mod child_service;

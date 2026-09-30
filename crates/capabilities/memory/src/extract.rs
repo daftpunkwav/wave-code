@@ -1,12 +1,13 @@
 //! Auto-extract output parsing (simplified first version).
 //!
 //! Extracting subagents are asked to emit candidate entries in the line format
-//! below (see the core-side extraction preamble); this module parses that
+//! below (see the distillation prompt in `operations-bootstrap`'s
+//! `memory_finish`); this module parses that
 //! output back into a `(category, content)` list as a pure, unit-testable
 //! function. Model output is untrusted: unknown tags, empty entries, and
 //! chatter before the tags are all dropped — extraction is a best-effort
 //! background task, and unparseable output simply means nothing is written
-//! (the core side logs a silent warning on failure).
+//! (the caller swallows failures silently by contract).
 //!
 //! ```text
 //! [user] prefers compact replies
@@ -23,8 +24,9 @@ use crate::store::MemoryCategory;
 /// no valid tags -> empty list.
 ///
 /// Known limitation: chatter after the last tag merges into the last entry
-/// (indistinguishable from multi-line content) — the extraction preamble asks
-/// subagents to emit entry lines only; see the core-side extraction flow.
+/// (indistinguishable from multi-line content) — the distillation prompt asks
+/// subagents to emit entry lines only; see the extraction flow in
+/// `operations-bootstrap`'s `memory_finish`.
 pub fn parse_extracted_entries(text: &str) -> Vec<(MemoryCategory, String)> {
     let mut entries = Vec::new();
     let mut current: Option<(MemoryCategory, String)> = None;

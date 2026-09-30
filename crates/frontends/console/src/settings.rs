@@ -132,7 +132,7 @@ impl UiSettings {
 
     /// Load from the default path; missing or broken files yield the
     /// defaults. Legacy `wave_denylist` entries migrate once into the
-    /// config-owned store (see [`load_at`]).
+    /// config-owned store (see `load_at`).
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
             return Self::default();

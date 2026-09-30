@@ -3,7 +3,8 @@
 //! bullet form (`- ` list items).
 //!
 //! Pure logic with sync IO: writes are single-entry appends (small files),
-//! called by core's `memory_write` tool via `spawn_blocking`; reads happen
+//! called by the `memory_write` tool (this crate's [`crate::tool`]) via
+//! `spawn_blocking`; reads happen
 //! once at startup assembly. Everything is transparent to the user and
 //! directly editable — this module only appends; consolidation lives in the
 //! [`crate::consolidate`] module (heuristic v1, see the crate-level docs).

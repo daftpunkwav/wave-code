@@ -198,7 +198,7 @@ pub(crate) fn truncate_output_spilled(
 /// 2. A shape fallback ([`is_sensitive_env_name`]): common secret shapes stay stripped even without deny_env.
 ///
 /// Threat-model boundary: this only guards "leaks via child-process environment inheritance"; reading an inline
-/// api_key straight from `type config.toml` is an accepted M1 surface (on record in the M1 review), out of scope here.
+/// api_key straight from `type config.toml` is a config-file concern, out of scope here.
 pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
     for name in &ctx.deny_env {
         cmd.env_remove(name);

@@ -14,7 +14,7 @@
 //! guarding against `..` escapes and absolute-path breakouts.
 //! Every built-in tool's execute is truly async (`tokio::fs` / `tokio::process`;
 //! grep/glob directory traversal is a sync API wrapped in `spawn_blocking` internally).
-//! The execution pipeline (schema validation, hooks, permission approval) is orchestrated by core.
+//! The execution pipeline (allowlist checks, hooks, permission approval) is orchestrated by the run loop (`runtime-runner`).
 
 mod agent_task_tool;
 mod ask_user_tool;
@@ -194,7 +194,7 @@ pub trait Tool: Send + Sync {
     /// Read-only tools may run in parallel; writing tools must run serially.
     fn is_read_only(&self) -> bool;
     /// Declarative capability class the policy layer keys on; the default
-    /// is the cautious [`ToolKind::Other`], which keeps the approval path.
+    /// is the cautious [`wavecode_protocol::ToolKind::Other`], which keeps the approval path.
     /// Builtin tools classify themselves so the sandbox never matches on
     /// names (architecture rule 4).
     fn kind(&self) -> wavecode_protocol::ToolKind {
@@ -204,8 +204,10 @@ pub trait Tool: Send + Sync {
     fn is_destructive(&self) -> bool {
         false
     }
-    /// Pre-execution semantic check (validation beyond JSON Schema, one stage of the
-    /// execution pipeline; invoked by core orchestration). The default implementation passes everything through.
+    /// Pre-execution semantic check (validation beyond JSON Schema). A
+    /// provided method: the default passes everything through, and no
+    /// workspace call site invokes it today — tools must not rely on it
+    /// for safety; containment and policy do not depend on it.
     async fn validate(&self, _input: &serde_json::Value) -> Result<()> {
         Ok(())
     }
@@ -248,13 +250,14 @@ pub enum ToolsError {
 /// Crate-wide Result alias.
 pub type Result<T> = std::result::Result<T, ToolsError>;
 
-/// Shared handle for the tool-surface allowlist (skills `allowed-tools`):
+/// Shared handle for a name-based tool allowlist (skills `allowed-tools`):
 /// with `Some(set)` only tools in the set may execute, `None` allows all.
 ///
-/// Same shape as [`TodoStore`] -- held by the **session config** (per-session), not by
+/// Same shape as [`TodoStore`] -- a per-session shared handle, not owned by
 /// [`Registry`] (a pure tool index) or [`ToolCtx`] (a plain data snapshot rebuilt every turn).
-/// Checked by the core execution pipeline before PreToolUse / sandbox decisions; written when a skill tool activates.
-/// Semantics are **turn-scoped**: core clears it at each turn entry (first-version tradeoff, see core::skills).
+/// The `allowed-tools` enforcement that actually runs today lives in the run
+/// loop's per-run allowlist (`runtime_runner::RunAllowlist`) and
+/// [`Registry::name_subset`]; no pipeline stage reads this handle.
 #[derive(Clone, Default)]
 pub struct ToolAllowlist {
     inner: Arc<Mutex<Option<HashSet<String>>>>,

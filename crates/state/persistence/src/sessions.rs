@@ -93,7 +93,7 @@ fn journal_path(home: &Path, id: &str) -> Result<PathBuf, SessionError> {
 /// Journal file one session's turns are appended to, for callers that want
 /// to *name* it (a prompt note pointing at the on-disk record) rather than
 /// read or write it. `None` for an invalid id, so path escapes stay rejected
-/// at one place (see the error-channel convention on [`journal_path`]).
+/// at one place (see the error-channel convention on `journal_path`).
 pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
     journal_path(home, id).ok()
 }
@@ -103,7 +103,7 @@ pub fn session_journal_file(home: &Path, id: &str) -> Option<PathBuf> {
 /// records what happened per turn for the picker and the text-level fallback;
 /// this file is the block-level write-ahead log that resume samples from.
 /// `None` for an invalid id (see the error-channel convention on
-/// [`journal_path`]).
+/// `journal_path`).
 pub fn session_history_file(home: &Path, id: &str) -> Option<PathBuf> {
     Some(journal_path(home, id).ok()?.with_extension("history.jsonl"))
 }
@@ -112,7 +112,7 @@ pub fn session_history_file(home: &Path, id: &str) -> Option<PathBuf> {
 /// `.../sessions/children/<parent>/<child>.jsonl`, keeping a session's own
 /// log and its subagents' logs together without mixing them. `None` for an
 /// invalid parent or child id (see the error-channel convention on
-/// [`journal_path`]).
+/// `journal_path`).
 pub fn child_journal_file(home: &Path, parent: &str, child: &str) -> Option<PathBuf> {
     if !is_valid_session_id(parent) || !is_valid_session_id(child) {
         return None;
@@ -268,7 +268,7 @@ fn salvage_index_objects(text: &str) -> (Vec<SessionMeta>, usize) {
 }
 
 /// Load the whole index for the picker: sorted newest-first. Missing or
-/// corrupt files yield whatever still parses (see [`load_index`]).
+/// corrupt files yield whatever still parses (see `load_index`).
 pub fn list_sessions(home: &Path) -> Vec<SessionMeta> {
     let mut sessions = load_index(home).sessions;
     sessions.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));

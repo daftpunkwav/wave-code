@@ -114,7 +114,7 @@ impl Drop for TerminalGuard {
 /// hook fires first — without this, the panic message prints in raw
 /// mode (unreadable), and an aborting panic skips `drop` entirely.
 /// Restoration runs only while a guard owns the modes
-/// ([`GUARD_ACTIVE`]): non-TUI surfaces are untouched, a non-terminal
+/// (`GUARD_ACTIVE`): non-TUI surfaces are untouched, a non-terminal
 /// stdout (`exec --json` pipe) stays byte-clean, and a panic that some
 /// component catches while the TUI is live degrades the UI (an
 /// accepted, bug-scenario cost) instead of silently corrupting later

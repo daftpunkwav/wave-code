@@ -30,8 +30,8 @@ pub const MCP_TOOL_PREFIX: &str = "mcp__";
 
 /// Separator between the server name and the tool name ([`parse_tool_name`]
 /// splits on the first separator — a tool name containing `__` survives the
-/// round trip, while a server name must not contain `__`, enforced by the
-/// assembly layer (core config translation)).
+/// round trip, while a server name must not contain `__`, enforced by
+/// [`McpServerConfig::from_raw`] at assembly time).
 pub const NAME_SEPARATOR: &str = "__";
 
 /// Assemble a registry tool name: `mcp__{server}__{tool}`.
@@ -127,7 +127,7 @@ pub struct McpPromptArgument {
 ///
 /// The protocol requires prompts to auto-convert into inline skills: the
 /// conversion needs `prompts/get` content fetches, which depend on a real
-/// transport and wire up on the core side in a later iteration (the skills
+/// transport and are not wired into the composition root yet (the skills
 /// crate already carries the `SkillSource::Mcp` source placeholder).
 #[derive(Debug, Clone, PartialEq)]
 pub struct McpPromptDef {

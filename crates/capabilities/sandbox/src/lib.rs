@@ -473,10 +473,12 @@ pub enum Verdict {
     /// Allow (read-only default, rule exemption, acceptEdits file edits,
     /// bypassPermissions).
     Allow,
-    /// Needs a human approval: core emits `ApprovalRequested` and parks for
+    /// Needs a human approval: the run loop (`runtime-runner`) emits
+    /// `ApprovalRequested` and parks for
     /// the resolution.
     Ask { kind: ApprovalKind, detail: String },
-    /// Park an interactive question: core emits `QuestionRequested` and the
+    /// Park an interactive question: the run loop (`runtime-runner`) emits
+    /// `QuestionRequested` and the
     /// user's answer becomes the tool result (the tool body never runs).
     Question {
         /// The question text for display.
@@ -577,7 +579,7 @@ impl Sandbox {
     /// allow).
     ///
     /// Candidate selection mirrors the rule-matching input keys
-    /// ([`Rule::matches`]): a non-empty `command` derives a Bash-scope
+    /// (`Rule::matches`): a non-empty `command` derives a Bash-scope
     /// rule (so every shell-kind tool — `shell`, `python`, `node` — can
     /// derive, not just the one literally named "shell"); otherwise a
     /// `path` derives a File-scope rule, matched on the lexically
@@ -595,7 +597,7 @@ impl Sandbox {
     ///   literally — an approved command holding `*` / `?` never degrades
     ///   into a wildcard-widened allow surface;
     /// - Scope binding: a derived Bash rule exempts only shell-kind tools
-    ///   and a File rule only file-editing tools ([`Rule::scope_allows_tool`]),
+    ///   and a File rule only file-editing tools (`Rule::scope_allows_tool`),
     ///   so a rule derived from a foreign tool's same-named key never
     ///   exempts that tool itself;
     /// - Deny-first is unaffected: `decide` judges deny first, so a
@@ -632,7 +634,8 @@ impl Sandbox {
     /// policy.
     ///
     /// `tool` / `input` feed rule matching and Ask details; `read_only` /
-    /// `destructive` come from the Tool trait (passed in by core — sandbox
+    /// `destructive` come from the Tool trait (passed in by the composition
+    /// root's policy adapter — sandbox
     /// never depends back on tools).
     pub fn decide(
         &self,

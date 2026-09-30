@@ -1,4 +1,4 @@
-//! Raw MCP server config (split from lib.rs in phase 5): the [mcp_servers] section.
+//! Raw MCP server config: the `[mcp_servers]` section.
 
 use super::*;
 

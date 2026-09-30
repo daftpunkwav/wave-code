@@ -144,7 +144,7 @@ pub enum ContentBlock {
         is_error: bool,
     },
     /// Reasoning the model emitted alongside its turn (see
-    /// [`state_store::Block::Thinking`]): the Anthropic wire requires the
+    /// `state_store::Block::Thinking`): the Anthropic wire requires the
     /// block back on a tool-call turn, so the adapter preserves it in
     /// history. Providers with no thinking wire shape skip it.
     Thinking {
@@ -320,7 +320,7 @@ pub enum LlmError {
         message: String,
         retry_after: Option<std::time::Duration>,
     },
-    /// Overlong-context error (the trigger for core reactive compact):
+    /// Overlong-context error (the trigger for the run loop's reactive compact):
     /// the provider explicitly reports an oversized prompt / request (e.g. Anthropic 400
     /// "prompt is too long", 413 request_too_large). Split out from the generic Api error
     /// as its own variant so upper layers can match on the enum instead of sniffing strings.

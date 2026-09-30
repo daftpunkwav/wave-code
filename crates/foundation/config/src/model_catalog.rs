@@ -303,7 +303,7 @@ impl ModelCatalog {
         self.models.remove(alias)
     }
 
-    /// Merge the catalog into a runtime [`Config`]: every catalog model
+    /// Merge the catalog into a runtime [`crate::Config`]: every catalog model
     /// becomes a `[models]` entry, and its synthesized provider is
     /// injected only when the id is not already defined there — a
     /// config.toml provider overrides the catalog, never the reverse.

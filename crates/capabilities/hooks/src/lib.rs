@@ -217,8 +217,8 @@ pub struct HookReport {
 /// Hook engine: the config tables plus the once-fired record.
 ///
 /// Per-session "once" is scoped to the engine instance — a session assembles
-/// one engine (SessionConfig holds an `Arc<HookEngine>`), and rebuilding
-/// across sessions resets it.
+/// one engine (the composition root builds an `Arc<HookEngine>` per session),
+/// and rebuilding across sessions resets it.
 pub struct HookEngine {
     defs: HashMap<HookEventPoint, Vec<HookDef>>,
     /// Prompt-type hooks (registered via [`HookEngine::register_prompt_hook`]):

@@ -35,7 +35,7 @@ use surfaces::metrics::run_metrics;
 use surfaces::update_cmd::{run_update_check, run_update_install};
 use tui::run_tui_new;
 
-/// Single-turn headless execution and interactive REPL over the new stack.
+/// Single-turn headless execution and interactive REPL.
 #[derive(Debug, Parser)]
 #[command(name = "wavecode", version)]
 struct Args {
@@ -80,7 +80,7 @@ struct Args {
     command: Option<Command>,
 }
 
-/// Frontend surfaces on the new stack.
+/// Frontend surfaces.
 #[derive(Debug, Parser)]
 enum Command {
     /// Run one prompt and exit with the turn outcome as exit code.
@@ -176,21 +176,21 @@ enum Command {
     },
 }
 
-/// MCP surfaces on the new stack.
+/// MCP surfaces.
 #[derive(Debug, Parser)]
 enum McpCommand {
     /// Serve the builtin tools over stdio as an MCP server.
     Serve,
 }
 
-/// Plugin surfaces on the new stack.
+/// Plugin surfaces.
 #[derive(Debug, Parser)]
 enum PluginCommand {
     /// List installed plugins with skill/MCP/hook counts.
     List,
 }
 
-/// Grant surfaces on the new stack.
+/// Grant surfaces.
 #[derive(Debug, Parser)]
 enum GrantsCommand {
     /// Show every stored grant with the index `remove` takes.

@@ -181,7 +181,7 @@ fn chat_completions_url(base_url: &str) -> String {
 
 /// Single construction point for API errors (non-2xx responses and in-stream
 /// `error` payloads): kind/message are preserved verbatim so upper layers can
-/// match known shapes (e.g. the reactive-compact trigger in `core::session`).
+/// match known shapes (e.g. the reactive-compact trigger in the run loop).
 fn api_error(kind: String, message: String) -> LlmError {
     LlmError::Api { kind, message }
 }
@@ -1430,7 +1430,7 @@ mod tests {
 
     #[test]
     fn context_length_markers_survive_verbatim_in_api_error() {
-        // `core::session::is_prompt_too_long` matches on Api kind/message strings;
+        // `classify_api_error` matches on Api kind/message strings;
         // the OpenAI context shapes must pass through untouched for future wiring.
         let err = api_error(
             "http_400".into(),

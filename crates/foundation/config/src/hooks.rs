@@ -1,4 +1,4 @@
-//! hooks config (split from lib.rs in phase 5): HookRule / HookRuleSet and ConfigError.
+//! Hooks config: HookRule / HookRuleSet and ConfigError.
 
 use super::*;
 

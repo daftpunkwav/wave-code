@@ -134,7 +134,7 @@ fn message_text(message: &Message) -> (bool, String) {
 /// Compaction records reset accumulated history; corrupt lines end the
 /// scan with earlier records kept; missing files read as empty.
 ///
-/// Scope decision: import stays text-only by design. The new-stack
+/// Scope decision: import stays text-only by design. The current
 /// conversation holds role plus text, so structured tool-call blocks have
 /// no representation to land in; tool calls collapse to `[tool:name]` /
 /// `[error:...]` markers that keep pairing visible to the model. True

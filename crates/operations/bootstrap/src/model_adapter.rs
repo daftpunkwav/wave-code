@@ -1,6 +1,6 @@
 /*!
  * @file ModelAdapter
- * @description Adapts a legacy chat model to the ModelGateway seam.
+ * @description Adapts a chat model to the ModelGateway seam.
  *
  * Responsibilities:
  * - Build provider requests from seam requests with registry schemas.
@@ -24,7 +24,7 @@ use wavecode_llm::{
     ToolSpec,
 };
 
-/// Samples a legacy chat model through the gateway seam.
+/// Samples a chat model through the gateway seam.
 pub struct ModelAdapter {
     model: Arc<dyn ChatModel>,
     /// Wire model name, interior-mutable so `/model` switches it

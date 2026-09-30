@@ -76,8 +76,8 @@ pub(crate) fn doctor_checks(
                 Err(error) => checks.push(fail(format!("provider: {error}"))),
                 Ok((provider, _key)) => {
                     // The key source is named, never the value. An inline
-                    // api_key sits in plaintext in config.toml (an accepted
-                    // M1 surface — shell/script tools can read the file), so
+                    // api_key sits in plaintext in config.toml (readable by
+                    // any shell/script tool running on this machine), so
                     // the report says so and points at env_key instead of
                     // presenting the setup as equivalent.
                     let source = provider

@@ -13,7 +13,7 @@
  * This crate is a pure library with zero internal workspace
  * dependencies. Semantic theming and session wiring live in the
  * application layer above it. It must not depend on: any workspace
- * crate, the agent core, or an async runtime.
+ * crate, any agent runtime crate, or an async runtime.
  */
 
 //! Inline terminal rendering engine.

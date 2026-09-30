@@ -10,8 +10,9 @@
 //!   `description` (required) / `when_to_use` / `allowed-tools` /
 //!   `context: inline | fork` / `user-invocable` / `argument-hint` / `paths`;
 //! - Catalog injection: [`SkillSet::catalog`] renders the name + description +
-//!   when_to_use catalog; the budget (1% of the context window) arrives from
-//!   the caller (core) as a character quota, with downgraded truncation past
+//!   when_to_use catalog; the budget arrives from the caller as a character
+//!   quota (the composition root passes a fixed default), with downgraded
+//!   truncation past
 //!   the limit (drop when_to_use first, then truncate descriptions);
 //! - Execution expansion: [`Skill::expand`] substitutes the `$ARGUMENTS`
 //!   placeholder and the `${WAVECODE_SKILL_DIR}` variable; the `tool`
@@ -54,8 +55,7 @@ pub enum SkillSource {
     Project,
     /// Inline skills converted from prompts an MCP server exposes (the
     /// highest-priority source). The enum is a placeholder; real conversion fetches content via
-    /// `prompts/get` and wires up on the core side with the real MCP
-    /// transport.
+    /// `prompts/get` and is not wired into the composition root yet.
     Mcp,
 }
 
@@ -404,7 +404,8 @@ impl SkillSet {
 
     /// Render the catalog injection text (name +
     /// description + when_to_use; `max_chars` is a character quota — the
-    /// budget = 1% of the context window, converted by core).
+    /// composition root passes a fixed default, see
+    /// `runtime_prompt::DEFAULT_CATALOG_BUDGET`).
     ///
     /// Downgrade policy past the limit (stepwise): full (with when_to_use) ->
     /// without when_to_use -> descriptions truncated to a per-entry quota

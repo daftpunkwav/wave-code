@@ -1,6 +1,7 @@
 /*!
  * @file ToolAdapter
- * @description Adapts the legacy tool registry to the ToolExecutor seam.
+ * @description Adapts the shared tool registry (`wavecode_tools::Registry`)
+ * to the ToolExecutor seam.
  *
  * Responsibilities:
  * - Look up tools by stable name and execute them with a fixed context.
@@ -16,7 +17,7 @@ use std::sync::Arc;
 
 use runtime_runner::{ToolCall, ToolExecutor, ToolRef, ToolResult};
 
-/// Executes tools from a shared legacy registry with a fixed context.
+/// Executes tools from the shared `wavecode_tools` registry with a fixed context.
 pub struct ToolAdapter {
     registry: Arc<wavecode_tools::Registry>,
     ctx: wavecode_tools::ToolCtx,
@@ -43,7 +44,7 @@ impl ToolAdapter {
     /// tool-approval responsibility on the client). The configured `wave`
     /// denylist is likewise a session-policy artifact and is not consulted
     /// here. What is carried over from session assembly is credential
-    /// hygiene: the provider `env_key` names ([`serve_deny_env`]) are
+    /// hygiene: the provider `env_key` names (`serve_deny_env`) are
     /// stripped from tool child environments, so a secret never rides into
     /// a shell spawned through MCP.
     ///

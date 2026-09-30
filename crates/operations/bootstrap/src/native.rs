@@ -10,10 +10,12 @@
  * This module must not depend on: runtime internals beyond its trait seam.
  */
 
-//! Native tools: the new stack's first executable tool surface.
+//! Native tools: in-process executable tool surface for tests, evaluations,
+//! and drivers.
 //!
-//! Handlers are synchronous functions so tests stay deterministic; real
-//! IO-backed tools arrive as capability crates with their own executors.
+//! Handlers are synchronous functions so tests stay deterministic; the
+//! production IO-backed tools live in capability crates and enter execution
+//! through `ToolAdapter` over the shared `wavecode_tools` registry.
 
 use std::collections::HashMap;
 use std::sync::Arc;

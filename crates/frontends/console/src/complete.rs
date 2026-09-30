@@ -21,7 +21,7 @@ pub struct FileInventory {
 
 impl FileInventory {
     /// Walk `root` breadth-first, bounded by [`MAX_SCANNED`] entries.
-    /// Directories in [`SKIPPED_DIRS`] and hidden entries are skipped.
+    /// Directories in `SKIPPED_DIRS` and hidden entries are skipped.
     pub fn scan(root: &Path) -> Self {
         let mut paths = Vec::new();
         let mut queue = std::collections::VecDeque::new();

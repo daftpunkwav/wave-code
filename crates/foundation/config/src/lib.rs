@@ -1,6 +1,6 @@
 //! wavecode-config - TOML config loading and provider resolution.
 //!
-//! M1 implementation: loads the user-level `~/.wavecode/config.toml`, parses the `model` /
+//! Loads the user-level `~/.wavecode/config.toml`, parses the `model` /
 //! `model_provider` / `model_providers` sections, and resolves the current provider's
 //! api key (priority: the env var pointed to by `env_key` > inline `api_key`).
 //!
@@ -43,12 +43,13 @@ pub struct Config {
     pub permissions: PermissionsConfig,
     /// hooks config: a `[hooks.<EventPoint>]` table or array of tables.
     /// The config layer only does raw parsing (config has no in-workspace dependencies);
-    /// event-point validity checks and execution semantics land in core via the hooks crate.
+    /// event-point validity is checked at assembly time (`HookEventPoint::parse`),
+    /// and execution semantics live in the hooks crate.
     #[serde(default)]
     pub hooks: HashMap<String, HookRuleSet>,
     /// MCP server config: `[mcp_servers.<name>]` tables.
     /// The config layer only does raw parsing; the either-or (stdio `command` vs http `url`)
-    /// validity check happens in core during conversion via the mcp crate.
+    /// validity check happens in the mcp crate's `McpServerConfig::from_raw` at assembly time.
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerRaw>,
     /// Selectable model catalog for the `/model` picker: `[models.<alias>]`
@@ -89,7 +90,7 @@ pub struct ModelEntry {
 
 /// User home directory: `USERPROFILE` (Windows) first, `HOME` as fallback; when neither
 /// is set, returns `None` (callers explicitly degrade home-dependent behavior instead of guessing a relative path).
-/// Single definition point for the whole workspace - memory / core / cli all go through
+/// Single definition point for the whole workspace - spill, checkpoint, and the frontends all go through
 /// this function instead of each reading `var_os` on their own.
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
@@ -128,8 +129,9 @@ impl Config {
     /// Missing (or unreadable) file maps to [`ConfigError::NotFound`]; TOML parse failure maps to
     /// [`ConfigError::Parse`].
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
-        // M1 convention: read failures (including permission issues) are treated as NotFound,
-        // just like a missing file; the path in the error is enough to locate the problem.
+        // Unreadable files (including permission errors) are treated as
+        // NotFound, just like a missing file; the path in the error is
+        // enough to locate the problem.
         let content =
             std::fs::read_to_string(path).map_err(|_| ConfigError::NotFound(path.to_path_buf()))?;
         Ok(toml::from_str(&content)?)
@@ -341,7 +343,7 @@ deny = ["Bash(rm -rf *)"]
     }
 
     /// hooks config: single-table and array-of-tables forms; empty map by default.
-    /// Event-point validity is not checked in the config layer (no in-workspace deps; core checks during conversion).
+    /// Event-point validity is not checked in the config layer (no in-workspace deps; assembly checks during conversion).
     #[test]
     fn hooks_parse_single_and_array_forms() {
         let toml = format!(

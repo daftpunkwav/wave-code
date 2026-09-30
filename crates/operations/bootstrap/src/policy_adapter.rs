@@ -1,6 +1,6 @@
 /*!
  * @file PolicyAdapter
- * @description Adapts the legacy sandbox to the PolicyDecider seam.
+ * @description Adapts the sandbox to the PolicyDecider seam.
  *
  * Responsibilities:
  * - Resolve tool attributes from the tool itself, never from names.
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use infrastructure_base::{APPROVAL_DETAIL_TRUNCATION, truncate};
 use runtime_runner::{AskKind, PolicyDecider, PolicyVerdict, ToolCall};
 
-/// Decides policy through a legacy sandbox with registry-backed attributes.
+/// Decides policy through the sandbox with registry-backed attributes.
 pub struct PolicyAdapter {
     sandbox: wavecode_sandbox::Sandbox,
     registry: Arc<wavecode_tools::Registry>,

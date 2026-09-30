@@ -26,7 +26,7 @@
 //! with an explicit failed outcome instead of panicking. Panics inside child
 //! work are caught at the task boundary and recorded as failures, so one
 //! faulty child can never take down the parent runtime. Completion reports
-//! flow through a data-only [`CompletionSink`], which carries no spawn
+//! flow through a data-only `CompletionSink`, which carries no spawn
 //! capability by design.
 
 use std::collections::{HashMap, VecDeque};

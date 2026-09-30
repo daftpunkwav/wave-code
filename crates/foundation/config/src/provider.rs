@@ -1,4 +1,4 @@
-//! provider config (split from lib.rs in phase 5): ProviderKind / ProviderConfig.
+//! Provider config: ProviderKind / ProviderConfig.
 
 /// Provider type (the `type` field in config).
 ///
@@ -48,7 +48,7 @@ pub struct ProviderConfig {
     pub base_url: String,
     /// Name of the env var the api key is read from at runtime.
     pub env_key: Option<String>,
-    /// Inline api key (M1 convenience, lower priority than env_key).
+    /// Inline api key (convenience fallback, lower priority than env_key).
     pub api_key: Option<String>,
     pub context_window: Option<u64>,
     pub max_output_tokens: Option<u32>,

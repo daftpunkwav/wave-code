@@ -30,7 +30,7 @@ async fn execute(&self, input, ctx: &ToolCtx) -> Result<ToolOutput>;
 - 已存在的路径：解析出的 canonical 路径必须以 canonicalize 后的 `cwd` 开头——这会拒绝符号链接/junction 逃逸。
 - 缺失的路径（`write` 的情形）：锚定到最近的现存祖先，canonicalize，重新检查前缀。
 - 组件级前缀比较拒绝同缀目录混淆（`../abc` 内部的 `../abd`）。
-- 已记录的限制：TOCTOU 窗口（检查与使用之间被调换的符号链接）为 M1 威胁模型所接受；fd 锚定访问是未来工作。
+- 已记录的限制：TOCTOU 窗口（检查与使用之间被调换的符号链接）是可接受、已记录的限制（见 `src/path_guard.rs`）；fd 锚定访问尚未实现。
 
 ## 执行管线各阶段
 
@@ -58,4 +58,4 @@ async fn execute(&self, input, ctx: &ToolCtx) -> Result<ToolOutput>;
 - `web_fetch` — `src/web_fetch.rs`；`web_search` — `src/web_search.rs`（DuckDuckGo 后端）；两者只读。
 - `view`、`present` — `src/fs/image.rs`、`src/fs/present.rs`；`spill` — `src/spill_tool.rs`（读上下文 spill 存储）。
 
-`todowrite`（`src/todo_tool.rs`）经 `with_todo_write` 单独注册，使工具与会话级 `TodoStore` 共享一个 `Arc`。`lsp_diagnostics`（`src/lsp.rs`）不在 `builtin()` 里；会话装配在 `crates/operations/bootstrap/src/session.rs` 中为 LSP 工具注册活的 provider（共享注册表上的迟注册）。`task`、`task_output`、`task_stop`（`src/task_tools.rs`、`src/agent_task_tool.rs`）、`ask_user`（`src/ask_user_tool.rs`）随本 crate 发布；`skill` 工具位于 `crates/capabilities/skills/src/tool.rs`，`memory_write` 位于 `crates/capabilities/memory/src/tool.rs`，`goal` 位于 `crates/state/goal/src/tool.rs`，`plan` 位于 `crates/state/plan/src/tool.rs`，`job_*` 家族位于 `crates/action/jobs/src/tools.rs`，`workflow_run` / `ralph_run` / `schedule` 位于 `crates/action/workflow/src/tools.rs`——会话装配以同样的方式从这些原籍注册它们全部。
+`todowrite`（`src/todo_tool.rs`）经 `with_todo_write` 单独注册，使工具与会话级 `TodoStore` 共享一个 `Arc`。`lsp_diagnostics`（`src/lsp.rs`）不在 `builtin()` 里；会话装配在 `crates/operations/bootstrap/src/session.rs` 中为 LSP 工具注册活的 provider（共享注册表上的迟注册）。`task`（`src/agent_task_tool.rs`）与 `task_output`、`task_stop`、`task_continue`（`src/task_tools.rs`）随本 crate 发布：`task_continue` 向一个已结束的子任务发送后续指令——`action-tasks` 接缝会派生深度 +1 的新一代子任务，继承父任务的工具面与谱系；后续派生嵌套到运行期深度上限为止（超上限的子任务会被接受但以 "max child depth" 原因失败结束，可经 `task_output` 查看）。`ask_user`（`src/ask_user_tool.rs`）同样随本 crate 发布；`skill` 工具位于 `crates/capabilities/skills/src/tool.rs`，`memory_write` 位于 `crates/capabilities/memory/src/tool.rs`，`goal` 位于 `crates/state/goal/src/tool.rs`，`plan` 位于 `crates/state/plan/src/tool.rs`，`job_*` 家族位于 `crates/action/jobs/src/tools.rs`，`workflow_run` / `ralph_run` / `schedule` 位于 `crates/action/workflow/src/tools.rs`——会话装配以同样的方式从这些原籍注册它们全部。

@@ -1,5 +1,7 @@
 # Postmortem: bulk regex edit truncates three Rust files
 
+English | [中文](2026-09-13-bulk-regex-corruption.zh.md)
+
 Date: 2026-09-13 · Status: resolved · Severity: low (no data loss)
 
 ## Summary

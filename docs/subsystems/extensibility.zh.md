@@ -30,7 +30,7 @@ Frontmatter 解析使用 `serde_yaml` 而不是手写扫描器——一个刻意
 
 传输：子进程 **stdio** 与 **streamable HTTP**（服务器以 404 使会话过期时 HTTP 客户端重新初始化一次；连接断开在下一次调用时重连愈合，连续愈合之间按指数冷却（250ms 起倍增，上限 8s），使宕机的服务器不再每次调用都付出一次进程启动；客户端没有后台重试循环，且 `tools/call` 绝不在愈合时重放，因为服务器可能已经执行过该调用）。列表方法（`tools/list`、`resources/list`、`prompts/list`）在有界范围内逐页遍历，因此行为不端的服务器无法让客户端永远循环。经分页 `tools/list` 发现的工具以 `mcp__{server}__{tool}`（`MCP_TOOL_PREFIX`）桥接进注册表，因此服务器侧的名字不会与内建工具冲突，且桥接工具从不采信服务器自述的 `readOnlyHint`——未知效果保留审批路径。当服务器宣告相应能力时，两个发现工具桥接资源与提示——`mcp__{server}__read_resource`（`resources/list` + `resources/read`）与 `mcp__{server}__get_prompt`（`prompts/list` + `prompts/get`）——服务器的目录嵌入在工具描述中。
 
-已知限制（代码中已写明）：交互式浏览器/PKCE OAuth 不在范围内（仅静态 header），MCP prompts 不自动转换为内联技能：skills crate 保留一个无人产出的 `SkillSource::Mcp` 来源变体，且不存在任何转换接线。
+已知限制（代码中已写明）：交互式浏览器/PKCE OAuth 不在范围内——认证方式是静态 header 或 OAuth **客户端凭证**（`oauth_token_url` + `oauth_client_id`/`oauth_client_secret`，可选 `oauth_scope`；铸造出的 bearer 令牌会缓存到临近过期前，铸造失败只重拨一次），客户端拒绝指向交互式流程的质询。MCP prompts 不自动转换为内联技能：skills crate 保留一个无人产出的 `SkillSource::Mcp` 来源变体，且不存在任何转换接线。
 
 ## 插件（`crates/runtime/plugin/src/lib.rs`、`crates/capabilities/skills/src/plugin.rs`）
 

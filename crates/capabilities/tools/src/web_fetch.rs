@@ -411,10 +411,7 @@ impl Tool for WebFetch {
                 }
             }
         }
-        let mut text = decode_body(&body, content_type.as_deref());
-        if truncated {
-            text.push_str("\n[truncated]");
-        }
+        let text = decode_body(&body, content_type.as_deref());
         // HTML pages are converted to Markdown before entering model
         // context: raw markup burns tokens on attributes and scripts while
         // carrying little meaning. `raw: true` opts out (verbatim HTML).
@@ -429,11 +426,18 @@ impl Tool for WebFetch {
                 .to_ascii_lowercase()
                 .starts_with("<!doctype html");
         if is_html && !input.get("raw").and_then(Value::as_bool).unwrap_or(false) {
-            let converted = crate::html::html_to_markdown(&text);
+            // Convert first, mark truncation once after: appending the
+            // marker to the raw text too would leave it twice in the
+            // converted output.
+            let mut converted = crate::html::html_to_markdown(&text);
             if truncated {
-                return Ok(ok_output(format!("{converted}\n[truncated]")));
+                converted.push_str("\n[truncated]");
             }
             return Ok(ok_output(converted));
+        }
+        let mut text = text;
+        if truncated {
+            text.push_str("\n[truncated]");
         }
         Ok(ok_output(text))
     }
@@ -499,6 +503,18 @@ mod tests {
                             let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n".to_vec();
                             out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
                             out.extend_from_slice(body);
+                            out
+                        }
+                        "/bightml" => {
+                            let body = format!(
+                                "<html><body>{}</body></html>",
+                                "<p>lorem ipsum </p>".repeat(6000)
+                            );
+                            let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n".to_vec();
+                            out.extend_from_slice(
+                                format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes(),
+                            );
+                            out.extend_from_slice(body.as_bytes());
                             out
                         }
                         _ => {
@@ -778,6 +794,30 @@ mod tests {
         assert!(out.content.ends_with("[truncated]"));
         let body = out.content.strip_suffix("\n[truncated]").unwrap();
         assert_eq!(body.len(), 1024);
+    }
+
+    /// A truncated HTML response carries the truncation marker exactly once:
+    /// the raw body is never marked before the Markdown conversion.
+    #[tokio::test]
+    async fn fetch_truncated_html_marks_exactly_once() {
+        let (addr, server) = stub_server().await;
+        let (_d, c) = ctx();
+        let out = WebFetch
+            .execute(
+                serde_json::json!({"url": format!("http://{addr}/bightml"), "max_bytes": 1024}),
+                &c,
+            )
+            .await
+            .unwrap();
+        server.abort();
+        assert!(!out.is_error, "unexpected failure: {}", out.content);
+        assert!(out.content.ends_with("[truncated]"), "{}", out.content);
+        assert_eq!(
+            out.content.matches("[truncated]").count(),
+            1,
+            "marker duplicated: {}",
+            out.content
+        );
     }
 
     #[tokio::test]

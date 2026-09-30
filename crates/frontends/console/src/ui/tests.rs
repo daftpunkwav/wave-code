@@ -519,6 +519,33 @@ fn streaming_draft_persists_until_the_text_changes() {
     );
 }
 
+/// A streamed message whose live draft hit the runaway cap must not stay
+/// truncated in the transcript: the completed text is authoritative, so the
+/// tail the draft dropped is restored when the message completes.
+#[test]
+fn capped_stream_draft_is_replaced_by_the_completion_text() {
+    let mut ui = ui();
+    let full = format!("{}FINAL-TAIL-MARKER", "lorem ipsum ".repeat(6000));
+    ui.handle_wire_event(&EventMsg::AgentMessageDelta {
+        text: full.clone(),
+    });
+    assert!(
+        ui.streaming.assistant_truncated(),
+        "the live draft hit the runaway cap"
+    );
+    ui.handle_wire_event(&EventMsg::AgentMessageComplete {
+        text: full.clone(),
+    });
+    let index = ui.transcript.last_index().expect("assistant pushed");
+    let entry = ui.transcript.get_mut(index).expect("entry");
+    let rendered = entry.component.render(80);
+    let joined = strip_ansi(&rendered.join("\n"));
+    assert!(
+        joined.contains("FINAL-TAIL-MARKER"),
+        "the completion text must restore the dropped tail"
+    );
+}
+
 /// The live thinking block persists across frames: a rebuilt
 /// instance would restart its header clock and spinner on every
 /// flush (the same regression class as the streamed draft).

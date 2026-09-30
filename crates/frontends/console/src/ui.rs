@@ -898,12 +898,23 @@ impl ConsoleUi {
             }
             EventMsg::AgentMessageComplete { text } => {
                 self.finalize_thinking();
-                // Deltas accumulated the full body; only fall back to the
-                // completion text when nothing streamed.
-                self.flush_assistant_draft();
-                if !self.streaming_flushed_assistant && !text.is_empty() {
+                if self.streaming.assistant_truncated() && !text.is_empty() {
+                    // The live draft hit its runaway cap mid-stream and
+                    // dropped the tail of this message. The completed text
+                    // is the authoritative body (already fully in memory),
+                    // so it replaces the draft instead of leaving a cut
+                    // message in the transcript.
+                    let _ = self.streaming.take_assistant();
                     let text = tui_engine::sanitize::sanitize_terminal(text);
                     self.push_assistant_message(&text);
+                } else {
+                    // Deltas accumulated the full body; only fall back to
+                    // the completion text when nothing streamed.
+                    self.flush_assistant_draft();
+                    if !self.streaming_flushed_assistant && !text.is_empty() {
+                        let text = tui_engine::sanitize::sanitize_terminal(text);
+                        self.push_assistant_message(&text);
+                    }
                 }
                 self.streaming_flushed_assistant = false;
                 true

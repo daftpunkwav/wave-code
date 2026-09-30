@@ -535,6 +535,11 @@ mod tests {
         assert_eq!(decode_entities("a &amp; b"), "a & b");
         assert_eq!(decode_entities("&#65;&#x42;"), "AB");
         assert_eq!(decode_entities("&unknown;"), "&unknown;");
+        // A reference without the closing semicolon stays literal: only an
+        // exact `&name;` shape is decoded, so sloppy prose (and unclosed
+        // entities in the source) are never over-decoded.
+        assert_eq!(decode_entities("Tom &amp Jerry"), "Tom &amp Jerry");
+        assert_eq!(decode_entities("&#65 something"), "&#65 something");
     }
 
     #[test]

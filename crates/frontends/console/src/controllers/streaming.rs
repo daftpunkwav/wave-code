@@ -14,6 +14,10 @@ pub const MAX_DRAFT_BYTES: usize = 64 * 1024;
 pub struct StreamingController {
     pub thinking: String,
     pub assistant: String,
+    /// True once the assistant draft hit the byte cap since the last
+    /// `take_assistant` / `clear` (mid-stream content was dropped). The
+    /// completed text must then win over the truncated draft.
+    assistant_truncated: bool,
     dirty: bool,
     last_flush: Option<Instant>,
 }
@@ -24,6 +28,7 @@ impl StreamingController {
         Self {
             thinking: String::new(),
             assistant: String::new(),
+            assistant_truncated: false,
             dirty: false,
             last_flush: None,
         }
@@ -45,9 +50,17 @@ impl StreamingController {
         self.dirty = true;
         // Runaway-sample guard: hard-cap the live drafts without ever
         // splitting a UTF-8 character (`String::truncate` would panic).
-        truncate_at_boundary(&mut self.assistant, MAX_DRAFT_BYTES);
+        if truncate_at_boundary(&mut self.assistant, MAX_DRAFT_BYTES) {
+            self.assistant_truncated = true;
+        }
         truncate_at_boundary(&mut self.thinking, MAX_DRAFT_BYTES);
         self.due(Instant::now())
+    }
+
+    /// True when the assistant draft dropped content to the byte cap since
+    /// the last `take_assistant` / `clear`.
+    pub fn assistant_truncated(&self) -> bool {
+        self.assistant_truncated
     }
 
     /// True when a draft changed since the last flush.
@@ -71,6 +84,7 @@ impl StreamingController {
 
     /// Take the accumulated assistant draft.
     pub fn take_assistant(&mut self) -> String {
+        self.assistant_truncated = false;
         std::mem::take(&mut self.assistant)
     }
 
@@ -78,6 +92,7 @@ impl StreamingController {
     pub fn clear(&mut self) {
         self.thinking.clear();
         self.assistant.clear();
+        self.assistant_truncated = false;
         self.dirty = false;
     }
 
@@ -93,16 +108,18 @@ impl Default for StreamingController {
     }
 }
 
-/// Cap `text` at `max` bytes on the nearest character boundary.
-fn truncate_at_boundary(text: &mut String, max: usize) {
+/// Cap `text` at `max` bytes on the nearest character boundary; true when
+/// content was cut.
+fn truncate_at_boundary(text: &mut String, max: usize) -> bool {
     if text.len() <= max {
-        return;
+        return false;
     }
     let mut cut = max;
     while !text.is_char_boundary(cut) {
         cut -= 1;
     }
     text.truncate(cut);
+    true
 }
 
 #[cfg(test)]
@@ -143,6 +160,11 @@ mod tests {
         let mut controller = StreamingController::new();
         controller.push_assistant(&"x".repeat(MAX_DRAFT_BYTES + 1024));
         assert!(controller.assistant.len() <= MAX_DRAFT_BYTES);
+        // The cap drop is recorded so the completion text can win over the
+        // truncated draft, and the flag resets when the draft is taken.
+        assert!(controller.assistant_truncated());
+        assert_eq!(controller.take_assistant().len(), MAX_DRAFT_BYTES);
+        assert!(!controller.assistant_truncated());
     }
 
     #[test]

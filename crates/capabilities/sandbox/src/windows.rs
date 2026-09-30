@@ -249,17 +249,24 @@ fn registry() -> &'static std::sync::Mutex<Registry> {
     mutex
 }
 
-/// Watcher main loop: sleeps idle while nothing is pending, otherwise ticks
-/// fast to keep the suspended-child window short. A panicking tick is caught
-/// (the loop must survive: a dead watcher would leave armed children
-/// suspended forever).
+/// Watcher main loop: ticks fast while a spawn is in flight — an armed
+/// child waits suspended (so discovery latency adds to command start-up)
+/// and a committed pid waits for its job assignment — and sleeps idle only
+/// when neither queue has work. A panicking tick is caught (the loop must
+/// survive: a dead watcher would leave armed children suspended forever).
 #[cfg(windows)]
 fn watcher_loop(registry: &'static std::sync::Mutex<Registry>) {
     let pending_sleep = std::time::Duration::from_millis(POLL_PENDING_MS);
     let idle_sleep = std::time::Duration::from_millis(POLL_IDLE_MS);
     loop {
-        let has_pending = !crate::lock(registry).pending.is_empty();
-        if has_pending {
+        // One lock acquisition covers both queues: work exists while an
+        // armed spawn waits for its commit OR a committed pid waits for
+        // its assignment (after the commit the pending queue is empty).
+        let has_work = {
+            let guard = crate::lock(registry);
+            !guard.pending.is_empty() || !guard.designated.is_empty()
+        };
+        if has_work {
             let _ =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| watcher_tick(registry)));
             std::thread::sleep(pending_sleep);

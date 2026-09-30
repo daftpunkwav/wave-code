@@ -703,27 +703,21 @@ fn pump(
 /// Queue one op through the session's pump and wait for acceptance.
 async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Response {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    let submission_id = {
+    // One lock hold covers touch, numbering, and enqueue (`try_send` is
+    // synchronous); the lock drops before the only await, the pump reply.
+    let send_result = {
         let mut sessions = state.sessions.lock().await;
         let Some(session) = sessions.get_mut(session_id) else {
             return (StatusCode::NOT_FOUND, "unknown session").into_response();
         };
         session.touch(state.started);
         session.submissions += 1;
-        format!("srv-{session_id}-{}", session.submissions)
-    };
-    // Send without holding the lock across await; the pump replies.
-    let sessions = state.sessions.lock().await;
-    let send_result = sessions.get(session_id).map(|session| {
+        let submission_id = format!("srv-{session_id}-{}", session.submissions);
         session.commands.try_send(SessionCommand::Submit {
             submission_id,
             op,
             reply: reply_tx,
         })
-    });
-    drop(sessions);
-    let Some(send_result) = send_result else {
-        return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
     match send_result {
         // Backpressure is not shutdown: a full queue means the prompt can
@@ -1148,12 +1142,14 @@ mod tests {
         );
         let _ = done;
     }
-    /// A full submission queue answers 429 with a Retry-After hint —
-    /// the prompt is retryable once the pump drains. Only a dead pump
-    /// (409) means the session is closing.
-    #[tokio::test]
-    async fn full_submission_queue_answers_429_with_retry_after() {
-        let (commands, _pending) = tokio::sync::mpsc::channel(32);
+    /// Minimal server state for the submit-path tests: one session under
+    /// `id` whose pump channel is `commands`. Assembly is unreachable and
+    /// the serve options are inert, so each new `AppState` field lands here
+    /// once instead of once per test.
+    fn state_with_session(
+        id: &str,
+        commands: mpsc::Sender<SessionCommand>,
+    ) -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(8);
         let session = AppSession {
             commands,
@@ -1164,9 +1160,9 @@ mod tests {
             interrupt: infrastructure_base::InterruptHandle::new(),
             last_active_millis: Arc::new(AtomicU64::new(0)),
         };
-        let state = AppState {
+        AppState {
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::from([(
-                "s-full".to_string(),
+                id.to_string(),
                 session,
             )]))),
             token: String::new(),
@@ -1188,7 +1184,16 @@ mod tests {
             started: Instant::now(),
             idle_ttl: SESSION_IDLE_TTL,
             max_sessions: MAX_SESSIONS,
-        };
+        }
+    }
+
+    /// A full submission queue answers 429 with a Retry-After hint —
+    /// the prompt is retryable once the pump drains. Only a dead pump
+    /// (409) means the session is closing.
+    #[tokio::test]
+    async fn full_submission_queue_answers_429_with_retry_after() {
+        let (commands, _pending) = tokio::sync::mpsc::channel(32);
+        let state = state_with_session("s-full", commands);
         // Fill the queue with no pump consuming: the queued replies are
         // dropped, so those submissions would hang — the point is that
         // the thirty-third arrives at a channel already at capacity.
@@ -1232,41 +1237,7 @@ mod tests {
     async fn closed_session_answers_409_without_retry_after() {
         let (commands, receiver) = tokio::sync::mpsc::channel(32);
         drop(receiver);
-        let (events, _) = tokio::sync::broadcast::channel(8);
-        let session = AppSession {
-            commands,
-            submissions: 0,
-            events,
-            approvals: Arc::new(safety_gate::ApprovalGate::new()),
-            questions: Arc::new(safety_gate::QuestionGate::new()),
-            interrupt: infrastructure_base::InterruptHandle::new(),
-            last_active_millis: Arc::new(AtomicU64::new(0)),
-        };
-        let state = AppState {
-            sessions: Arc::new(tokio::sync::Mutex::new(HashMap::from([(
-                "s-closed".to_string(),
-                session,
-            )]))),
-            token: String::new(),
-            base: ServeOptions {
-                config_path: None,
-                model_override: None,
-                cwd: std::env::temp_dir(),
-                home: None,
-                port: 0,
-                token: String::new(),
-                session_idle_ttl: None,
-                max_sessions: None,
-            },
-            next_session: Arc::new(tokio::sync::Mutex::new(1)),
-            shutdown: Arc::new(tokio::sync::Notify::new()),
-            assemble: Arc::new(|_| -> Result<Box<dyn SessionSurface>, SessionError> {
-                unreachable!("no assembly in this test")
-            }),
-            started: Instant::now(),
-            idle_ttl: SESSION_IDLE_TTL,
-            max_sessions: MAX_SESSIONS,
-        };
+        let state = state_with_session("s-closed", commands);
         let response = submit(
             state,
             "s-closed",

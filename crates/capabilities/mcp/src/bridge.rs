@@ -155,19 +155,109 @@ where
     parse_tool_result(&payload)
 }
 
+/// Capability-gated drivers shared by all three [`McpClient`] impls below:
+/// each takes the caller's capability snapshot so the Stdio/Http clients
+/// gate on their live handshake and [`ResilientMcpClient`] gates on its
+/// `initial_caps` snapshot at the call site.
+
+/// `prompts/list` walk behind the prompts capability gate.
+async fn list_prompts_via<C>(
+    client: &C,
+    caps: ServerCaps,
+) -> std::result::Result<Vec<McpPromptDef>, McpError>
+where
+    C: RpcClient + ?Sized,
+{
+    if !caps.prompts {
+        return Ok(vec![]);
+    }
+    list_paged(client, "prompts/list", parse_prompts_list).await
+}
+
+/// `prompts/get` round trip behind the prompts capability gate.
+async fn get_prompt_via<C>(
+    client: &C,
+    caps: ServerCaps,
+    name: &str,
+    arguments: HashMap<String, String>,
+) -> std::result::Result<Vec<McpPromptMessage>, McpError>
+where
+    C: RpcClient + ?Sized,
+{
+    if !caps.prompts {
+        return Ok(vec![]);
+    }
+    let payload = client
+        .rpc(
+            "prompts/get",
+            serde_json::json!({"name": name, "arguments": arguments}),
+        )
+        .await?;
+    parse_prompt_messages(&payload)
+}
+
+/// `resources/list` walk behind the resources capability gate.
+async fn list_resources_via<C>(
+    client: &C,
+    caps: ServerCaps,
+) -> std::result::Result<Vec<McpResourceDef>, McpError>
+where
+    C: RpcClient + ?Sized,
+{
+    if !caps.resources {
+        return Ok(vec![]);
+    }
+    list_paged(client, "resources/list", parse_resources_list).await
+}
+
+/// `resources/read` round trip behind the resources capability gate.
+async fn read_resource_via<C>(
+    client: &C,
+    caps: ServerCaps,
+    uri: &str,
+) -> std::result::Result<Vec<McpResourceContent>, McpError>
+where
+    C: RpcClient + ?Sized,
+{
+    if !caps.resources {
+        return Ok(vec![]);
+    }
+    let payload = client
+        .rpc("resources/read", serde_json::json!({"uri": uri}))
+        .await?;
+    parse_resource_contents(&payload)
+}
+
+/// Split one list-method page into its item array plus the next cursor.
+///
+/// `key` is the result field (`tools` / `resources` / `prompts`) and `what`
+/// names it in the error message. A non-object payload or a non-array `key`
+/// field is a protocol error; a missing or empty cursor reads as `None`.
+fn parse_list_page<'a>(
+    payload: &'a serde_json::Value,
+    key: &str,
+    what: &str,
+) -> std::result::Result<(&'a Vec<serde_json::Value>, Option<String>), McpError> {
+    let malformed = || McpError::Protocol(format!("malformed {what}/list result"));
+    let result = payload.as_object().ok_or_else(malformed)?;
+    let items = result
+        .get(key)
+        .and_then(|v| v.as_array())
+        .ok_or_else(malformed)?;
+    let cursor = result
+        .get("nextCursor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    Ok((items, cursor))
+}
+
 /// Parse one `tools/list` page into tool definitions plus a next cursor.
 ///
 /// Items without a usable name are skipped (a server naming slip must not
 /// poison the whole page); a non-object payload is a protocol error.
-fn parse_tools_list(
-    payload: &serde_json::Value,
-) -> std::result::Result<(Vec<McpToolDef>, Option<String>), McpError> {
-    let malformed = || McpError::Protocol("malformed tools/list result".to_string());
-    let result = payload.as_object().ok_or_else(malformed)?;
-    let tools = result
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .ok_or_else(malformed)?;
+fn parse_tools_list(payload: &serde_json::Value) -> ListPage<McpToolDef> {
+    let (tools, cursor) = parse_list_page(payload, "tools", "tools")?;
     let mut defs = Vec::with_capacity(tools.len());
     for item in tools {
         let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
@@ -193,11 +283,6 @@ fn parse_tools_list(
                 .unwrap_or(false),
         });
     }
-    let cursor = result
-        .get("nextCursor")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
     Ok((defs, cursor))
 }
 
@@ -257,15 +342,8 @@ fn transport_error(context: &str, error: transport_mcp::TransportError) -> McpEr
 ///
 /// Items without a usable URI are skipped; a missing `name` falls back to
 /// the URI (the protocol makes it optional).
-fn parse_resources_list(
-    payload: &serde_json::Value,
-) -> std::result::Result<(Vec<McpResourceDef>, Option<String>), McpError> {
-    let malformed = || McpError::Protocol("malformed resources/list result".to_string());
-    let result = payload.as_object().ok_or_else(malformed)?;
-    let resources = result
-        .get("resources")
-        .and_then(|v| v.as_array())
-        .ok_or_else(malformed)?;
+fn parse_resources_list(payload: &serde_json::Value) -> ListPage<McpResourceDef> {
+    let (resources, cursor) = parse_list_page(payload, "resources", "resources")?;
     let mut defs = Vec::with_capacity(resources.len());
     for item in resources {
         let Some(uri) = item
@@ -293,11 +371,6 @@ fn parse_resources_list(
                 .map(|s| s.to_string()),
         });
     }
-    let cursor = result
-        .get("nextCursor")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
     Ok((defs, cursor))
 }
 
@@ -343,15 +416,8 @@ fn parse_resource_contents(
 }
 
 /// Parse one `prompts/list` page into prompt definitions plus a cursor.
-fn parse_prompts_list(
-    payload: &serde_json::Value,
-) -> std::result::Result<(Vec<McpPromptDef>, Option<String>), McpError> {
-    let malformed = || McpError::Protocol("malformed prompts/list result".to_string());
-    let result = payload.as_object().ok_or_else(malformed)?;
-    let prompts = result
-        .get("prompts")
-        .and_then(|v| v.as_array())
-        .ok_or_else(malformed)?;
+fn parse_prompts_list(payload: &serde_json::Value) -> ListPage<McpPromptDef> {
+    let (prompts, cursor) = parse_list_page(payload, "prompts", "prompts")?;
     let mut defs = Vec::with_capacity(prompts.len());
     for item in prompts {
         let Some(name) = item
@@ -392,11 +458,6 @@ fn parse_prompts_list(
             arguments,
         });
     }
-    let cursor = result
-        .get("nextCursor")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string());
     Ok((defs, cursor))
 }
 
@@ -565,10 +626,7 @@ impl McpClient for StdioMcpClient {
     }
 
     async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
-        if !self.caps.prompts {
-            return Ok(vec![]);
-        }
-        list_paged(self, "prompts/list", parse_prompts_list).await
+        list_prompts_via(self, self.caps()).await
     }
 
     async fn get_prompt(
@@ -576,36 +634,18 @@ impl McpClient for StdioMcpClient {
         name: &str,
         arguments: HashMap<String, String>,
     ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
-        if !self.caps.prompts {
-            return Ok(vec![]);
-        }
-        let payload = self
-            .rpc(
-                "prompts/get",
-                serde_json::json!({"name": name, "arguments": arguments}),
-            )
-            .await?;
-        parse_prompt_messages(&payload)
+        get_prompt_via(self, self.caps(), name, arguments).await
     }
 
     async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
-        if !self.caps.resources {
-            return Ok(vec![]);
-        }
-        list_paged(self, "resources/list", parse_resources_list).await
+        list_resources_via(self, self.caps()).await
     }
 
     async fn read_resource(
         &self,
         uri: &str,
     ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
-        if !self.caps.resources {
-            return Ok(vec![]);
-        }
-        let payload = self
-            .rpc("resources/read", serde_json::json!({"uri": uri}))
-            .await?;
-        parse_resource_contents(&payload)
+        read_resource_via(self, self.caps(), uri).await
     }
 }
 
@@ -718,10 +758,7 @@ impl McpClient for HttpMcpClient {
     }
 
     async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
-        if !self.caps.prompts {
-            return Ok(vec![]);
-        }
-        list_paged(self, "prompts/list", parse_prompts_list).await
+        list_prompts_via(self, self.caps()).await
     }
 
     async fn get_prompt(
@@ -729,36 +766,18 @@ impl McpClient for HttpMcpClient {
         name: &str,
         arguments: HashMap<String, String>,
     ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
-        if !self.caps.prompts {
-            return Ok(vec![]);
-        }
-        let payload = self
-            .rpc(
-                "prompts/get",
-                serde_json::json!({"name": name, "arguments": arguments}),
-            )
-            .await?;
-        parse_prompt_messages(&payload)
+        get_prompt_via(self, self.caps(), name, arguments).await
     }
 
     async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
-        if !self.caps.resources {
-            return Ok(vec![]);
-        }
-        list_paged(self, "resources/list", parse_resources_list).await
+        list_resources_via(self, self.caps()).await
     }
 
     async fn read_resource(
         &self,
         uri: &str,
     ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
-        if !self.caps.resources {
-            return Ok(vec![]);
-        }
-        let payload = self
-            .rpc("resources/read", serde_json::json!({"uri": uri}))
-            .await?;
-        parse_resource_contents(&payload)
+        read_resource_via(self, self.caps(), uri).await
     }
 }
 
@@ -979,10 +998,7 @@ impl McpClient for ResilientMcpClient {
     }
 
     async fn list_prompts(&self) -> std::result::Result<Vec<McpPromptDef>, McpError> {
-        if !self.initial_caps.prompts {
-            return Ok(vec![]);
-        }
-        list_paged(self, "prompts/list", parse_prompts_list).await
+        list_prompts_via(self, self.initial_caps).await
     }
 
     async fn get_prompt(
@@ -990,36 +1006,18 @@ impl McpClient for ResilientMcpClient {
         name: &str,
         arguments: HashMap<String, String>,
     ) -> std::result::Result<Vec<McpPromptMessage>, McpError> {
-        if !self.initial_caps.prompts {
-            return Ok(vec![]);
-        }
-        let payload = self
-            .rpc(
-                "prompts/get",
-                serde_json::json!({"name": name, "arguments": arguments}),
-            )
-            .await?;
-        parse_prompt_messages(&payload)
+        get_prompt_via(self, self.initial_caps, name, arguments).await
     }
 
     async fn list_resources(&self) -> std::result::Result<Vec<McpResourceDef>, McpError> {
-        if !self.initial_caps.resources {
-            return Ok(vec![]);
-        }
-        list_paged(self, "resources/list", parse_resources_list).await
+        list_resources_via(self, self.initial_caps).await
     }
 
     async fn read_resource(
         &self,
         uri: &str,
     ) -> std::result::Result<Vec<McpResourceContent>, McpError> {
-        if !self.initial_caps.resources {
-            return Ok(vec![]);
-        }
-        let payload = self
-            .rpc("resources/read", serde_json::json!({"uri": uri}))
-            .await?;
-        parse_resource_contents(&payload)
+        read_resource_via(self, self.initial_caps, uri).await
     }
 }
 
@@ -1368,6 +1366,45 @@ pub async fn connect_all(
     report
 }
 
+/// Drive one connect under the whole-connect timeout and format the status
+/// line plus optional degradation warning both connect paths share.
+async fn connect_within_budget(
+    connect: impl std::future::Future<Output = std::result::Result<usize, McpError>>,
+    name: &str,
+    summary: &str,
+) -> (String, Option<String>) {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(MCP_CONNECT_TIMEOUT_SECS),
+        connect,
+    )
+    .await
+    {
+        Ok(Ok(count)) => (
+            format!(
+                "{name} ({summary}) — connected ({count} tool{})",
+                if count == 1 { "" } else { "s" }
+            ),
+            None,
+        ),
+        Ok(Err(error)) => {
+            let reason = format!("MCP server {name:?} failed: {error}; tools skipped");
+            (
+                format!("{name} ({summary}) — unavailable ({error})"),
+                Some(reason),
+            )
+        }
+        Err(_) => {
+            let reason = format!(
+                "MCP server {name:?} connect timed out after {MCP_CONNECT_TIMEOUT_SECS}s; tools skipped"
+            );
+            (
+                format!("{name} ({summary}) — unavailable (connect timed out)"),
+                Some(reason),
+            )
+        }
+    }
+}
+
 /// Connect one server; returns its status line plus an optional warning.
 async fn connect_one(
     name: &str,
@@ -1402,36 +1439,12 @@ async fn connect_one(
                 _ => None,
             };
             let summary = format!("http: {url}");
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(MCP_CONNECT_TIMEOUT_SECS),
+            connect_within_budget(
                 connect_http(name, &url, headers, oauth, registry),
+                name,
+                &summary,
             )
             .await
-            {
-                Ok(Ok(count)) => (
-                    format!(
-                        "{name} ({summary}) — connected ({count} tool{})",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                    None,
-                ),
-                Ok(Err(error)) => {
-                    let reason = format!("MCP server {name:?} failed: {error}; tools skipped");
-                    (
-                        format!("{name} ({summary}) — unavailable ({error})"),
-                        Some(reason),
-                    )
-                }
-                Err(_) => {
-                    let reason = format!(
-                        "MCP server {name:?} connect timed out after {MCP_CONNECT_TIMEOUT_SECS}s; tools skipped"
-                    );
-                    (
-                        format!("{name} ({summary}) — unavailable (connect timed out)"),
-                        Some(reason),
-                    )
-                }
-            }
         }
         crate::McpServerConfig::Stdio { command, args, env } => {
             let summary = crate::McpServerConfig::Stdio {
@@ -1440,36 +1453,12 @@ async fn connect_one(
                 env: HashMap::new(),
             }
             .summary();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(MCP_CONNECT_TIMEOUT_SECS),
+            connect_within_budget(
                 connect_stdio(name, &command, args, &env, registry),
+                name,
+                &summary,
             )
             .await
-            {
-                Ok(Ok(count)) => (
-                    format!(
-                        "{name} ({summary}) — connected ({count} tool{})",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                    None,
-                ),
-                Ok(Err(error)) => {
-                    let reason = format!("MCP server {name:?} failed: {error}; tools skipped");
-                    (
-                        format!("{name} ({summary}) — unavailable ({error})"),
-                        Some(reason),
-                    )
-                }
-                Err(_) => {
-                    let reason = format!(
-                        "MCP server {name:?} connect timed out after {MCP_CONNECT_TIMEOUT_SECS}s; tools skipped"
-                    );
-                    (
-                        format!("{name} ({summary}) — unavailable (connect timed out)"),
-                        Some(reason),
-                    )
-                }
-            }
         }
     }
 }

@@ -143,7 +143,7 @@ pub fn kill_tree(pid: u32) {
         // Windows has no group-kill primitive here; `taskkill /T /F` is
         // the tree-kill analogue (the sandbox backend's kill-on-close Job
         // Object is the stronger confinement-side mechanism).
-        let _ = std::process::Command::new("taskkill")
+        let _ = std::process::Command::new(taskkill_program())
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -152,6 +152,30 @@ pub fn kill_tree(pid: u32) {
     }
     #[cfg(not(any(unix, windows)))]
     let _ = pid;
+}
+
+/// Absolute path to the Windows tree-kill utility.
+///
+/// Resolved against the system directory (`%SystemRoot%\System32`) instead
+/// of a bare name on purpose: `CreateProcess` searches the *current
+/// directory* before the system directories, so a bare `taskkill` would
+/// execute a model-planted `taskkill.exe` sitting in the working directory
+/// with this process' own privileges — outside every sandbox that only
+/// confines spawned children. The bare-name fallback below is unreachable
+/// on a healthy Windows host (`SystemRoot` is always set) and exists only
+/// so the kill still fires on a broken one rather than leaving orphaned
+/// trees behind.
+#[cfg(windows)]
+pub fn taskkill_program() -> std::path::PathBuf {
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        let path = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("taskkill.exe");
+        if path.is_file() {
+            return path;
+        }
+    }
+    std::path::PathBuf::from("taskkill")
 }
 
 /// Atomic file replace: write `contents` to a unique sibling staging file,
@@ -603,6 +627,31 @@ mod tests {
         // the saturate-to-zero contract would surface here.
         assert!(now_secs() > 1_672_531_200);
         assert!(now_secs_f64() > 1_672_531_200.0);
+    }
+
+    /// The tree-kill utility resolves to the absolute system path, never a
+    /// bare name: CreateProcess would otherwise search the current
+    /// directory (where a model can plant files) before the system
+    /// directories and execute a planted `taskkill.exe` with this
+    /// process' own privileges.
+    #[cfg(windows)]
+    #[test]
+    fn taskkill_resolves_to_the_system_directory() {
+        let program = taskkill_program();
+        if !program.is_absolute() {
+            // Only reachable when SystemRoot is unset (broken host).
+            eprintln!("SystemRoot unset; skipping the taskkill resolution test");
+            return;
+        }
+        let system_root = std::env::var_os("SystemRoot").expect("checked above");
+        let expected = std::path::PathBuf::from(system_root)
+            .join("System32")
+            .join("taskkill.exe");
+        assert_eq!(program, expected, "tree kill must anchor at System32");
+        assert!(
+            program.is_file(),
+            "resolved taskkill must exist: {program:?}"
+        );
     }
 
     #[test]

@@ -200,7 +200,20 @@ pub(crate) fn truncate_output_spilled(
 /// Threat-model boundary: this only guards "leaks via child-process environment inheritance"; reading an inline
 /// api_key straight from `type config.toml` is a config-file concern, out of scope here.
 pub(crate) fn sanitize_env(cmd: &mut tokio::process::Command, ctx: &ToolCtx) {
-    for name in &ctx.deny_env {
+    strip_child_env(cmd.as_std_mut(), &ctx.deny_env);
+}
+
+/// The shared strip over a plain [`std::process::Command`]: every `deny_env`
+/// name plus every sensitive-shaped variable of this process' environment
+/// ([`is_sensitive_env_name`]).
+///
+/// One implementation for every model-facing spawn path in the crate (the
+/// shell tool, the script tools, the LSP tools): whichever tool the model
+/// drives, a child that reads or forwards its environment cannot recover a
+/// secret. User-configured spawn paths (hooks, the PTY shell) sit outside
+/// this boundary — they are operator-chosen commands.
+pub(crate) fn strip_child_env(cmd: &mut std::process::Command, deny_env: &[String]) {
+    for name in deny_env {
         cmd.env_remove(name);
     }
     for (key, _) in std::env::vars_os() {

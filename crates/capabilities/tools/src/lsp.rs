@@ -185,7 +185,15 @@ impl ChildLsp {
     /// Spawn `server_command` with `cwd` as working directory. The command
     /// is split on ASCII whitespace (program plus argv, no shell quoting);
     /// stderr is discarded so a chatty server cannot block on a full pipe.
-    pub fn spawn(server_command: &str, cwd: &std::path::Path) -> std::io::Result<Self> {
+    /// `deny_env` plus the shared sensitive-shape fallback are stripped
+    /// from the child's environment (same scrub as the shell tool): a
+    /// `server_command` is model-facing input here, so its process must
+    /// not inherit secrets.
+    pub fn spawn(
+        server_command: &str,
+        cwd: &std::path::Path,
+        deny_env: &[String],
+    ) -> std::io::Result<Self> {
         let mut parts = server_command.split_whitespace();
         let program = parts.next().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty server_command")
@@ -197,6 +205,7 @@ impl ChildLsp {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        crate::shell_tool::strip_child_env(cmd.as_std_mut(), deny_env);
         let mut child = cmd.spawn()?;
         let stdin = child
             .stdin
@@ -230,9 +239,14 @@ impl LspTransport for ChildLsp {
 pub struct AnyTransport(Box<dyn LspTransport>);
 
 impl AnyTransport {
-    /// Spawn a real language server over stdio.
-    pub fn spawn(server_command: &str, cwd: &Path) -> std::io::Result<Self> {
-        Ok(Self(Box::new(ChildLsp::spawn(server_command, cwd)?)))
+    /// Spawn a real language server over stdio (environment scrubbed via
+    /// `deny_env`, see [`ChildLsp::spawn`]).
+    pub fn spawn(server_command: &str, cwd: &Path, deny_env: &[String]) -> std::io::Result<Self> {
+        Ok(Self(Box::new(ChildLsp::spawn(
+            server_command,
+            cwd,
+            deny_env,
+        )?)))
     }
 }
 
@@ -290,13 +304,18 @@ pub struct LspProviders {
     /// pushes observed during any call land here and survive across calls
     /// (read back by the `lsp_diagnostics` tool via [`Self::diagnostics_text`]).
     diagnostics: Arc<std::sync::Mutex<DiagnosticsStore>>,
+    /// Environment names stripped from every pooled server spawn (the same
+    /// list the shell tool receives, so a registered server inherits the
+    /// same scrubbed environment a model-driven command would).
+    deny_env: Vec<String>,
     spawns: AtomicU64,
 }
 
 impl LspProviders {
     /// Build for `workspace_root` (must be the workspace directory; used as
-    /// the server working directory and the `initialize` rootUri).
-    pub fn new(workspace_root: PathBuf) -> Self {
+    /// the server working directory and the `initialize` rootUri). `deny_env`
+    /// is stripped from every pooled server spawn (see [`ChildLsp::spawn`]).
+    pub fn new(workspace_root: PathBuf, deny_env: Vec<String>) -> Self {
         let root_uri = path_to_uri(&workspace_root);
         Self {
             root: workspace_root,
@@ -304,6 +323,7 @@ impl LspProviders {
             commands: std::sync::Mutex::new(HashMap::new()),
             pooled: std::sync::Mutex::new(HashMap::new()),
             diagnostics: Arc::new(std::sync::Mutex::new(DiagnosticsStore::default())),
+            deny_env,
             spawns: AtomicU64::new(0),
         }
     }
@@ -383,9 +403,10 @@ impl LspProviders {
         };
         let mut guard = handle.lock().await;
         if guard.is_none() {
-            let transport = AnyTransport::spawn(&command, &self.root).map_err(|e| {
-                err_output(format!("failed to spawn language server '{command}': {e}"))
-            })?;
+            let transport =
+                AnyTransport::spawn(&command, &self.root, &self.deny_env).map_err(|e| {
+                    err_output(format!("failed to spawn language server '{command}': {e}"))
+                })?;
             let mut client =
                 LspClient::new(transport).with_diagnostics_sink(Arc::clone(&self.diagnostics));
             if let Err(e) = client.initialize(&self.root_uri, timeout).await {
@@ -880,7 +901,7 @@ async fn run_lsp_call(
     if let Some(server_command) = override_command {
         // Explicit override (also the fallback when the extension is
         // unregistered): per-call spawn, handshake, one request, teardown.
-        let transport = match AnyTransport::spawn(&server_command, &ctx.cwd) {
+        let transport = match AnyTransport::spawn(&server_command, &ctx.cwd, &ctx.deny_env) {
             Ok(transport) => transport,
             Err(e) => {
                 return Ok(err_output(format!(
@@ -1682,7 +1703,7 @@ mod tests {
     #[test]
     fn registry_resolves_commands_by_extension() {
         let dir = tempfile::tempdir().unwrap();
-        let providers = LspProviders::new(dir.path().to_path_buf());
+        let providers = LspProviders::new(dir.path().to_path_buf(), Vec::new());
         assert!(providers.command_for_path("a.rs").is_none());
         providers.register("rs", "rust-analyzer".to_owned());
         providers.register(".PY", "pyright-langserver --stdio".to_owned());
@@ -1718,7 +1739,7 @@ mod tests {
             deny_env: Vec::new(),
         };
         std::fs::write(dir.path().join("a.rs"), "fn main() {}\n").unwrap();
-        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf(), Vec::new()));
         let out = DocumentSymbols::with_providers(providers.clone())
             .execute(json!({"path": "a.rs"}), &ctx)
             .await
@@ -1738,7 +1759,7 @@ mod tests {
             deny_env: Vec::new(),
         };
         std::fs::write(dir.path().join("a.xyz"), "x\n").unwrap();
-        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf(), Vec::new()));
         let out = DocumentSymbols::with_providers(providers.clone())
             .execute(
                 json!({"server_command": "wavecode-definitely-missing-server", "path": "a.xyz"}),
@@ -1815,7 +1836,7 @@ mod tests {
         };
         std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
         let hits = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf(), Vec::new()));
         providers.register("py", "fake-server (injected)".to_owned());
         // Handshake the injected client, then install it as the pooled entry.
         let mut ready = LspClient::new(AnyTransport(Box::new(DuplexLsp::new(counting_server(
@@ -1877,7 +1898,7 @@ mod tests {
             deny_env: Vec::new(),
         };
         std::fs::write(dir.path().join("a.py"), "x = 1\n").unwrap();
-        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf()));
+        let providers = Arc::new(LspProviders::new(dir.path().to_path_buf(), Vec::new()));
         providers.register("py", "fake-server (injected)".to_owned());
         let mut ready =
             LspClient::new(AnyTransport(Box::new(DuplexLsp::new(diagnostics_server()))));
@@ -1961,5 +1982,120 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
+    }
+
+    // -- child environment scrubbing --
+
+    /// The LSP spawn path scrubs the child environment like the shell tool:
+    /// a `server_command` can arrive as model input, so sensitive-shaped
+    /// variables and `deny_env` names never reach the server process while
+    /// normal variables stay visible. A scripted fake server echoes the
+    /// three variables inside an LSP-framed response; skipped where the
+    /// platform refuses the spawn or the temp path carries a space (the
+    /// whitespace-split command cannot quote it).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn server_command_child_env_is_scrubbed() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        if dir.path().to_string_lossy().contains(' ') {
+            eprintln!("temp path contains a space; skipping the LSP env scrub test");
+            return;
+        }
+
+        // Fake server: answers `initialize` (id 1), replies to the
+        // navigation request (id 2) with the three variables embedded, and
+        // answers the tool's `shutdown` (id 3) so the call never waits out
+        // its timeout on a quiet pipe. It never reads stdin, so all frames
+        // land before the first read.
+        #[cfg(windows)]
+        let server_command = {
+            let script = dir.path().join("lsp_env.ps1");
+            std::fs::write(
+                &script,
+                concat!(
+                    "$b1='{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{}}}'\n",
+                    "$b2='{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"v\":\"' + $env:FOO_LSP_SECRET + '|' + $env:FOO_LSP_DENY + '|' + $env:FOO_LSP_NORMAL + '\"}}'\n",
+                    "$b3='{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":null}'\n",
+                    "[Console]::Out.Write('Content-Length: ' + $b1.Length + \"`r`n`r`n\" + $b1)\n",
+                    "[Console]::Out.Write('Content-Length: ' + $b2.Length + \"`r`n`r`n\" + $b2)\n",
+                    "[Console]::Out.Write('Content-Length: ' + $b3.Length + \"`r`n`r`n\" + $b3)\n",
+                ),
+            )
+            .unwrap();
+            format!(
+                "powershell -NoProfile -ExecutionPolicy Bypass -File {}",
+                script.display()
+            )
+        };
+        #[cfg(unix)]
+        let server_command = {
+            let script = dir.path().join("lsp_env.sh");
+            std::fs::write(
+                &script,
+                concat!(
+                    "b1=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"result\\\":{\\\"capabilities\\\":{}}}\"",
+                    "\n",
+                    "b2=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"result\\\":{\\\"v\\\":\\\"$FOO_LSP_SECRET|$FOO_LSP_DENY|$FOO_LSP_NORMAL\\\"}}\"",
+                    "\n",
+                    "b3=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":3,\\\"result\\\":null}\"",
+                    "\n",
+                    "printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${#b1}\" \"$b1\"",
+                    "\n",
+                    "printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${#b2}\" \"$b2\"",
+                    "\n",
+                    "printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${#b3}\" \"$b3\"",
+                    "\n",
+                ),
+            )
+            .unwrap();
+            format!("sh {}", script.display())
+        };
+
+        unsafe {
+            std::env::set_var("FOO_LSP_SECRET", "lsp-secret-value");
+            std::env::set_var("FOO_LSP_DENY", "lsp-deny-value");
+            std::env::set_var("FOO_LSP_NORMAL", "lsp-visible-value");
+        }
+        let ctx = ToolCtx {
+            cwd: dir.path().to_path_buf(),
+            deny_env: vec!["FOO_LSP_DENY".to_owned()],
+        };
+        // The navigation result carries the echoed variables. The budget is
+        // generous because a cold interpreter start (powershell) can exceed
+        // a second under parallel test load; the fake server answers the
+        // shutdown too, so the happy path never waits it out.
+        let out = DocumentSymbols::new()
+            .execute(
+                json!({"server_command": server_command, "path": "a.py", "timeout_ms": 5000}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        unsafe {
+            std::env::remove_var("FOO_LSP_SECRET");
+            std::env::remove_var("FOO_LSP_DENY");
+            std::env::remove_var("FOO_LSP_NORMAL");
+        }
+        assert!(!out.is_error, "fake server call failed: {}", out.content);
+        // Sensitive-shaped and deny-listed names are stripped: the values
+        // never reach the server, so it echoes empty slots for them.
+        assert!(
+            !out.content.contains("lsp-secret-value"),
+            "secret leaked to the LSP child: {}",
+            out.content
+        );
+        assert!(
+            !out.content.contains("lsp-deny-value"),
+            "deny_env value leaked to the LSP child: {}",
+            out.content
+        );
+        // No over-stripping: a normal variable stays visible.
+        assert!(
+            out.content.contains("lsp-visible-value"),
+            "normal variable was over-stripped: {}",
+            out.content
+        );
     }
 }

@@ -709,7 +709,10 @@ pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
         registry.clone(),
         wavecode_tools::ToolCtx {
             cwd: cwd.clone(),
-            deny_env,
+            // Cloned so the same list also reaches the LSP provider registry
+            // below: every model-facing spawn path needs the provider's
+            // deny names, and assembly order consumes this one first.
+            deny_env: deny_env.clone(),
         },
     );
     let policy = match (home.as_deref(), session_id.as_deref()) {
@@ -924,7 +927,10 @@ pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
     // servers survive across calls, and diagnostics pushed while any LSP
     // tool call is in flight land in the same store `lsp_diagnostics`
     // reads back. Re-registration replaces the builtin no-registry tools.
-    let lsp_providers = Arc::new(wavecode_tools::LspProviders::new(cwd.clone()));
+    let lsp_providers = Arc::new(wavecode_tools::LspProviders::new(
+        cwd.clone(),
+        deny_env.clone(),
+    ));
     registry.register(Arc::new(wavecode_tools::DocumentSymbols::with_providers(
         lsp_providers.clone(),
     )));

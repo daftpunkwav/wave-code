@@ -9,6 +9,17 @@
 //! use (read/write), and this module cannot guard that race. The window is
 //! accepted; stronger measures such as fd-anchored (openat-style) access are
 //! not implemented.
+//!
+//! Threat model for that acceptance: this guard's boundary is the model's
+//! own path input, which must not escape `cwd`. Winning the race requires
+//! an actor that can run concurrent local code against the same files in
+//! the check-to-use window — e.g. a process the model itself started. Such
+//! an actor already acts with the user's own privileges and is governed by
+//! the approval policy and job lifetime controls, not by path resolution,
+//! so closing the window would not move the trust boundary; it only adds
+//! handle-anchored IO complexity across every file tool. Revisit if the
+//! agent ever gains a confinement model where the racing actor is weaker
+//! than the user.
 
 use std::path::{Component, Path, PathBuf};
 

@@ -222,10 +222,11 @@ pub trait Tool: Send + Sync {
     /// the scrub through the shared helpers so every spawn path matches —
     /// [`is_sensitive_env_name`] for the shape fallback and
     /// `shell_tool::sanitize_env` (crate-private) for the combined strip.
-    /// Built-in spawns comply (`shell`, `python`, `node`, and the job
-    /// handoff); the LSP tools are the documented exception: their child
-    /// is a user-registered local language server command and inherits
-    /// the process environment.
+    /// All model-facing built-in spawns comply (`shell`, `python`, `node`,
+    /// the job handoff, and the LSP tools — a `server_command` can arrive
+    /// as model input, so its process is scrubbed like any other). Only
+    /// operator-configured spawn paths outside this crate's tools (hooks,
+    /// the interactive PTY shell) keep the full environment by trust level.
     ///
     /// All built-in tools are truly async: file tools use `tokio::fs`, shell uses
     /// `tokio::process`; grep/glob directory traversal is the `glob` crate's sync API,

@@ -170,6 +170,24 @@ pub enum TransportError {
     SessionExpired,
 }
 
+/// Apply the child environment for one stdio server spawn: inherit this
+/// process' environment, remove every `strip_env` name, then overlay the
+/// configured `env` entries (applied last, so a config entry deliberately
+/// wins over the strip — a server that genuinely needs a secret-shaped
+/// variable re-declares it through its config block).
+pub fn apply_child_env(
+    cmd: &mut std::process::Command,
+    env: &HashMap<String, String>,
+    strip_env: &[String],
+) {
+    for name in strip_env {
+        cmd.env_remove(name);
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+}
+
 /// Child-process MCP transport over stdio pipes.
 #[derive(Debug)]
 pub struct ChildTransport {
@@ -188,7 +206,7 @@ impl ChildTransport {
         args: Vec<String>,
         timeout_secs: u64,
     ) -> Result<Self, TransportError> {
-        Self::spawn_with_env(command, args, &HashMap::new(), timeout_secs).await
+        Self::spawn_with_env(command, args, &HashMap::new(), &[], timeout_secs).await
     }
 
     /// Spawn with extra environment variables over the inherited set.
@@ -196,10 +214,12 @@ impl ChildTransport {
     /// **Append, not replace**: `env` entries are added on top of this
     /// process' inherited environment (a duplicate key in `env` wins),
     /// mirroring `tokio::process::Command::envs` and the
-    /// `McpServerConfig::Stdio.env` field semantics. The child keeps
-    /// every inherited variable that is not explicitly overridden —
-    /// callers that need secrets out of the child must strip them here
-    /// (the bridge passes only its configured server `env` block).
+    /// `McpServerConfig::Stdio.env` field semantics. `strip_env` names are
+    /// removed from the child environment before `env` is applied, so a
+    /// config `env` entry deliberately wins over the strip: callers pass
+    /// the sensitive names they want out of the child (the bridge strips
+    /// the sensitive-shaped parent variables) and re-declare any the
+    /// server genuinely needs through its configured `env` block.
     ///
     /// The child dies with the transport (`kill_on_drop`): a failed
     /// handshake never leaks a server process behind a dropped handle.
@@ -207,21 +227,21 @@ impl ChildTransport {
         command: impl Into<String>,
         args: Vec<String>,
         env: &HashMap<String, String>,
+        strip_env: &[String],
         timeout_secs: u64,
     ) -> Result<Self, TransportError> {
         let command = command.into();
-        let mut child = tokio::process::Command::new(&command)
-            .args(&args)
-            .envs(env)
+        let mut cmd = tokio::process::Command::new(&command);
+        cmd.args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| TransportError::Spawn {
-                command: command.clone(),
-                cause: e.to_string(),
-            })?;
+            .kill_on_drop(true);
+        apply_child_env(cmd.as_std_mut(), env, strip_env);
+        let mut child = cmd.spawn().map_err(|e| TransportError::Spawn {
+            command: command.clone(),
+            cause: e.to_string(),
+        })?;
         let stdin = child.stdin.take().expect("piped stdin just requested");
         let stdout = child.stdout.take().expect("piped stdout just requested");
         Ok(Self {
@@ -517,6 +537,138 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("wavecode-definitely-missing-binary-xyz")
+        );
+    }
+
+    /// Serializes env mutation in this binary against itself.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `apply_child_env` strips sensitive inherited variables while the
+    /// configured `env` block (applied after the strip) survives — live
+    /// over a real child so the spawn semantics are pinned, not assumed.
+    #[test]
+    fn apply_child_env_strips_inherited_and_keeps_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("FOO_MCP_TOKEN", "mcp-token-value");
+            std::env::set_var("FOO_MCP_SECRET", "mcp-parent-secret");
+            std::env::set_var("FOO_MCP_KEEP", "mcp-keep-value");
+        }
+        let mut cmd = if cfg!(windows) {
+            let mut c = std::process::Command::new("cmd");
+            c.args([
+                "/C",
+                "echo %FOO_MCP_TOKEN% & echo %FOO_MCP_SECRET% & echo %FOO_MCP_KEEP%",
+            ]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sh");
+            c.args([
+                "-c",
+                "echo \"$FOO_MCP_TOKEN\"; echo \"$FOO_MCP_SECRET\"; echo \"$FOO_MCP_KEEP\"",
+            ]);
+            c
+        };
+        // The config block re-declares FOO_MCP_SECRET on purpose: config
+        // wins over the strip (the server deliberately asked for it).
+        let mut env = HashMap::new();
+        env.insert("FOO_MCP_SECRET".to_owned(), "mcp-cfg-wins-value".to_owned());
+        apply_child_env(&mut cmd, &env, &["FOO_MCP_TOKEN".to_owned()]);
+        let out = cmd.output().expect("child runs");
+        let text = String::from_utf8_lossy(&out.stdout);
+        unsafe {
+            std::env::remove_var("FOO_MCP_TOKEN");
+            std::env::remove_var("FOO_MCP_SECRET");
+            std::env::remove_var("FOO_MCP_KEEP");
+        }
+        // The inherited sensitive-shaped variable never reaches the child.
+        assert!(
+            !text.contains("mcp-token-value"),
+            "sensitive variable leaked to the child: {text}"
+        );
+        // The config block wins over the strip.
+        assert!(
+            text.contains("mcp-cfg-wins-value"),
+            "config env entry must survive the strip: {text}"
+        );
+        assert!(
+            !text.contains("mcp-parent-secret"),
+            "config override must replace, not append: {text}"
+        );
+        // Untouched inherited variables stay visible.
+        assert!(
+            text.contains("mcp-keep-value"),
+            "normal inherited variable was over-stripped: {text}"
+        );
+    }
+
+    /// End to end through [`ChildTransport::spawn_with_env`]: the strip list
+    /// really reaches the spawned child. The child echoes the variables as
+    /// non-JSON output, which surfaces as a `BadFrame` carrying the text —
+    /// the keep value proves the echo pipeline sees values, so the missing
+    /// token value is the strip working, not a vacuous pass.
+    #[tokio::test]
+    async fn spawn_with_env_strips_the_inherited_environment() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("FOO_MCP_E2E_TOKEN", "e2e-token-value");
+            std::env::set_var("FOO_MCP_E2E_KEEP", "e2e-keep-value");
+        }
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) {
+            (
+                "cmd",
+                vec![
+                    "/C".into(),
+                    "echo T=%FOO_MCP_E2E_TOKEN% K=%FOO_MCP_E2E_KEEP%".into(),
+                ],
+            )
+        } else {
+            (
+                "sh",
+                vec![
+                    "-c".into(),
+                    "echo T=$FOO_MCP_E2E_TOKEN K=$FOO_MCP_E2E_KEEP".into(),
+                ],
+            )
+        };
+        let mut transport = match ChildTransport::spawn_with_env(
+            program,
+            args,
+            &HashMap::new(),
+            &["FOO_MCP_E2E_TOKEN".to_owned()],
+            10,
+        )
+        .await
+        {
+            Ok(transport) => transport,
+            Err(_) => {
+                unsafe {
+                    std::env::remove_var("FOO_MCP_E2E_TOKEN");
+                    std::env::remove_var("FOO_MCP_E2E_KEEP");
+                }
+                eprintln!("child spawn refused; skipping the spawn_with_env strip test");
+                return;
+            }
+        };
+        transport
+            .send_request("ping", serde_json::Value::Null)
+            .await
+            .unwrap();
+        let err = transport.recv_response().await.unwrap_err();
+        unsafe {
+            std::env::remove_var("FOO_MCP_E2E_TOKEN");
+            std::env::remove_var("FOO_MCP_E2E_KEEP");
+        }
+        let TransportError::BadFrame(line) = err else {
+            panic!("echo output must surface as a BadFrame: {err:?}");
+        };
+        assert!(
+            !line.contains("e2e-token-value"),
+            "stripped variable leaked into the child: {line}"
+        );
+        assert!(
+            line.contains("e2e-keep-value"),
+            "untouched variable must stay visible: {line}"
         );
     }
 

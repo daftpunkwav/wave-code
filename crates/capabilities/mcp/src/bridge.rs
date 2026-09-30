@@ -35,7 +35,7 @@ use crate::{
     McpClient, McpError, McpPromptDef, McpPromptMessage, McpResourceContent, McpResourceDef,
     McpToolDef, McpToolOutput, try_tool_name,
 };
-use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
+use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput, is_sensitive_env_name};
 
 /// Protocol version offered at `initialize`.
 ///
@@ -505,6 +505,20 @@ pub struct StdioMcpClient {
     caps: ServerCaps,
 }
 
+/// Names to strip from a spawned stdio server's inherited environment:
+/// every sensitive-shaped variable of this process (see
+/// [`is_sensitive_env_name`]). A server process is third-party code that
+/// may phone home, so it gets the same scrub a model-driven shell command
+/// gets; the transport applies the config `env` block after the strip, so
+/// a server that deliberately needs a secret-shaped variable still
+/// declares it through its config.
+fn sensitive_env_strip() -> Vec<String> {
+    std::env::vars_os()
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .filter(|name| is_sensitive_env_name(name))
+        .collect()
+}
+
 impl StdioMcpClient {
     /// Spawn the server and run the `initialize` handshake.
     pub async fn connect(
@@ -513,10 +527,12 @@ impl StdioMcpClient {
         args: Vec<String>,
         env: &HashMap<String, String>,
     ) -> std::result::Result<Self, McpError> {
+        let strip_env = sensitive_env_strip();
         let transport = transport_mcp::ChildTransport::spawn_with_env(
             command,
             args,
             env,
+            &strip_env,
             MCP_RESPONSE_TIMEOUT_SECS,
         )
         .await
@@ -1553,6 +1569,34 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Serializes env mutation in this binary against itself.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The stdio strip list covers sensitive-shaped parent variables and
+    /// leaves normal configuration visible (the transport applies config
+    /// `env` after the strip, so the list itself needs no exclusions).
+    #[test]
+    fn sensitive_env_strip_covers_secret_shapes_only() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("FOO_BRIDGE_API_KEY", "bridge-secret");
+            std::env::set_var("FOO_BRIDGE_NORMAL", "visible");
+        }
+        let strip = sensitive_env_strip();
+        unsafe {
+            std::env::remove_var("FOO_BRIDGE_API_KEY");
+            std::env::remove_var("FOO_BRIDGE_NORMAL");
+        }
+        assert!(
+            strip.iter().any(|n| n == "FOO_BRIDGE_API_KEY"),
+            "sensitive-shaped variable missing from the strip list: {strip:?}"
+        );
+        assert!(
+            !strip.iter().any(|n| n == "FOO_BRIDGE_NORMAL"),
+            "normal variable must not be stripped: {strip:?}"
+        );
+    }
 
     /// Scripted transport: pops queued rpc outcomes; each construction
     /// bumps `connects` so tests can observe the healing count.

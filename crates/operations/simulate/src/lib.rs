@@ -2,6 +2,11 @@
  * @file PlanPreview
  * @description Dry-run rendering of model-planned actions.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Library-only plan preview; not a product feature yet.
  * Responsibilities:
  * - Turn sampled blocks into human-readable plan lines.
  * - Never execute anything; preview is read-only analysis.

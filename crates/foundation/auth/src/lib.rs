@@ -2,6 +2,12 @@
  * @file CredentialStore
  * @description Provider-scoped credentials for model access.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Reserved for credential setups beyond `wavecode-config`'s `env_key`
+ * path, which is what sessions use today.
  * Responsibilities:
  * - Hold one credential per provider behind explicit lookups.
  * - Load values from the process environment at composition time.

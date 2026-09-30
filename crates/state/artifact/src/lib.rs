@@ -2,6 +2,12 @@
  * @file ArtifactStore
  * @description Versioned registry of run-produced artifacts.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Reserved versioned registry of run-produced artifacts; the product's
+ * durable data currently rides `state-persistence` / `state-store`.
  * Responsibilities:
  * - Publish artifacts under stable names with auto versions.
  * - Resolve the latest version of a name.

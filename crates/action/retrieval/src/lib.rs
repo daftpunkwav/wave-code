@@ -2,6 +2,12 @@
  * @file TermRetriever
  * @description Term-overlap retrieval over chunked documents.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Reserved for agent projects that need local corpus search; no
+ * consumer in the product yet.
  * Responsibilities:
  * - Split documents into overlapping character windows.
  * - Score chunks by query term overlap.

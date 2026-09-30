@@ -2,6 +2,13 @@
  * @file InjectionGuard
  * @description Heuristic prompt-injection screening and taint tracking.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Reserved for a future trust-boundary redraw: the live policy and
+ * approval flow is `safety-gate` + `wavecode-sandbox`, which this
+ * overlaps; adoption needs that boundary redrawn, not a splice.
  * Responsibilities:
  * - Flag known prompt-injection phrasings in untrusted text.
  * - Reduce signals to one verdict so callers decide identically.

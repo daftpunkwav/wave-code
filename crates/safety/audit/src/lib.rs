@@ -2,6 +2,12 @@
  * @file AuditLog
  * @description Append-only audit trail of security-relevant decisions.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Reserved for deployments that need an append-only audit trail of
+ * security-relevant decisions.
  * Responsibilities:
  * - Record every allow/ask/deny/error decision with a sequence number.
  * - Filter entries by actor for incident review.

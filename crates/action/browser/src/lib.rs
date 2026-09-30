@@ -2,6 +2,13 @@
  * @file BrowserSession
  * @description Browser automation behind an async tab seam.
  *
+ * Unwired by intent: zero dependents — not reachable from the
+ * `wavecode` binary. Kept as a deliberate seed; see the "Wiring
+ * status" section of docs/architecture.md before citing or wiring.
+ *
+ * Reserved for agent projects that need a browser; the seam has no
+ * driver implementer or consumer yet (`wavecode-tools` owns the live
+ * registry).
  * Responsibilities:
  * - Name tab state and page actions in driver-neutral types.
  * - Define the async session seam real drivers implement.

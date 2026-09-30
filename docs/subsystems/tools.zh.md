@@ -55,7 +55,7 @@ async fn execute(&self, input, ctx: &ToolCtx) -> Result<ToolOutput>;
 - `shell` — `src/shell_tool.rs`；经 `sanitize_env`（剥离 `deny_env` 名单及 `*_KEY`、`*_PAT`、`AWS_SECRET_ACCESS_KEY` 等敏感形态变量）与 OS sandbox 后端生成子进程。会话装配把 job 服务接为 shell 的 `RunHandoff`，因此超过超时的命令会被**晋升**为后台作业（进程在 `JobService` 下继续运行；turn 继续推进，由 `job_wait`/`job_output` 收集；完成通知只在晋升时才打开）——没有接缝时、或在 `WAVECODE_SANDBOX_OS` 隔离模式下，超时杀死进程并报告杀死前已产生的输出。完成运行的单流在捕获上限处被截断时会把全文落入 context 的 `SpillStore`，给出 `spill` 工具可读回的 `spill://` URI。捕获流先按 UTF-8 解码，逐行回退到 Windows ANSI 代码页（中文主机为 GBK），`cmd` 内建命令的输出不再变成 U+FFFD 乱码；`python`/`node` 走同一个解码器。
 - `python`、`node` — `src/script.rs`（非只读）。
 - `lsp_symbols`、`lsp_definition`、`lsp_hover`、`lsp_references` — `src/lsp.rs`；导航工具只读。
-- `web_fetch` — `src/web_fetch.rs`；`web_search` — `src/websearch.rs`（DuckDuckGo 后端）；两者只读。
+- `web_fetch` — `src/web_fetch.rs`；`web_search` — `src/web_search.rs`（DuckDuckGo 后端）；两者只读。
 - `view`、`present` — `src/fs/image.rs`、`src/fs/present.rs`；`spill` — `src/spill_tool.rs`（读上下文 spill 存储）。
 
 `todowrite`（`src/todo_tool.rs`）经 `with_todo_write` 单独注册，使工具与会话级 `TodoStore` 共享一个 `Arc`。`lsp_diagnostics`（`src/lsp.rs`）不在 `builtin()` 里；会话装配在 `crates/operations/bootstrap/src/session.rs` 中为 LSP 工具注册活的 provider（共享注册表上的迟注册）。`task`、`task_output`、`task_stop`（`src/task_tools.rs`、`src/agent_task_tool.rs`）、`ask_user`（`src/ask_user_tool.rs`）随本 crate 发布；`skill` 工具位于 `crates/capabilities/skills/src/tool.rs`，`memory_write` 位于 `crates/capabilities/memory/src/tool.rs`，`goal` 位于 `crates/state/goal/src/tool.rs`，`plan` 位于 `crates/state/plan/src/tool.rs`，`job_*` 家族位于 `crates/action/jobs/src/tools.rs`，`workflow_run` / `ralph_run` / `schedule` 位于 `crates/action/workflow/src/tools.rs`——会话装配以同样的方式从这些原籍注册它们全部。

@@ -450,7 +450,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     }
 
     // 2. Provider model client; the model-independent remainder lives in
-    // `assemble_session_with_model` so tests can inject a stub model.
+    // `assemble_session_after_model` so tests can inject a stub model.
     // Production behavior is unchanged: this resolves config and builds
     // the provider client, then delegates everything below.
     // Effort display state: only OpenAI-compatible providers carry a
@@ -550,7 +550,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     } else {
         None
     };
-    Ok(assemble_session_with_model(WithModel {
+    Ok(assemble_session_after_model(WithModel {
         session_id: session_id.clone(),
         config,
         model,
@@ -637,7 +637,7 @@ pub struct WithModel {
 /// Shares its body with [`assemble_session`]; the split is purely a
 /// seam for hermetic tests, never a behavior fork. Public only so the
 /// gateway's server tests can assemble sessions the production way.
-pub fn assemble_session_with_model(parts: WithModel) -> SessionHandle {
+pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
     let WithModel {
         config,
         model,

@@ -263,7 +263,7 @@ mod tests {
         let specs = reg.specs();
         // builtin excludes todowrite (injected by session assembly via with_todo_write).
         // Exact counts are not asserted: concurrent milestones register more
-        // builtins (websearch, spill, image, present, ...); the stable
+        // builtins (web_search, spill, image, present, ...); the stable
         // contract is sorted specs, object schemas, and per-tool presence.
         assert!(specs.len() >= 14);
         for name in ["read", "view", "present", "web_search", "spill"] {

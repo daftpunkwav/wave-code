@@ -29,7 +29,7 @@ mod spill_tool;
 mod task_tools;
 mod todo_tool;
 mod web_fetch;
-mod websearch;
+mod web_search;
 
 pub use shell_tool::{RunHandoff, RunSnapshot, shell_with_handoff};
 
@@ -42,7 +42,7 @@ pub use lsp::{
 pub use spill_tool::SpillRead;
 pub use task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
-pub use websearch::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};
+pub use web_search::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
@@ -345,7 +345,7 @@ impl Registry {
         reg.register(Arc::new(lsp::Hover::new()));
         reg.register(Arc::new(lsp::FindReferences::new()));
         reg.register(Arc::new(web_fetch::WebFetch));
-        reg.register(Arc::new(websearch::WebSearch::new()));
+        reg.register(Arc::new(web_search::WebSearch::new()));
         reg.register(Arc::new(fs::ReadImage));
         // Present records into a registry-scoped store (first version: no
         // steering consumer needs the handle, unlike todowrite).

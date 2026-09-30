@@ -1065,7 +1065,7 @@ mod tests {
     use crate::test_stubs::{CONFIG, OneShotModel, done_script};
     use infrastructure_base::InterruptHandle;
     use operations_bootstrap::SessionHandle;
-    use operations_bootstrap::session::{WithModel, assemble_session_with_model};
+    use operations_bootstrap::session::{WithModel, assemble_session_after_model};
 
     /// Model blocked on a gate: prompt turns stay in flight until the
     /// test releases them, so cancel paths run deterministically.
@@ -1211,7 +1211,7 @@ mod tests {
                     Arc::new(OneShotModel::new(script))
                 }
             };
-            let handle = assemble_session_with_model(WithModel {
+            let handle = assemble_session_after_model(WithModel {
                 config,
                 model,
                 model_name,

@@ -765,7 +765,7 @@ impl ConsoleUi {
 
     /// Steer the running turn with the queued message or editor text.
     /// Returns true when steering landed.
-    pub fn steer(&mut self) -> bool {
+    pub fn steer_running_turn(&mut self) -> bool {
         if !self.state.busy() {
             self.push_status("nothing is running to steer", false);
             return false;
@@ -2387,7 +2387,7 @@ verify from the repository.";
                 Flow::Continue
             }
             (Key::Char('s'), m) if m.ctrl => {
-                self.steer();
+                self.steer_running_turn();
                 Flow::Continue
             }
             (Key::Char('g'), m) if m.ctrl => {

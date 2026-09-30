@@ -786,7 +786,7 @@ fn ctrl_s_steers_with_editor_text() {
     ui.submit("go");
     // Type text into the editor via direct insert.
     ui.editor.insert_text("change course");
-    assert!(ui.steer());
+    assert!(ui.steer_running_turn());
     assert!(ui.editor.is_empty(), "editor cleared after steering");
 }
 
@@ -794,7 +794,7 @@ fn ctrl_s_steers_with_editor_text() {
 fn ctrl_s_without_running_turn_reports() {
     let mut ui = ui();
     ui.editor.insert_text("hello");
-    assert!(!ui.steer(), "idle turn cannot steer");
+    assert!(!ui.steer_running_turn(), "idle turn cannot steer");
     assert!(ui.editor.text() == "hello", "editor untouched");
 }
 

@@ -576,7 +576,7 @@ pub struct InboxHandle {
 struct InboxQueue {
     next_turn: VecDeque<String>,
     next_step: VecDeque<String>,
-    inject: VecDeque<String>,
+    injected: VecDeque<String>,
 }
 
 impl InboxHandle {
@@ -599,7 +599,7 @@ impl InboxHandle {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .inject
+            .injected
             .push_back(text);
     }
 
@@ -608,9 +608,9 @@ impl InboxHandle {
     /// current-turn items drop; otherwise everything pending is dropped.
     pub fn cancel(&self, keep_next_turn: bool) -> usize {
         let mut inbox = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut dropped = inbox.next_step.len() + inbox.inject.len();
+        let mut dropped = inbox.next_step.len() + inbox.injected.len();
         inbox.next_step.clear();
-        inbox.inject.clear();
+        inbox.injected.clear();
         if !keep_next_turn {
             dropped += inbox.next_turn.len();
             inbox.next_turn.clear();
@@ -639,11 +639,11 @@ impl InboxHandle {
     }
 
     /// Drain directly injected messages.
-    fn take_inject(&self) -> Vec<String> {
+    fn take_injected(&self) -> Vec<String> {
         self.inner
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .inject
+            .injected
             .drain(..)
             .collect()
     }
@@ -1608,7 +1608,7 @@ where
                 .inbox
                 .take_next_step()
                 .into_iter()
-                .chain(self.inbox.take_inject())
+                .chain(self.inbox.take_injected())
             {
                 conv.push(Role::User, text);
                 applied += 1;

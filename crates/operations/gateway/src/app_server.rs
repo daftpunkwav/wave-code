@@ -801,7 +801,7 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(done_script);
             let model: Arc<dyn wavecode_llm::ChatModel> = Arc::new(OneShotModel::new(script));
-            Ok(operations_bootstrap::session::assemble_session_with_model(
+            Ok(operations_bootstrap::session::assemble_session_after_model(
                 operations_bootstrap::session::WithModel {
                     config,
                     model,

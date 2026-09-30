@@ -104,6 +104,14 @@ pub trait SandboxBackend: Send + Sync + std::fmt::Debug {
         cmd: &mut tokio::process::Command,
         profile: &ConfinementProfile,
     ) -> Result<(), SandboxError>;
+    /// Pair a just-spawned child with the confinement armed by the last
+    /// `spawn_confined` call on this backend. Backends that pair processes
+    /// by observation (the Windows job watcher) need the exact child to
+    /// assign; without the commit they could only guess among concurrently
+    /// created direct children and might confine an unrelated one. The
+    /// default does nothing. Callers invoke it right after the armed
+    /// `spawn()` succeeded, and never for unconfined spawns.
+    fn commit_confined_spawn(&self, _child_pid: u32) {}
 }
 
 /// Fallback backend: confinement is unavailable, so every spawn fails closed

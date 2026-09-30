@@ -137,6 +137,8 @@ async fn run_script(
         &mut cmd,
         crate::shell_tool::STREAM_CAPTURE_CAP,
         Duration::from_millis(timeout_ms),
+        // Script tools never arm OS confinement: nothing to commit.
+        None,
     )
     .await
     {

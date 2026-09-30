@@ -491,10 +491,10 @@ enum ExecOutcome {
 /// Run one command hook: platform shell + stdin payload JSON + timeout kill.
 ///
 /// The hook spawns as its own process group (same convention as the shell
-/// tool and the job service), and the timeout path tree-kills by recorded
-/// pid ([`infrastructure_base::kill_tree`]) so grandchildren die with the
-/// shell; the dropped future's `kill_on_drop` stays as the reap backstop
-/// for the direct child.
+/// tool and the job service), and the timeout path kills the shell through
+/// its own handle first and then tree-kills by pid
+/// ([`infrastructure_base::kill_tree`]) so grandchildren die with the shell;
+/// `kill_on_drop` stays as the reap backstop for the other drop paths.
 async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>) -> ExecOutcome {
     let payload = serde_json::json!({
         "event": point.as_str(),
@@ -502,6 +502,7 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         "input": input.tool_input,
         "output": input.tool_output,
     });
+    let payload_bytes = payload.to_string();
     let (prog, flag) = shell_invocation();
     let mut cmd = tokio::process::Command::new(prog);
     cmd.arg(flag)
@@ -519,41 +520,75 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         Ok(child) => child,
         Err(e) => return ExecOutcome::SpawnFailed(e.to_string()),
     };
-    // Recorded before the child moves into the wait below: the timeout
-    // branch needs it for the tree kill (the child handle itself is
-    // dropped there, and kill_on_drop only reaches the shell).
-    let pid = child.id();
+    // Split the pipe handles out so the wait below borrows the child instead
+    // of consuming it: the timeout path then still owns the child. It kills
+    // through the handle first, which pins the pid to this child until the
+    // tree kill has run (an unreaped zombie on Unix, an open process handle
+    // on Windows) — a tree kill on a pid the OS already handed to an
+    // unrelated process would be far worse than no kill.
+    let mut stdin = child.stdin.take();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
     // Write the payload to stdin, then close it (hooks that read stdin see
     // EOF); a write failure (the command exited early without reading stdin)
     // is not an error — still wait for the exit code.
     // Writing and waiting are both inside the timeout: write_all can block
     // forever when the payload exceeds the pipe buffer and the hook process
     // never reads stdin, so leaving it outside the timeout would void the
-    // timeout guarantee (hanging the whole turn). A timeout drops the future,
-    // which drops the child, and kill_on_drop sends the kill.
+    // timeout guarantee (hanging the whole turn). Both pipes drain
+    // concurrently so a full pipe cannot stall the other side or the wait.
     let waited = tokio::time::timeout(def.effective_timeout(), async {
-        if let Some(mut stdin) = child.stdin.take() {
+        if let Some(mut stdin) = stdin.take() {
             use tokio::io::AsyncWriteExt;
-            let _ = stdin.write_all(payload.to_string().as_bytes()).await;
+            let _ = stdin.write_all(payload_bytes.as_bytes()).await;
             let _ = stdin.shutdown().await;
+            // Close the write end here, not when this function returns:
+            // hooks reading stdin to EOF (e.g. `more`) must see it before
+            // the wait below, or they hang until the timeout.
+            drop(stdin);
         }
-        child.wait_with_output().await
+        match (stdout.as_mut(), stderr.as_mut()) {
+            (Some(stdout), Some(stderr)) => {
+                use tokio::io::AsyncReadExt;
+                let mut out_buf = Vec::new();
+                let mut err_buf = Vec::new();
+                let (out, err, status) = tokio::join!(
+                    stdout.read_to_end(&mut out_buf),
+                    stderr.read_to_end(&mut err_buf),
+                    child.wait(),
+                );
+                // Read failures degrade to a partial capture; the exit code
+                // still surfaces (same contract as `wait_with_output`).
+                let _ = (out, err);
+                status.map(move |status| (out_buf, err_buf, status))
+            }
+            // Both streams are piped above; a missing one still waits.
+            _ => child
+                .wait()
+                .await
+                .map(|status| (Vec::new(), Vec::new(), status)),
+        }
     })
     .await;
     match waited {
         Err(_) => {
-            // Timeout: the future was dropped (kill_on_drop kills the
-            // shell); the recorded pid takes the whole tree with it.
-            if let Some(pid) = pid {
+            // Timeout: kill the direct child through its own handle, then
+            // take the whole tree with it by the still-pinned pid, and reap
+            // so nothing lingers. start_kill is best-effort: a child that
+            // exited in the timeout window has nothing to kill, and the
+            // tree kill below still runs.
+            let _ = child.start_kill();
+            if let Some(pid) = child.id() {
                 infrastructure_base::kill_tree(pid);
             }
+            let _ = child.wait().await;
             ExecOutcome::Timeout
         }
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            match output.status.code() {
+        Ok(Ok((out, err, status))) => {
+            let stdout = String::from_utf8_lossy(&out).trim().to_owned();
+            let stderr = String::from_utf8_lossy(&err).trim().to_owned();
+            match status.code() {
                 Some(0) => ExecOutcome::Success(stdout),
                 Some(2) => ExecOutcome::Blocked(stderr),
                 Some(code) => ExecOutcome::NonZero(code, stderr),
@@ -857,6 +892,54 @@ mod tests {
             "timeouts should return promptly instead of waiting out the command: {:?}",
             start.elapsed()
         );
+    }
+
+    /// The timeout tree kill still reaches grandchildren after the shell is
+    /// killed through its own handle first: a grandchild scheduled to write
+    /// a marker file well after the timeout must never get to run.
+    #[tokio::test]
+    async fn timeout_tree_kill_covers_grandchildren() {
+        let marker = std::env::temp_dir().join(format!(
+            "wavecode-hook-tree-kill-{}-{}.marker",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        // The grandchild writes the marker after ~2s; the hook shell itself
+        // sleeps far past the 300ms timeout. If the tree kill misses the
+        // grandchild, the marker appears while this test waits.
+        let hook_command = if cfg!(windows) {
+            // cmd temp paths carry no spaces; `start /b` keeps the grandchild
+            // in the shell's process tree for taskkill /T to reach.
+            format!(
+                "start /b cmd /c \"ping -n 3 127.0.0.1 >nul & type nul > {}\"& {}",
+                marker.display(),
+                sleep_cmd()
+            )
+        } else {
+            format!(r#"(sleep 2 && : > "{}") & {}"#, marker.display(), sleep_cmd())
+        };
+        let e = engine(&[(
+            HookEventPoint::PreToolUse,
+            HookDef {
+                timeout_ms: 300,
+                ..def(&hook_command)
+            },
+        )]);
+        let report = e
+            .run(HookEventPoint::PreToolUse, &input(Some("shell")))
+            .await;
+        assert_eq!(report.warnings.len(), 1, "hook must time out");
+        // Outlive the grandchild's fire time before judging the marker.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !marker.exists(),
+            "grandchild survived the timeout tree kill"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 
     // —— once ——

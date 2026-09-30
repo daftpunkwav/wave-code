@@ -277,10 +277,18 @@ pub(crate) struct Collected {
 /// kill could not land. Shared by `Shell` and the script tools so no
 /// child-output path buffers unbounded or leaks a killed process's
 /// captured output.
+///
+/// `confined_backend` is set exactly when the caller armed `cmd` through
+/// `SandboxBackend::spawn_confined`: the spawned child's pid is then
+/// committed to the backend right after spawn
+/// ([`SandboxBackend::commit_confined_spawn`]), so an observing backend
+/// (the Windows job watcher) assigns this exact child instead of guessing
+/// among concurrently created ones. Unconfined spawns pass `None`.
 pub(crate) async fn spawn_collect_bounded(
     cmd: &mut tokio::process::Command,
     cap: usize,
     timeout: Duration,
+    confined_backend: Option<&Arc<dyn wavecode_sandbox::SandboxBackend>>,
 ) -> std::io::Result<Collected> {
     // Own group (see the doc above) so the timeout kill covers descendants;
     // applied before spawn like the job service's spawn path.
@@ -289,6 +297,11 @@ pub(crate) async fn spawn_collect_bounded(
     #[cfg(windows)]
     cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
     let mut child = cmd.spawn()?;
+    if let Some(backend) = confined_backend
+        && let Some(pid) = child.id()
+    {
+        backend.commit_confined_spawn(pid);
+    }
     // The capture buffers live outside the reader tasks so the bounded
     // wait below can return the partial streams without depending on the
     // readers reaching EOF (a grandchild holding the write ends open can
@@ -503,7 +516,11 @@ impl Tool for Shell {
         // apply to the final confined command. Any failure fails closed
         // here (SANDBOX_UNAVAILABLE when no backend is available) — the
         // command never runs unconfined when confinement was requested.
-        // Timeout / kill / truncate behavior below is unchanged.
+        // Timeout / kill / truncate behavior below is unchanged. The
+        // backend is kept so the spawn below can commit the child pid to
+        // it (the Windows job watcher pairs only committed pids).
+        let mut confined_backend: Option<std::sync::Arc<dyn wavecode_sandbox::SandboxBackend>> =
+            None;
         if os_sandbox_enabled() {
             let profile = wavecode_sandbox::ConfinementProfile::for_shell(&ctx.cwd);
             let backend = wavecode_sandbox::detect_backend();
@@ -513,6 +530,7 @@ impl Tool for Shell {
                     backend.backend_name()
                 )));
             }
+            confined_backend = Some(backend);
         }
         // Scrubbing lands on the final command (post-confinement): strip
         // deny_env entries and sensitive-shape variables to prevent leaks.
@@ -535,6 +553,7 @@ impl Tool for Shell {
             &mut cmd,
             STREAM_CAPTURE_CAP,
             Duration::from_millis(timeout_ms),
+            confined_backend.as_ref(),
         )
         .await
         {

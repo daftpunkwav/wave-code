@@ -2727,9 +2727,12 @@ verify from the repository.";
 
     /// `/doctor`: one-pass health report over the on-disk config
     /// surface — home directory, config.toml, the active provider's
-    /// credential, models.json, console-settings.json, MCP servers —
-    /// closing with the live session facts. Every line carries an
-    /// `ok` / `warn` / `fail` marker so problems scan instantly.
+    /// credential, models.json, console-settings.json, custom themes,
+    /// session records, MCP servers — closing with the live session
+    /// facts. Every line carries an `ok` / `warn` / `fail` marker so
+    /// problems scan instantly. Permission-table and MCP-entry syntax
+    /// validation stays in `wavecode doctor` (harness): the findings
+    /// ride the startup warnings this UI already prints.
     fn run_doctor(&mut self) {
         let Some(home) = self.state.home.clone() else {
             self.push_status("fail · no home directory (USERPROFILE/HOME unset)", true);
@@ -2802,6 +2805,75 @@ verify from the repository.";
                 Err(_) => self.push_status("info · console-settings.json not written yet", false),
             },
             None => self.push_status("warn · no home for console-settings.json", true),
+        }
+        // Custom themes: the same files the theme picker lists, checked
+        // with the loader it uses, so a broken file is visible here
+        // instead of failing a live `/theme` switch.
+        let themes = crate::theme::file::list(&home);
+        if themes.is_empty() {
+            self.push_status("ok   · themes: none custom", false);
+        } else {
+            for name in &themes {
+                match crate::theme::file::load(&home, name) {
+                    Ok(_) => self.push_status(&format!("ok   · theme {name}"), false),
+                    Err(error) => {
+                        self.push_status(&format!("warn · theme {name}: {error}"), true)
+                    }
+                }
+            }
+        }
+        // Session records: the index must parse and every journal file
+        // named by the index should still exist — resume reads the same
+        // store, so a broken index means silently lost sessions. Health
+        // reads through the persistence layer's own salvage rules.
+        let index = state_persistence::sessions::index_path(&home);
+        if !index.exists() {
+            self.push_status("ok   · sessions: none recorded yet", false);
+        } else {
+            let health = state_persistence::sessions::index_health(&home);
+            if health.sessions.is_empty() {
+                // A broken index reads as empty; the health report tells
+                // a valid empty index apart from one that failed to parse.
+                if health.parses {
+                    self.push_status("ok   · sessions: index present, none recorded", false);
+                } else {
+                    self.push_status(
+                        &format!(
+                            "warn · sessions: {} does not parse (read as empty; resumable sessions are lost until it is fixed or removed)",
+                            index.display()
+                        ),
+                        true,
+                    );
+                }
+            } else {
+                let missing: Vec<&str> = health
+                    .sessions
+                    .iter()
+                    .filter(|meta| {
+                        !state_persistence::sessions::session_journal_file(&home, &meta.id)
+                            .is_some_and(|path| path.exists())
+                    })
+                    .map(|meta| meta.id.as_str())
+                    .collect();
+                if missing.is_empty() {
+                    self.push_status(
+                        &format!(
+                            "ok   · sessions: {} recorded, all journals present",
+                            health.sessions.len()
+                        ),
+                        false,
+                    );
+                } else {
+                    self.push_status(
+                        &format!(
+                            "warn · sessions: {} recorded, missing journals for {}",
+                            health.sessions.len(),
+                            missing.join(", ")
+                        ),
+                        true,
+                    );
+                }
+            }
         }
         self.push_status(
             &format!(

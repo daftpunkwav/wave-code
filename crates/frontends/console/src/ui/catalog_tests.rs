@@ -266,7 +266,49 @@ fn doctor_reports_over_a_temp_home() {
         text.contains("console-settings.json"),
         "settings line: {text}"
     );
+    assert!(
+        text.contains("themes: none custom"),
+        "themes line: {text}"
+    );
+    assert!(
+        text.contains("sessions: none recorded yet"),
+        "sessions line: {text}"
+    );
     assert!(text.contains("mcp server"), "session line: {text}");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+    /// `/doctor` catches the on-disk breakages a session would hit
+/// silently: a broken session index (resume reads it as empty) and a
+/// broken custom theme file.
+#[test]
+fn doctor_reports_broken_sessions_index_and_theme() {
+    let (mut ui, home) = ui_with_home("doctor-broken");
+    let wave = home.join(".wavecode");
+    std::fs::create_dir_all(wave.join("themes")).unwrap();
+    // Parseable JSON over an unknown base: `list` keeps it, `load`
+    // rejects it — the shape the doctor themes check can catch.
+    std::fs::write(
+        wave.join("themes").join("broken.json"),
+        r#"{"base": "no-such-base"}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(state_persistence::sessions::sessions_dir(&home)).unwrap();
+    std::fs::write(
+        state_persistence::sessions::index_path(&home),
+        "{not json",
+    )
+    .unwrap();
+    ui.user_submit("/doctor");
+    let text = transcript_plain(&mut ui);
+    assert!(
+        text.contains("sessions:") && text.contains("does not parse"),
+        "broken index reported: {text}"
+    );
+    assert!(
+        text.contains("theme broken"),
+        "broken theme reported: {text}"
+    );
     let _ = std::fs::remove_dir_all(&home);
 }
 

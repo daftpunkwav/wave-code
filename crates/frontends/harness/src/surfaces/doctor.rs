@@ -164,6 +164,18 @@ pub(crate) fn doctor_checks(
         }
     }
 
+    // The model catalog (`~/.wavecode/models.json`): session launch
+    // merges it on top of config.toml and the console's /provider
+    // editor writes it, so a malformed file would degrade silently —
+    // a missing file is the normal optional case, a broken one is not.
+    match wavecode_config::ModelCatalog::load(home) {
+        Ok(catalog) => checks.push(ok(format!(
+            "models.json: {} model(s)",
+            catalog.models.len()
+        ))),
+        Err(error) => checks.push(fail(format!("models.json: {error}"))),
+    }
+
     // Console settings (a broken file silently degrades at runtime, so
     // doctor is the place where the breakage becomes visible).
     let settings_path = home.join(".wavecode").join("console-settings.json");
@@ -199,22 +211,18 @@ pub(crate) fn doctor_checks(
     }
 
     // Session records: the index must parse and every journal file
-    // named by the index should still exist.
+    // named by the index should still exist. Health reads through the
+    // persistence layer's own salvage rules, so this report cannot
+    // drift from what the picker and resume actually load.
     let index = state_persistence::sessions::index_path(home);
     if !index.exists() {
         checks.push(ok("sessions: none recorded yet"));
     } else {
-        let metas = state_persistence::sessions::list_sessions(home);
-        if metas.is_empty() {
-            // `list_sessions` reads a broken index as empty; tell a
-            // valid empty index apart from one that fails to parse.
-            let parses = std::fs::read_to_string(&index)
-                .map(|text| {
-                    serde_json::from_str::<Vec<state_persistence::sessions::SessionMeta>>(&text)
-                        .is_ok()
-                })
-                .unwrap_or(false);
-            if parses {
+        let health = state_persistence::sessions::index_health(home);
+        if health.sessions.is_empty() {
+            // A broken index reads as empty; the health report tells a
+            // valid empty index apart from one that failed to parse.
+            if health.parses {
                 checks.push(ok("sessions: index present, none recorded"));
             } else {
                 checks.push(fail(format!(
@@ -223,24 +231,24 @@ pub(crate) fn doctor_checks(
                 )));
             }
         } else {
-            let missing: Vec<&str> = metas
+            let missing: Vec<&str> = health
+                .sessions
                 .iter()
                 .filter(|meta| {
-                    !state_persistence::sessions::sessions_dir(home)
-                        .join(format!("{}.jsonl", meta.id))
-                        .exists()
+                    !state_persistence::sessions::session_journal_file(home, &meta.id)
+                        .is_some_and(|path| path.exists())
                 })
                 .map(|meta| meta.id.as_str())
                 .collect();
             if missing.is_empty() {
                 checks.push(ok(format!(
                     "sessions: {} recorded, all journals present",
-                    metas.len()
+                    health.sessions.len()
                 )));
             } else {
                 checks.push(fail(format!(
                     "sessions: {} recorded, missing journals for {}",
-                    metas.len(),
+                    health.sessions.len(),
                     missing.join(", ")
                 )));
             }
@@ -498,6 +506,47 @@ url = "https://mcp.example.com"
             .map(|check| check.line.as_str())
             .collect();
         assert_eq!(failed.len(), 2, "{failed:?}");
+    }
+
+    /// The model catalog rides the same doctor pass: a malformed
+    /// `models.json` fails (session launch merges it on top), while a
+    /// missing file is the normal optional case and reads as empty.
+    #[test]
+    fn doctor_reports_a_broken_models_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let wave = dir.path().join(".wavecode");
+        std::fs::create_dir_all(&wave).unwrap();
+        std::fs::write(
+            wave.join("config.toml"),
+            r#"
+model = "m"
+model_provider = "p"
+
+[model_providers.p]
+type = "anthropic"
+base_url = "https://api.example.com"
+api_key = "k"
+"#,
+        )
+        .unwrap();
+        // No models.json yet: healthy empty.
+        let lines: Vec<String> = doctor_checks(None, Some(dir.path()))
+            .into_iter()
+            .map(|check| check.line)
+            .collect();
+        assert!(
+            lines.iter().any(|l| l == "models.json: 0 model(s)"),
+            "{lines:?}"
+        );
+
+        std::fs::write(wave.join("models.json"), "{not json").unwrap();
+        let failed: Vec<String> = doctor_checks(None, Some(dir.path()))
+            .into_iter()
+            .filter(|check| !check.ok)
+            .map(|check| check.line)
+            .collect();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("models.json"), "{failed:?}");
     }
 
     /// A well-formed `[mcp_servers]` entry reads as healthy.

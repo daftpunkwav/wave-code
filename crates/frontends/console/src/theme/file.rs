@@ -301,8 +301,9 @@ pub fn describe(home: &Path) -> Vec<(String, Option<String>)> {
 }
 
 /// Stems plus descriptions of every parseable `*.json` in the themes
-/// directory, sorted. Unparsable files are skipped (the doctor reports
-/// them via [`load`]).
+/// directory, sorted. Files that fail to parse are skipped silently —
+/// the picker only offers loadable themes, and doctor's themes check
+/// (via [`load`]) sees resolve failures only, never parse failures.
 fn user_themes(home: &Path) -> Vec<(String, Option<String>)> {
     let mut themes: Vec<(String, Option<String>)> = std::fs::read_dir(themes_dir(home))
         .into_iter()

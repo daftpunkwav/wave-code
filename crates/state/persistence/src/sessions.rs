@@ -198,18 +198,29 @@ fn default_title(history: &[(bool, String)]) -> String {
     }
 }
 
+/// What one index read produced: the salvaged entries plus whether the
+/// file parsed as a whole (a salvaged or missing read did not have to).
+struct IndexRead {
+    sessions: Vec<SessionMeta>,
+    parses: bool,
+}
+
 /// Load the index, salvaging what parses: the happy path reads the whole
 /// array; a corrupt file falls back to per-object salvage so one broken
 /// entry costs itself instead of dropping every other session from the
-/// picker. Returns the parsed entries plus the number of skipped ones.
-fn load_index(home: &Path) -> (Vec<SessionMeta>, usize) {
+/// picker. Returns the parsed entries plus whether the file needed the
+/// salvage path (a missing file reads as healthy emptiness).
+fn load_index(home: &Path) -> IndexRead {
     let text = match std::fs::read_to_string(index_path(home)) {
         Ok(text) => text,
-        Err(_) => return (Vec::new(), 0),
+        Err(_) => return IndexRead { sessions: Vec::new(), parses: true },
     };
     match serde_json::from_str::<Vec<SessionMeta>>(&text) {
-        Ok(sessions) => (sessions, 0),
-        Err(_) => salvage_index_objects(&text),
+        Ok(sessions) => IndexRead { sessions, parses: true },
+        Err(_) => {
+            let (sessions, _malformed) = salvage_index_objects(&text);
+            IndexRead { sessions, parses: false }
+        }
     }
 }
 
@@ -259,16 +270,42 @@ fn salvage_index_objects(text: &str) -> (Vec<SessionMeta>, usize) {
 /// Load the whole index for the picker: sorted newest-first. Missing or
 /// corrupt files yield whatever still parses (see [`load_index`]).
 pub fn list_sessions(home: &Path) -> Vec<SessionMeta> {
-    let mut sessions = load_index(home).0;
+    let mut sessions = load_index(home).sessions;
     sessions.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
     sessions
+}
+
+/// Doctor-facing session-index health: the sessions the picker would
+/// see (same salvage rules as [`list_sessions`]) plus whether the index
+/// file parsed as a whole. `parses: false` with sessions present means
+/// entries were salvaged from a corrupt file; with no sessions it means
+/// nothing was recoverable. A missing index reads as healthy emptiness;
+/// callers tell the absent case apart with [`index_path`].
+pub struct IndexHealth {
+    /// Salvaged, sorted newest-first — identical to [`list_sessions`].
+    pub sessions: Vec<SessionMeta>,
+    /// Whether the index file parsed as one array (no salvage needed).
+    pub parses: bool,
+}
+
+/// Read the index the way the picker does and report its health, so a
+/// doctor surface can distinguish a healthy empty index from a broken
+/// one without re-deriving the salvage rules or the file layout.
+pub fn index_health(home: &Path) -> IndexHealth {
+    let read = load_index(home);
+    let mut sessions = read.sessions;
+    sessions.sort_by_key(|meta| std::cmp::Reverse(meta.updated_at));
+    IndexHealth {
+        sessions,
+        parses: read.parses,
+    }
 }
 
 /// Upsert one index entry and persist the index file.
 fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     let dir = sessions_dir(home);
     std::fs::create_dir_all(&dir)?;
-    let (mut sessions, _malformed) = load_index(home);
+    let mut sessions = load_index(home).sessions;
     match sessions.iter_mut().find(|entry| entry.id == meta.id) {
         Some(entry) => *entry = meta,
         None => sessions.push(meta),
@@ -380,7 +417,7 @@ pub fn set_title(home: &Path, id: &str, title: &str) -> Result<Option<SessionMet
     if title.is_empty() {
         return Ok(None);
     }
-    let mut sessions = load_index(home).0;
+    let mut sessions = load_index(home).sessions;
     let mut updated = None;
     for entry in &mut sessions {
         if entry.id == id {
@@ -641,6 +678,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(list_sessions(home).len(), 2);
+    }
+
+    /// `index_health` is the doctor-facing view of the same salvage
+    /// rules: a missing index reads as healthy emptiness, a wholly
+    /// corrupt one reads as empty with `parses: false`, and a partially
+    /// corrupt one lists its salvaged entries with `parses: false`.
+    #[test]
+    fn index_health_mirrors_the_salvage_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        // Missing file: healthy emptiness.
+        let health = index_health(home);
+        assert!(health.sessions.is_empty() && health.parses);
+        // Wholly corrupt: empty, not parsed.
+        std::fs::create_dir_all(sessions_dir(home)).unwrap();
+        std::fs::write(index_path(home), "{not json").unwrap();
+        let health = index_health(home);
+        assert!(health.sessions.is_empty() && !health.parses);
+        // Healthy non-empty: everything listed, parsed.
+        let good = |id: &str| {
+            format!(
+                r#"{{"id": "{id}", "title": "t", "cwd": "/tmp", "created_at": 1, "updated_at": 2, "turns": 1}}"#
+            )
+        };
+        std::fs::write(index_path(home), format!("[{}]", good("s-a"))).unwrap();
+        let health = index_health(home);
+        assert_eq!(health.sessions.len(), 1);
+        assert!(health.parses);
+        // Partially corrupt: the survivor is listed, the file did not
+        // parse as a whole.
+        let corrupt = format!("[{}, {{\"id\": \"bad\"}}]", good("s-a"));
+        std::fs::write(index_path(home), corrupt).unwrap();
+        let health = index_health(home);
+        assert_eq!(health.sessions.len(), 1);
+        assert!(!health.parses);
     }
 
     /// The fork's seeded snapshot rides the redaction gate like every other

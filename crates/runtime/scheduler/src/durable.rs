@@ -235,7 +235,9 @@ impl Scheduler {
         };
         let text = serde_json::to_string_pretty(&stored)
             .map_err(|e| SchedulePersistError::Corrupt(e.to_string()))?;
-        infrastructure_base::atomic_write(path, text.as_bytes())?;
+        // Owner-only: schedule entries embed user-authored prompts and the
+        // store lives under `<home>/.wavecode`.
+        infrastructure_base::atomic_write_private(path, text.as_bytes())?;
         Ok(())
     }
 }
@@ -268,6 +270,20 @@ mod tests {
         // Ids stay monotonic across the restart, never reused.
         let third = reloaded.add("30 12 * * *", "noon").expect("add");
         assert_eq!(third.id, "sched-3");
+    }
+
+    /// The schedule store lands owner-only: entries embed user-authored
+    /// prompts and the file lives under `<home>/.wavecode`.
+    #[test]
+    #[cfg(unix)]
+    fn schedule_store_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = home();
+        let mut scheduler = Scheduler::load_or_default(dir.path());
+        scheduler.add("0 9 * * *", "morning sync").expect("add");
+        let path = Scheduler::schedule_file_for_home(dir.path());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "store file stays owner-only: {mode:o}");
     }
 
     /// Missed fires during downtime are NOT replayed: a restart restores

@@ -455,7 +455,9 @@ pub fn load_from_path(path: &Path) -> Result<GoalState, GoalError> {
 }
 
 /// Save a goal atomically: write a sibling temp file, then rename over
-/// the target so a crash never leaves a half-written goal behind.
+/// the target so a crash never leaves a half-written goal behind. The
+/// file lands owner-only: goal state mirrors the session conversation
+/// and lives under `<home>/.wavecode`.
 pub fn save_to_path(state: &GoalState, path: &Path) -> Result<(), GoalError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -463,7 +465,7 @@ pub fn save_to_path(state: &GoalState, path: &Path) -> Result<(), GoalError> {
     let text = serde_json::to_string_pretty(state).map_err(|e| GoalError::Corrupt {
         message: e.to_string(),
     })?;
-    infrastructure_base::atomic_write(path, text.as_bytes())?;
+    infrastructure_base::atomic_write_private(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -540,6 +542,21 @@ mod tests {
         goal.complete().unwrap();
         goal.set("after completion").unwrap();
         assert_eq!(goal.status, GoalStatus::Active);
+    }
+
+    /// Saved goal files land owner-only: goal state mirrors the session
+    /// conversation and lives under `<home>/.wavecode`.
+    #[test]
+    #[cfg(unix)]
+    fn saved_goal_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut goal = GoalState::default();
+        goal.set("ship the milestone").unwrap();
+        let path = dir.path().join("goal.json");
+        save_to_path(&goal, &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "goal file stays owner-only: {mode:o}");
     }
 
     #[test]

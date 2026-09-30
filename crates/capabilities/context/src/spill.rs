@@ -191,7 +191,9 @@ impl SpillStore {
         // shared primitive stages under a per-writer unique name: a fixed
         // staging name would let two processes sharing this root clobber
         // each other's bytes mid-write and rename half a file into place.
-        infrastructure_base::atomic_write(
+        // Owner-only: the manifest lists the store's entry files (which
+        // carry user content) under `<home>/.wavecode`.
+        infrastructure_base::atomic_write_private(
             &self.manifest_path(),
             render_manifest(entries).as_bytes(),
         )
@@ -348,6 +350,23 @@ mod tests {
         std::fs::write(dir.path().join("manifest.txt"), "{corrupt").unwrap();
         let uri = store.spill("still works").unwrap();
         assert_eq!(store.read(&uri).unwrap(), "still works");
+    }
+
+    /// Spilled payloads and the manifest land owner-only: entries carry
+    /// user content and the store lives under `<home>/.wavecode/spills`.
+    #[test]
+    #[cfg(unix)]
+    fn spilled_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SpillStore::new(dir.path().to_path_buf());
+        let uri = store.spill("session content").unwrap();
+        let id = uri.strip_prefix("spill://").unwrap();
+        for file in [format!("{id}.txt"), "manifest.txt".to_owned()] {
+            let path = dir.path().join(&file);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{file} stays owner-only: {mode:o}");
+        }
     }
 
     /// A corrupt manifest carrying huge byte counts must not panic the

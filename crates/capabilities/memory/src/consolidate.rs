@@ -100,7 +100,9 @@ impl MemoryStore {
                     body.push('\n');
                 }
             }
-            std::fs::write(self.root().join(category.file_name()), body)?;
+            // Owner-only: rewritten category files carry user content.
+            let target = self.root().join(category.file_name());
+            infrastructure_base::write_private(&target, body.as_bytes())?;
             changed = true;
         }
         if changed {
@@ -115,7 +117,7 @@ impl MemoryStore {
                     ));
                 }
             }
-            std::fs::write(self.root().join(INDEX_FILE), index)?;
+            infrastructure_base::write_private(&self.root().join(INDEX_FILE), index.as_bytes())?;
         }
         Ok(dropped)
     }
@@ -247,6 +249,19 @@ mod tests {
             store.read_index().unwrap(),
             "- [feedback] never refactor working code (see feedback.md)\n"
         );
+        // Rewritten files keep the owner-only policy of the append path.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for file in [
+                MemoryCategory::Feedback.file_name(),
+                crate::store::INDEX_FILE,
+            ] {
+                let path = dir.path().join("memories").join(file);
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600, "{file} stays owner-only: {mode:o}");
+            }
+        }
         // Idempotent: a second pass finds nothing left to merge.
         assert_eq!(store.consolidate().unwrap(), 0);
     }

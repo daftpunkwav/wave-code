@@ -273,7 +273,9 @@ pub fn load_from_path(path: &Path) -> Result<PlanState, PlanError> {
 }
 
 /// Save a plan atomically: write a sibling temp file, then rename over
-/// the target so a crash never leaves a half-written plan behind.
+/// the target so a crash never leaves a half-written plan behind. The
+/// file lands owner-only: plan state mirrors the session conversation
+/// and lives under `<home>/.wavecode`.
 pub fn save_to_path(state: &PlanState, path: &Path) -> Result<(), PlanError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -281,7 +283,7 @@ pub fn save_to_path(state: &PlanState, path: &Path) -> Result<(), PlanError> {
     let text = serde_json::to_string_pretty(state).map_err(|e| PlanError::Corrupt {
         message: e.to_string(),
     })?;
-    infrastructure_base::atomic_write(path, text.as_bytes())?;
+    infrastructure_base::atomic_write_private(path, text.as_bytes())?;
     Ok(())
 }
 
@@ -363,6 +365,21 @@ mod tests {
         // A revised proposal keeps the review context on disk.
         plan.propose("v2").unwrap();
         assert!(plan.plan_text.contains("v2"));
+    }
+
+    /// Saved plan files land owner-only: plan text mirrors the session
+    /// conversation and lives under `<home>/.wavecode`.
+    #[test]
+    #[cfg(unix)]
+    fn saved_plan_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut plan = PlanState::default();
+        plan.propose("migrate the store").unwrap();
+        let path = dir.path().join("plan.json");
+        save_to_path(&plan, &path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "plan file stays owner-only: {mode:o}");
     }
 
     #[test]

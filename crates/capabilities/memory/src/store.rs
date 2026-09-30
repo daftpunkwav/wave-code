@@ -161,12 +161,11 @@ pub(crate) fn summarize(content: &str) -> String {
 }
 
 /// Append one line at the end of a file (creating the file if needed).
+/// Owner-only: memory entries distill session conversations and live
+/// under `~/.wavecode/memories`.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = infrastructure_base::open_append_private(path)?;
     writeln!(file, "{line}")
 }
 
@@ -202,6 +201,24 @@ mod tests {
         assert_eq!(lines[0], "- [user] prefers compact replies (see user.md)");
         assert_eq!(lines[1], "- [project] repo uses pnpm (see project.md)");
         assert_eq!(lines[2], "- [user] long-time Rust user (see user.md)");
+    }
+
+    /// Memory files land owner-only: entries distill session conversations
+    /// and live under `~/.wavecode/memories`.
+    #[test]
+    #[cfg(unix)]
+    fn memory_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().join("memories"));
+        store
+            .append(MemoryCategory::User, "prefers compact replies")
+            .unwrap();
+        for file in [MemoryCategory::User.file_name(), INDEX_FILE] {
+            let path = dir.path().join("memories").join(file);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{file} stays owner-only: {mode:o}");
+        }
     }
 
     /// Multi-line content: continuation lines stay indented in the same item;

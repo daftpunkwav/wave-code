@@ -189,8 +189,15 @@ pub fn durable_save(
         .sync_all()?;
     std::fs::rename(&staging, &dest)?;
     // Best-effort directory fsync so the rename itself survives a crash.
+    // Opening the directory handle is structurally unavailable on some
+    // platforms (Windows), so that skip stays silent; a failure *after*
+    // the handle is open is a real durability signal and must surface.
     if let Ok(dir) = std::fs::File::open(root) {
-        let _ = dir.sync_all();
+        if let Err(error) = dir.sync_all() {
+            tracing::warn!(
+                "checkpoint directory fsync failed; the rename may not survive a crash: {error}"
+            );
+        }
     }
     Ok(())
 }
@@ -219,6 +226,8 @@ pub fn durable_load(
 /// Missing roots and unreadable entries read as empty/skipped, never as
 /// errors: resume is best-effort discovery, and the caller decides what
 /// a missing history means. Use `.last()` for the resume candidate.
+/// Equal mtimes (saves landing within one timestamp tick) order by the
+/// label's trailing number, so `turn-10` stays newer than `turn-2`.
 pub fn resume_checkpoint(root: &std::path::Path) -> Vec<String> {
     let Ok(read_dir) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -246,8 +255,26 @@ pub fn resume_checkpoint(root: &std::path::Path) -> Vec<String> {
             .unwrap_or(std::time::UNIX_EPOCH);
         labeled.push((modified, stem.to_owned()));
     }
-    labeled.sort();
+    labeled.sort_by(|a, b| {
+        (a.0, label_order_key(&a.1)).cmp(&(b.0, label_order_key(&b.1)))
+    });
     labeled.into_iter().map(|(_, label)| label).collect()
+}
+
+/// Sort key for one label: the part before a trailing digit run, that run
+/// as a number, then the label itself. Plain string order would place
+/// `turn-10` between `turn-1` and `turn-2`, naming the wrong checkpoint
+/// as the newest whenever two saves share one mtime tick. The final whole
+/// label component keeps the order total for stems the numeric tail does
+/// not distinguish. Labels reaching this function are validated ASCII
+/// (`[A-Za-z0-9_-]`), so the byte split is always a char boundary.
+fn label_order_key(label: &str) -> (&str, u64, &str) {
+    let split = label
+        .bytes()
+        .rposition(|b| !b.is_ascii_digit())
+        .map_or(0, |i| i + 1);
+    let (prefix, tail) = label.split_at(split);
+    (prefix, tail.parse().unwrap_or(u64::MAX), label)
 }
 
 #[cfg(test)]
@@ -1220,6 +1247,38 @@ mod durability_tests {
             .filter(|n| n.starts_with(".staging-"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    /// Same-tick mtimes must not let string order invert the numeric
+    /// sequence: with one shared timestamp, plain label order reads
+    /// `turn-10` as older than `turn-2` and resume would name the wrong
+    /// checkpoint as newest. The trailing number breaks the tie.
+    #[test]
+    fn equal_mtimes_order_labels_numerically() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("checkpoints");
+        for label in ["turn-2", "turn-10", "turn-1"] {
+            durable_save(&root, label, "x").unwrap();
+        }
+        // Force one shared mtime: real saves can land within one
+        // filesystem timestamp tick.
+        let shared = std::time::SystemTime::now();
+        for entry in std::fs::read_dir(&root).unwrap().flatten() {
+            std::fs::File::options()
+                .write(true)
+                .open(entry.path())
+                .unwrap()
+                .set_modified(shared)
+                .unwrap();
+        }
+        assert_eq!(
+            resume_checkpoint(&root),
+            vec![
+                "turn-1".to_owned(),
+                "turn-2".to_owned(),
+                "turn-10".to_owned()
+            ]
+        );
     }
 
     #[test]

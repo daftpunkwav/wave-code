@@ -9,6 +9,7 @@ license.workspace = true
 thiserror.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 wavecode-config = { path = "../../foundation/config" }
 
 [dev-dependencies]

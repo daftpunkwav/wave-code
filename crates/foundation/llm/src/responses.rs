@@ -24,6 +24,7 @@
 //! machine, and the Responses API otherwise persists them server-side.
 
 use std::sync::RwLock;
+use std::time::Duration;
 
 use futures::StreamExt;
 use serde_json::Value;
@@ -60,8 +61,13 @@ impl ResponsesClient {
     /// panicking).
     pub fn try_new(base_url: String, api_key: String, model: String) -> Result<Self> {
         let http = reqwest::Client::builder()
-            // A redirect would carry the Authorization header to another
+            // Timeout policy mirrors the other clients: connect_timeout
+            // guards the connect phase, so a blackholed endpoint fails in
+            // 10s instead of waiting out the OS connect limit (the
+            // establishment idle bound only starts on `.send()`). A
+            // redirect would carry the Authorization header to another
             // host; fail the request instead.
+            .connect_timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| LlmError::Http(e.to_string()))?;

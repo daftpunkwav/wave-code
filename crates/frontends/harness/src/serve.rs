@@ -84,6 +84,9 @@ pub(crate) async fn run_serve(
             home,
             token: token.clone(),
             port,
+            // Reaper defaults: 30-minute idle TTL, 64-session cap.
+            session_idle_ttl: None,
+            max_sessions: None,
         },
         operations_bootstrap::assemble_session,
     )

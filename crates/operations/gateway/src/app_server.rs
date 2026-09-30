@@ -14,6 +14,16 @@
  * channel (HTTP handlers), so event consumption and submission never
  * race on the client.
  *
+ * Session lifecycle: besides an explicit `DELETE /sessions/{id}`, a
+ * background reaper closes sessions idle longer than [`SESSION_IDLE_TTL`]
+ * (through the same removal path as the DELETE), because a crashed
+ * client can never call DELETE and would otherwise leak its actor task,
+ * journal, and MCP children forever. Every client-driven interaction —
+ * submitting, deciding, answering, cancelling, subscribing, and every
+ * forwarded turn event — resets the idle clock, so a session in active
+ * use is never reaped. Creating beyond [`MAX_SESSIONS`] live sessions
+ * fails with 503 (refusal, not eviction: evicting could kill a turn).
+ *
  * Security posture: binds the loopback interface only; every route
  * except `/healthz` requires `Authorization: Bearer <token>`; the Host
  * header must name the loopback host (DNS-rebinding guard — an attacker
@@ -26,6 +36,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -36,6 +48,28 @@ use axum::{Json, Router};
 use operations_actor::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionSurface};
 use tokio::sync::{Notify, broadcast, mpsc};
 use wavecode_wire::{Event, EventMsg, Op, Submission};
+
+/// Idle TTL after which the reaper closes a served session.
+///
+/// The longest legitimate quiet stretch inside one running turn is bounded
+/// far below this: an approval park resolves within the assembly's
+/// `APPROVAL_TIMEOUT` (120s) and transport deadlines cap around 60s, so a
+/// turn that is alive always produces activity (an event, a submit, a
+/// decision) long before the TTL. A crashed client's session — the leak
+/// this reaps — therefore closes within half an hour instead of never.
+pub const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Cap on concurrently live sessions; creations beyond it answer 503.
+///
+/// Refusal instead of eviction: evicting a session the reaper cannot
+/// prove idle could kill a mid-turn client, and the local single-user
+/// server never legitimately holds this many.
+pub const MAX_SESSIONS: usize = 64;
+
+/// Milliseconds from the server's monotonic start, for idle bookkeeping.
+fn elapsed_millis(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Server inputs; sessions inherit these at assembly.
 #[derive(Debug, Clone)]
@@ -54,6 +88,12 @@ pub struct ServeOptions {
     pub token: String,
     /// Bind port; 0 picks an ephemeral port (the bound port is returned).
     pub port: u16,
+    /// Idle TTL the reaper enforces; `None` uses [`SESSION_IDLE_TTL`].
+    /// Tests pass a short value to observe the reap quickly.
+    pub session_idle_ttl: Option<Duration>,
+    /// Cap on live sessions; `None` uses [`MAX_SESSIONS`]. Tests pass a
+    /// small value to observe the 503 without 64 assemblies.
+    pub max_sessions: Option<usize>,
 }
 
 /// Commands a session's pump task executes on the owned actor client.
@@ -76,6 +116,25 @@ struct AppSession {
     approvals: Arc<safety_gate::ApprovalGate>,
     questions: Arc<safety_gate::QuestionGate>,
     interrupt: infrastructure_base::InterruptHandle,
+    /// Milliseconds from the server start to the last client-driven
+    /// activity (submit, decision, answer, cancel, subscribe, or a
+    /// forwarded turn event). The reaper compares this with the TTL.
+    last_active_millis: Arc<AtomicU64>,
+}
+
+impl AppSession {
+    /// Record client-driven activity for the idle clock.
+    fn touch(&self, started: Instant) {
+        self.last_active_millis
+            .store(elapsed_millis(started), Ordering::Relaxed);
+    }
+
+    /// How long since the last client-driven activity.
+    fn idle_for(&self, started: Instant) -> Duration {
+        Duration::from_millis(
+            elapsed_millis(started).saturating_sub(self.last_active_millis.load(Ordering::Relaxed)),
+        )
+    }
 }
 
 type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, AppSession>>>;
@@ -95,6 +154,11 @@ struct AppState {
     next_session: Arc<tokio::sync::Mutex<u64>>,
     shutdown: Arc<Notify>,
     assemble: Assemble,
+    /// Monotonic server start the idle clock measures from.
+    started: Instant,
+    /// Effective idle TTL and session cap (option defaults resolved).
+    idle_ttl: Duration,
+    max_sessions: usize,
 }
 
 /// The server surface handed back to the caller (CLI or tests).
@@ -140,6 +204,9 @@ where
     let port = listener.local_addr()?.port();
 
     let shutdown = Arc::new(Notify::new());
+    let started = Instant::now();
+    let idle_ttl = options.session_idle_ttl.unwrap_or(SESSION_IDLE_TTL);
+    let max_sessions = options.max_sessions.unwrap_or(MAX_SESSIONS);
     let state = AppState {
         sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         token: options.token.clone(),
@@ -147,7 +214,11 @@ where
         shutdown: shutdown.clone(),
         assemble,
         base: options,
+        started,
+        idle_ttl,
+        max_sessions,
     };
+    spawn_idle_reaper(state.clone(), shutdown.clone());
     let server_shutdown = shutdown.clone();
 
     let app = router(state);
@@ -160,6 +231,51 @@ where
         }
     });
     Ok(ServerHandle { port, shutdown })
+}
+
+/// Spawn the background reaper: every `idle_ttl / 4` (clamped) it removes
+/// sessions idle longer than the TTL. Removal drops the entry's command
+/// sender, so the pump shuts the actor down — the same path an explicit
+/// `DELETE /sessions/{id}` takes. The task exits on server shutdown; a
+/// notification missed between iterations only costs one extra tick, and
+/// the detached task dies with the runtime either way.
+fn spawn_idle_reaper(state: AppState, shutdown: Arc<Notify>) {
+    let reap_interval =
+        (state.idle_ttl / 4).clamp(Duration::from_millis(50), Duration::from_secs(60));
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(reap_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.notified() => return,
+            }
+            let reaped = {
+                let mut sessions = state.sessions.lock().await;
+                take_idle(&mut sessions, state.idle_ttl, state.started)
+            };
+            for id in reaped {
+                eprintln!("[serve] reaped session {id} idle past {:?}", state.idle_ttl);
+            }
+        }
+    });
+}
+
+/// Remove and return the ids of sessions idle longer than `ttl`.
+fn take_idle(
+    sessions: &mut HashMap<String, AppSession>,
+    ttl: Duration,
+    started: Instant,
+) -> Vec<String> {
+    let stale: Vec<String> = sessions
+        .iter()
+        .filter(|(_, session)| session.idle_for(started) > ttl)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &stale {
+        sessions.remove(id);
+    }
+    stale
 }
 
 fn router(state: AppState) -> Router {
@@ -229,10 +345,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter()
-        .zip(b)
-        .fold(0u8, |diff, (x, y)| diff | (x ^ y))
-        == 0
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
 /// True when the Host header names the loopback interface (with any
@@ -263,6 +376,17 @@ async fn create_session(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    // Capacity first: a refused creation must not pay for an assembly.
+    if state.sessions.lock().await.len() >= state.max_sessions {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!(
+                "session limit reached ({}, idle sessions are reaped); delete one first",
+                state.max_sessions
+            )})),
+        )
+            .into_response();
+    }
     let cwd = body
         .get("cwd")
         .and_then(serde_json::Value::as_str)
@@ -310,19 +434,42 @@ async fn create_session(
     let interrupt = handle.interrupt();
     let (events, _) = broadcast::channel(256);
     let (commands, command_rx) = mpsc::channel(32);
-    pump(handle, events.clone(), command_rx);
-
-    state.sessions.lock().await.insert(
-        session_id.clone(),
-        AppSession {
-            commands,
-            submissions: 0,
-            events,
-            approvals,
-            questions,
-            interrupt,
-        },
+    let last_active_millis = Arc::new(AtomicU64::new(elapsed_millis(state.started)));
+    pump(
+        handle,
+        events.clone(),
+        command_rx,
+        last_active_millis.clone(),
+        state.started,
     );
+
+    let entry = AppSession {
+        commands,
+        submissions: 0,
+        events,
+        approvals,
+        questions,
+        interrupt,
+        last_active_millis,
+    };
+    let mut sessions = state.sessions.lock().await;
+    // The pre-assembly check can be raced past by concurrent creations:
+    // the insert re-checks under the lock. Losing the race drops `entry`,
+    // which closes the command channel and makes the pump shut the freshly
+    // assembled actor down — the DELETE path again.
+    if sessions.len() >= state.max_sessions {
+        drop(sessions);
+        drop(entry);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": format!(
+                "session limit reached ({}, idle sessions are reaped); delete one first",
+                state.max_sessions
+            )})),
+        )
+            .into_response();
+    }
+    sessions.insert(session_id.clone(), entry);
     (
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -387,6 +534,7 @@ async fn answer_approval(
     let Some(session) = sessions.get(&session_id) else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
+    session.touch(state.started);
     if session.approvals.decide(&call_id, decision) {
         StatusCode::OK.into_response()
     } else {
@@ -406,6 +554,7 @@ async fn answer_question(
     let Some(session) = sessions.get(&session_id) else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
+    session.touch(state.started);
     if session.questions.answer(&call_id, answer.to_string()) {
         StatusCode::OK.into_response()
     } else {
@@ -421,6 +570,7 @@ async fn cancel_session(
     let Some(session) = sessions.get(&session_id) else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
+    session.touch(state.started);
     session.interrupt.trigger();
     StatusCode::OK.into_response()
 }
@@ -466,6 +616,9 @@ async fn stream_events(
     let Some(session) = sessions.get(&session_id) else {
         return (StatusCode::NOT_FOUND, "unknown session").into_response();
     };
+    // Subscribing is client liveness: the per-turn stream is opened right
+    // before a prompt, so it must not race the reaper.
+    session.touch(state.started);
     let mut receiver = session.events.subscribe();
     drop(sessions);
     let stream = async_stream::stream! {
@@ -502,17 +655,22 @@ async fn stream_events(
 // ---- internals ----
 
 /// Spawn a session's pump task: exclusive session owner, forwarding
-/// events to subscribers and executing submission commands.
+/// events to subscribers and executing submission commands. Forwarded
+/// events count as activity: a turn that is alive keeps producing them,
+/// so the reaper can never take a running session.
 fn pump(
     mut session: Box<dyn SessionSurface>,
     events: broadcast::Sender<Event>,
     mut commands: mpsc::Receiver<SessionCommand>,
+    activity: Arc<AtomicU64>,
+    started: Instant,
 ) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 event = session.next_event() => match event {
                     Some(event) => {
+                        activity.store(elapsed_millis(started), Ordering::Relaxed);
                         let _ = events.send(event);
                     }
                     None => break,
@@ -550,6 +708,7 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
         let Some(session) = sessions.get_mut(session_id) else {
             return (StatusCode::NOT_FOUND, "unknown session").into_response();
         };
+        session.touch(state.started);
         session.submissions += 1;
         format!("srv-{session_id}-{}", session.submissions)
     };
@@ -677,6 +836,16 @@ mod tests {
     async fn start(
         scripts: Vec<Vec<wavecode_llm::StreamEvent>>,
     ) -> (String, u16, tokio::sync::oneshot::Sender<()>) {
+        start_with(scripts, None, None).await
+    }
+
+    /// `start` with the reaper knobs injected: `session_idle_ttl` and
+    /// `max_sessions` (`None` = production defaults).
+    async fn start_with(
+        scripts: Vec<Vec<wavecode_llm::StreamEvent>>,
+        session_idle_ttl: Option<Duration>,
+        max_sessions: Option<usize>,
+    ) -> (String, u16, tokio::sync::oneshot::Sender<()>) {
         let tmp = tempfile::tempdir().unwrap();
         let config = tmp.path().join("config.toml");
         std::fs::write(&config, CONFIG).unwrap();
@@ -693,6 +862,8 @@ mod tests {
                 home: None,
                 token: token.clone(),
                 port: 0,
+                session_idle_ttl,
+                max_sessions,
             },
             move |options| assemble.assemble(options),
         )
@@ -817,6 +988,8 @@ mod tests {
                 home: None,
                 token: String::new(),
                 port: 0,
+                session_idle_ttl: None,
+                max_sessions: None,
             },
             |_options| -> Result<operations_bootstrap::SessionHandle, SessionError> {
                 unreachable!("no assembly before the token check")
@@ -989,6 +1162,7 @@ mod tests {
             approvals: Arc::new(safety_gate::ApprovalGate::new()),
             questions: Arc::new(safety_gate::QuestionGate::new()),
             interrupt: infrastructure_base::InterruptHandle::new(),
+            last_active_millis: Arc::new(AtomicU64::new(0)),
         };
         let state = AppState {
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::from([(
@@ -1003,12 +1177,17 @@ mod tests {
                 home: None,
                 port: 0,
                 token: String::new(),
+                session_idle_ttl: None,
+                max_sessions: None,
             },
             next_session: Arc::new(tokio::sync::Mutex::new(1)),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             assemble: Arc::new(|_| -> Result<Box<dyn SessionSurface>, SessionError> {
                 unreachable!("no assembly in this test")
             }),
+            started: Instant::now(),
+            idle_ttl: SESSION_IDLE_TTL,
+            max_sessions: MAX_SESSIONS,
         };
         // Fill the queue with no pump consuming: the queued replies are
         // dropped, so those submissions would hang — the point is that
@@ -1061,6 +1240,7 @@ mod tests {
             approvals: Arc::new(safety_gate::ApprovalGate::new()),
             questions: Arc::new(safety_gate::QuestionGate::new()),
             interrupt: infrastructure_base::InterruptHandle::new(),
+            last_active_millis: Arc::new(AtomicU64::new(0)),
         };
         let state = AppState {
             sessions: Arc::new(tokio::sync::Mutex::new(HashMap::from([(
@@ -1075,12 +1255,17 @@ mod tests {
                 home: None,
                 port: 0,
                 token: String::new(),
+                session_idle_ttl: None,
+                max_sessions: None,
             },
             next_session: Arc::new(tokio::sync::Mutex::new(1)),
             shutdown: Arc::new(tokio::sync::Notify::new()),
             assemble: Arc::new(|_| -> Result<Box<dyn SessionSurface>, SessionError> {
                 unreachable!("no assembly in this test")
             }),
+            started: Instant::now(),
+            idle_ttl: SESSION_IDLE_TTL,
+            max_sessions: MAX_SESSIONS,
         };
         let response = submit(
             state,
@@ -1097,5 +1282,179 @@ mod tests {
             "a closing session must not read as retryable backpressure"
         );
         assert!(response.headers().get("Retry-After").is_none());
+    }
+
+    /// Create one session; panics on anything but `201`.
+    async fn create_session_ok(http: &reqwest::Client, port: u16) -> String {
+        let created: serde_json::Value = http
+            .post(format!("http://127.0.0.1:{port}/sessions"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        created["session_id"].as_str().unwrap().to_string()
+    }
+
+    /// The reap helper removes only the stale entries: a session whose
+    /// activity stamp is older than the TTL goes, a fresh one stays.
+    #[test]
+    fn take_idle_removes_only_stale_sessions() {
+        // A server-start a minute in the past: stamp arithmetic then has
+        // real distance to work with and no test needs to sleep.
+        let started = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
+        let mut sessions = HashMap::new();
+        let mut make = || AppSession {
+            commands: tokio::sync::mpsc::channel(1).0,
+            submissions: 0,
+            events: tokio::sync::broadcast::channel(1).0,
+            approvals: Arc::new(safety_gate::ApprovalGate::new()),
+            questions: Arc::new(safety_gate::QuestionGate::new()),
+            interrupt: infrastructure_base::InterruptHandle::new(),
+            last_active_millis: Arc::new(AtomicU64::new(0)),
+        };
+        let mut fresh = make();
+        fresh.touch(started);
+        // The stale one never recorded activity: its stamp is still the
+        // server start, a minute ago — the crashed-client shape.
+        let stale = make();
+        sessions.insert("fresh".to_string(), fresh);
+        sessions.insert("stale".to_string(), stale);
+
+        let reaped = take_idle(&mut sessions, Duration::from_secs(5), started);
+        assert_eq!(reaped, vec!["stale".to_string()]);
+        assert!(sessions.contains_key("fresh"), "an active session survives");
+        assert!(!sessions.contains_key("stale"));
+    }
+
+    /// A crashed client can never send DELETE: the reaper closes its
+    /// session once the idle TTL passes, and later client calls see the
+    /// session as gone (404) instead of talking to a leaked actor.
+    #[tokio::test]
+    async fn idle_sessions_are_reaped_after_the_ttl() {
+        let ttl = Duration::from_millis(400);
+        let (token, port, done) = start_with(vec![], Some(ttl), None).await;
+        let http = client(&token);
+        let session_id = create_session_ok(&http, port).await;
+        let listed: serde_json::Value = http
+            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed["sessions"], serde_json::json!([session_id]));
+
+        // Past TTL + one reap tick the session is gone for clients.
+        tokio::time::sleep(ttl + Duration::from_millis(400)).await;
+        let listed: serde_json::Value = http
+            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["sessions"],
+            serde_json::json!([]),
+            "the idle session must be reaped"
+        );
+        let prompted = http
+            .post(format!(
+                "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
+            ))
+            .json(&serde_json::json!({"text": "anyone there?"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(prompted.status(), StatusCode::NOT_FOUND);
+        let _ = done;
+    }
+
+    /// The misfire guard: a client that keeps using its session — here by
+    /// prompting faster than the TTL — is never reaped, while the same
+    /// session goes once the activity stops.
+    #[tokio::test]
+    async fn recently_active_sessions_survive_the_reaper() {
+        let ttl = Duration::from_millis(400);
+        let (token, port, done) = start_with(vec![], Some(ttl), None).await;
+        let http = client(&token);
+        let session_id = create_session_ok(&http, port).await;
+        // Each prompt re-touches the session; the window spans several
+        // TTLs, so only the touch (not creation) keeps it alive.
+        for _ in 0..4 {
+            tokio::time::sleep(ttl / 3).await;
+            let prompted = http
+                .post(format!(
+                    "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
+                ))
+                .json(&serde_json::json!({"text": "still here"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                prompted.status(),
+                StatusCode::ACCEPTED,
+                "an actively used session must never be reaped mid-use"
+            );
+        }
+        let listed: serde_json::Value = http
+            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["sessions"],
+            serde_json::json!([session_id]),
+            "activity across several TTLs keeps the session"
+        );
+        // Activity stops: the reap takes over.
+        tokio::time::sleep(ttl + Duration::from_millis(400)).await;
+        let listed: serde_json::Value = http
+            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed["sessions"], serde_json::json!([]));
+        let _ = done;
+    }
+
+    /// Creations past the cap answer 503 instead of assembling; deleting
+    /// a session frees a slot again.
+    #[tokio::test]
+    async fn session_creation_past_the_cap_answers_503() {
+        let (token, port, done) = start_with(vec![], None, Some(1)).await;
+        let http = client(&token);
+        let first = create_session_ok(&http, port).await;
+        let refused = http
+            .post(format!("http://127.0.0.1:{port}/sessions"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            refused.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the cap must refuse, not evict"
+        );
+        let deleted = http
+            .delete(format!("http://127.0.0.1:{port}/sessions/{first}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let replacement = create_session_ok(&http, port).await;
+        assert_ne!(first, replacement);
+        let _ = done;
     }
 }

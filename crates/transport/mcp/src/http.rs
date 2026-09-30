@@ -401,6 +401,13 @@ fn is_interactive_challenge(challenge: &str) -> bool {
 }
 
 /// Run the OAuth client-credentials grant against the token endpoint.
+///
+/// One bounded re-dial on a connect-phase failure, the same shape as the
+/// RPC path above: `is_connect` proves no bytes were written, and the
+/// grant is a token mint with no user-visible side effect, so a repeat
+/// cannot double anything. A second failure — or any failure after the
+/// request left the process — surfaces; a flaky auth endpoint must not
+/// turn the first MCP call of a session into a hard business error.
 async fn fetch_client_credentials(
     client: &reqwest::Client,
     oauth: &OAuthClientCredentials,
@@ -415,21 +422,40 @@ async fn fetch_client_credentials(
         body.push_str(&form_encode(scope));
     }
     let recall = Duration::from_secs(REQUEST_TIMEOUT_SECS);
-    let response = tokio::time::timeout(
-        recall,
-        client
-            .post(&oauth.token_url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(body)
-            .send(),
-    )
-    .await
-    .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))?
-    .map_err(|e| TransportError::Http(format!("OAuth token request failed: {e}")))?;
+    let mut attempt = 0usize;
+    let response = loop {
+        let sent = tokio::time::timeout(
+            recall,
+            client
+                .post(&oauth.token_url)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "application/x-www-form-urlencoded",
+                )
+                .body(body.clone())
+                .send(),
+        )
+        .await;
+        match sent {
+            // Timed out before a response: the endpoint may have seen the
+            // grant — never retried, same rule as the RPC path.
+            Err(_elapsed) => return Err(TransportError::Timeout(REQUEST_TIMEOUT_SECS)),
+            Ok(Ok(response)) => break response,
+            Ok(Err(error)) => {
+                if attempt > 0 || !error.is_connect() {
+                    return Err(TransportError::Http(format!(
+                        "OAuth token request failed: {error}"
+                    )));
+                }
+                attempt += 1;
+                tracing::warn!(
+                    "OAuth token endpoint connect failed before the request was sent; retrying once"
+                );
+            }
+        }
+        tokio::time::sleep(CONNECT_RETRY_BACKOFF).await;
+    };
     let status = response.status();
     let bytes = tokio::time::timeout(recall, read_capped(response, MAX_BODY_BYTES))
         .await
@@ -1402,6 +1428,43 @@ mod tests {
         assert!(
             matches!(error, TransportError::Http(_)),
             "connect refusal surfaces as an HTTP transport error, got: {error}"
+        );
+    }
+
+    /// A connect-refused token endpoint re-dials the grant once and then
+    /// surfaces: the elapsed time spans the inter-attempt backoff, locking
+    /// that the retry actually fired instead of failing fast. The grant
+    /// mints a token with no user-visible side effect and a connect
+    /// failure proves no bytes were written, so the re-dial is safe.
+    #[tokio::test]
+    async fn oauth_token_connect_refusal_retries_once_then_surfaces() {
+        let transport = HttpMcp::new(HttpMcpConfig {
+            // The token fetch fails before any MCP endpoint is dialed, so
+            // the discard port here is never reached.
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: Some(OAuthClientCredentials {
+                token_url: "http://127.0.0.1:1/token".to_owned(),
+                client_id: "wave".to_owned(),
+                client_secret: "s3cret".to_owned(),
+                scope: None,
+            }),
+        })
+        .unwrap();
+        let started = std::time::Instant::now();
+        let error = transport
+            .rpc("initialize", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TransportError::Http(_))
+                && error.to_string().contains("OAuth token request failed"),
+            "the token fetch surfaces as an HTTP transport error, got: {error}"
+        );
+        assert!(
+            started.elapsed() >= CONNECT_RETRY_BACKOFF,
+            "the backoff between the two dials must have run, got {:?}",
+            started.elapsed()
         );
     }
 

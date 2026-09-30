@@ -1274,7 +1274,7 @@ mod tests {
         // real distance to work with and no test needs to sleep.
         let started = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
         let mut sessions = HashMap::new();
-        let mut make = || AppSession {
+        let make = || AppSession {
             commands: tokio::sync::mpsc::channel(1).0,
             submissions: 0,
             events: tokio::sync::broadcast::channel(1).0,
@@ -1283,7 +1283,7 @@ mod tests {
             interrupt: infrastructure_base::InterruptHandle::new(),
             last_active_millis: Arc::new(AtomicU64::new(0)),
         };
-        let mut fresh = make();
+        let fresh = make();
         fresh.touch(started);
         // The stale one never recorded activity: its stamp is still the
         // server start, a minute ago — the crashed-client shape.

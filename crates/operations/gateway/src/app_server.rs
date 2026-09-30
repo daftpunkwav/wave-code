@@ -1146,10 +1146,7 @@ mod tests {
     /// `id` whose pump channel is `commands`. Assembly is unreachable and
     /// the serve options are inert, so each new `AppState` field lands here
     /// once instead of once per test.
-    fn state_with_session(
-        id: &str,
-        commands: mpsc::Sender<SessionCommand>,
-    ) -> AppState {
+    fn state_with_session(id: &str, commands: mpsc::Sender<SessionCommand>) -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(8);
         let session = AppSession {
             commands,

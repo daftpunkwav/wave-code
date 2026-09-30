@@ -12,8 +12,9 @@ wavecode-wire = { path = "../../foundation/wire" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-tokio.workspace = true
-async-trait.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Test-only: the stub `TurnDriver` impl and `#[tokio::test]` bodies.
+async-trait.workspace = true
+tokio.workspace = true

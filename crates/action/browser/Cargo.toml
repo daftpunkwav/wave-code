@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 thiserror.workspace = true
 async-trait.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
+# Test-only: `#[tokio::test]` for the async tab lifecycle tests.
+tokio.workspace = true

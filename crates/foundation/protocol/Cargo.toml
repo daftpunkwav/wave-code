@@ -7,4 +7,7 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+
+[dev-dependencies]
+# Test-only: locks the wire form of protocol enums against drift.
 serde_json.workspace = true

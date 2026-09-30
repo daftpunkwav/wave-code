@@ -222,10 +222,12 @@ fn staging_path_for(path: &std::path::Path) -> std::path::PathBuf {
 /// Owner-only file mode for local private data (Unix `0o600`).
 ///
 /// Everything a session writes under the home directory (`~/.wavecode`:
-/// journals, input history, spill side-store, grants) carries user content,
-/// so on multi-user Unix systems it must not be group/world readable.
-/// Windows needs no equivalent: default profile ACLs already scope files to
-/// the owning user, so every helper here is a plain write there.
+/// journals, input history, plans, goals, schedules, memories, the spill
+/// side-store and its manifest, grants, and other session data) carries
+/// user content, so on multi-user Unix systems it must not be group/world
+/// readable. Windows needs no equivalent: default profile ACLs already
+/// scope files to the owning user, so every helper here is a plain write
+/// there.
 #[cfg(unix)]
 const PRIVATE_MODE: u32 = 0o600;
 

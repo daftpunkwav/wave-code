@@ -158,9 +158,8 @@ where
 /// Capability-gated drivers shared by all three [`McpClient`] impls below:
 /// each takes the caller's capability snapshot so the Stdio/Http clients
 /// gate on their live handshake and [`ResilientMcpClient`] gates on its
-/// `initial_caps` snapshot at the call site.
-
-/// `prompts/list` walk behind the prompts capability gate.
+/// `initial_caps` snapshot at the call site. `prompts/list` walks behind
+/// the prompts capability gate.
 async fn list_prompts_via<C>(
     client: &C,
     caps: ServerCaps,

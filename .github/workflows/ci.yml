@@ -5,21 +5,49 @@ on:
     branches: [main]
   pull_request:
 
-  # Real MSRV (verified: locked tree-sitter 0.27 needs 1.90); a check
-  # rather than the full test suite keeps this leg fast — the stable
-  # legs carry the tests.
-  msrv:
+# A second push to the same ref should not keep the previous full
+# matrix running.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # rustfmt is host-independent. One leg is enough, and it does not
+  # need a dependency build.
+  fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # Real MSRV (verified: locked tree-sitter 0.27 needs 1.90). A check
+  # rather than the full test suite keeps this leg fast — the 1.98
+  # legs carry clippy and the tests.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msrv
+          key: msrv-1.90.0
+          cache-on-failure: true
       - run: cargo check --workspace --locked
 
   supply-chain:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -29,8 +57,8 @@ on:
   title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
       - name: Check PR title against Conventional Commits
         env:
           TITLE: ${{ github.event.pull_request.title }}
@@ -48,39 +76,54 @@ on:
             exit 1
           fi
 
-  rust:
+  # Clippy and tests stay per OS: cfg-gated Windows and macOS code is
+  # not compiled on Ubuntu. Fmt and the TypeScript SDK are not here.
+  test:
+    name: test (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
+        with:
+          cache-on-failure: true
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: E2E smoke (binary boots, MCP protocol answers)
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --bin wavecode
           bin="target/debug/wavecode"
           if [[ "$RUNNER_OS" == "Windows" ]]; then bin="target/debug/wavecode.exe"; fi
+          test -f "$bin"
           "$bin" --version | grep -q wavecode
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
             | "$bin" mcp serve | grep -q '"serverInfo"'
           "$bin" plugin list | grep -q "no plugins installed"
-      - name: SDK build and smoke (real binary)
-        uses: pnpm/action-setup@v4
+
+  # The SDK smoke skips live turns unless WAVECODE_SDK_LIVE=1, so this
+  # leg only typechecks and runs the node:test file. One OS is enough.
+  sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: SDK build and test
-        working-directory: sdk/typescript
-        run: |
-          pnpm install --no-frozen-lockfile
-          pnpm build
-          pnpm test
+      - run: pnpm install --no-frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test

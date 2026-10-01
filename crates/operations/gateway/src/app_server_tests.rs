@@ -399,6 +399,11 @@ async fn approval_requests_answer_over_http() {
         .expect("shell call must ask in auto mode");
     let call_id = approval["call_id"].as_str().unwrap().to_string();
 
+    // Subscribe before the decision. The events channel does not replay,
+    // and a fast tool can finish before a subscriber that joins afterwards.
+    let follow = open_events(&http, port, &session_id).await;
+    let rest_task = tokio::spawn(collect_events(follow, 1));
+
     // Answer over HTTP; the parked tool resumes.
     let answered = http
         .post(format!(
@@ -410,8 +415,7 @@ async fn approval_requests_answer_over_http() {
         .unwrap();
     assert_eq!(answered.status(), StatusCode::OK);
 
-    let follow = open_events(&http, port, &session_id).await;
-    let rest = collect_events(follow, 1).await;
+    let rest = rest_task.await.unwrap();
     let types: Vec<&str> = rest.iter().filter_map(|e| e["type"].as_str()).collect();
     assert!(
         types.contains(&"tool_call_end") || types.contains(&"turn_completed"),

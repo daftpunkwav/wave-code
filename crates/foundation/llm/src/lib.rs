@@ -33,6 +33,8 @@ pub mod openai;
 pub mod responses;
 pub mod retry;
 mod sse;
+#[cfg(test)]
+mod test_support;
 
 pub use anthropic::{AnthropicClient, CacheTtl};
 pub use openai::{ModelCapabilities, OpenAIClient};

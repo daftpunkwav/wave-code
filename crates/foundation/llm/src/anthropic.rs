@@ -490,7 +490,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sse::find_subsequence;
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
     use std::sync::Arc;
@@ -799,7 +798,7 @@ mod tests {
             let (tx, rx) = mpsc::channel::<String>();
             std::thread::spawn(move || {
                 if let Ok((mut s, _)) = listener.accept() {
-                    let head = read_http_request_head(&mut s);
+                    let head = crate::test_support::read_http_request_head(&mut s);
                     let _ = tx.send(head);
                     let _ = s.write_all(
                         b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1045,7 +1044,7 @@ mod tests {
         let port_b = listener_b.local_addr().unwrap().port();
         std::thread::spawn(move || {
             if let Ok((mut s, _)) = listener_b.accept() {
-                let head = read_http_request_head(&mut s);
+                let head = crate::test_support::read_http_request_head(&mut s);
                 let _ = b_tx.send(head);
             }
         });
@@ -1056,7 +1055,7 @@ mod tests {
         let port_a = listener_a.local_addr().unwrap().port();
         std::thread::spawn(move || {
             let (mut s, _) = listener_a.accept().unwrap();
-            let head = read_http_request_head(&mut s);
+            let head = crate::test_support::read_http_request_head(&mut s);
             let _ = a_tx.send(head);
             let resp = format!(
                 "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{port_b}/v1/messages\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1096,42 +1095,6 @@ mod tests {
                 .is_err(),
             "the redirect was followed; the api key leaked to B"
         );
-    }
-
-    /// Test helper: reads the HTTP request head (up to `\r\n\r\n`) and then reads the full
-    /// body per Content-Length - responding/closing before reading the body risks an RST while the client writes its body.
-    fn read_http_request_head(s: &mut std::net::TcpStream) -> String {
-        use std::io::Read;
-        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        let mut buf: Vec<u8> = Vec::new();
-        let mut tmp = [0u8; 4096];
-        let head_len = loop {
-            match s.read(&mut tmp) {
-                Ok(0) | Err(_) => return String::from_utf8_lossy(&buf).into_owned(),
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if let Some(i) = find_subsequence(&buf, b"\r\n\r\n") {
-                        break i + 4;
-                    }
-                }
-            }
-        };
-        let head = String::from_utf8_lossy(&buf[..head_len]).into_owned();
-        let content_length: usize = head
-            .lines()
-            .find_map(|l| {
-                l.to_ascii_lowercase()
-                    .strip_prefix("content-length:")
-                    .and_then(|v| v.trim().parse().ok())
-            })
-            .unwrap_or(0);
-        while buf.len() < head_len + content_length {
-            match s.read(&mut tmp) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => buf.extend_from_slice(&tmp[..n]),
-            }
-        }
-        head
     }
 }
 

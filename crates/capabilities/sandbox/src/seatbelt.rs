@@ -46,11 +46,31 @@ impl SeatbeltBackend {
 /// roots, write only `cwd` / temp / /dev/null. Pure and hermetic.
 pub fn render_seatbelt_profile(cwd: &Path, extra_writable: &[PathBuf]) -> String {
     let mut out = String::from("(version 1)\n(deny default)\n");
+    // dyld and libsystem run before main. Without these, sandbox-exec
+    // SIGKILLs the child and the parent only sees an empty signal exit.
     out.push_str("(allow process-exec process-fork)\n");
+    out.push_str("(allow process-info*)\n");
+    out.push_str("(allow signal (target self))\n");
     out.push_str("(allow sysctl-read)\n");
     out.push_str("(allow mach-lookup)\n");
+    out.push_str("(allow mach-priv-host-port)\n");
+    out.push_str("(allow mach-register)\n");
     out.push_str("(allow ipc-posix-shm*)\n");
-    for root in ["/usr", "/bin", "/sbin", "/lib", "/System", "/private/etc"] {
+    out.push_str("(allow file-map-executable)\n");
+    out.push_str("(allow file-read-metadata)\n");
+    // `/etc` is a symlink to `/private/etc`; seatbelt checks the path
+    // the caller used, so both must be readable. `/opt` covers Homebrew.
+    for root in [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/System",
+        "/Library",
+        "/etc",
+        "/private/etc",
+        "/opt",
+    ] {
         out.push_str(&format!("(allow file-read* (subpath \"{root}\"))\n"));
     }
     out.push_str(&format!(
@@ -189,6 +209,8 @@ mod tests {
         );
         // Reads stay broad (system roots), writes stay scoped.
         assert!(profile.contains("(allow file-read* (subpath \"/usr\"))"));
+        assert!(profile.contains("(allow file-map-executable)"));
+        assert!(profile.contains("(allow file-read-metadata)"));
     }
 
     #[test]

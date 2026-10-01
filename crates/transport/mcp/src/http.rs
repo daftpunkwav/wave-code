@@ -145,6 +145,11 @@ pub struct HttpMcp {
     session_id: Mutex<Option<String>>,
     token: Mutex<Option<CachedToken>>,
     next_id: AtomicU64,
+    /// Send + body-read budget. Production uses [`REQUEST_TIMEOUT_SECS`];
+    /// tests shrink it so a hung server does not depend on paused time
+    /// (paused time can expire the budget before a real loopback accept
+    /// is observed, which macOS CI does).
+    request_timeout: Duration,
 }
 
 /// Cached bearer token with an absolute expiry.
@@ -174,7 +179,16 @@ impl HttpMcp {
             session_id: Mutex::new(None),
             token: Mutex::new(None),
             next_id: AtomicU64::new(FIRST_REQUEST_ID),
+            request_timeout: Duration::from_secs(REQUEST_TIMEOUT_SECS),
         })
+    }
+
+    /// Shorten the per-request budget. Test-only: production always uses
+    /// [`REQUEST_TIMEOUT_SECS`].
+    #[cfg(test)]
+    fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Endpoint this transport posts to, for diagnostics.
@@ -264,7 +278,8 @@ impl HttpMcp {
             }
             Ok(request.body(raw.clone()))
         };
-        let recall = Duration::from_secs(REQUEST_TIMEOUT_SECS);
+        let recall = self.request_timeout;
+        let reported_secs = recall.as_secs();
         let method = body.get("method").and_then(serde_json::Value::as_str);
         let response = {
             let mut attempt = 0usize;
@@ -273,7 +288,7 @@ impl HttpMcp {
                 match sent {
                     // Timed out before a response: the server may have
                     // received and acted on the request — never retried.
-                    Err(_elapsed) => return Err(TransportError::Timeout(REQUEST_TIMEOUT_SECS)),
+                    Err(_elapsed) => return Err(TransportError::Timeout(reported_secs)),
                     Ok(Ok(response)) => break response,
                     Ok(Err(error)) => {
                         let may_retry =
@@ -320,7 +335,7 @@ impl HttpMcp {
         }
         let bytes = tokio::time::timeout(recall, read_capped(response, MAX_BODY_BYTES))
             .await
-            .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
+            .map_err(|_| TransportError::Timeout(reported_secs))??;
         parse_response_body_for_request(&bytes, expected_id)
     }
 
@@ -1470,10 +1485,12 @@ mod tests {
 
     /// A per-request timeout is never retried: the server may have
     /// received and acted on the request, so one re-issue could double a
-    /// side effect. Paused time drives the full request timeout instantly
-    /// while the real loopback connection hangs unanswered; the dial count
-    /// proves no second attempt was made.
-    #[tokio::test(start_paused = true)]
+    /// side effect. The budget is one real second, not paused time: a
+    /// paused runtime can fire the timer before macOS reports the
+    /// loopback accept, so the dial count would stay at zero. The server
+    /// holds the socket and never answers; the dial count proves no
+    /// second attempt was made.
+    #[tokio::test]
     async fn timeout_is_never_retried() {
         let dials = Arc::new(AtomicUsize::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1495,13 +1512,14 @@ mod tests {
             headers: HashMap::new(),
             oauth: None,
         })
-        .unwrap();
+        .unwrap()
+        .with_request_timeout(Duration::from_secs(1));
         let error = transport
             .rpc("tools/list", serde_json::json!({}))
             .await
             .unwrap_err();
         assert!(
-            matches!(error, TransportError::Timeout(REQUEST_TIMEOUT_SECS)),
+            matches!(error, TransportError::Timeout(1)),
             "an unanswered server surfaces as the request timeout, got: {error}"
         );
         assert_eq!(

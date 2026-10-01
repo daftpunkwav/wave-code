@@ -517,21 +517,15 @@ async fn checkpoint_pre_turn(
     // `None` across the await.
     let mut taken = durability.take();
     match tokio::task::spawn_blocking(move || {
-        checkpoint_turn(
-            &mut taken,
-            checkpoint_on,
-            &label,
-            &snapshot,
-            &|message| {
-                try_send_event(
-                    &warn_tx,
-                    Event {
-                        id: warn_id.clone(),
-                        msg: EventMsg::Warning { message },
-                    },
-                );
-            },
-        );
+        checkpoint_turn(&mut taken, checkpoint_on, &label, &snapshot, &|message| {
+            try_send_event(
+                &warn_tx,
+                Event {
+                    id: warn_id.clone(),
+                    msg: EventMsg::Warning { message },
+                },
+            );
+        });
         taken
     })
     .await

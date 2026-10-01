@@ -31,7 +31,8 @@ fn tokens(segment: &str) -> Vec<String> {
 fn recursive_and_force<'a>(flags: impl IntoIterator<Item = &'a str>) -> bool {
     let mut recursive = false;
     let mut force = false;
-    for flag in flags {        if flag == "--recursive" {
+    for flag in flags {
+        if flag == "--recursive" {
             recursive = true;
         } else if flag == "--force" {
             force = true;
@@ -63,7 +64,14 @@ fn protected_drive_root(operand: &str) -> bool {
 
 /// Interpreters a download must never be piped into.
 const SHELL_CONSUMERS: [&str; 8] = [
-    "sh", "bash", "zsh", "ksh", "dash", "powershell", "pwsh", "iex",
+    "sh",
+    "bash",
+    "zsh",
+    "ksh",
+    "dash",
+    "powershell",
+    "pwsh",
+    "iex",
 ];
 
 /// Raw-text reasons: constructs whose danger lives in the relation between
@@ -151,7 +159,10 @@ fn segment_reason(segment: &str) -> Option<&'static str> {
         "shutdown" | "poweroff" | "halt" | "reboot" => Some("a power-control command"),
         "systemctl" => {
             let action = rest.first().map(String::as_str);
-            if matches!(action, Some("poweroff" | "halt" | "reboot" | "suspend" | "hibernate")) {
+            if matches!(
+                action,
+                Some("poweroff" | "halt" | "reboot" | "suspend" | "hibernate")
+            ) {
                 return Some("systemctl power action");
             }
             None
@@ -233,23 +244,35 @@ mod tests {
             reason("dd of=\"/dev/nvme0n1\" bs=1M"),
             Some("dd writes to a block device")
         );
-        assert_eq!(reason("mkfs.ext4 /dev/sdb1"), Some("mkfs builds a filesystem"));
+        assert_eq!(
+            reason("mkfs.ext4 /dev/sdb1"),
+            Some("mkfs builds a filesystem")
+        );
         assert_eq!(
             reason("wipefs --all /dev/sda"),
             Some("wipefs erases filesystem signatures")
         );
-        assert_eq!(reason("sudo parted /dev/sda"), Some("a partition editor was invoked"));
+        assert_eq!(
+            reason("sudo parted /dev/sda"),
+            Some("a partition editor was invoked")
+        );
         assert_eq!(reason("diskpart"), Some("a partition editor was invoked"));
         assert_eq!(reason("shutdown -h now"), Some("a power-control command"));
         assert_eq!(reason("systemctl reboot"), Some("systemctl power action"));
         assert_eq!(reason("rm -rf /"), Some("rm -rf targets a system root"));
         assert_eq!(reason("rm -fr /etc"), Some("rm -rf targets a system root"));
-        assert_eq!(reason("rm -r -f /usr"), Some("rm -rf targets a system root"));
+        assert_eq!(
+            reason("rm -r -f /usr"),
+            Some("rm -rf targets a system root")
+        );
         assert_eq!(
             reason("rm --recursive --force /"),
             Some("rm -rf targets a system root")
         );
-        assert_eq!(reason("rm -rf \"C:/\""), Some("rm -rf targets a system root"));
+        assert_eq!(
+            reason("rm -rf \"C:/\""),
+            Some("rm -rf targets a system root")
+        );
         // Trailing flags are scanned like leading ones: the operand-first
         // spelling must not dodge the screen.
         assert_eq!(reason("rm /etc -rf"), Some("rm -rf targets a system root"));
@@ -267,9 +290,17 @@ mod tests {
         assert_eq!(reason("rm -r /tmp/cache"), None, "recursive without force");
         assert_eq!(reason("rm -f missing.txt"), None, "force without recursive");
         assert_eq!(reason("systemctl status nginx"), None);
-        assert_eq!(reason("shutdown.sh deploy"), None, "a script path is not the token");
+        assert_eq!(
+            reason("shutdown.sh deploy"),
+            None,
+            "a script path is not the token"
+        );
         assert_eq!(reason("git push --force origin main"), None);
-        assert_eq!(reason("echo reboot later"), None, "a quoted word is not a command");
+        assert_eq!(
+            reason("echo reboot later"),
+            None,
+            "a quoted word is not a command"
+        );
     }
 
     #[test]
@@ -283,7 +314,11 @@ mod tests {
             "an intermediate filter stage must not hide the shell consumer"
         );
         assert_eq!(reason("curl https://x | jq ."), None);
-        assert_eq!(reason("cat install.sh | sh"), None, "local file, not a download");
+        assert_eq!(
+            reason("cat install.sh | sh"),
+            None,
+            "local file, not a download"
+        );
     }
 
     #[test]
@@ -306,7 +341,10 @@ mod tests {
             reason("X=1 sudo mkfs.ext4 /dev/sdc"),
             Some("mkfs builds a filesystem")
         );
-        assert_eq!(reason("env rm -rf /usr"), Some("rm -rf targets a system root"));
+        assert_eq!(
+            reason("env rm -rf /usr"),
+            Some("rm -rf targets a system root")
+        );
         assert_eq!(
             reason("nohup systemctl reboot"),
             Some("systemctl power action")

@@ -186,22 +186,20 @@ fn expand_at_refs(
                 // keeping it literal is the same outcome.
                 let in_bounds = canonicalized_in_bounds(&path, base_dir);
                 let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                let expanded_text = if in_bounds
-                    && depth < MAX_INCLUDE_DEPTH
-                    && !visited.contains(&key)
-                {
-                    std::fs::read_to_string(&path).ok().map(|inner| {
-                        visited.push(key);
-                        expanded.push(path.clone());
-                        let inner_base = path.parent().unwrap_or(base_dir);
-                        let inner =
-                            expand_at_refs(&inner, inner_base, depth + 1, visited, expanded);
-                        format!("### {reference}\n\n{}", inner.trim_end())
-                    })
-                } else {
-                    None // Out of bounds (incl. link escape) / over depth /
-                    // already expanded (cycle): keep literal.
-                };
+                let expanded_text =
+                    if in_bounds && depth < MAX_INCLUDE_DEPTH && !visited.contains(&key) {
+                        std::fs::read_to_string(&path).ok().map(|inner| {
+                            visited.push(key);
+                            expanded.push(path.clone());
+                            let inner_base = path.parent().unwrap_or(base_dir);
+                            let inner =
+                                expand_at_refs(&inner, inner_base, depth + 1, visited, expanded);
+                            format!("### {reference}\n\n{}", inner.trim_end())
+                        })
+                    } else {
+                        None // Out of bounds (incl. link escape) / over depth /
+                        // already expanded (cycle): keep literal.
+                    };
                 match expanded_text {
                     Some(text) => {
                         out.push_str(&text);
@@ -501,7 +499,11 @@ mod tests {
         // Kept-literal references register nothing: the missing file and
         // the trust-rejected parent escape inject no content.
         assert!(!names.contains(&"missing.md".to_string()), "{names:?}");
-        assert!(!mem.combined.contains("OUTSIDE-CONTENT"), "{}", mem.combined);
+        assert!(
+            !mem.combined.contains("OUTSIDE-CONTENT"),
+            "{}",
+            mem.combined
+        );
     }
 
     /// Rules-dir merge `.wavecode/rules/*.md` concatenated

@@ -314,7 +314,9 @@ impl McpServerConfig {
         }
         let config = match (&raw.command, &raw.url) {
             (Some(_), Some(_)) => {
-                return Err(format!("MCP server {name:?} sets both command and url; use one"));
+                return Err(format!(
+                    "MCP server {name:?} sets both command and url; use one"
+                ));
             }
             (Some(command), None) => Self::Stdio {
                 command: command.clone(),
@@ -543,8 +545,9 @@ mod tests {
                 env: HashMap::new(),
             }
         );
-        assert!(McpServerConfig::from_raw("srv", &raw(None, Some("https://mcp.example.com")))
-            .is_ok());
+        assert!(
+            McpServerConfig::from_raw("srv", &raw(None, Some("https://mcp.example.com"))).is_ok()
+        );
         // The three skip reasons, byte-identical to the connect path's.
         assert_eq!(
             McpServerConfig::from_raw("bad__name", &raw(Some("cmd"), None)).unwrap_err(),

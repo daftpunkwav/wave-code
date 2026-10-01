@@ -231,7 +231,10 @@ fn memory_lists_the_agents_chain() {
     ui.user_submit("/memory");
     let text = transcript_plain(&mut ui);
     assert!(text.contains("AGENTS.md ·"), "{text}");
-    assert!(text.contains("AGENTS.local.md ·"), "local tier shown: {text}");
+    assert!(
+        text.contains("AGENTS.local.md ·"),
+        "local tier shown: {text}"
+    );
     assert!(text.contains("01-x.md ·"), "rules tier shown: {text}");
     assert!(text.contains("(2 lines)"), "root file counted: {text}");
     assert!(text.contains("(1 lines)"), "local file counted: {text}");
@@ -266,10 +269,7 @@ fn doctor_reports_over_a_temp_home() {
         text.contains("console-settings.json"),
         "settings line: {text}"
     );
-    assert!(
-        text.contains("themes: none custom"),
-        "themes line: {text}"
-    );
+    assert!(text.contains("themes: none custom"), "themes line: {text}");
     assert!(
         text.contains("sessions: none recorded yet"),
         "sessions line: {text}"
@@ -278,7 +278,7 @@ fn doctor_reports_over_a_temp_home() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-    /// `/doctor` catches the on-disk breakages a session would hit
+/// `/doctor` catches the on-disk breakages a session would hit
 /// silently: a broken session index (resume reads it as empty) and a
 /// broken custom theme file.
 #[test]
@@ -294,11 +294,7 @@ fn doctor_reports_broken_sessions_index_and_theme() {
     )
     .unwrap();
     std::fs::create_dir_all(state_persistence::sessions::sessions_dir(&home)).unwrap();
-    std::fs::write(
-        state_persistence::sessions::index_path(&home),
-        "{not json",
-    )
-    .unwrap();
+    std::fs::write(state_persistence::sessions::index_path(&home), "{not json").unwrap();
     ui.user_submit("/doctor");
     let text = transcript_plain(&mut ui);
     assert!(

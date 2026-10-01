@@ -1298,7 +1298,8 @@ mod tests {
     /// that stops producing bytes ends the stream with a Timeout error
     /// instead of hanging forever (parity with the Anthropic client).
     #[tokio::test]
-    async fn openai_stream_ends_with_timeout_when_upstream_stalls() {        use futures::StreamExt;
+    async fn openai_stream_ends_with_timeout_when_upstream_stalls() {
+        use futures::StreamExt;
         let first = Ok::<_, LlmError>(bytes::Bytes::from_static(b"data: {\"choices\":[]}\n\n"));
         let hang: futures::stream::Pending<Result<bytes::Bytes>> = futures::stream::pending();
         let guarded = sse::stall_guard(

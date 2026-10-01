@@ -399,8 +399,7 @@ impl TaskService for TurnChildService {
                     run_id,
                     done,
                 };
-                let (conv, outcome) =
-                    drive_child_turn(&driver, &ctx, &ticket.input, &system).await;
+                let (conv, outcome) = drive_child_turn(&driver, &ctx, &ticket.input, &system).await;
                 drop(teardown);
                 let snapshot = conv.snapshot();
                 let summary = summarize_child_run(&snapshot, &outcome);

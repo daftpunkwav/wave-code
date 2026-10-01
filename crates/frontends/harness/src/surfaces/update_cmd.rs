@@ -50,11 +50,7 @@ pub(crate) async fn run_update_check() {
 /// swap them in as the running binary. Verification failure returns
 /// before [`update::apply_swap`] runs, so mismatched bytes never touch
 /// the file on disk.
-fn verify_and_install(
-    exe: &std::path::Path,
-    bytes: &[u8],
-    checksum: &str,
-) -> anyhow::Result<()> {
+fn verify_and_install(exe: &std::path::Path, bytes: &[u8], checksum: &str) -> anyhow::Result<()> {
     update::verify_sha256(bytes, checksum)?;
     update::apply_swap(exe, bytes)
 }

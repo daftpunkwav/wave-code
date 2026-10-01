@@ -547,14 +547,16 @@ mod tests {
     }
 
     /// Serializes env mutation in this binary against itself.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Async-aware so the spawn test can hold it across `.await` without
+    /// blocking a worker thread.
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// `apply_child_env` strips sensitive inherited variables while the
     /// configured `env` block (applied after the strip) survives — live
     /// over a real child so the spawn semantics are pinned, not assumed.
     #[test]
     fn apply_child_env_strips_inherited_and_keeps_config() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.blocking_lock();
         unsafe {
             std::env::set_var("FOO_MCP_TOKEN", "mcp-token-value");
             std::env::set_var("FOO_MCP_SECRET", "mcp-parent-secret");
@@ -615,7 +617,7 @@ mod tests {
     /// token value is the strip working, not a vacuous pass.
     #[tokio::test]
     async fn spawn_with_env_strips_the_inherited_environment() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe {
             std::env::set_var("FOO_MCP_E2E_TOKEN", "e2e-token-value");
             std::env::set_var("FOO_MCP_E2E_KEEP", "e2e-keep-value");

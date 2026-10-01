@@ -526,16 +526,12 @@ fn streaming_draft_persists_until_the_text_changes() {
 fn capped_stream_draft_is_replaced_by_the_completion_text() {
     let mut ui = ui();
     let full = format!("{}FINAL-TAIL-MARKER", "lorem ipsum ".repeat(6000));
-    ui.handle_wire_event(&EventMsg::AgentMessageDelta {
-        text: full.clone(),
-    });
+    ui.handle_wire_event(&EventMsg::AgentMessageDelta { text: full.clone() });
     assert!(
         ui.streaming.assistant_truncated(),
         "the live draft hit the runaway cap"
     );
-    ui.handle_wire_event(&EventMsg::AgentMessageComplete {
-        text: full.clone(),
-    });
+    ui.handle_wire_event(&EventMsg::AgentMessageComplete { text: full.clone() });
     let index = ui.transcript.last_index().expect("assistant pushed");
     let entry = ui.transcript.get_mut(index).expect("entry");
     let rendered = entry.component.render(80);
@@ -2298,12 +2294,11 @@ async fn exit_submits_shutdown_to_the_session_link() {
     );
     // Shrunken window: TestLink yields no events, so the drain ends on
     // the deadline rather than a channel close.
-    ui.shutdown_session_within(std::time::Duration::from_millis(50)).await;
+    ui.shutdown_session_within(std::time::Duration::from_millis(50))
+        .await;
     let submitted = link.submitted.lock().expect("test lock");
     assert!(
-        submitted
-            .iter()
-            .any(|op| matches!(op, Op::Shutdown)),
+        submitted.iter().any(|op| matches!(op, Op::Shutdown)),
         "shutdown op missing: {submitted:?}"
     );
 }

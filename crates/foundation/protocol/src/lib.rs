@@ -196,10 +196,7 @@ mod tests {
         assert_eq!(PermissionMode::Plan.next_in_cycle(), PermissionMode::Auto);
         assert_eq!(PermissionMode::Auto.next_in_cycle(), PermissionMode::Wave);
         assert_eq!(PermissionMode::Wave.next_in_cycle(), PermissionMode::Plan);
-        assert_eq!(
-            PermissionMode::cycle_from_str("wave"),
-            PermissionMode::Plan
-        );
+        assert_eq!(PermissionMode::cycle_from_str("wave"), PermissionMode::Plan);
         // A legacy alias still parses, so it cycles from its successor.
         assert_eq!(
             PermissionMode::cycle_from_str("guarded"),

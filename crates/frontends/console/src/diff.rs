@@ -152,9 +152,7 @@ pub fn render(
         if !m {
             continue;
         }
-        if marked_rank >= max_rows
-            && matches!(row, DiffRow::Added(_) | DiffRow::Removed(_))
-        {
+        if marked_rank >= max_rows && matches!(row, DiffRow::Added(_) | DiffRow::Removed(_)) {
             hidden_changed += 1;
         }
         marked_rank += 1;
@@ -222,7 +220,10 @@ pub fn render(
         let hint = if hidden_changed > 0 {
             format!("│ … {hidden_changed} more changed lines (ctrl+o to expand)")
         } else {
-            format!("│ … {} more lines (ctrl+o to expand)", total_body - max_rows)
+            format!(
+                "│ … {} more lines (ctrl+o to expand)",
+                total_body - max_rows
+            )
         };
         body.push(theme.paint(Token::DiffMeta, &hint));
     }
@@ -399,7 +400,14 @@ mod tests {
         theme::set(theme::Theme::dark());
         // One addition with context on both sides: marked = C C C A C,
         // total_body = 5. A cap of 4 hides exactly one context row.
-        let lines = render("k1\nk2\nk3\nend", "k1\nk2\nk3\nNEW\nend", None, false, 4, 80);
+        let lines = render(
+            "k1\nk2\nk3\nend",
+            "k1\nk2\nk3\nNEW\nend",
+            None,
+            false,
+            4,
+            80,
+        );
         let plain_lines = plain(&lines);
         assert!(
             plain_lines.iter().any(|l| l.contains("1 more lines")),
@@ -546,7 +554,7 @@ mod tests {
         }
         assert_eq!(
             marker_columns,
-            std::collections::HashSet::from([b'+', b'-', b' ']),
+            std::collections::HashSet::from(*b"+- "),
             "markers share one column: {marker_columns:?}"
         );
     }

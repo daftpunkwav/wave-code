@@ -279,10 +279,7 @@ mod tests {
     fn dispatch_maps_to_ops() {
         let effect = dispatch(&parse("/compact").unwrap(), &state());
         assert_eq!(effect, Effect::Ops(vec![Op::Compact { instruction: None }]));
-        let effect = dispatch(
-            &parse("/compact keep the api decisions").unwrap(),
-            &state(),
-        );
+        let effect = dispatch(&parse("/compact keep the api decisions").unwrap(), &state());
         assert_eq!(
             effect,
             Effect::Ops(vec![Op::Compact {

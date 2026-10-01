@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::test_stubs::{CONFIG, OneShotModel, done_script};
 use std::collections::VecDeque;

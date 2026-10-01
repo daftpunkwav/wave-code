@@ -164,95 +164,15 @@ pub(crate) fn doctor_checks(
         }
     }
 
-    // The model catalog (`~/.wavecode/models.json`): session launch
-    // merges it on top of config.toml and the console's /provider
-    // editor writes it, so a malformed file would degrade silently —
-    // a missing file is the normal optional case, a broken one is not.
-    match wavecode_config::ModelCatalog::load(home) {
-        Ok(catalog) => checks.push(ok(format!(
-            "models.json: {} model(s)",
-            catalog.models.len()
-        ))),
-        Err(error) => checks.push(fail(format!("models.json: {error}"))),
-    }
-
-    // Console settings (a broken file silently degrades at runtime, so
-    // doctor is the place where the breakage becomes visible).
-    let settings_path = home.join(".wavecode").join("console-settings.json");
-    if !settings_path.exists() {
-        checks.push(ok("settings: defaults (no console-settings.json yet)"));
-    } else {
-        match std::fs::read_to_string(&settings_path)
-            .map_err(|e| e.to_string())
-            .and_then(|text| {
-                serde_json::from_str::<console_ui::settings::UiSettings>(&text)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            }) {
-            Ok(()) => checks.push(ok(format!("settings: {}", settings_path.display()))),
-            Err(error) => checks.push(fail(format!(
-                "settings: {} parses as defaults; fix or delete the file ({error})",
-                settings_path.display()
-            ))),
-        }
-    }
-
-    // Custom themes: every file must resolve.
-    let themes = console_ui::theme::file::list(home);
-    if themes.is_empty() {
-        checks.push(ok("themes: none custom"));
-    } else {
-        for name in &themes {
-            match console_ui::theme::file::load(home, name) {
-                Ok(_) => checks.push(ok(format!("theme {name}: parses"))),
-                Err(error) => checks.push(fail(format!("theme {name}: {error}"))),
-            }
-        }
-    }
-
-    // Session records: the index must parse and every journal file
-    // named by the index should still exist. Health reads through the
-    // persistence layer's own salvage rules, so this report cannot
-    // drift from what the picker and resume actually load.
-    let index = state_persistence::sessions::index_path(home);
-    if !index.exists() {
-        checks.push(ok("sessions: none recorded yet"));
-    } else {
-        let health = state_persistence::sessions::index_health(home);
-        if health.sessions.is_empty() {
-            // A broken index reads as empty; the health report tells a
-            // valid empty index apart from one that failed to parse.
-            if health.parses {
-                checks.push(ok("sessions: index present, none recorded"));
-            } else {
-                checks.push(fail(format!(
-                    "sessions: {} does not parse (read as empty; resumable sessions are lost until it is fixed or removed)",
-                    index.display()
-                )));
-            }
+    // Catalog, settings, themes, and session records: one implementation
+    // shared with the console `/doctor`. Permissions, MCP, and the
+    // sandbox line stay here because they need the composition root.
+    for check in console_ui::health::local_file_checks(home) {
+        checks.push(if check.ok {
+            ok(check.line)
         } else {
-            let missing: Vec<&str> = health
-                .sessions
-                .iter()
-                .filter(|meta| {
-                    !state_persistence::sessions::session_journal_file(home, &meta.id)
-                        .is_some_and(|path| path.exists())
-                })
-                .map(|meta| meta.id.as_str())
-                .collect();
-            if missing.is_empty() {
-                checks.push(ok(format!(
-                    "sessions: {} recorded, all journals present",
-                    health.sessions.len()
-                )));
-            } else {
-                checks.push(fail(format!(
-                    "sessions: {} recorded, missing journals for {}",
-                    health.sessions.len(),
-                    missing.join(", ")
-                )));
-            }
-        }
+            fail(check.line)
+        });
     }
     // OS confinement: policy rules on intent, this is the machine boundary
     // behind it. Report what actually holds rather than letting an

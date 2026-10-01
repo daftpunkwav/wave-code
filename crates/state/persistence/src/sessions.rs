@@ -235,13 +235,24 @@ struct IndexRead {
 fn load_index(home: &Path) -> IndexRead {
     let text = match std::fs::read_to_string(index_path(home)) {
         Ok(text) => text,
-        Err(_) => return IndexRead { sessions: Vec::new(), parses: true },
+        Err(_) => {
+            return IndexRead {
+                sessions: Vec::new(),
+                parses: true,
+            };
+        }
     };
     match serde_json::from_str::<Vec<SessionMeta>>(&text) {
-        Ok(sessions) => IndexRead { sessions, parses: true },
+        Ok(sessions) => IndexRead {
+            sessions,
+            parses: true,
+        },
         Err(_) => {
             let (sessions, _malformed) = salvage_index_objects(&text);
-            IndexRead { sessions, parses: false }
+            IndexRead {
+                sessions,
+                parses: false,
+            }
         }
     }
 }
@@ -320,6 +331,52 @@ pub fn index_health(home: &Path) -> IndexHealth {
     IndexHealth {
         sessions,
         parses: read.parses,
+    }
+}
+
+/// Doctor-facing classification of the session store: whether the index
+/// file exists, whether it parsed, how many sessions the picker would
+/// show, and which of those are missing their journal file.
+///
+/// Both doctor surfaces render this. They must not re-walk the index
+/// themselves — a second missing-journal filter is how the two reports
+/// drift.
+pub struct SessionStoreReport {
+    /// `index.json` is present on disk. A missing file is healthy emptiness,
+    /// distinct from an empty or unparseable file.
+    pub index_exists: bool,
+    /// Whether the index parsed as one array. Meaningful when
+    /// [`Self::index_exists`] is true; a missing file reports `true`.
+    pub parses: bool,
+    /// Sessions the picker would list.
+    pub session_count: usize,
+    /// Ids whose journal file is absent. Empty when every listed session
+    /// still has one, including when nothing is listed.
+    pub missing_journal_ids: Vec<String>,
+}
+
+/// Classify the session store the way resume and the picker read it.
+pub fn session_store_report(home: &Path) -> SessionStoreReport {
+    if !index_path(home).exists() {
+        return SessionStoreReport {
+            index_exists: false,
+            parses: true,
+            session_count: 0,
+            missing_journal_ids: Vec::new(),
+        };
+    }
+    let health = index_health(home);
+    let missing_journal_ids = health
+        .sessions
+        .iter()
+        .filter(|meta| !session_journal_file(home, &meta.id).is_some_and(|path| path.exists()))
+        .map(|meta| meta.id.clone())
+        .collect();
+    SessionStoreReport {
+        index_exists: true,
+        parses: health.parses,
+        session_count: health.sessions.len(),
+        missing_journal_ids,
     }
 }
 

@@ -756,8 +756,10 @@ impl ConsoleUi {
             })
             .await;
         let deadline = tokio::time::Instant::now() + window;
-        while let Some(event) =
-            tokio::time::timeout_at(deadline, self.next_event()).await.ok().flatten()
+        while let Some(event) = tokio::time::timeout_at(deadline, self.next_event())
+            .await
+            .ok()
+            .flatten()
         {
             self.handle_wire_event(&event.msg);
         }
@@ -2715,7 +2717,10 @@ verify from the repository.";
             let lines = std::fs::read_to_string(&path)
                 .map(|text| text.lines().count())
                 .unwrap_or(0);
-            self.push_status(&format!("{name} · {} ({lines} lines)", path.display()), false);
+            self.push_status(
+                &format!("{name} · {} ({lines} lines)", path.display()),
+                false,
+            );
         }
     }
 
@@ -2798,92 +2803,13 @@ verify from the repository.";
             }
             Err(error) => self.push_status(&format!("fail · config.toml: {error}"), true),
         }
-        match wavecode_config::ModelCatalog::load(&home) {
-            Ok(catalog) => self.push_status(
-                &format!("ok   · models.json ({} model(s))", catalog.models.len()),
-                false,
-            ),
-            Err(error) => self.push_status(&format!("warn · models.json: {error}"), true),
-        }
-        match crate::settings::UiSettings::path() {
-            Some(path) => match std::fs::read_to_string(&path) {
-                Ok(text) => match serde_json::from_str::<crate::settings::UiSettings>(&text) {
-                    Ok(_) => self.push_status("ok   · console-settings.json", false),
-                    Err(error) => {
-                        self.push_status(&format!("warn · console-settings.json: {error}"), true)
-                    }
-                },
-                Err(_) => self.push_status("info · console-settings.json not written yet", false),
-            },
-            None => self.push_status("warn · no home for console-settings.json", true),
-        }
-        // Custom themes: the same files the theme picker lists, checked
-        // with the loader it uses, so a broken file is visible here
-        // instead of failing a live `/theme` switch.
-        let themes = crate::theme::file::list(&home);
-        if themes.is_empty() {
-            self.push_status("ok   · themes: none custom", false);
-        } else {
-            for name in &themes {
-                match crate::theme::file::load(&home, name) {
-                    Ok(_) => self.push_status(&format!("ok   · theme {name}"), false),
-                    Err(error) => {
-                        self.push_status(&format!("warn · theme {name}: {error}"), true)
-                    }
-                }
-            }
-        }
-        // Session records: the index must parse and every journal file
-        // named by the index should still exist — resume reads the same
-        // store, so a broken index means silently lost sessions. Health
-        // reads through the persistence layer's own salvage rules.
-        let index = state_persistence::sessions::index_path(&home);
-        if !index.exists() {
-            self.push_status("ok   · sessions: none recorded yet", false);
-        } else {
-            let health = state_persistence::sessions::index_health(&home);
-            if health.sessions.is_empty() {
-                // A broken index reads as empty; the health report tells
-                // a valid empty index apart from one that failed to parse.
-                if health.parses {
-                    self.push_status("ok   · sessions: index present, none recorded", false);
-                } else {
-                    self.push_status(
-                        &format!(
-                            "warn · sessions: {} does not parse (read as empty; resumable sessions are lost until it is fixed or removed)",
-                            index.display()
-                        ),
-                        true,
-                    );
-                }
+        // Catalog, settings, themes, and session records: the same lines
+        // `wavecode doctor` prints. This surface only adds the marker.
+        for check in crate::health::local_file_checks(&home) {
+            if check.ok {
+                self.push_status(&format!("ok   · {}", check.line), false);
             } else {
-                let missing: Vec<&str> = health
-                    .sessions
-                    .iter()
-                    .filter(|meta| {
-                        !state_persistence::sessions::session_journal_file(&home, &meta.id)
-                            .is_some_and(|path| path.exists())
-                    })
-                    .map(|meta| meta.id.as_str())
-                    .collect();
-                if missing.is_empty() {
-                    self.push_status(
-                        &format!(
-                            "ok   · sessions: {} recorded, all journals present",
-                            health.sessions.len()
-                        ),
-                        false,
-                    );
-                } else {
-                    self.push_status(
-                        &format!(
-                            "warn · sessions: {} recorded, missing journals for {}",
-                            health.sessions.len(),
-                            missing.join(", ")
-                        ),
-                        true,
-                    );
-                }
+                self.push_status(&format!("warn · {}", check.line), true);
             }
         }
         self.push_status(

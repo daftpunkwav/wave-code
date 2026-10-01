@@ -21,6 +21,7 @@ pub mod controllers;
 pub mod dialogs;
 pub mod diff;
 pub mod git_info;
+pub mod health;
 pub mod highlight;
 pub mod history;
 pub mod messages;

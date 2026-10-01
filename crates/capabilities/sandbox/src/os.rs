@@ -300,15 +300,12 @@ fn apply_landlock(profile: &ConfinementProfile) -> std::io::Result<()> {
         ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
         RulesetAttr, RulesetCreatedAttr,
     };
-    use std::io::{Error, ErrorKind};
+    use std::io::Error;
 
     // A function, not a closure: `impl Trait` in closure parameters is
-    // newer than the 1.90 MSRV.
+    // newer than the 1.90 MSRV. `Error::other` is the form clippy accepts.
     fn fail(what: &str, detail: impl std::fmt::Display) -> Error {
-        Error::new(
-            ErrorKind::Other,
-            format!("landlock confinement failed at {what}: {detail}"),
-        )
+        Error::other(format!("landlock confinement failed at {what}: {detail}"))
     }
     let abi = ABI::V1;
     let ruleset = Ruleset::default()

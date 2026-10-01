@@ -85,7 +85,7 @@ fn spawn_capped(program: &OsStr, args: &[String], cwd: &Path, cap: Duration) -> 
             Ok(None) => {
                 if started.elapsed() >= cap {
                     note = format!("killed after {}s", cap.as_secs());
-                    kill_tree(&child);
+                    kill_tree(&mut child);
                     let _ = child.wait();
                     break None;
                 }
@@ -144,7 +144,7 @@ fn empty_reader() -> std::thread::JoinHandle<Vec<u8>> {
 /// `taskkill /F /T` hazard fix in console's shell controller. On POSIX
 /// the direct kill remains (the child shares our process group, so a
 /// group kill is not safe without spawning into a new session).
-fn kill_tree(child: &std::process::Child) {
+fn kill_tree(child: &mut std::process::Child) {
     #[cfg(windows)]
     {
         let pid = child.id();

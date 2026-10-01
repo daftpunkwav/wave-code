@@ -96,6 +96,8 @@ jobs:
           cache-on-failure: true
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # `cargo test` builds the harness, not `target/debug/wavecode`.
+      - run: cargo build --locked --bin wavecode
       - name: E2E smoke (binary boots, MCP protocol answers)
         shell: bash
         run: |

@@ -191,7 +191,7 @@ fn make_tui_factory(
         let update_notice = update_notice.clone();
         let history = spec.history.clone();
         let resume_id = spec.session_id.clone();
-        let readonly = spec.readonly;
+        let read_only = spec.read_only;
         let model_hint = spec.model_override.clone();
         tokio::task::block_in_place(|| {
             runtime.block_on(async move {
@@ -208,7 +208,7 @@ fn make_tui_factory(
                 // unless the caller pinned a live model hint (an explicit
                 // choice outranks the cost steering). An unresolvable
                 // alias degrades to the primary with a warning.
-                let secondary = if readonly {
+                let secondary = if read_only {
                     load_config_opt(config_path.as_deref())
                         .ok()
                         .and_then(|config| resolve_secondary(&config))
@@ -238,7 +238,7 @@ fn make_tui_factory(
                     // mode, never by trust.
                     model_override,
                     provider_override,
-                    permission_override: if readonly {
+                    permission_override: if read_only {
                         Some("plan".to_string())
                     } else {
                         permission_mode

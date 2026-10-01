@@ -162,7 +162,7 @@ pub struct LaunchSpec {
     pub history: Vec<(bool, String)>,
     /// True assembles a read-only side session (`/btw`): approvals and
     /// destructive work are impossible by mode, never by trust.
-    pub readonly: bool,
+    pub read_only: bool,
     /// Model the launch should sample with (e.g. the live `/model`
     /// choice); `None` falls back to the launch-time defaults.
     pub model_override: Option<String>,
@@ -702,7 +702,7 @@ impl ConsoleUi {
                 self.pending_launch = Some(LaunchSpec {
                     session_id: Some(id.to_string()),
                     history,
-                    readonly: false,
+                    read_only: false,
                     model_override: Some(self.state.model_name.clone()),
                 });
             }
@@ -1624,7 +1624,7 @@ impl ConsoleUi {
             self.pending_launch = Some(LaunchSpec {
                 session_id: None,
                 history: Vec::new(),
-                readonly: false,
+                read_only: false,
                 model_override: None,
             });
         } else {
@@ -2058,7 +2058,7 @@ verify from the repository.";
         let spec = LaunchSpec {
             session_id: None,
             history,
-            readonly: true,
+            read_only: true,
             model_override: Some(self.state.model_name.clone()),
         };
         match self.factory.as_ref().map(|factory| factory(&spec)) {

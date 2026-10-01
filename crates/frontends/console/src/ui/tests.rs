@@ -1767,7 +1767,7 @@ async fn btw_streams_answers_through_the_side_session() {
     let submitted_clone = submitted.clone();
     let script_clone = script.clone();
     ui.set_factory(std::sync::Arc::new(move |spec: &LaunchSpec| {
-        assert!(spec.readonly, "btw launches are read-only");
+        assert!(spec.read_only, "btw launches are read-only");
         assert_eq!(spec.model_override.as_deref(), Some("test-model"));
         Ok(SessionLaunch {
             link: Box::new(ScriptBtwLink {

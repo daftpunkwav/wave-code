@@ -635,6 +635,36 @@ mod tests {
         }
     }
 
+    /// Every stop reason maps onto the capability-neutral task vocabulary:
+    /// both ceilings end the child without a fault, an interrupt is a stop
+    /// (not a failure to report to the parent), and only a real error is a
+    /// failure. A drifted arm would mislabel the parent-visible outcome of
+    /// every child task in that state.
+    #[test]
+    fn child_task_status_maps_every_stop_reason() {
+        use runtime_child::TaskStatus;
+        assert_eq!(
+            child_task_status(&StopReason::Completed),
+            TaskStatus::Completed
+        );
+        assert_eq!(
+            child_task_status(&StopReason::MaxToolRounds),
+            TaskStatus::Completed
+        );
+        assert_eq!(
+            child_task_status(&StopReason::RepeatBreaker),
+            TaskStatus::Completed
+        );
+        assert_eq!(
+            child_task_status(&StopReason::Interrupted),
+            TaskStatus::Stopped
+        );
+        assert_eq!(
+            child_task_status(&StopReason::Error("boom".to_string())),
+            TaskStatus::Failed
+        );
+    }
+
     #[tokio::test]
     async fn child_turns_complete_through_the_task_seam() {
         let allowlist = RunAllowlist::default();

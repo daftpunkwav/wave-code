@@ -902,4 +902,44 @@ mod snapshot_tests {
             home.join(".wavecode").join("snapshots")
         );
     }
+
+    // Home variables are process-global state; tests mutating them run
+    // mutually exclusive and restore the originals before asserting.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// With the home unresolvable (neither USERPROFILE nor HOME set — the
+    /// USERPROFILE-first order matches [`wavecode_config::home_dir`]), the
+    /// store root falls back explicitly to the system temp dir. The
+    /// contract is "explicit fallback, never a silent relative path": a
+    /// cwd- or relative-looking fallback would scatter snapshot stores
+    /// into whatever directory the user happened to launch from.
+    #[test]
+    fn unresolved_home_falls_back_to_temp_dir_not_a_relative_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved_userprofile = std::env::var_os("USERPROFILE");
+        let saved_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::remove_var("USERPROFILE");
+            std::env::remove_var("HOME");
+        }
+        let fallback = effective_snapshot_store_root();
+        // Restore before asserting so a failure cannot leak the mutation.
+        unsafe {
+            if let Some(value) = saved_userprofile {
+                std::env::set_var("USERPROFILE", value);
+            }
+            if let Some(value) = saved_home {
+                std::env::set_var("HOME", value);
+            }
+        }
+        assert_eq!(
+            fallback,
+            std::env::temp_dir().join(format!("wavecode-{SNAPSHOTS_DIR}")),
+            "the unresolvable-home fallback must be the documented temp-dir root"
+        );
+        assert!(
+            fallback.is_absolute(),
+            "the fallback must stay an explicit absolute path, never cwd-relative: {fallback:?}"
+        );
+    }
 }

@@ -497,7 +497,11 @@ mod tests {
             return;
         }
         let inside = tempfile::tempdir().expect("tempdir");
-        let outside = tempfile::tempdir().expect("tempdir");
+        // `for_shell` also grants `/tmp`. A second system temp dir would
+        // sit inside that root, so the secret has to live under the
+        // process cwd, which the profile does not allow.
+        let outside =
+            tempfile::tempdir_in(std::env::current_dir().expect("cwd")).expect("outside dir");
         std::fs::write(outside.path().join("secret.txt"), "secret").expect("seed file");
         let profile = ConfinementProfile::for_shell(inside.path());
 

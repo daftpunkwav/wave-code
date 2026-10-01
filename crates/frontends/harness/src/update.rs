@@ -289,10 +289,10 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
     }
-    // Unix rename replaces atomically. Windows refuses to remove a
-    // running exe but allows renaming it, so the old binary steps
-    // aside as `.bak` first; a failed second step rolls the `.bak`
-    // back into place.
+    // Step the old binary aside as `.bak` before the staging file takes
+    // its place. Windows cannot delete a running exe, but it can rename
+    // one; a failed second step rolls the `.bak` back. Unix keeps the
+    // same copy so a failed install can restore it.
     #[cfg(windows)]
     let backup = dir.join(format!("{file_name}.bak"));
     #[cfg(windows)]
@@ -307,9 +307,19 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        if let Err(error) = std::fs::rename(&staging, target_exe) {
+        // Same two-step as Windows: a direct rename of the staging file
+        // over the target would drop the old bytes, and the contract is
+        // that `<name>.bak` survives for rollback.
+        let backup = dir.join(format!("{file_name}.bak"));
+        if let Err(error) = std::fs::rename(target_exe, &backup) {
             let _ = std::fs::remove_file(&staging);
-            return Err(error).context("install failed; the old binary was not touched");
+            return Err(error)
+                .with_context(|| format!("moving the old binary to {}", backup.display()));
+        }
+        if let Err(error) = std::fs::rename(&staging, target_exe) {
+            let _ = std::fs::rename(&backup, target_exe);
+            let _ = std::fs::remove_file(&staging);
+            return Err(error).context("install failed; the old binary was restored");
         }
     }
     #[cfg(windows)]
@@ -388,7 +398,13 @@ mod tests {
     #[test]
     fn source_builds_are_detected_by_their_path() {
         let source = std::path::Path::new("/repo/target/debug/wavecode");
+        // A backslash path is only a `target/release` pair on Windows.
+        // Elsewhere it is one component, so the release case uses the
+        // host separator.
+        #[cfg(windows)]
         let source_release = std::path::Path::new(r"D:\repo\target\release\wavecode.exe");
+        #[cfg(not(windows))]
+        let source_release = std::path::Path::new("/repo/target/release/wavecode");
         let installed = std::path::Path::new("/home/u/.cargo/bin/wavecode");
         assert!(running_from_source(source));
         assert!(running_from_source(source_release));

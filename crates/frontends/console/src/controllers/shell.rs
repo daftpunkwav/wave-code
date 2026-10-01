@@ -31,9 +31,9 @@ pub struct ShellJob {
     rx: mpsc::Receiver<ShellEvent>,
     kill: Arc<Notify>,
     /// Platform pid of the shell child, captured before it moves into
-    /// the pump task. Windows `cancel` tree-kills that pid; other
-    /// platforms kill through the child handle inside the pump task.
-    #[cfg(windows)]
+    /// the pump task. `cancel` tree-kills this pid: `taskkill /T` on
+    /// Windows, and the process group on Unix (the child is spawned as
+    /// the group leader).
     pid: Option<u32>,
     /// Set once the pump reported `Done` (or the channel closed), so
     /// `try_recv` stops reporting instead of feeding an endless stream
@@ -56,6 +56,13 @@ impl ShellJob {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // Own process group so Unix cancel can signal the shell and the
+        // command it spawned without hitting this process.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.as_std_mut().process_group(0);
+        }
         let mut child = cmd.spawn()?;
         let Some(stdout) = child.stdout.take() else {
             return Err(std::io::Error::other("child stdout unavailable"));
@@ -66,7 +73,6 @@ impl ShellJob {
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let kill = Arc::new(Notify::new());
         let killer = Arc::clone(&kill);
-        #[cfg(windows)]
         let pid = child.id();
         tokio::spawn(async move {
             let mut out = BufReader::new(stdout).lines();
@@ -123,7 +129,6 @@ impl ShellJob {
         Ok(Self {
             rx,
             kill,
-            #[cfg(windows)]
             pid,
             ended: false,
         })
@@ -160,6 +165,10 @@ impl ShellJob {
         // `start_kill` on Windows terminates only `cmd.exe` itself; the
         // command tree it spawned survives and keeps the output pipes
         // open. Kill the whole tree instead (best effort).
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            state_persistence::kill_tree(pid);
+        }
         #[cfg(windows)]
         if let Some(pid) = self.pid {
             // Fire-and-forget: taskkill exits on its own once the tree

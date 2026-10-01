@@ -16,9 +16,10 @@
 //!
 //! `workflow_run` takes a spec JSON object and returns one JSON object of
 //! step summaries keyed by step id. `ralph_run` respawns a fresh child per
-//! round with the same objective until the child reports `RALPH_DONE`.
-//! The `schedule` tool manages durable cron entries persisted under
-//! `<home>/.wavecode/schedule.json`.
+//! round with the same objective until the child reports `RALPH_DONE`
+//! ("Ralph" is the agent community's established name for this loop
+//! pattern). The `schedule` tool manages durable cron entries persisted
+//! under `<home>/.wavecode/schedule.json`.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 

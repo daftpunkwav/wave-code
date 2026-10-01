@@ -314,7 +314,7 @@ pub struct LspProviders {
 impl LspProviders {
     /// Build for `workspace_root` (must be the workspace directory; used as
     /// the server working directory and the `initialize` rootUri). `deny_env`
-    /// is stripped from every pooled server spawn (see [`ChildLsp::spawn`]).
+    /// is stripped from every pooled server spawn (see `ChildLsp::spawn`).
     pub fn new(workspace_root: PathBuf, deny_env: Vec<String>) -> Self {
         let root_uri = path_to_uri(&workspace_root);
         Self {

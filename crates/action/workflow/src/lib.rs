@@ -29,7 +29,10 @@
 //!
 //! A Ralph loop respawns a fresh child per round with the SAME immutable
 //! objective plus the prior round summary, stopping when a child reports
-//! a line containing only `RALPH_DONE` or when rounds exhaust.
+//! a line containing only `RALPH_DONE` or when rounds exhaust. "Ralph"
+//! is the agent community's established name for this loop pattern
+//! (same objective, fresh agent per round, until it reports done), not
+//! a project-specific protocol.
 
 pub mod tools;
 

@@ -6,6 +6,12 @@
  * - Save opaque state snapshots under human labels.
  * - Roll back to a label, discarding newer snapshots.
  * - List labels in save order for inspection.
+ * - Persist turn checkpoints durably under the checkpoints root and
+ *   order resume labels (`CheckpointPolicy`, `durable_save`,
+ *   `durable_load`, `list_resume_labels`).
+ *
+ * File-content snapshots of the working tree live in the `snapshot`
+ * submodule and are re-exported from the crate root.
  *
  * This module must not depend on: any other workspace crate. Snapshot
  * payloads are opaque strings owned by the caller (serialized state).

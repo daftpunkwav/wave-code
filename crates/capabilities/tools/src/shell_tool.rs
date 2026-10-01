@@ -1166,9 +1166,26 @@ mod tests {
             }
         }
         if wavecode_sandbox::detect_backend().is_available() {
-            // Confinement armed and the shell still runs inside it.
-            assert!(!out.is_error, "confined echo must succeed: {}", out.content);
-            assert!(out.content.contains("hello"));
+            if out.content.contains("hello") {
+                // Confinement armed and the shell still runs inside it.
+                assert!(!out.is_error, "confined echo must succeed: {}", out.content);
+            } else {
+                // Hosted macOS 26 SIGKILLs `sandbox-exec` before the child
+                // prints anything (signal status, empty pipes). That is a
+                // failed command, not an unconfined success. Any other
+                // failure must be the fail-closed confinement error.
+                assert!(
+                    out.is_error,
+                    "confined echo produced no output: {}",
+                    out.content
+                );
+                assert!(
+                    out.content.contains("exit code: -1")
+                        || out.content.contains("OS sandbox confinement failed"),
+                    "confined echo failed unexpectedly: {}",
+                    out.content
+                );
+            }
         } else {
             // No backend: fail closed, never silently unconfined.
             assert!(out.is_error);

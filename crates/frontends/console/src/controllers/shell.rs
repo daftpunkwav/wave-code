@@ -30,6 +30,11 @@ const CHANNEL_CAP: usize = 1024;
 pub struct ShellJob {
     rx: mpsc::Receiver<ShellEvent>,
     kill: Arc<Notify>,
+    /// Platform pid of the shell child, captured before it moves into
+    /// the pump task. Windows `cancel` tree-kills that pid; other
+    /// platforms kill through the child handle inside the pump task.
+    #[cfg(windows)]
+    pid: Option<u32>,
     /// Set once the pump reported `Done` (or the channel closed), so
     /// `try_recv` stops reporting instead of feeding an endless stream
     /// of terminal events to the caller.
@@ -61,6 +66,8 @@ impl ShellJob {
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let kill = Arc::new(Notify::new());
         let killer = Arc::clone(&kill);
+        #[cfg(windows)]
+        let pid = child.id();
         tokio::spawn(async move {
             let mut out = BufReader::new(stdout).lines();
             let mut err = BufReader::new(stderr).lines();
@@ -77,29 +84,13 @@ impl ShellJob {
                             let _ = child.start_kill();
                         }
                         #[cfg(windows)]
+                        // `cancel` tree-kills the command (taskkill /T);
+                        // give it a moment to land, then hard-kill
+                        // cmd.exe itself as a fallback. Killing cmd
+                        // immediately would orphan its children, which
+                        // inherit the output pipes and keep them open.
                         {
-                            // `start_kill` ends only cmd.exe. Its children
-                            // keep the output pipes open, so tree-kill
-                            // first and wait for taskkill to finish.
-                            // A fixed sleep races a cold taskkill on a
-                            // busy runner and leaves the pipes open.
-                            if let Some(pid) = child.id()
-                                && let Ok(mut taskkill) = tokio::process::Command::new(
-                                    state_persistence::taskkill_program(),
-                                )
-                                .args(["/F", "/T", "/PID", &pid.to_string()])
-                                .stdin(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                                .spawn()
-                            {
-                                let _ = tokio::time::timeout(
-                                    std::time::Duration::from_secs(5),
-                                    taskkill.wait(),
-                                )
-                                .await;
-                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                             let _ = child.start_kill();
                         }
                     }
@@ -132,6 +123,8 @@ impl ShellJob {
         Ok(Self {
             rx,
             kill,
+            #[cfg(windows)]
+            pid,
             ended: false,
         })
     }
@@ -161,10 +154,27 @@ impl ShellJob {
     /// Kill the child; the remaining piped output still drains and the
     /// job ends with a `Done(None)` event.
     pub fn cancel(&self) {
-        // The pump task performs the kill and then reports `Done(None)`.
-        // On Windows it waits for `taskkill /T` before falling back to
-        // `start_kill`, so children cannot outlive cmd.exe and hold the pipes.
+        // Wake the pump task so the job always reports `Done(None)`,
+        // however the child ends up dying.
         self.kill.notify_one();
+        // `start_kill` on Windows terminates only `cmd.exe` itself; the
+        // command tree it spawned survives and keeps the output pipes
+        // open. Kill the whole tree instead (best effort).
+        #[cfg(windows)]
+        if let Some(pid) = self.pid {
+            // Fire-and-forget: taskkill exits on its own once the tree
+            // is terminated (no kill_on_drop — dropping the handle here
+            // must not kill it mid-run). The absolute system path keeps
+            // CreateProcess from resolving a planted `taskkill.exe` in
+            // the working directory (`state_persistence::taskkill_program`).
+            let _ = tokio::process::Command::new(state_persistence::taskkill_program())
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .spawn();
+        }
     }
 }
 

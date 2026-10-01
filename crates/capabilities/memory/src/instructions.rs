@@ -382,8 +382,8 @@ mod tests {
         write(&root.join(".git/HEAD"), "x\n");
         write(&dir.path().join("secret.md"), "SECRET-CONTENT");
         write(&root.join("docs/real.md"), "REAL-CONTENT");
-        symlink(&dir.path().join("secret.md"), &root.join("docs/link.md")).unwrap();
-        symlink(&root.join("docs/real.md"), &root.join("docs/in-link.md")).unwrap();
+        symlink(dir.path().join("secret.md"), root.join("docs/link.md")).unwrap();
+        symlink(root.join("docs/real.md"), root.join("docs/in-link.md")).unwrap();
         write(
             &root.join("AGENTS.md"),
             "out-of-bounds @docs/link.md and in-bounds @docs/in-link.md",

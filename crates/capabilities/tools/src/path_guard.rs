@@ -160,7 +160,7 @@ mod tests {
             .map(|s| s.success())
             .unwrap_or(false);
         #[cfg(unix)]
-        let made = std::os::unix::fs::symlink(outside.path(), &link).is_ok();
+        let made = std::os::unix::fs::symlink(outside.path(), link.as_path()).is_ok();
         #[cfg(not(any(windows, unix)))]
         let made = false;
         if !made || link.symlink_metadata().is_err() {

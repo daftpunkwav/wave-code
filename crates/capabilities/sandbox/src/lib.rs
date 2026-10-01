@@ -2116,7 +2116,7 @@ mod tests {
         std::fs::write(&secret, "SECRET=1").unwrap();
         let link = dir.join("notes.txt");
         #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(&secret, &link).is_ok();
+        let linked = std::os::unix::fs::symlink(secret.as_path(), link.as_path()).is_ok();
         #[cfg(windows)]
         let linked = std::os::windows::fs::symlink_file(&secret, &link).is_ok();
         if linked {

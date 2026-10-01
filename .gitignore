@@ -37,7 +37,6 @@ desktop.ini
 
 # Local agent instruction overrides (personal, never shared)
 *.local.md
-CLAUDE.md
 
 # Local docs directory (local working copy of docs): kept local-only, never committed
 docs-local/

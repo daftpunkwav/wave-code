@@ -147,6 +147,8 @@ impl ArmedSpawn {
 
     /// Arm `cmd` with a pairing step that runs after a successful spawn
     /// and a cancel step that runs when the guard is dropped first.
+    /// Windows-only: the other backends do not pair a job with the child.
+    #[cfg(windows)]
     pub(crate) fn with_pairing(
         cmd: tokio::process::Command,
         commit: impl FnOnce(u32) + Send + 'static,
@@ -300,12 +302,14 @@ fn apply_landlock(profile: &ConfinementProfile) -> std::io::Result<()> {
     };
     use std::io::{Error, ErrorKind};
 
-    let fail = |what: &str, detail: impl std::fmt::Display| {
+    // A function, not a closure: `impl Trait` in closure parameters is
+    // newer than the 1.90 MSRV.
+    fn fail(what: &str, detail: impl std::fmt::Display) -> Error {
         Error::new(
             ErrorKind::Other,
             format!("landlock confinement failed at {what}: {detail}"),
         )
-    };
+    }
     let abi = ABI::V1;
     let ruleset = Ruleset::default()
         .set_compatibility(CompatLevel::HardRequirement)

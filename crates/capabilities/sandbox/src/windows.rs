@@ -129,9 +129,9 @@ impl SandboxBackend for WindowsJobBackend {
         #[cfg(not(windows))]
         {
             let _ = cmd;
-            return Err(SandboxError::Unavailable {
+            Err(SandboxError::Unavailable {
                 platform: std::env::consts::OS,
-            });
+            })
         }
         #[cfg(windows)]
         {

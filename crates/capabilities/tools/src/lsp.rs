@@ -2062,13 +2062,13 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             deny_env: vec!["FOO_LSP_DENY".to_owned()],
         };
-        // The navigation result carries the echoed variables. The budget is
-        // generous because a cold interpreter start (powershell) can exceed
-        // a second under parallel test load; the fake server answers the
-        // shutdown too, so the happy path never waits it out.
+        // The navigation result carries the echoed variables. The default
+        // timeout covers a cold PowerShell start on a loaded CI runner;
+        // the fake server answers shutdown, so the happy path returns
+        // as soon as the frames arrive.
         let out = DocumentSymbols::new()
             .execute(
-                json!({"server_command": server_command, "path": "a.py", "timeout_ms": 5000}),
+                json!({"server_command": server_command, "path": "a.py"}),
                 &ctx,
             )
             .await

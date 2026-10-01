@@ -346,6 +346,9 @@ fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
 /// the stored input text and how the turn count moves. `fresh_turns`
 /// seeds a first-ever entry; `turns_for` derives the count when the
 /// session already has one.
+// Private helper: each parameter is one of the two callers' semantic
+// differences, so a parameter struct would only re-bundle the same names.
+#[allow(clippy::too_many_arguments)]
 fn record_snapshot(
     home: &Path,
     id: &str,

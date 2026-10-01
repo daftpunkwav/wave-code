@@ -201,12 +201,12 @@ pub fn durable_save(
     // Opening the directory handle is structurally unavailable on some
     // platforms (Windows), so that skip stays silent; a failure *after*
     // the handle is open is a real durability signal and must surface.
-    if let Ok(dir) = std::fs::File::open(root) {
-        if let Err(error) = dir.sync_all() {
-            tracing::warn!(
-                "checkpoint directory fsync failed; the rename may not survive a crash: {error}"
-            );
-        }
+    if let Ok(dir) = std::fs::File::open(root)
+        && let Err(error) = dir.sync_all()
+    {
+        tracing::warn!(
+            "checkpoint directory fsync failed; the rename may not survive a crash: {error}"
+        );
     }
     Ok(())
 }
@@ -265,9 +265,7 @@ pub fn list_resume_labels(root: &std::path::Path) -> Vec<String> {
             .unwrap_or(std::time::UNIX_EPOCH);
         labeled.push((modified, stem.to_owned()));
     }
-    labeled.sort_by(|a, b| {
-        (a.0, label_order_key(&a.1)).cmp(&(b.0, label_order_key(&b.1)))
-    });
+    labeled.sort_by(|a, b| (a.0, label_order_key(&a.1)).cmp(&(b.0, label_order_key(&b.1))));
     labeled.into_iter().map(|(_, label)| label).collect()
 }
 

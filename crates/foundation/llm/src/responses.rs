@@ -1030,4 +1030,122 @@ mod tests {
         assert_eq!(content[0]["type"], "input_text");
         assert_eq!(content[1]["type"], "input_image");
     }
+
+    /// Regression test: redirects are disabled, so the bearer token cannot
+    /// leak to a cross-origin target (the same guarantee the Anthropic
+    /// client locks for `x-api-key`).
+    ///
+    /// Service A answers POST with a 301 to B; assert the client errors
+    /// directly (http_301) instead of following, and B never receives a
+    /// request (reqwest follows redirects by default and would carry the
+    /// `Authorization` header, verified with a PoC on the Anthropic side).
+    #[tokio::test]
+    async fn redirect_is_not_followed_and_bearer_token_not_leaked() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        // B: the redirect target; on receiving a request it sends the full
+        // request head back to the main thread.
+        let (b_tx, b_rx) = mpsc::channel::<String>();
+        let listener_b = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_b = listener_b.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener_b.accept() {
+                let head = read_http_request_head(&mut s);
+                let _ = b_tx.send(head);
+            }
+        });
+
+        // A: the entry service; records the request head (proving the token
+        // did reach A) then replies 301 to B.
+        let (a_tx, a_rx) = mpsc::channel::<String>();
+        let listener_a = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port_a = listener_a.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener_a.accept().unwrap();
+            let head = read_http_request_head(&mut s);
+            let _ = a_tx.send(head);
+            let resp = format!(
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{port_b}/responses\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            s.write_all(resp.as_bytes()).unwrap();
+        });
+
+        let client = ResponsesClient::new(
+            format!("http://127.0.0.1:{port_a}"),
+            "sk-secret-key".into(),
+            "m".into(),
+        );
+        let req = ChatRequest {
+            model: "m".into(),
+            system: String::new(),
+            messages: Arc::new(vec![]),
+            tools: Arc::new(vec![]),
+            max_tokens: 1,
+        };
+        let err = match client.stream(req).await {
+            Ok(_) => panic!("a 301 should error directly instead of being followed"),
+            Err(e) => e,
+        };
+        // With redirects disabled, the 301 comes back as a plain response and stream() reports it as non-2xx.
+        assert!(
+            matches!(&err, LlmError::Api { kind, .. } if kind.as_str() == "http_301"),
+            "a 301 should report http_301, not be followed: {err:?}"
+        );
+        // Precondition: A did receive the request carrying the token (otherwise this test is meaningless).
+        let head_a = a_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            head_a
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sk-secret-key"),
+            "A should have received the request head carrying the bearer token: {head_a}"
+        );
+        // B never receives a request: no connection on loopback within 500ms counts as not followed.
+        assert!(
+            b_rx.recv_timeout(std::time::Duration::from_millis(500))
+                .is_err(),
+            "the redirect was followed; the bearer token leaked to B"
+        );
+    }
+
+    /// Test helper: reads the HTTP request head (up to `\r\n\r\n`) and then reads the full
+    /// body per Content-Length - responding/closing before reading the body risks an RST while the client writes its body.
+    /// (Same shape as the Anthropic client's test helper; kept local because
+    /// each client module owns its test server fixtures.)
+    fn read_http_request_head(s: &mut std::net::TcpStream) -> String {
+        use std::io::Read;
+        let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut buf: Vec<u8> = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let head_len = loop {
+            match s.read(&mut tmp) {
+                Ok(0) | Err(_) => return String::from_utf8_lossy(&buf).into_owned(),
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(i) = crate::sse::find_subsequence(&buf, b"\r\n\r\n") {
+                        break i + 4;
+                    }
+                }
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_len]).into_owned();
+        let content_length: usize = head
+            .lines()
+            .find_map(|l| {
+                l.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse().ok())
+            })
+            .unwrap_or(0);
+        while buf.len() < head_len + content_length {
+            match s.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+        head
+    }
 }

@@ -8,18 +8,12 @@
 //! never configured the list — and never blocks startup.
 //!
 //! Like the model catalog, the file lives under the config layer's home
-//! directory and is written atomically; the config crate itself stays
-//! dependency-free, so the staging write is local (no infrastructure
-//! helper import).
+//! directory and is written atomically through [`crate::atomic_file`].
 
 use std::path::{Path, PathBuf};
 
 /// The denylist file name under the wavecode home directory.
 const FILE_NAME: &str = "wave-denylist.json";
-
-/// Per-process staging sequence: concurrent writers in this process
-/// never share one temp file (same scheme as the model catalog).
-static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The file shape: one object, one list, room to grow.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -67,40 +61,12 @@ pub fn load_from(dir: &Path) -> Vec<String> {
 pub fn save_to(dir: &Path, entries: &[String]) -> std::io::Result<()> {
     let path = path_in(dir);
     std::fs::create_dir_all(dir)?;
-    let content = serde_json::to_string_pretty(&DenylistFile {
+    let mut content = serde_json::to_string_pretty(&DenylistFile {
         entries: entries.to_vec(),
-    })?;
-    let tmp = path.with_extension(format!(
-        "json.staging-{}-{}",
-        std::process::id(),
-        STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    // One write path for every platform: only the open (plus the Unix
-    // owner-only mode, matching the sibling stores) differs.
-    use std::io::Write as _;
-    let mut file = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-            file
-        }
-        #[cfg(not(unix))]
-        std::fs::File::create(&tmp)?
-    };
-    file.write_all(content.as_bytes())
-        .and_then(|()| file.write_all(b"\n"))?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, &path).inspect_err(|_| {
-        // Leave no temp litter behind when the rename fails.
-        let _ = std::fs::remove_file(&tmp);
     })
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    content.push('\n');
+    crate::atomic_file::write_private_atomic(&path, content.as_bytes())
 }
 
 #[cfg(test)]

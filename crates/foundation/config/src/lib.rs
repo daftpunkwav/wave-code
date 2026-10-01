@@ -14,6 +14,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod atomic_file;
 mod hooks;
 mod mcp;
 mod model_catalog;

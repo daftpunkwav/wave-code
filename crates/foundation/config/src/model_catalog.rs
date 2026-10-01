@@ -15,12 +15,6 @@ use std::path::{Path, PathBuf};
 
 use crate::provider::{ProviderConfig, ProviderKind};
 
-/// Per-process staging sequence: concurrent writers in this process
-/// never share one temp file, and the process id separates processes
-/// (a fixed staging name lets two writers clobber each other's bytes
-/// mid-write and rename half a file into place).
-static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// The API dialect a catalog model speaks. The spellings match the
 /// official protocol names; the config-TOML aliases resolve through
 /// [`ProviderKind`] separately.
@@ -242,50 +236,11 @@ impl ModelCatalog {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(CatalogError::Write)?;
         }
-        let content =
+        let mut content =
             serde_json::to_string_pretty(self).map_err(|e| CatalogError::Parse(e.to_string()))?;
-        let tmp = path.with_extension(format!(
-            "json.staging-{}-{}",
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        // One write path for every platform: only the open (plus the Unix
-        // owner-only mode) differs, while the write and the durability
-        // flush must never drift apart between the two branches.
-        use std::io::Write as _;
-        let mut file = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(&tmp)
-                    .map_err(CatalogError::Write)?;
-                // An existing temp file keeps its mode on rewrite: tighten
-                // it to owner-only as well, and the rename carries that
-                // mode onto the catalog.
-                file.set_permissions(std::fs::Permissions::from_mode(0o600))
-                    .map_err(CatalogError::Write)?;
-                file
-            }
-            #[cfg(not(unix))]
-            std::fs::File::create(&tmp).map_err(CatalogError::Write)?
-        };
-        file.write_all(content.as_bytes())
-            .and_then(|()| file.write_all(b"\n"))
-            .map_err(CatalogError::Write)?;
-        // Flush to disk before the rename: without it the "atomic"
-        // rename covers placement, not durability, and an OS crash
-        // could still leave an empty file behind.
-        file.sync_all().map_err(CatalogError::Write)?;
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            // Leave no temp litter behind when the rename fails.
-            let _ = std::fs::remove_file(&tmp);
-            CatalogError::Write(e)
-        })
+        content.push('\n');
+        crate::atomic_file::write_private_atomic(&path, content.as_bytes())
+            .map_err(CatalogError::Write)
     }
 
     /// The spec for `alias`.

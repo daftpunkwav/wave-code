@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use super::os::{ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError};
+use super::os::{ArmedSpawn, ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError};
 
 /// Seatbelt backend: prefixes the spawn with
 /// `/usr/bin/sandbox-exec -f <generated profile>`, so the child may read
@@ -107,9 +107,9 @@ impl SandboxBackend for SeatbeltBackend {
 
     fn spawn_confined(
         &self,
-        cmd: &mut tokio::process::Command,
+        cmd: tokio::process::Command,
         profile: &ConfinementProfile,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<ArmedSpawn, SandboxError> {
         if !self.is_available() {
             return Err(SandboxError::Unavailable {
                 platform: std::env::consts::OS,
@@ -154,8 +154,7 @@ impl SandboxBackend for SeatbeltBackend {
                 }
             }
         }
-        *cmd = confined;
-        Ok(())
+        Ok(ArmedSpawn::new(confined))
     }
 }
 
@@ -198,10 +197,10 @@ mod tests {
         #[cfg(not(target_os = "macos"))]
         assert!(!backend.is_available());
         if !backend.is_available() {
-            let mut cmd = tokio::process::Command::new("sh");
+            let cmd = tokio::process::Command::new("sh");
             let profile = ConfinementProfile::for_shell(Path::new("/work"));
             let err = backend
-                .spawn_confined(&mut cmd, &profile)
+                .spawn_confined(cmd, &profile)
                 .expect_err("must fail closed");
             assert_eq!(
                 err,

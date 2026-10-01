@@ -512,10 +512,7 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
-    #[cfg(windows)]
-    cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
+    infrastructure_base::lead_process_group(cmd.as_std_mut());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => return ExecOutcome::SpawnFailed(e.to_string()),
@@ -920,7 +917,11 @@ mod tests {
                 sleep_cmd()
             )
         } else {
-            format!(r#"(sleep 2 && : > "{}") & {}"#, marker.display(), sleep_cmd())
+            format!(
+                r#"(sleep 2 && : > "{}") & {}"#,
+                marker.display(),
+                sleep_cmd()
+            )
         };
         let e = engine(&[(
             HookEventPoint::PreToolUse,

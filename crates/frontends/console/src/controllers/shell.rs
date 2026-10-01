@@ -162,8 +162,8 @@ impl ShellJob {
             // is terminated (no kill_on_drop — dropping the handle here
             // must not kill it mid-run). The absolute system path keeps
             // CreateProcess from resolving a planted `taskkill.exe` in
-            // the working directory (see `taskkill_program`).
-            let _ = tokio::process::Command::new(taskkill_program())
+            // the working directory (`state_persistence::taskkill_program`).
+            let _ = tokio::process::Command::new(state_persistence::taskkill_program())
                 .args(["/F", "/T", "/PID", &pid.to_string()])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -172,27 +172,6 @@ impl ShellJob {
                 .spawn();
         }
     }
-}
-
-/// Absolute path to the Windows tree-kill utility.
-///
-/// Resolved against `%SystemRoot%\System32` instead of a bare name:
-/// CreateProcess searches the current directory before the system
-/// directories, so a planted `taskkill.exe` in the working directory
-/// would run with this process' own privileges. Same contract as
-/// `infrastructure_base::taskkill_program` (kept local because this
-/// crate's internal dependency set is locked by test).
-#[cfg(windows)]
-fn taskkill_program() -> std::path::PathBuf {
-    if let Some(system_root) = std::env::var_os("SystemRoot") {
-        let path = std::path::PathBuf::from(system_root)
-            .join("System32")
-            .join("taskkill.exe");
-        if path.is_file() {
-            return path;
-        }
-    }
-    std::path::PathBuf::from("taskkill")
 }
 
 /// The platform shell program: `%COMSPEC%` (default `cmd`) on Windows,

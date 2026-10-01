@@ -3,12 +3,12 @@
 //! return `Ok(is_error=true)` with the reason fed back to the model; `Err` is only for implementation-level failures.
 //!
 //! Process-tree lifetime: every child spawns as its own process group
-//! (Unix `process_group(0)`, Windows `CREATE_NEW_PROCESS_GROUP`), so the
-//! timeout kill in [`spawn_collect_bounded`] takes the shell *and* its
-//! descendants via [`infrastructure_base::kill_tree`] (Unix group signal,
-//! Windows `taskkill /T`). `kill_on_drop` stays as the drop-path backstop
-//! but only reaches the shell itself — the orphan window is therefore
-//! limited to wavecode's own abnormal exit, not every timeout.
+//! ([`infrastructure_base::lead_process_group`]), so the timeout kill in
+//! [`spawn_collect_bounded`] takes the shell *and* its descendants via
+//! [`infrastructure_base::kill_tree`] (Unix group signal, Windows
+//! `taskkill /T`). `kill_on_drop` stays as the drop-path backstop but only
+//! reaches the shell itself — the orphan window is therefore limited to
+//! wavecode's own abnormal exit, not every timeout.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -280,9 +280,9 @@ pub(crate) struct Collected {
 /// Spawn `cmd` and collect its piped streams into at most `cap` bytes each,
 /// bounded by `timeout` across the whole run (spawn + reads + wait).
 ///
-/// `cmd` is rewritten to lead its own process group (Unix
-/// `process_group(0)`, Windows `CREATE_NEW_PROCESS_GROUP`), so the timeout
-/// kill below takes the shell and every descendant through
+/// `armed` is rewritten to lead its own process group
+/// ([`infrastructure_base::lead_process_group`]), so the timeout kill below
+/// takes the shell and every descendant through
 /// [`infrastructure_base::kill_tree`] instead of orphaning grandchildren
 /// that inherited the pipe handles. Reads run to EOF so the child never
 /// blocks on a full pipe; bytes past the cap are drained and discarded.
@@ -295,30 +295,19 @@ pub(crate) struct Collected {
 /// child-output path buffers unbounded or leaks a killed process's
 /// captured output.
 ///
-/// `confined_backend` is set exactly when the caller armed `cmd` through
-/// `SandboxBackend::spawn_confined`: the spawned child's pid is then
-/// committed to the backend right after spawn
-/// ([`SandboxBackend::commit_confined_spawn`]), so an observing backend
-/// (the Windows job watcher) assigns this exact child instead of guessing
-/// among concurrently created ones. Unconfined spawns pass `None`.
+/// When `armed` came from `SandboxBackend::spawn_confined`, [`ArmedSpawn::spawn`]
+/// commits the Windows job pairing inside the spawn. Unconfined callers pass
+/// [`ArmedSpawn::new`].
 pub(crate) async fn spawn_collect_bounded(
-    cmd: &mut tokio::process::Command,
+    mut armed: wavecode_sandbox::ArmedSpawn,
     cap: usize,
     timeout: Duration,
-    confined_backend: Option<&Arc<dyn wavecode_sandbox::SandboxBackend>>,
 ) -> std::io::Result<Collected> {
     // Own group (see the doc above) so the timeout kill covers descendants;
-    // applied before spawn like the job service's spawn path.
-    #[cfg(unix)]
-    cmd.process_group(0);
-    #[cfg(windows)]
-    cmd.creation_flags(0x0000_0200); // CREATE_NEW_PROCESS_GROUP
-    let mut child = cmd.spawn()?;
-    if let Some(backend) = confined_backend
-        && let Some(pid) = child.id()
-    {
-        backend.commit_confined_spawn(pid);
-    }
+    // applied before spawn like the job service's spawn path. OR'd with
+    // flags the arm already set (Windows `CREATE_SUSPENDED`).
+    infrastructure_base::lead_process_group(armed.command().as_std_mut());
+    let mut child = armed.spawn()?;
     // The capture buffers live outside the reader tasks so the bounded
     // wait below can return the partial streams without depending on the
     // readers reaching EOF (a grandchild holding the write ends open can
@@ -529,30 +518,32 @@ impl Tool for Shell {
         cmd.arg(flag).arg(command).current_dir(&ctx.cwd);
         // OS confinement (chain: bwrap -> Landlock -> seatbelt -> Windows
         // job object; opt-in via WAVECODE_SANDBOX_OS): confine FIRST — rewriting backends replace
-        // `cmd` wholesale, so stdio, env scrubbing and kill_on_drop below
+        // the command wholesale, so stdio, env scrubbing and kill_on_drop below
         // apply to the final confined command. Any failure fails closed
         // here (SANDBOX_UNAVAILABLE when no backend is available) — the
         // command never runs unconfined when confinement was requested.
-        // Timeout / kill / truncate behavior below is unchanged. The
-        // backend is kept so the spawn below can commit the child pid to
-        // it (the Windows job watcher pairs only committed pids).
-        let mut confined_backend: Option<std::sync::Arc<dyn wavecode_sandbox::SandboxBackend>> =
-            None;
-        if os_sandbox_enabled() {
+        // Timeout / kill / truncate behavior below is unchanged. Windows job
+        // pairing happens inside `ArmedSpawn::spawn`, not as a later step.
+        let mut armed = if os_sandbox_enabled() {
             let profile = wavecode_sandbox::ConfinementProfile::for_shell(&ctx.cwd);
             let backend = wavecode_sandbox::detect_backend();
-            if let Err(e) = backend.spawn_confined(&mut cmd, &profile) {
-                return Ok(err_output(format!(
-                    "OS sandbox confinement failed ({}): {e}",
-                    backend.backend_name()
-                )));
+            match backend.spawn_confined(cmd, &profile) {
+                Ok(armed) => armed,
+                Err(e) => {
+                    return Ok(err_output(format!(
+                        "OS sandbox confinement failed ({}): {e}",
+                        backend.backend_name()
+                    )));
+                }
             }
-            confined_backend = Some(backend);
-        }
+        } else {
+            wavecode_sandbox::ArmedSpawn::new(cmd)
+        };
         // Scrubbing lands on the final command (post-confinement): strip
         // deny_env entries and sensitive-shape variables to prevent leaks.
-        sanitize_env(&mut cmd, ctx);
-        cmd
+        sanitize_env(armed.command(), ctx);
+        armed
+            .command()
             // Non-interactive: null stdin so interactive commands (read/pause/npm init) cannot steal the host terminal's input.
             .stdin(std::process::Stdio::null())
             // wait_with_output only collects piped streams; the default inherit would read nothing.
@@ -567,10 +558,9 @@ impl Tool for Shell {
         // it, and each stream stops buffering at STREAM_CAPTURE_CAP so a
         // chatty child cannot grow memory without bound.
         let output = match spawn_collect_bounded(
-            &mut cmd,
+            armed,
             STREAM_CAPTURE_CAP,
             Duration::from_millis(timeout_ms),
-            confined_backend.as_ref(),
         )
         .await
         {

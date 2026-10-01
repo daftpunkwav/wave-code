@@ -60,8 +60,8 @@ pub use chain::{PROBE_ORDER, first_available, status_line, unavailable};
 #[cfg(target_os = "linux")]
 pub use os::LinuxLandlockBackend;
 pub use os::{
-    ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError, UnavailableBackend,
-    detect_backend,
+    ArmedSpawn, ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError,
+    UnavailableBackend, detect_backend,
 };
 pub use seatbelt::SeatbeltBackend;
 pub use windows::{JOB_STATUS_GAP, WINDOWS_UNAVAILABLE_REASON, WindowsJobBackend};

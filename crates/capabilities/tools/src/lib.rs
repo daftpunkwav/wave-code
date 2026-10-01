@@ -282,8 +282,8 @@ impl ToolAllowlist {
 /// `remove_var` mutate process-global state, so parallel unit tests reading
 /// the same names (e.g. the sandbox routing check) must run mutually
 /// exclusive to stay deterministic. The OS-sandbox watcher itself needs no
-/// such exclusion anymore: it pairs only pids explicitly committed via
-/// `commit_confined_spawn`, so a child spawned by an unrelated test is never
+/// such exclusion anymore: it pairs only the pid committed by
+/// `ArmedSpawn::spawn`, so a child spawned by an unrelated test is never
 /// confined and a confined child is never left unpaired. One lock for the
 /// whole crate: separate per-module mutexes would not exclude each other.
 #[cfg(test)]

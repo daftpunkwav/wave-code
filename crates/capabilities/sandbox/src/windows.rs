@@ -13,7 +13,7 @@
  *  This module must not depend on: tools, transport, frontend crates.
  */
 
-use super::os::{ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError};
+use super::os::{ArmedSpawn, ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError};
 
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
@@ -64,16 +64,15 @@ const PENDING_TTL_MS: u64 = 10_000;
 /// Why the watcher: stable Rust exposes no pre-exec hook and no
 /// `PROC_THREAD_ATTRIBUTE_LIST` on `std::process::Command`, and job
 /// assignment (`AssignProcessToJobObject`) strictly needs the child handle
-/// that only exists after spawn. The backend therefore registers a pending
-/// job in `spawn_confined` and a single background watcher thread pairs the
-/// suspended child with its job right after the caller's `cmd.spawn()` —
-/// the caller commits the spawned pid through
-/// [`SandboxBackend::commit_confined_spawn`] (see [`commit_confined_spawn`]),
-/// and the child is resumed by the watcher only after assignment succeeds,
-/// or **terminated** when assignment fails. Pairing is exact: only committed
-/// pids are ever assigned, so children spawned concurrently by other code
-/// (hooks, background jobs) are never confined, and the armed child is never
-/// left waiting on an unrelated process.
+/// that only exists after spawn. `spawn_confined` therefore registers a
+/// pending job and returns an [`ArmedSpawn`](crate::os::ArmedSpawn) that
+/// owns the command. [`ArmedSpawn::spawn`](crate::os::ArmedSpawn::spawn)
+/// creates the suspended child and commits that exact pid; the watcher
+/// assigns the job and resumes the child, or **terminates** it when
+/// assignment fails. Dropping the guard without spawning cancels that
+/// pending job. Pairing is by arm id, so children spawned by other code
+/// (hooks, background jobs) are never confined, and two concurrent arms
+/// cannot swap jobs.
 ///
 /// What IS enforced (honest scope, `EnforcementLevel::Partial`):
 /// - Process-tree lifetime control: every descendant joins the job
@@ -124,24 +123,27 @@ impl SandboxBackend for WindowsJobBackend {
 
     fn spawn_confined(
         &self,
-        cmd: &mut tokio::process::Command,
+        cmd: tokio::process::Command,
         _profile: &ConfinementProfile,
-    ) -> Result<(), SandboxError> {
-        if !cfg!(windows) {
+    ) -> Result<ArmedSpawn, SandboxError> {
+        #[cfg(not(windows))]
+        {
+            let _ = cmd;
             return Err(SandboxError::Unavailable {
                 platform: std::env::consts::OS,
             });
         }
-        if !self.is_available() {
-            return Err(SandboxError::Unavailable {
-                platform: "windows",
-            });
-        }
         #[cfg(windows)]
         {
+            if !self.is_available() {
+                return Err(SandboxError::Unavailable {
+                    platform: "windows",
+                });
+            }
             let job = create_confined_job().map_err(|e| SandboxError::ConfineFailed {
                 reason: format!("create job object: {e}"),
             })?;
+            let id = next_pending_id();
             {
                 let mut registry = crate::lock(registry());
                 if !registry.watcher_started {
@@ -150,41 +152,32 @@ impl SandboxBackend for WindowsJobBackend {
                     });
                 }
                 registry.pending.push(PendingJob {
+                    id,
                     job,
                     armed_at: std::time::Instant::now(),
                 });
             }
-            // Arm the spawn: the child starts suspended; the caller commits
-            // the spawned pid and the watcher assigns it to the pending job
-            // and resumes it before its first instruction. If the caller
-            // never spawns, the pending entry expires harmlessly.
+            // The child starts suspended. ArmedSpawn::spawn commits this
+            // arm's id to the spawned pid; dropping the guard cancels it.
+            let mut cmd = cmd;
             cmd.creation_flags(CREATE_SUSPENDED);
+            Ok(ArmedSpawn::with_pairing(
+                cmd,
+                move |pid| commit_pending(id, pid),
+                move || cancel_pending(id),
+            ))
         }
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    fn commit_confined_spawn(&self, child_pid: u32) {
-        commit_confined_spawn(child_pid);
     }
 }
 
-/// Pair a just-spawned child with the oldest job armed by `spawn_confined`
-/// on this process. The caller invokes this right after the armed
-/// `spawn()` succeeds, so the watcher assigns this exact child instead of
-/// guessing among concurrently created direct children: an unrelated child
-/// (a hook shell, a background job) is never confined, and the armed child
-/// is never left suspended. Two concurrent confined spawns may swap jobs —
-/// every pending job is created identically, so the pairing order only
-/// keeps assignment predictable.
+/// Pair a spawned child with the pending job registered under `id`.
 #[cfg(windows)]
-pub fn commit_confined_spawn(child_pid: u32) {
+fn commit_pending(id: u64, child_pid: u32) {
     let mut guard = crate::lock(registry());
-    if guard.pending.is_empty() {
-        // The spawn was never armed — nothing to confine.
+    let Some(pos) = guard.pending.iter().position(|pending| pending.id == id) else {
         return;
-    }
-    let PendingJob { job, .. } = guard.pending.remove(0);
+    };
+    let PendingJob { job, .. } = guard.pending.remove(pos);
     guard.designated.insert(
         child_pid,
         DesignatedJob {
@@ -192,6 +185,20 @@ pub fn commit_confined_spawn(child_pid: u32) {
             committed_at: std::time::Instant::now(),
         },
     );
+}
+
+/// Drop an arm that never spawned: its job must not stay pending for a
+/// later commit to claim.
+#[cfg(windows)]
+fn cancel_pending(id: u64) {
+    let mut guard = crate::lock(registry());
+    guard.pending.retain(|pending| pending.id != id);
+}
+
+#[cfg(windows)]
+fn next_pending_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Probe: can this host create a fully configured Job Object? The job is
@@ -210,6 +217,7 @@ fn probe_job_object() -> bool {
 /// the configured job plus the arming timestamp (for expiry).
 #[cfg(windows)]
 struct PendingJob {
+    id: u64,
     job: std::os::windows::io::OwnedHandle,
     armed_at: std::time::Instant,
 }
@@ -596,10 +604,10 @@ mod tests {
         // Fail-closed: a confinement attempt without availability never
         // succeeds, and a non-Windows compile names the platform.
         if !backend.is_available() {
-            let mut cmd = tokio::process::Command::new("cmd");
+            let cmd = tokio::process::Command::new("cmd");
             let profile = ConfinementProfile::for_shell(Path::new("C:\\Windows\\Temp"));
             let err = backend
-                .spawn_confined(&mut cmd, &profile)
+                .spawn_confined(cmd, &profile)
                 .expect_err("must fail closed");
             match err {
                 SandboxError::Unavailable { platform } => {
@@ -685,15 +693,14 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        backend
-            .spawn_confined(&mut cmd, &profile)
+        let armed = backend
+            .spawn_confined(cmd, &profile)
             .expect("confinement arms on a Windows host");
         // The watcher must pair the committed pid and resume the suspended
         // child; a generous timeout turns a watcher regression into a test
         // failure, not a hang.
         let run = async {
-            let child = cmd.spawn()?;
-            backend.commit_confined_spawn(child.id().expect("pid"));
+            let child = armed.spawn()?;
             child.wait_with_output().await
         };
         let out = tokio::time::timeout(Duration::from_secs(30), run)
@@ -704,14 +711,13 @@ mod tests {
         assert!(String::from_utf8_lossy(&out.stdout).contains("ok"));
     }
 
-    /// The commit protocol is what makes pairing exact: an armed spawn whose
-    /// pid was never committed is never paired — the child stays suspended
-    /// (the watcher used to pair any new direct child and would have resumed
-    /// it). The test kills the stranded child itself.
+    /// Pairing is by arm id: a child spawned beside a held guard is not
+    /// assigned that guard's job (it runs and exits), and the armed command
+    /// still completes once [`ArmedSpawn::spawn`] commits its own pid.
     #[cfg(windows)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn armed_spawn_without_commit_is_never_paired() {
+    async fn sibling_child_is_not_paired_with_a_held_arm() {
         use std::process::Stdio;
         use std::time::Duration;
 
@@ -720,23 +726,40 @@ mod tests {
         assert!(backend.is_available());
         let profile = ConfinementProfile::for_shell(Path::new("C:\\Windows\\Temp"));
         let mut cmd = tokio::process::Command::new("cmd");
-        cmd.args(["/c", "echo ok"])
+        cmd.args(["/c", "echo armed"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        backend
-            .spawn_confined(&mut cmd, &profile)
+        let armed = backend
+            .spawn_confined(cmd, &profile)
             .expect("confinement arms on a Windows host");
-        let mut child = cmd.spawn().expect("spawn armed cmd");
-        // A resumed child finishes in milliseconds; a still-suspended one
-        // cannot complete. (A pending without a commit expires via TTL.)
-        let run = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        let mut sibling = tokio::process::Command::new("cmd");
+        sibling
+            .args(["/c", "echo side"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let side = tokio::time::timeout(
+            Duration::from_secs(10),
+            sibling.spawn().expect("sibling spawn").wait_with_output(),
+        )
+        .await
+        .expect("a sibling must not be suspended by someone else's arm")
+        .expect("sibling wait");
         assert!(
-            run.is_err(),
-            "an uncommitted armed child must never be resumed by the watcher"
+            side.status.success(),
+            "sibling must run unconfined and exit"
         );
-        let _ = child.kill().await;
+        let out = tokio::time::timeout(Duration::from_secs(30), async {
+            let child = armed.spawn()?;
+            child.wait_with_output().await
+        })
+        .await
+        .expect("the armed child must still be resumed")
+        .expect("armed spawn");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("armed"));
     }
 
     /// The headline guarantee: closing the job handle kills a long-running

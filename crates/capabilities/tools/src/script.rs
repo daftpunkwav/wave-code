@@ -134,11 +134,9 @@ async fn run_script(
     // Same scrubbing as Shell: deny_env list plus sensitive-suffix fallback.
     crate::shell_tool::sanitize_env(&mut cmd, ctx);
     let output = match crate::shell_tool::spawn_collect_bounded(
-        &mut cmd,
+        wavecode_sandbox::ArmedSpawn::new(cmd),
         crate::shell_tool::STREAM_CAPTURE_CAP,
         Duration::from_millis(timeout_ms),
-        // Script tools never arm OS confinement: nothing to commit.
-        None,
     )
     .await
     {

@@ -13,7 +13,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Stdio;
 
-use super::os::{ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError};
+use super::os::{ArmedSpawn, ConfinementProfile, EnforcementLevel, SandboxBackend, SandboxError};
 
 /// Bubblewrap backend: rewrites the spawn into
 /// `bwrap <isolation + mount flags> -- <program> <args...>`, so the child
@@ -128,9 +128,9 @@ impl SandboxBackend for BwrapBackend {
 
     fn spawn_confined(
         &self,
-        cmd: &mut tokio::process::Command,
+        cmd: tokio::process::Command,
         profile: &ConfinementProfile,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<ArmedSpawn, SandboxError> {
         if !cfg!(target_os = "linux") {
             return Err(SandboxError::Unavailable {
                 platform: std::env::consts::OS,
@@ -166,8 +166,7 @@ impl SandboxBackend for BwrapBackend {
                 }
             }
         }
-        *cmd = confined;
-        Ok(())
+        Ok(ArmedSpawn::new(confined))
     }
 }
 
@@ -249,9 +248,9 @@ mod tests {
         assert!(!backend.is_available());
         // Fail-closed: a rewrite attempt without availability never succeeds.
         if !backend.is_available() {
-            let mut cmd = tokio::process::Command::new("sh");
+            let cmd = tokio::process::Command::new("sh");
             let profile = ConfinementProfile::for_shell(Path::new("/work"));
-            assert!(backend.spawn_confined(&mut cmd, &profile).is_err());
+            assert!(backend.spawn_confined(cmd, &profile).is_err());
         }
     }
 }

@@ -150,8 +150,12 @@ fn kill_tree(child: &std::process::Child) {
         let pid = child.id();
         use std::os::windows::process::CommandExt;
         // Fire-and-forget: taskkill finishes on its own once the tree is
-        // terminated.
-        let _ = std::process::Command::new("taskkill")
+        // terminated. The program path is the shared System32 resolution:
+        // a bare `taskkill` would run a planted executable from the work
+        // root. This spawn is not a process-group leader, so the Unix
+        // branch must not call `infrastructure_base::kill_tree` (a group
+        // signal would hit the eval harness itself).
+        let _ = std::process::Command::new(state_persistence::taskkill_program())
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

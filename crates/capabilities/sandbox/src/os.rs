@@ -83,10 +83,11 @@ impl std::fmt::Display for EnforcementLevel {
 /// before it execs. Implementations must be fail-closed — any failure returns
 /// `Err` and the child must never run unconfined.
 ///
-/// Backends that rewrite `cmd` wholesale (bwrap, seatbelt) replace whatever
-/// the caller configured before (stdio included — `std` exposes no stdio
-/// accessors), so callers must configure stdio, env scrubbing and
-/// kill-on-drop AFTER `spawn_confined` returns.
+/// Backends that rewrite the command wholesale (bwrap, seatbelt) replace
+/// whatever the caller configured before (stdio included — `std` exposes no
+/// stdio accessors), so callers configure stdio, env scrubbing and
+/// kill-on-drop on [`ArmedSpawn::command`] after `spawn_confined` returns,
+/// then create the child only through [`ArmedSpawn::spawn`].
 pub trait SandboxBackend: Send + Sync + std::fmt::Debug {
     /// Whether this backend can confine on the running kernel.
     fn is_available(&self) -> bool;
@@ -108,20 +109,93 @@ pub trait SandboxBackend: Send + Sync + std::fmt::Debug {
     fn status_appendix(&self) -> Option<&'static str> {
         None
     }
-    /// Arm confinement on `cmd` for one spawn under `profile`.
+    /// Arm confinement for one spawn under `profile`.
+    ///
+    /// The returned guard owns the command. [`ArmedSpawn::spawn`] is the
+    /// only way to create the child, and it performs any platform pairing
+    /// (Windows job assignment) inside that call. Dropping the guard
+    /// without spawning cancels the arm.
     fn spawn_confined(
         &self,
-        cmd: &mut tokio::process::Command,
+        cmd: tokio::process::Command,
         profile: &ConfinementProfile,
-    ) -> Result<(), SandboxError>;
-    /// Pair a just-spawned child with the confinement armed by the last
-    /// `spawn_confined` call on this backend. Backends that pair processes
-    /// by observation (the Windows job watcher) need the exact child to
-    /// assign; without the commit they could only guess among concurrently
-    /// created direct children and might confine an unrelated one. The
-    /// default does nothing. Callers invoke it right after the armed
-    /// `spawn()` succeeded, and never for unconfined spawns.
-    fn commit_confined_spawn(&self, _child_pid: u32) {}
+    ) -> Result<ArmedSpawn, SandboxError>;
+}
+
+/// One command armed by [`SandboxBackend::spawn_confined`].
+///
+/// Owning the command makes an uncommitted spawn unrepresentable: the
+/// child is created only by [`Self::spawn`], which runs the platform
+/// pairing step before returning. Dropping the guard without spawning
+/// cancels that arm, so a pending Windows job cannot be claimed by a
+/// later, unrelated child.
+pub struct ArmedSpawn {
+    cmd: tokio::process::Command,
+    on_spawned: Option<Box<dyn FnOnce(u32) + Send>>,
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl ArmedSpawn {
+    /// An unconfined command. [`Self::spawn`] creates the child and nothing else.
+    pub fn new(cmd: tokio::process::Command) -> Self {
+        Self {
+            cmd,
+            on_spawned: None,
+            on_drop: None,
+        }
+    }
+
+    /// Arm `cmd` with a pairing step that runs after a successful spawn
+    /// and a cancel step that runs when the guard is dropped first.
+    pub(crate) fn with_pairing(
+        cmd: tokio::process::Command,
+        commit: impl FnOnce(u32) + Send + 'static,
+        cancel: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            cmd,
+            on_spawned: Some(Box::new(commit)),
+            on_drop: Some(Box::new(cancel)),
+        }
+    }
+
+    /// The command, still configurable (stdio, env, kill-on-drop, process group).
+    ///
+    /// Rewriting backends have already replaced the program. Callers set
+    /// stdio and env here, after `spawn_confined` returns.
+    pub fn command(&mut self) -> &mut tokio::process::Command {
+        &mut self.cmd
+    }
+
+    /// Spawn the child and, when this arm pairs a process, commit that pid
+    /// before returning. A spawn error cancels the arm via [`Drop`].
+    pub fn spawn(mut self) -> std::io::Result<tokio::process::Child> {
+        let child = self.cmd.spawn()?;
+        if let Some(pid) = child.id()
+            && let Some(commit) = self.on_spawned.take()
+        {
+            // The pending arm now belongs to this pid. Drop must not cancel it.
+            self.on_drop.take();
+            commit(pid);
+        }
+        Ok(child)
+    }
+}
+
+impl std::fmt::Debug for ArmedSpawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArmedSpawn")
+            .field("pairs_on_spawn", &self.on_spawned.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ArmedSpawn {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.on_drop.take() {
+            cancel();
+        }
+    }
 }
 
 /// Fallback backend: confinement is unavailable, so every spawn fails closed
@@ -140,9 +214,9 @@ impl SandboxBackend for UnavailableBackend {
 
     fn spawn_confined(
         &self,
-        _cmd: &mut tokio::process::Command,
+        _cmd: tokio::process::Command,
         _profile: &ConfinementProfile,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<ArmedSpawn, SandboxError> {
         Err(SandboxError::Unavailable {
             platform: std::env::consts::OS,
         })
@@ -185,9 +259,9 @@ impl SandboxBackend for LinuxLandlockBackend {
 
     fn spawn_confined(
         &self,
-        cmd: &mut tokio::process::Command,
+        mut cmd: tokio::process::Command,
         profile: &ConfinementProfile,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<ArmedSpawn, SandboxError> {
         if !self.is_available() {
             return Err(SandboxError::Unavailable { platform: "linux" });
         }
@@ -199,7 +273,7 @@ impl SandboxBackend for LinuxLandlockBackend {
             use std::os::unix::process::CommandExt;
             cmd.as_std_mut().pre_exec(move || apply_landlock(&profile));
         }
-        Ok(())
+        Ok(ArmedSpawn::new(cmd))
     }
 }
 
@@ -350,10 +424,10 @@ mod tests {
     fn unavailable_backend_refuses_naming_the_platform() {
         let backend = UnavailableBackend;
         assert!(!backend.is_available());
-        let mut cmd = tokio::process::Command::new("sh");
+        let cmd = tokio::process::Command::new("sh");
         let profile = ConfinementProfile::for_shell(Path::new("/work"));
         let err = backend
-            .spawn_confined(&mut cmd, &profile)
+            .spawn_confined(cmd, &profile)
             .expect_err("fallback must never arm confinement");
         assert_eq!(
             err,
@@ -435,10 +509,9 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        backend
-            .spawn_confined(&mut cmd, &profile)
-            .expect("confinement arms on a Landlock kernel");
-        let out = cmd
+        let out = backend
+            .spawn_confined(cmd, &profile)
+            .expect("confinement arms on a Landlock kernel")
             .spawn()
             .expect("spawn")
             .wait_with_output()
@@ -458,10 +531,9 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        backend
-            .spawn_confined(&mut cmd, &profile)
-            .expect("confinement arms on a Landlock kernel");
-        let out = cmd
+        let out = backend
+            .spawn_confined(cmd, &profile)
+            .expect("confinement arms on a Landlock kernel")
             .spawn()
             .expect("spawn")
             .wait_with_output()
@@ -486,10 +558,9 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        backend
-            .spawn_confined(&mut cmd, &profile)
-            .expect("confinement arms on a Landlock kernel");
-        let out = cmd
+        let out = backend
+            .spawn_confined(cmd, &profile)
+            .expect("confinement arms on a Landlock kernel")
             .spawn()
             .expect("spawn")
             .wait_with_output()
@@ -549,11 +620,11 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        match backend.spawn_confined(&mut cmd, &profile) {
+        match backend.spawn_confined(cmd, &profile) {
             // No network ABI: fail-closed without spawning counts as confined.
             Err(_) => {}
-            Ok(()) => {
-                let out = cmd
+            Ok(armed) => {
+                let out = armed
                     .spawn()
                     .expect("spawn")
                     .wait_with_output()

@@ -416,18 +416,8 @@ async fn drive_job(
     for name in &request.deny_env {
         cmd.env_remove(name);
     }
-    #[cfg(unix)]
-    {
-        // Own group so `cancel` kills descendants with one killpg.
-        // (`process_group` is inherent on tokio's Command; no trait import.)
-        cmd.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        // New group so `taskkill /T` stays inside this job's tree.
-        // (`creation_flags` is inherent on tokio's Command; no trait import.)
-        cmd.creation_flags(0x0000_0200);
-    }
+    // Own group so `cancel` kills descendants with one killpg / taskkill /T.
+    infrastructure_base::lead_process_group(cmd.as_std_mut());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {

@@ -120,9 +120,35 @@ pub fn shell_invocation() -> (String, &'static str) {
     }
 }
 
+/// Windows `CREATE_NEW_PROCESS_GROUP`. OR'd with flags already set on `cmd`
+/// (tokio and `std` both OR repeated `creation_flags` calls), so it composes
+/// with `CREATE_SUSPENDED`.
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Mark `cmd` as its own process-group leader, the precondition of [`kill_tree`].
+///
+/// Unix: `process_group(0)`. Windows: `CREATE_NEW_PROCESS_GROUP`. Every spawn
+/// that will later be tree-killed goes through here, so the flag cannot drift
+/// from the kill helper.
+pub fn lead_process_group(cmd: &mut std::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(not(any(unix, windows)))]
+    let _ = cmd;
+}
+
 /// Kill a spawned process tree by leader pid (best effort).
 ///
-/// Precondition: the caller spawned `pid` as its own process-group leader
+/// Precondition: the caller marked the spawn with [`lead_process_group`]
 /// (Unix `Command::process_group(0)`; Windows `CREATE_NEW_PROCESS_GROUP`),
 /// so the Unix branch's group signal cannot land outside that spawn. The
 /// pid may have exited already — `killpg` reports ESRCH and `taskkill`

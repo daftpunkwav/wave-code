@@ -55,7 +55,7 @@ pub fn unavailable() -> Arc<dyn SandboxBackend> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::os::{ConfinementProfile, EnforcementLevel, SandboxError};
+    use crate::os::{ArmedSpawn, ConfinementProfile, EnforcementLevel, SandboxError};
 
     #[derive(Debug)]
     struct FakeBackend {
@@ -79,11 +79,11 @@ mod tests {
 
         fn spawn_confined(
             &self,
-            _cmd: &mut tokio::process::Command,
+            cmd: tokio::process::Command,
             _profile: &ConfinementProfile,
-        ) -> Result<(), SandboxError> {
+        ) -> Result<ArmedSpawn, SandboxError> {
             if self.available {
-                Ok(())
+                Ok(ArmedSpawn::new(cmd))
             } else {
                 Err(SandboxError::Unavailable { platform: "fake" })
             }
@@ -132,9 +132,9 @@ mod tests {
         // The chain terminus refuses every spawn.
         let end = unavailable();
         assert!(!end.is_available());
-        let mut cmd = tokio::process::Command::new("sh");
+        let cmd = tokio::process::Command::new("sh");
         let profile = ConfinementProfile::for_shell(std::path::Path::new("/work"));
-        assert!(end.spawn_confined(&mut cmd, &profile).is_err());
+        assert!(end.spawn_confined(cmd, &profile).is_err());
     }
 
     #[test]

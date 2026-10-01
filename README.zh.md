@@ -203,6 +203,11 @@ model = "your-model-fast"
   打印 "no published release yet"。探测失败 exit 1，脚本绝不会把它
   误认为"无更新"。TUI 启动时探测一次，有新 release 时在 footer 显示
   `update available: <tag>`。
+- `update --install`：下载最新 release 的二进制与其发布的 sha256，
+  校验通过后才触碰正在运行的二进制，再经暂存文件加原子重命名换装
+  （Windows 将被替换的二进制保留为 `<name>.bak`，供手动回退）。拒绝
+  源码构建（`target/`；请改用 `cargo build --release`）与没有预编译
+  产物的平台；任何一步失败 exit 1。
 
 ## 权限
 

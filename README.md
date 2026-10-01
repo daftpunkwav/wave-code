@@ -216,6 +216,12 @@ live UI restores terminal modes before the report prints.
   probe exits 1 so scripts never mistake it for "no update". The TUI
   probes once at startup and shows `update available: <tag>` in the
   footer when a newer release exists.
+- `update --install`: downloads the newest release binary together with
+  its published sha256, verifies the checksum before touching the
+  running binary, then swaps atomically (Windows keeps the replaced
+  binary as `<name>.bak` for manual rollback). Refuses source builds
+  (`target/`; use `cargo build --release` instead) and platforms
+  without a prebuilt release asset; any failure exits 1.
 
 ## Permissions
 

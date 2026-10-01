@@ -128,6 +128,29 @@ pub(crate) fn child_journal_dir(home: &Path, parent: &str) -> PathBuf {
     sessions_dir(home).join(CHILDREN_DIR).join(parent)
 }
 
+/// Redact and append one turn snapshot to a journal: the single write
+/// path shared by [`record_turn`], [`record_rewind`], and
+/// [`record_child_turn`]. Every persisted text rides `redact` first.
+fn append_redacted_turn(
+    journal: &JsonlJournal,
+    run_id: &str,
+    input: String,
+    history: &[(bool, String)],
+    outcome: &str,
+    redact: &dyn Fn(&str) -> String,
+) -> Result<(), SessionError> {
+    journal.append_turn(&crate::TurnRecord {
+        run_id: run_id.to_string(),
+        input,
+        history: history
+            .iter()
+            .map(|(from_model, text)| (*from_model, redact(text)))
+            .collect(),
+        outcome: redact(outcome),
+    })?;
+    Ok(())
+}
+
 /// Append one completed child task's turn to its own journal. Best-effort by
 /// contract (callers ignore failures): a subagent's log must never fail the
 /// run that spawned it.
@@ -150,15 +173,14 @@ pub fn record_child_turn(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    JsonlJournal::new(path.clone()).append_turn(&crate::TurnRecord {
-        run_id: child.to_string(),
-        input: redact(input),
-        history: history
-            .iter()
-            .map(|(from_model, text)| (*from_model, redact(text)))
-            .collect(),
-        outcome: redact(outcome),
-    })?;
+    append_redacted_turn(
+        &JsonlJournal::new(path.clone()),
+        child,
+        redact(input),
+        history,
+        outcome,
+        redact,
+    )?;
     Ok(path)
 }
 
@@ -319,6 +341,47 @@ fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Append one journal snapshot and upsert its index entry: the shared
+/// body of [`record_turn`] and [`record_rewind`], which differ only in
+/// the stored input text and how the turn count moves. `fresh_turns`
+/// seeds a first-ever entry; `turns_for` derives the count when the
+/// session already has one.
+fn record_snapshot(
+    home: &Path,
+    id: &str,
+    cwd: &str,
+    input: String,
+    history: &[(bool, String)],
+    outcome: &str,
+    fresh_turns: u32,
+    turns_for: impl Fn(u32) -> u32,
+    redact: &dyn Fn(&str) -> String,
+) -> Result<SessionMeta, SessionError> {
+    let path = journal_path(home, id)?;
+    std::fs::create_dir_all(sessions_dir(home))?;
+    let journal = JsonlJournal::new(path);
+    append_redacted_turn(&journal, id, input, history, outcome, redact)?;
+    let now = now_secs();
+    let existing = list_sessions(home).into_iter().find(|entry| entry.id == id);
+    let meta = match existing {
+        Some(mut meta) => {
+            meta.updated_at = now;
+            meta.turns = turns_for(meta.turns);
+            meta
+        }
+        None => SessionMeta {
+            id: id.to_string(),
+            title: default_title(history),
+            cwd: cwd.to_string(),
+            created_at: now,
+            updated_at: now,
+            turns: fresh_turns,
+        },
+    };
+    upsert_index(home, meta.clone())?;
+    Ok(meta)
+}
+
 /// Record one completed turn: append the journal snapshot and upsert the
 /// index entry (creating it on the first turn).
 ///
@@ -334,37 +397,17 @@ pub fn record_turn(
     outcome: &str,
     redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
-    let path = journal_path(home, id)?;
-    std::fs::create_dir_all(sessions_dir(home))?;
-    let journal = JsonlJournal::new(path);
-    journal.append_turn(&crate::TurnRecord {
-        run_id: id.to_string(),
-        input: redact(input),
-        history: history
-            .iter()
-            .map(|(from_model, text)| (*from_model, redact(text)))
-            .collect(),
-        outcome: redact(outcome),
-    })?;
-    let now = now_secs();
-    let existing = list_sessions(home).into_iter().find(|entry| entry.id == id);
-    let meta = match existing {
-        Some(mut meta) => {
-            meta.updated_at = now;
-            meta.turns += 1;
-            meta
-        }
-        None => SessionMeta {
-            id: id.to_string(),
-            title: default_title(history),
-            cwd: cwd.to_string(),
-            created_at: now,
-            updated_at: now,
-            turns: 1,
-        },
-    };
-    upsert_index(home, meta.clone())?;
-    Ok(meta)
+    record_snapshot(
+        home,
+        id,
+        cwd,
+        redact(input),
+        history,
+        outcome,
+        1,
+        |turns| turns + 1,
+        redact,
+    )
 }
 
 /// Record a rewind: append the truncated dialogue as the newest
@@ -378,37 +421,17 @@ pub fn record_rewind(
     turns_removed: u32,
     redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
-    let path = journal_path(home, id)?;
-    std::fs::create_dir_all(sessions_dir(home))?;
-    let journal = JsonlJournal::new(path);
-    journal.append_turn(&crate::TurnRecord {
-        run_id: id.to_string(),
-        input: String::new(),
-        history: history
-            .iter()
-            .map(|(from_model, text)| (*from_model, redact(text)))
-            .collect(),
-        outcome: redact("Rewound"),
-    })?;
-    let now = now_secs();
-    let existing = list_sessions(home).into_iter().find(|entry| entry.id == id);
-    let meta = match existing {
-        Some(mut meta) => {
-            meta.updated_at = now;
-            meta.turns = meta.turns.saturating_sub(turns_removed);
-            meta
-        }
-        None => SessionMeta {
-            id: id.to_string(),
-            title: default_title(history),
-            cwd: cwd.to_string(),
-            created_at: now,
-            updated_at: now,
-            turns: 0,
-        },
-    };
-    upsert_index(home, meta.clone())?;
-    Ok(meta)
+    record_snapshot(
+        home,
+        id,
+        cwd,
+        String::new(),
+        history,
+        "Rewound",
+        0,
+        |turns| turns.saturating_sub(turns_removed),
+        redact,
+    )
 }
 
 /// Rename a session; returns the updated meta (`None` when unknown).

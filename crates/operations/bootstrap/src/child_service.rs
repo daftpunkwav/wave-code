@@ -39,7 +39,7 @@ use action_tasks::{TaskInfo, TaskKind, TaskOutcome, TaskRequest, TaskService, Ta
 use infrastructure_base::InterruptHandle;
 use runtime_child::{ChildKind, ChildRuntime, ChildSpec};
 use runtime_runner::{RunAllowlist, RunContext, RunInterrupts, StopReason, TurnDriver, TurnInput};
-use state_store::{Conversation, Role};
+use state_store::{Conversation, HistoryEntry, Role};
 
 /// How often the stop watcher polls the ticket flag.
 const STOP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -99,6 +99,110 @@ impl Drop for SpawnTeardown {
         self.allowlist.release(&self.run_id);
         self.run_interrupts.release(&self.run_id);
         self.done.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Poll the parent ticket's stop flag into the child's own run-scoped
+/// interrupt every [`STOP_POLL_INTERVAL`]. The teardown guard flips
+/// `done` on every exit path, so no watcher outlives its child.
+fn spawn_stop_watcher(
+    stop: InterruptHandle,
+    child_interrupt: InterruptHandle,
+    done: Arc<AtomicBool>,
+) {
+    tokio::spawn(async move {
+        while !done.load(Ordering::SeqCst) {
+            if stop.is_triggered() {
+                child_interrupt.trigger();
+                break;
+            }
+            tokio::time::sleep(STOP_POLL_INTERVAL).await;
+        }
+    });
+}
+
+/// Drive one child turn on a fresh conversation, handing back the
+/// transcript and the raw stop reason for the caller to map.
+async fn drive_child_turn(
+    driver: &Arc<dyn TurnDriver>,
+    ctx: &RunContext,
+    input: &str,
+    system: &str,
+) -> (Conversation, StopReason) {
+    let mut conv = Conversation::new();
+    let outcome = driver
+        .drive_turn(
+            ctx,
+            &mut conv,
+            TurnInput {
+                text: input,
+                images: &ctx.images,
+            },
+            system,
+            &|_| {},
+        )
+        .await;
+    (conv, outcome)
+}
+
+/// The summary is the child's final answer, not whatever entry landed
+/// last: a round-ceiling or stop-hook exit leaves tool results (user
+/// role) at the tail, and a failure should carry the reason, not a
+/// transcript tail.
+fn summarize_child_run(snapshot: &[HistoryEntry], outcome: &StopReason) -> String {
+    match outcome {
+        StopReason::Error(reason) => reason.clone(),
+        // A ceiling exit whose last round had no final text
+        // would render as an empty summary downstream; give
+        // it an honest placeholder instead.
+        _ => snapshot
+            .iter()
+            .rev()
+            .find(|entry| entry.role == Role::Assistant)
+            .map(|entry| entry.text())
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "(no final answer text)".to_string()),
+    }
+}
+
+/// Append the child's transcript to its own journal under the parent
+/// session. Best-effort: a subagent's log must never fail the run that
+/// spawned it.
+fn record_child_journal(
+    journal: &ChildJournal,
+    task_id: &str,
+    input: &str,
+    snapshot: &[HistoryEntry],
+    outcome: &StopReason,
+) {
+    let pairs: Vec<(bool, String)> = snapshot
+        .iter()
+        .map(|entry| (entry.role == Role::Assistant, entry.text()))
+        .collect();
+    let noop = |text: &str| text.to_string();
+    let redact = journal.redact.as_deref().unwrap_or(&noop);
+    let _ = state_persistence::sessions::record_child_turn(
+        &journal.home,
+        &journal.parent,
+        task_id,
+        input,
+        &pairs,
+        &format!("{outcome:?}"),
+        redact,
+    );
+}
+
+/// Map the raw stop reason onto the capability-neutral task vocabulary.
+fn child_task_status(outcome: &StopReason) -> runtime_child::TaskStatus {
+    match outcome {
+        // Both ceilings end the child without a fault: the
+        // repeat breaker hands back a text summary of the
+        // blocker, exactly like the round ceiling.
+        StopReason::Completed | StopReason::MaxToolRounds | StopReason::RepeatBreaker => {
+            runtime_child::TaskStatus::Completed
+        }
+        StopReason::Interrupted => runtime_child::TaskStatus::Stopped,
+        StopReason::Error(_) => runtime_child::TaskStatus::Failed,
     }
 }
 
@@ -240,7 +344,6 @@ impl TaskService for TurnChildService {
         // empty) restricts, None means the legacy unrestricted surface.
         let effective = self.effective_surface(&request);
         let done = Arc::new(AtomicBool::new(false));
-        let watcher_done = done.clone();
         let journal_sink = self.journal.clone();
         // Depth/parent flow straight into the runtime spec: the runtime
         // owns cap enforcement, refusing depth past its max with an
@@ -276,16 +379,7 @@ impl TaskService for TurnChildService {
                 // session-wide flag other children and the parent share.
                 let child_interrupt = InterruptHandle::new();
                 run_interrupts.register(&run_id, child_interrupt.clone());
-                let stop = ticket.stop.clone();
-                tokio::spawn(async move {
-                    while !watcher_done.load(Ordering::SeqCst) {
-                        if stop.is_triggered() {
-                            child_interrupt.trigger();
-                            break;
-                        }
-                        tokio::time::sleep(STOP_POLL_INTERVAL).await;
-                    }
-                });
+                spawn_stop_watcher(ticket.stop.clone(), child_interrupt, done.clone());
                 let ctx = RunContext {
                     run_id: run_id.clone(),
                     submission_id: ticket.task_id.clone(),
@@ -305,69 +399,22 @@ impl TaskService for TurnChildService {
                     run_id,
                     done,
                 };
-                let mut conv = Conversation::new();
-                let outcome = driver
-                    .drive_turn(
-                        &ctx,
-                        &mut conv,
-                        TurnInput {
-                            text: &ticket.input,
-                            images: &ctx.images,
-                        },
-                        &system,
-                        &|_| {},
-                    )
-                    .await;
+                let (conv, outcome) =
+                    drive_child_turn(&driver, &ctx, &ticket.input, &system).await;
                 drop(teardown);
-                // The summary is the child's final answer, not whatever
-                // entry landed last: a round-ceiling or stop-hook exit
-                // leaves tool results (user role) at the tail, and a
-                // failure should carry the reason, not a transcript tail.
                 let snapshot = conv.snapshot();
-                let final_text = snapshot
-                    .iter()
-                    .rev()
-                    .find(|entry| entry.role == Role::Assistant)
-                    .map(|entry| entry.text());
-                let summary = match &outcome {
-                    StopReason::Error(reason) => reason.clone(),
-                    // A ceiling exit whose last round had no final text
-                    // would render as an empty summary downstream; give
-                    // it an honest placeholder instead.
-                    _ => final_text
-                        .filter(|text| !text.is_empty())
-                        .unwrap_or_else(|| "(no final answer text)".to_string()),
-                };
+                let summary = summarize_child_run(&snapshot, &outcome);
                 if let Some(journal) = &journal_sink {
-                    let pairs: Vec<(bool, String)> = snapshot
-                        .iter()
-                        .map(|entry| (entry.role == Role::Assistant, entry.text()))
-                        .collect();
-                    // Best-effort: a subagent's log must never fail the run
-                    // that spawned it.
-                    let noop = |text: &str| text.to_string();
-                    let redact = journal.redact.as_deref().unwrap_or(&noop);
-                    let _ = state_persistence::sessions::record_child_turn(
-                        &journal.home,
-                        &journal.parent,
+                    record_child_journal(
+                        journal,
                         &ticket.task_id,
                         &ticket.input,
-                        &pairs,
-                        &format!("{outcome:?}"),
-                        redact,
+                        &snapshot,
+                        &outcome,
                     );
                 }
                 runtime_child::TaskResult {
-                    status: match &outcome {
-                        // Both ceilings end the child without a fault: the
-                        // repeat breaker hands back a text summary of the
-                        // blocker, exactly like the round ceiling.
-                        StopReason::Completed
-                        | StopReason::MaxToolRounds
-                        | StopReason::RepeatBreaker => runtime_child::TaskStatus::Completed,
-                        StopReason::Interrupted => runtime_child::TaskStatus::Stopped,
-                        StopReason::Error(_) => runtime_child::TaskStatus::Failed,
-                    },
+                    status: child_task_status(&outcome),
                     summary,
                     output_tokens: conv.usage_carry().output_tokens,
                 }

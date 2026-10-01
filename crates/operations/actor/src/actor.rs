@@ -28,6 +28,7 @@ use infrastructure_base::{
 use runtime_child::ChildRuntime;
 use runtime_runner::{HookPoint, RunContext, StopReason, TurnDriver, TurnInput};
 use safety_gate::{ApprovalDecision, ApprovalGate, QuestionGate};
+use state_checkpoint::CheckpointPolicy;
 use state_store::{CompactTrigger, Conversation, Role, Usage};
 use tokio::sync::mpsc;
 use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
@@ -216,12 +217,9 @@ where
                     }
                     // Persist-then-act: the pre-turn snapshot is durable
                     // before the driver broadcasts or executes anything.
-                    let checkpoint_on = durability
-                        .as_ref()
-                        .is_some_and(|dur| dur.policy.checkpoint_before_model_request);
                     checkpoint_pre_turn(
                         &mut durability,
-                        checkpoint_on,
+                        |policy| policy.checkpoint_before_model_request,
                         &mut turn_seq,
                         &conv,
                         &event_tx,
@@ -282,12 +280,9 @@ where
                     let id = sub.id.clone();
                     // Compaction rewrites shared history (a state side
                     // effect), so it honors the side-effect flag.
-                    let checkpoint_on = durability
-                        .as_ref()
-                        .is_some_and(|dur| dur.policy.before_tool_side_effect);
                     checkpoint_pre_turn(
                         &mut durability,
-                        checkpoint_on,
+                        |policy| policy.before_tool_side_effect,
                         &mut turn_seq,
                         &conv,
                         &event_tx,
@@ -496,12 +491,15 @@ async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
 /// checkpoint still unwinds via `resume_unwind`, matching the inline call.
 async fn checkpoint_pre_turn(
     durability: &mut Option<TurnDurability>,
-    checkpoint_on: bool,
+    enabled: impl Fn(&CheckpointPolicy) -> bool,
     turn_seq: &mut u64,
     conv: &Conversation,
     event_tx: &mpsc::Sender<Event>,
     id: &str,
 ) {
+    // The policy decides per hook point; the flag resolves once here so
+    // every call site stays a single expression.
+    let checkpoint_on = durability.as_ref().is_some_and(|dur| enabled(&dur.policy));
     // Disabled policy exits first: rendering the snapshot and deriving the
     // label are a full O(history) walk that would otherwise be computed and
     // dropped on every turn when no checkpoint can be written (the plain

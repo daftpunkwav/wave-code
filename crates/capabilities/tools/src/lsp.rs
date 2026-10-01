@@ -2007,8 +2007,9 @@ mod tests {
         // Fake server: answers `initialize` (id 1), replies to the
         // navigation request (id 2) with the three variables embedded, and
         // answers the tool's `shutdown` (id 3) so the call never waits out
-        // its timeout on a quiet pipe. It never reads stdin, so all frames
-        // land before the first read.
+        // its timeout on a quiet pipe. Responses are written first, then
+        // stdin is drained until the client closes it. Exiting immediately
+        // closes that pipe, and a later write fails with EPIPE.
         #[cfg(windows)]
         let server_command = {
             let script = dir.path().join("lsp_env.ps1");
@@ -2021,6 +2022,8 @@ mod tests {
                     "[Console]::Out.Write('Content-Length: ' + $b1.Length + \"`r`n`r`n\" + $b1)\n",
                     "[Console]::Out.Write('Content-Length: ' + $b2.Length + \"`r`n`r`n\" + $b2)\n",
                     "[Console]::Out.Write('Content-Length: ' + $b3.Length + \"`r`n`r`n\" + $b3)\n",
+                    "[Console]::Out.Flush()\n",
+                    "[Console]::In.ReadToEnd() | Out-Null\n",
                 ),
             )
             .unwrap();
@@ -2035,6 +2038,7 @@ mod tests {
             std::fs::write(
                 &script,
                 concat!(
+                    "(\n",
                     "b1=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":1,\\\"result\\\":{\\\"capabilities\\\":{}}}\"",
                     "\n",
                     "b2=\"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":2,\\\"result\\\":{\\\"v\\\":\\\"$FOO_LSP_SECRET|$FOO_LSP_DENY|$FOO_LSP_NORMAL\\\"}}\"",
@@ -2047,6 +2051,8 @@ mod tests {
                     "\n",
                     "printf 'Content-Length: %s\\r\\n\\r\\n%s' \"${#b3}\" \"$b3\"",
                     "\n",
+                    ")\n",
+                    "cat >/dev/null\n",
                 ),
             )
             .unwrap();

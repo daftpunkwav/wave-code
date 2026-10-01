@@ -367,12 +367,27 @@ fn resolved_for_sensitive_check(path: &str) -> String {
         .unwrap_or_else(|_| path.to_string())
 }
 
-/// Sensitive credential detection for [`Sandbox::decide`]: returns a
-/// short reason when the path names a file that usually holds secrets.
+/// Model-supplied language-server program, if the call carries one.
+///
+/// Empty and non-string values are absent: the tool reports those itself,
+/// and a missing override keeps the registered (read-only) provider path.
+fn server_command_text(input: &serde_json::Value) -> Option<&str> {
+    let command = input.get("server_command")?.as_str()?.trim();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+/// Sensitive credential detection for [`Sandbox::decide`] and for content
+/// search that would otherwise return secret file bodies without a `path`
+/// the policy check can see. Returns a short reason when the path names a
+/// file that usually holds secrets.
 /// Matched on separators-normalized lowercase: the `.env` family
 /// (documentation variants exempt), SSH private-key names with suffix
 /// variants, and cloud provider credential stores.
-fn sensitive_path_reason(path: &str) -> Option<&'static str> {
+pub fn sensitive_credential_reason(path: &str) -> Option<&'static str> {
     const ENV_REASON: &str = "environment files usually hold secrets";
     const SSH_REASON: &str = "SSH private keys";
     const CLOUD_REASON: &str = "cloud provider credential stores";
@@ -659,6 +674,22 @@ impl Sandbox {
                 reason: format!("denied by permission rule: {rule}"),
             };
         }
+        // LSP tools are declared read-only, but `server_command` is a
+        // model-supplied program that spawns before any handshake. Deny
+        // rules key on `command`, so judge that string as a shell command
+        // too — otherwise `Bash(python *)` never sees the spawn.
+        if let Some(command) = server_command_text(input) {
+            let as_command = serde_json::json!({ "command": command });
+            if let Some(rule) = self
+                .deny
+                .iter()
+                .find(|r| r.matches(&as_command) || r.matches_any_segment(&as_command))
+            {
+                return Verdict::Deny {
+                    reason: format!("denied by permission rule: {rule}"),
+                };
+            }
+        }
         // 1.9 Sensitive credential files always ask (deny rules above
         // still win; exact session allows below still exempt): `.env`
         // files, SSH private keys, and cloud credential stores hold
@@ -674,7 +705,7 @@ impl Sandbox {
             && let Some(path) = input.get("path").and_then(serde_json::Value::as_str)
         {
             let resolved = resolved_for_sensitive_check(path);
-            if let Some(reason) = sensitive_path_reason(&resolved) {
+            if let Some(reason) = sensitive_credential_reason(&resolved) {
                 // `allow_always` records the approved text normalized the
                 // same way `matches_text` normalizes candidates, so the
                 // exemption must compare those spellings: on an existing
@@ -771,6 +802,49 @@ impl Sandbox {
             && let Some(verdict) = question_verdict(input)
         {
             return verdict;
+        }
+        // 2.7 Model-supplied language-server spawns are command execution
+        // even when the tool's static attribute is read-only. Plan mode
+        // denies them (its read-only branch below would otherwise allow
+        // the spawn). Auto asks. Wave still falls through, after the
+        // deny pass above and the dangerous-command ask here.
+        if let Some(command) = server_command_text(input) {
+            if let Some(reason) = risk::dangerous_reason(command) {
+                let exact_allows = lock(&self.allow)
+                    .iter()
+                    .any(|r| r.scope == RuleScope::Bash && r.exact && r.matches_text(command));
+                if !exact_allows {
+                    if matches!(self.mode(), PermissionMode::Plan) {
+                        return Verdict::Deny {
+                            reason: format!(
+                                "plan mode: language-server command was flagged as dangerous ({reason})"
+                            ),
+                        };
+                    }
+                    return Verdict::Ask {
+                        kind: ApprovalKind::Exec,
+                        detail: format!(
+                            "spawn language server `{command}` was flagged as dangerous ({reason}); approve to run it"
+                        ),
+                    };
+                }
+            }
+            match self.mode() {
+                PermissionMode::Plan => {
+                    return Verdict::Deny {
+                        reason: format!(
+                            "plan mode: spawning `{command}` is command execution, not a read-only lookup"
+                        ),
+                    };
+                }
+                PermissionMode::Wave => {}
+                _ => {
+                    return Verdict::Ask {
+                        kind: ApprovalKind::Exec,
+                        detail: format!("spawn language server `{command}`"),
+                    };
+                }
+            }
         }
         // 3. Mode default policy (the ask-free phrasing below describes
         //    only this branch; step 1.9's sensitive-file ask happens
@@ -2089,19 +2163,82 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_path_reason_matrix() {
-        assert!(sensitive_path_reason(".env").is_some());
-        assert!(sensitive_path_reason("a/b/.env.local").is_some());
-        assert!(sensitive_path_reason(".env.example").is_none());
-        assert!(sensitive_path_reason(".env.sample").is_none());
+    fn sensitive_credential_reason_matrix() {
+        assert!(sensitive_credential_reason(".env").is_some());
+        assert!(sensitive_credential_reason("a/b/.env.local").is_some());
+        assert!(sensitive_credential_reason(".env.example").is_none());
+        assert!(sensitive_credential_reason(".env.sample").is_none());
         // Trailing naming forms carry the same secrets.
-        assert!(sensitive_path_reason("prod.env").is_some());
-        assert!(sensitive_path_reason("config/secrets.env").is_some());
-        assert!(sensitive_path_reason(".envrc").is_some());
-        assert!(sensitive_path_reason("sample.env").is_none());
-        assert!(sensitive_path_reason("ssh/id_ed25519-old").is_some());
-        assert!(sensitive_path_reason("identity.pub").is_none());
-        assert!(sensitive_path_reason("src/main.rs").is_none());
+        assert!(sensitive_credential_reason("prod.env").is_some());
+        assert!(sensitive_credential_reason("config/secrets.env").is_some());
+        assert!(sensitive_credential_reason(".envrc").is_some());
+        assert!(sensitive_credential_reason("sample.env").is_none());
+        assert!(sensitive_credential_reason("ssh/id_ed25519-old").is_some());
+        assert!(sensitive_credential_reason("identity.pub").is_none());
+        assert!(sensitive_credential_reason("src/main.rs").is_none());
+    }
+
+    /// A read-only LSP lookup that also carries `server_command` is a spawn.
+    /// Plan mode must deny it; the registered-provider path (no command)
+    /// stays allowed. Bash deny rules match the command string.
+    #[test]
+    fn lsp_server_command_is_not_a_read_only_lookup() {
+        let plan = Sandbox::without_rules(PermissionMode::Plan);
+        let registered = plan.decide(
+            "lsp_symbols",
+            &json!({"path": "src/main.rs"}),
+            true,
+            false,
+            ToolKind::Other,
+        );
+        assert!(
+            matches!(registered, Verdict::Allow),
+            "a registered language server is still a read-only lookup: {registered:?}"
+        );
+        let spawned = plan.decide(
+            "lsp_symbols",
+            &json!({"path": "src/main.rs", "server_command": "rust-analyzer"}),
+            true,
+            false,
+            ToolKind::Other,
+        );
+        assert!(
+            matches!(spawned, Verdict::Deny { .. }),
+            "plan mode must not spawn a model-supplied server: {spawned:?}"
+        );
+
+        let auto = Sandbox::without_rules(PermissionMode::Auto);
+        let asked = auto.decide(
+            "lsp_symbols",
+            &json!({"path": "src/main.rs", "server_command": "rust-analyzer"}),
+            true,
+            false,
+            ToolKind::Other,
+        );
+        assert!(
+            matches!(
+                asked,
+                Verdict::Ask {
+                    kind: ApprovalKind::Exec,
+                    ..
+                }
+            ),
+            "auto mode must ask before spawning: {asked:?}"
+        );
+
+        let denied =
+            Sandbox::new(PermissionMode::Wave, &[], &["Bash(python *)".to_string()]).unwrap();
+        let blocked = denied.decide(
+            "lsp_symbols",
+            &json!({"path": "a.rs", "server_command": "python -c pass"}),
+            true,
+            false,
+            ToolKind::Other,
+        );
+        assert!(
+            matches!(blocked, Verdict::Deny { .. }),
+            "a Bash deny rule must cover server_command: {blocked:?}"
+        );
     }
 
     /// A symlink whose spelling is innocent but whose target is a

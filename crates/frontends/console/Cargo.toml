@@ -10,9 +10,12 @@ license.workspace = true
 # tui-engine. Session identity/journaling for the pickers rides
 # state-persistence; user paths resolve through the shared
 # wavecode-config home definition; permission-mode vocabulary (mode
-# cycle, aliases) comes from wavecode-protocol. Internal dependencies
-# are exactly those six; tests::dependency_matrix_locked locks the set.
+# cycle, aliases) comes from wavecode-protocol. Shell cancel tree-kills
+# through infrastructure-base (the same helper the tool shell uses).
+# Internal dependencies are exactly those seven;
+# tests::dependency_matrix_locked locks the set.
 [dependencies]
+infrastructure-base = { path = "../../infrastructure/base" }
 tui-engine = { path = "../engine" }
 wavecode-wire = { path = "../../foundation/wire" }
 wavecode-protocol = { path = "../../foundation/protocol" }

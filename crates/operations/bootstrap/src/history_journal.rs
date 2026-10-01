@@ -92,16 +92,19 @@ pub fn replay_history(journal: &HistoryJournal) -> Replayed {
     let read = journal.read();
     let mut entries: Vec<HistoryEntry> = Vec::new();
     let mut expected_seq: u64 = 0;
-    let mut gapped = false;
+    // A corrupt line between records already dropped everything after it.
+    // That prefix is verified only when the caller treats the read as gapped.
+    let mut gapped = read.mid_gap;
     let mut next_seq = 0u64;
     for record in &read.records {
         let seq = record.get("seq").and_then(serde_json::Value::as_u64);
+        // Stop before applying a record whose sequence jumped. Applying it
+        // and then closing open calls at the very end puts a synthetic
+        // tool result after later messages, which providers reject.
         if seq != Some(expected_seq) {
             gapped = true;
+            break;
         }
-        let seq = seq.unwrap_or(expected_seq);
-        expected_seq = seq + 1;
-        next_seq = seq + 1;
         match record.get("k").and_then(serde_json::Value::as_str) {
             Some("append") => match decode_entry(record.get("entry")) {
                 Some(entry) => entries.push(entry),
@@ -124,6 +127,8 @@ pub fn replay_history(journal: &HistoryJournal) -> Replayed {
                 break;
             }
         }
+        expected_seq += 1;
+        next_seq = expected_seq;
     }
     let (entries, lost_calls) = state_store::close_open_calls(&entries, UNKNOWN_OUTCOME);
     Replayed {
@@ -275,7 +280,49 @@ mod tests {
             .unwrap();
         let replayed = replay_history(&journal);
         assert!(replayed.gapped);
-        assert_eq!(replayed.next_seq, 3, "numbering still continues");
+        assert_eq!(replayed.entries.len(), 1, "records after the hole stay out");
+        assert_eq!(replayed.entries[0].text(), "a");
+        assert_eq!(replayed.next_seq, 1, "numbering resumes at the hole");
+    }
+
+    /// A hole where a tool result should have been must not keep the later
+    /// messages and then tack a synthetic result onto the end.
+    #[test]
+    fn a_gap_does_not_apply_records_after_the_hole() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = journal_in(dir.path());
+        journal
+            .append(&serde_json::json!({
+                "k": "append",
+                "seq": 0,
+                "entry": {
+                    "role": "assistant",
+                    "blocks": [{"tool_use": {"call_id": "c1", "name": "shell", "input": {"command": "ls"}}}]
+                }
+            }))
+            .unwrap();
+        journal
+            .append(&serde_json::json!({
+                "k": "append",
+                "seq": 2,
+                "entry": {"role": "assistant", "blocks": [{"text": "later"}]}
+            }))
+            .unwrap();
+        let replayed = replay_history(&journal);
+        assert!(replayed.gapped);
+        assert_eq!(replayed.lost_calls, vec!["c1".to_string()]);
+        assert_eq!(
+            replayed.entries.len(),
+            2,
+            "tool call plus the closing result"
+        );
+        assert!(
+            matches!(
+                replayed.entries.last().map(|entry| entry.blocks.last()),
+                Some(Some(Block::ToolResult { call_id, .. })) if call_id == "c1"
+            ),
+            "the synthetic result stays adjacent to the open call"
+        );
     }
 
     /// A journal written before tool results carried wall-clock stamps has

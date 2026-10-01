@@ -105,6 +105,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grep_directory_search_skips_credential_bodies() {
+        let (_d, c) = ctx();
+        std::fs::write(c.cwd.join(".env"), "API_KEY=super-secret\n").unwrap();
+        std::fs::write(c.cwd.join("notes.txt"), "API_KEY is documented\n").unwrap();
+        let scanned = Grep
+            .execute(serde_json::json!({"pattern": "API_KEY"}), &c)
+            .await
+            .unwrap();
+        assert!(!scanned.is_error, "{}", scanned.content);
+        assert!(scanned.content.contains("notes.txt"));
+        assert!(!scanned.content.contains("super-secret"));
+        assert!(scanned.content.contains("skipped"));
+        let explicit = Grep
+            .execute(
+                serde_json::json!({"pattern": "API_KEY", "path": ".env"}),
+                &c,
+            )
+            .await
+            .unwrap();
+        assert!(
+            explicit.content.contains("super-secret"),
+            "an explicit credential path is the call the policy ask already gated: {}",
+            explicit.content
+        );
+    }
+
+    #[tokio::test]
     async fn grep_matches_with_line_numbers_and_footer() {
         let (_d, c) = ctx();
         std::fs::create_dir(c.cwd.join("src")).unwrap();

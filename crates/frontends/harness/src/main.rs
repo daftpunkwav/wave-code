@@ -666,6 +666,8 @@ mod tests {
             names,
             [
                 "console-ui",
+                // Eval timeouts tree-kill through the shared helper.
+                "infrastructure-base",
                 "operations-actor",
                 "operations-bootstrap",
                 "operations-eval",

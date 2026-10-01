@@ -10,6 +10,7 @@ name = "wavecode"
 path = "src/main.rs"
 
 [dependencies]
+infrastructure-base = { path = "../../infrastructure/base" }
 operations-actor = { path = "../../operations/actor" }
 operations-bootstrap = { path = "../../operations/bootstrap" }
 operations-gateway = { path = "../../operations/gateway" }

@@ -126,6 +126,11 @@ pub fn shell_invocation() -> (String, &'static str) {
 #[cfg(windows)]
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
+/// Windows `CREATE_NO_WINDOW`. `taskkill` is a console subsystem binary;
+/// without this flag a tree kill flashes a console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// Mark `cmd` as its own process-group leader, the precondition of [`kill_tree`].
 ///
 /// Unix: `process_group(0)`. Windows: `CREATE_NEW_PROCESS_GROUP`. Every spawn
@@ -155,6 +160,10 @@ pub fn lead_process_group(cmd: &mut std::process::Command) {
 /// fails — and both degrade to no-ops; the narrow pid-reuse window this
 /// leaves matches the accepted race in the job service's cancel path. The
 /// caller still reaps the direct child itself (kill/await on its handle).
+///
+/// On Windows this waits until `taskkill` exits, so the tree is gone when
+/// the call returns. A UI thread must move that wait off itself
+/// (`std::thread::spawn`); Unix `killpg` returns immediately.
 pub fn kill_tree(pid: u32) {
     #[cfg(unix)]
     {
@@ -169,11 +178,13 @@ pub fn kill_tree(pid: u32) {
         // Windows has no group-kill primitive here; `taskkill /T /F` is
         // the tree-kill analogue (the sandbox backend's kill-on-close Job
         // Object is the stronger confinement-side mechanism).
+        use std::os::windows::process::CommandExt;
         let _ = std::process::Command::new(taskkill_program())
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
             .status();
     }
     #[cfg(not(any(unix, windows)))]

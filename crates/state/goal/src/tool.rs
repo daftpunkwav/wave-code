@@ -51,12 +51,14 @@ pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (GoalState, Op
 }
 
 /// Shared goal handle: the in-memory machine plus its resume file.
-/// Mutations persist outside the lock via blocking IO so tool
-/// execution stays truly async.
+/// The state mutex covers the CAS. [`Self::persist_lock`] is held across
+/// the mutation and the following disk write, so a slower persist cannot
+/// overwrite a newer snapshot that already reached disk.
 #[derive(Debug)]
 pub struct GoalStore {
     state: Mutex<GoalState>,
     file: Option<PathBuf>,
+    persist_lock: tokio::sync::Mutex<()>,
 }
 
 impl GoalStore {
@@ -69,6 +71,7 @@ impl GoalStore {
         Self {
             state: Mutex::new(state),
             file,
+            persist_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -358,6 +361,7 @@ impl GoalTool {
     /// blocks the goal) while reporting an error, so unlike the other
     /// actions it must persist the snapshot on the cap path too.
     async fn action_tick(&self) -> Result<ToolOutput> {
+        let _persist = self.store.persist_lock.lock().await;
         let (snapshot, file, rendered, capped) = {
             let mut guard = self.store.lock();
             match guard.round_tick() {
@@ -401,6 +405,7 @@ async fn apply_transition(
     action: &'static str,
     transition: impl FnOnce(&mut GoalState) -> std::result::Result<(), crate::GoalError>,
 ) -> ToolOutput {
+    let _persist = store.persist_lock.lock().await;
     let (snapshot, file, rendered) = {
         let mut guard = store.lock();
         if let Err(e) = transition(&mut guard) {
@@ -749,5 +754,55 @@ mod tests {
             Tool::kind(&GoalTool::new(store)),
             wavecode_protocol::ToolKind::SessionState
         );
+    }
+
+    /// Overlapping updates must leave the file on the same version the
+    /// memory machine reports. A persist that runs after the lock is
+    /// released can write an older snapshot over a newer one.
+    #[tokio::test]
+    async fn concurrent_updates_persist_the_memory_version() {
+        let home = tempfile::tempdir().unwrap();
+        let store = store_in(home.path());
+        let ctx = ctx(&home);
+        let goal = GoalTool::new(store.clone());
+        goal.execute(
+            serde_json::json!({"action": "set", "objective": "start"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let mut tasks = Vec::new();
+        for index in 0..8 {
+            let store = store.clone();
+            let ctx = ctx.clone();
+            tasks.push(tokio::spawn(async move {
+                let goal = GoalTool::new(store.clone());
+                for _ in 0..16 {
+                    let version = store.snapshot().version;
+                    let out = goal
+                        .execute(
+                            serde_json::json!({
+                                "action": "update",
+                                "objective": format!("edit-{index}-{version}"),
+                                "expected_version": version,
+                            }),
+                            &ctx,
+                        )
+                        .await
+                        .unwrap();
+                    if !out.is_error {
+                        return;
+                    }
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let memory = store.snapshot().version;
+        let (disk, warning) = load_for_session(Some(home.path()), "test");
+        assert!(warning.is_none(), "{warning:?}");
+        assert_eq!(disk.version, memory);
+        assert!(disk.version > 1, "at least one update should have landed");
     }
 }

@@ -414,15 +414,18 @@ where
 }
 
 /// Drop the last `turns` user turns from the conversation: each user
-/// entry and everything after it, up to the next user entry. Entries
-/// before the first user entry (compaction summaries) are never
-/// dropped. Returns the number of turns actually removed.
+/// prompt and everything after it, up to the next user prompt. Entries
+/// before the first user prompt (compaction summaries) are never
+/// dropped. Tool results, continuation prompts, and system reminders
+/// are user-role entries but not turn boundaries — cutting on them
+/// leaves an assistant `tool_use` with no result. Returns the number
+/// of turns actually removed.
 fn rewind_conversation(conv: &mut Conversation, turns: u32) -> u32 {
     let entries = conv.snapshot();
     let user_positions: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.role == Role::User)
+        .filter(|(_, entry)| is_user_turn(entry))
         .map(|(index, _)| index)
         .collect();
     let drop = (turns as usize).min(user_positions.len());
@@ -432,6 +435,33 @@ fn rewind_conversation(conv: &mut Conversation, turns: u32) -> u32 {
     let cutoff = user_positions[user_positions.len() - drop];
     conv.replace(entries[..cutoff].to_vec());
     drop as u32
+}
+
+/// A user-authored turn, as opposed to a harness entry stored under the
+/// user role so providers will accept it.
+fn is_user_turn(entry: &state_store::HistoryEntry) -> bool {
+    if entry.role != Role::User {
+        return false;
+    }
+    if entry
+        .blocks
+        .iter()
+        .any(|block| matches!(block, state_store::Block::ToolResult { .. }))
+    {
+        return false;
+    }
+    let prose = entry.prose();
+    if prose.contains(wavecode_wire::SYSTEM_REMINDER_OPEN)
+        || prose == runtime_runner::CONTINUATION_PROMPT
+    {
+        return false;
+    }
+    entry.blocks.iter().any(|block| {
+        matches!(
+            block,
+            state_store::Block::Text(_) | state_store::Block::Image { .. }
+        )
+    })
 }
 
 /// Run one session lifecycle hook point, tagging events with the
@@ -860,6 +890,49 @@ mod tests {
             conv.push(Role::Assistant, format!("answer {i}"));
         }
         conv
+    }
+
+    #[test]
+    fn rewind_does_not_split_a_tool_pair() {
+        let mut conv = Conversation::new();
+        conv.push(Role::User, "first");
+        conv.push(Role::Assistant, "ack");
+        conv.push(Role::User, "do it");
+        conv.push_blocks(
+            Role::Assistant,
+            vec![state_store::Block::ToolUse {
+                call_id: "c1".to_string(),
+                name: "write".to_string(),
+                input: serde_json::json!({"path": "a.txt"}),
+            }],
+        );
+        conv.push_blocks(
+            Role::User,
+            vec![state_store::Block::ToolResult {
+                call_id: "c1".to_string(),
+                content: "wrote".to_string(),
+                is_error: false,
+                produced_at: None,
+            }],
+        );
+        conv.push(
+            Role::User,
+            wavecode_wire::wrap_system_reminder("goal still open"),
+        );
+        conv.push(Role::Assistant, "done");
+
+        assert_eq!(super::rewind_conversation(&mut conv, 1), 1);
+        let entries = conv.snapshot();
+        assert_eq!(entries.len(), 2, "only the first user turn remains");
+        assert_eq!(entries[0].text(), "first");
+        assert_eq!(entries[1].text(), "ack");
+        assert!(
+            !entries.iter().any(|entry| entry
+                .blocks
+                .iter()
+                .any(|block| { matches!(block, state_store::Block::ToolUse { .. }) })),
+            "undo must not leave a tool_use behind"
+        );
     }
 
     fn rewind(turns: u32) -> Submission {

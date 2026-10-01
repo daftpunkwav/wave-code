@@ -49,14 +49,17 @@ pub struct RawRun {
 /// the check. Output drains in reader threads so a chatty check cannot
 /// deadlock on a full pipe while we poll for exit.
 fn spawn_capped(program: &OsStr, args: &[String], cwd: &Path, cap: Duration) -> RawRun {
-    let mut child = match Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // Own group so a timeout can signal the whole tree. Without it a
+    // grandchild holding the pipes blocks the reader joins forever, and
+    // a group signal would hit this process.
+    infrastructure_base::lead_process_group(&mut cmd);
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             return RawRun {
@@ -85,7 +88,7 @@ fn spawn_capped(program: &OsStr, args: &[String], cwd: &Path, cap: Duration) -> 
             Ok(None) => {
                 if started.elapsed() >= cap {
                     note = format!("killed after {}s", cap.as_secs());
-                    kill_tree(&mut child);
+                    infrastructure_base::kill_tree(child.id());
                     let _ = child.wait();
                     break None;
                 }
@@ -135,36 +138,6 @@ fn spawn_reader(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec
 
 fn empty_reader() -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(Vec::new)
-}
-
-/// Kill the whole process tree, not just the direct child: a spawned
-/// grandchild inherits the stdout/stderr pipes, and a pipe-holding
-/// survivor would keep the reader threads waiting on EOF forever, so the
-/// `join()`s below would block past the wall cap. Mirrors the
-/// `taskkill /F /T` hazard fix in console's shell controller. On POSIX
-/// the direct kill remains (the child shares our process group, so a
-/// group kill is not safe without spawning into a new session).
-fn kill_tree(child: &mut std::process::Child) {
-    #[cfg(windows)]
-    {
-        let pid = child.id();
-        use std::os::windows::process::CommandExt;
-        // Fire-and-forget: taskkill finishes on its own once the tree is
-        // terminated. The program path is the shared System32 resolution:
-        // a bare `taskkill` would run a planted executable from the work
-        // root. This spawn is not a process-group leader, so the Unix
-        // branch must not call `infrastructure_base::kill_tree` (a group
-        // signal would hit the eval harness itself).
-        let _ = std::process::Command::new(state_persistence::taskkill_program())
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn();
-    }
-    #[cfg(not(windows))]
-    let _ = child.kill();
 }
 
 /// The world an eval judges: files under one work root, commands run in it.

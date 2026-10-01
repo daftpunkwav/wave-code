@@ -208,6 +208,20 @@ impl DirectoryInstructions {
     }
 }
 
+/// Land discovered directory instructions as persistent user entries.
+fn land_directory_instructions(conv: &mut Conversation, items: Vec<(std::path::PathBuf, String)>) {
+    for (directory, content) in items {
+        conv.push(
+            Role::User,
+            wavecode_wire::wrap_system_reminder(&format!(
+                "Project instructions from {}:\n\n{}",
+                directory.display(),
+                content.trim_end()
+            )),
+        );
+    }
+}
+
 /// Shared slot the `compact_context` tool writes and the run loop
 /// consumes at the next loop head.
 ///
@@ -435,6 +449,15 @@ pub trait ToolExecutor: Send + Sync {
     /// when the model touches the relevant files again. Default does
     /// nothing.
     fn note_compacted(&self) {}
+
+    /// Observe a call that is about to run.
+    ///
+    /// Discovery layers queue per-directory instructions here. `turn` is
+    /// the child turn's private slot; `None` is the session turn, which
+    /// drains the shared queue on the loop. Called synchronously before
+    /// [`Self::execute`], on the task that is about to run the body.
+    /// Default does nothing.
+    fn note_tool_call(&self, _call: &ToolCall, _turn: Option<&DirectoryInstructions>) {}
 }
 
 /// Decides the policy verdict for one tool call before execution.
@@ -1327,6 +1350,12 @@ where
         // or clears shared state — resetting the session flag here would
         // swallow a user interrupt racing the child start, and clearing
         // the gates would drop a parent approval parked mid-wait.
+        // The same flag keeps the child off the session inbox and the
+        // compaction slot. Those are single queues; a child loop head
+        // would drain a steer or a compaction meant for the parent turn.
+        // Directory instructions are split: the child drains a private
+        // slot filled from its own tool calls, and the shared queue stays
+        // for the parent.
         let run_interrupt = self.run_interrupts.take(&ctx.run_id);
         let owns_session_state = run_interrupt.is_none();
         let interrupt = TurnInterrupt {
@@ -1392,6 +1421,9 @@ where
         // a downgrade compacts at the next loop head instead of the next
         // sample failing hard on overflow.
         let mut window;
+        // Child turns keep a private instruction slot. Discovery offers
+        // into it for this turn only; the shared queue stays the parent's.
+        let child_instructions = (!owns_session_state).then(DirectoryInstructions::new);
 
         loop {
             window = self.effective_window();
@@ -1406,26 +1438,23 @@ where
             // land as user history at the loop head, ahead of the budget
             // line and the next sample.
             let mut applied = 0;
-            for text in self.inbox.take_next_turn() {
-                conv.push(Role::User, text);
-                applied += 1;
+            if owns_session_state {
+                for text in self.inbox.take_next_turn() {
+                    conv.push(Role::User, text);
+                    applied += 1;
+                }
             }
 
             // Per-directory instructions discovered by the file tools:
             // each lands as a persistent user entry, so a directory's
             // rules ride the conversation from the turn after its first
-            // touched file onward.
-            if let Some(requests) = self.instruction_requests.as_ref() {
-                for (directory, content) in requests.take_all() {
-                    conv.push(
-                        Role::User,
-                        wavecode_wire::wrap_system_reminder(&format!(
-                            "Project instructions from {}:\n\n{}",
-                            directory.display(),
-                            content.trim_end()
-                        )),
-                    );
-                }
+            // touched file onward. A child drains only its private slot,
+            // so it sees the rules it just discovered and leaves anything
+            // still queued for the parent.
+            if let Some(slot) = child_instructions.as_ref() {
+                land_directory_instructions(conv, slot.take_all());
+            } else if let Some(requests) = self.instruction_requests.as_ref() {
+                land_directory_instructions(conv, requests.take_all());
             }
 
             // Context use feeds both gates below. The incremental estimator
@@ -1443,7 +1472,10 @@ where
                 Some(input_tokens) => input_tokens.saturating_add(last_output.unwrap_or(0)),
                 None => {
                     if carry.input_tokens > 0 {
-                        carry.input_tokens + carry.output_tokens
+                        // `output_tokens` is the turn's billing total. The
+                        // last sample's own output is the only part not
+                        // already inside `input_tokens`.
+                        carry.input_tokens.saturating_add(carry.last_output_tokens)
                     } else {
                         estimate_cache.estimate(conv) + CONTEXT_OVERHEAD_TOKENS
                     }
@@ -1559,7 +1591,7 @@ where
             // head, because `used` is stale after the rewrite.
             let mut denials: Vec<String> = Vec::new();
             let mut granted = false;
-            if let Some(slot) = self.compaction_requests.as_ref() {
+            if owns_session_state && let Some(slot) = self.compaction_requests.as_ref() {
                 for reason in slot.take_all() {
                     if granted {
                         denials.push(format!(
@@ -1604,12 +1636,16 @@ where
             // Pre-sample steering (NextStep target) plus direct injections:
             // both land as user history immediately before the next sample
             // so they steer the upcoming call, after the budget line.
-            for text in self
-                .inbox
-                .take_next_step()
-                .into_iter()
-                .chain(self.inbox.take_injected())
-            {
+            let steered = if owns_session_state {
+                self.inbox
+                    .take_next_step()
+                    .into_iter()
+                    .chain(self.inbox.take_injected())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            for text in steered {
                 conv.push(Role::User, text);
                 applied += 1;
             }
@@ -1918,7 +1954,13 @@ where
                 }
             }
             let (results, hook_contexts) = self
-                .execute_calls(&ctx.run_id, &calls, &interrupt, &emit_msg)
+                .execute_calls(
+                    &ctx.run_id,
+                    &calls,
+                    &interrupt,
+                    child_instructions.as_ref(),
+                    &emit_msg,
+                )
                 .await;
             conv.push_blocks(
                 Role::User,
@@ -2026,6 +2068,20 @@ where
         self.do_compact(conv, trigger, emit).await
     }
 
+    /// Run one tool body. A child turn's private instruction slot is visible
+    /// to discovery before the body starts, so the rules land on that slot
+    /// rather than only on the session queue.
+    async fn run_tool(
+        &self,
+        call: ToolCall,
+        turn_instructions: Option<&DirectoryInstructions>,
+    ) -> ToolResult {
+        if let Some(slot) = turn_instructions {
+            self.executor.note_tool_call(&call, Some(slot));
+        }
+        self.executor.execute(call).await
+    }
+
     /// Dispatch one tool-use batch with policy, approvals, and hooks.
     ///
     /// All ToolCallBegin events go out upfront in declaration order; all
@@ -2049,6 +2105,7 @@ where
         run_id: &str,
         calls: &[ToolCall],
         interrupt: &TurnInterrupt,
+        turn_instructions: Option<&DirectoryInstructions>,
         emit: &(dyn Fn(EventMsg) + Send + Sync),
     ) -> (Vec<ToolResult>, Vec<String>) {
         // Prompt-type hook contexts from this dispatch batch (pre- and
@@ -2204,7 +2261,7 @@ where
             .map(|call| async move {
                 let id = call.call_id.clone();
                 let started = Instant::now();
-                let output = self.executor.execute(call.clone()).await;
+                let output = self.run_tool(call.clone(), turn_instructions).await;
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 (id, call, output, elapsed_ms)
             })
@@ -2308,7 +2365,7 @@ where
                 continue;
             }
             let started = Instant::now();
-            let output = self.executor.execute(call.clone()).await;
+            let output = self.run_tool(call.clone(), turn_instructions).await;
             ran_ms.insert(call.call_id.clone(), started.elapsed().as_millis() as u64);
             if let Some(context) = self.post_tool(call, &output, emit).await {
                 hook_contexts.push(format!("[hook:post-tool-use {}] {}", call.name, context));
@@ -2696,6 +2753,7 @@ fn settle(
     conv.settle(Usage {
         input_tokens: *input,
         output_tokens: state.total_output_tokens,
+        last_output_tokens: last_output.unwrap_or(0),
         cache_read_tokens: state.total_cache_read_tokens,
         cache_creation_tokens: state.total_cache_creation_tokens,
     });
@@ -5717,6 +5775,64 @@ mod run_loop_tests {
         );
     }
 
+    /// The next turn's budget uses the last sample's output, not the
+    /// turn's cumulative output. Adding the cumulative total here would
+    /// see 30_000 tokens against a 25_000 window and compact immediately.
+    #[tokio::test]
+    async fn next_turn_budget_ignores_output_already_inside_the_prompt() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("ok")));
+        let conv = &mut Conversation::new();
+        conv.settle(Usage {
+            input_tokens: 10_000,
+            output_tokens: 20_000,
+            last_output_tokens: 100,
+            ..Usage::default()
+        });
+        let events = fx.events.clone();
+        let outcome = RunLoop::new(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 25_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 4,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+            },
+            fx.interrupt.clone(),
+        )
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        assert!(
+            !fx.event_kinds()
+                .iter()
+                .any(|kind| kind == "compact_started"),
+            "resident context is 10_100 of 25_000, above the compact line: {:?}",
+            fx.event_kinds()
+        );
+    }
+
     /// A successful sample that reports no input billing skips the settle
     /// (the usage carry stays at its previous value) and makes the gap
     /// visible with a warning instead of settling silently.
@@ -6362,6 +6478,109 @@ mod run_loop_tests {
                 && history.contains("APP RULES"),
             "{history}"
         );
+    }
+
+    /// Offers into the child slot the loop passes down, and nowhere else.
+    struct NoticingExecutor {
+        inner: FakeExecutor,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for NoticingExecutor {
+        async fn execute(&self, call: ToolCall) -> ToolResult {
+            self.inner.execute(call).await
+        }
+
+        fn is_read_only(&self, tool: &str) -> bool {
+            self.inner.is_read_only(tool)
+        }
+
+        fn is_destructive(&self, tool: &str) -> bool {
+            self.inner.is_destructive(tool)
+        }
+
+        fn note_tool_call(&self, call: &ToolCall, turn: Option<&DirectoryInstructions>) {
+            if let Some(turn) = turn {
+                turn.offer(
+                    std::path::PathBuf::from("/w/pkg"),
+                    format!("PKG RULES for {}", call.name),
+                );
+            }
+        }
+    }
+
+    /// A child turn injects instructions discovered by its own tools, and
+    /// leaves instructions already queued for the parent where they are.
+    #[tokio::test]
+    async fn child_turn_lands_its_own_directory_instructions() {
+        let fx = Fixture::new();
+        let (_, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        model.steps.lock().unwrap().push_back(call_step(
+            "c1",
+            "read_file",
+            serde_json::json!({"path": "pkg/lib.rs"}),
+        ));
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(text_response("done")));
+        let requests = std::sync::Arc::new(DirectoryInstructions::new());
+        requests.offer(
+            std::path::PathBuf::from("/w/parent"),
+            "PARENT RULES".to_string(),
+        );
+        let conv = &mut Conversation::new();
+        let run = RunLoop::new(
+            NoticingExecutor {
+                inner: FakeExecutor::new(&["read_file"]),
+            },
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            RunConfig {
+                model_name: "test".to_string(),
+                context_window: 200_000,
+                max_output_tokens: 100,
+                max_tool_rounds: 8,
+                max_continuations: MAX_CONTINUATIONS,
+                max_plan_nudges: MAX_PLAN_NUDGES,
+                max_goal_continuations: MAX_GOAL_CONTINUATIONS,
+                max_goal_rearms: MAX_GOAL_REARMS,
+                max_stop_blocks: MAX_STOP_BLOCKS,
+                max_reactive_compacts: MAX_REACTIVE_COMPACTS,
+                max_repeat_streak: MAX_REPEAT_STREAK,
+                max_wire_images: MAX_WIRE_IMAGES,
+            },
+            fx.interrupt.clone(),
+        )
+        .with_instruction_requests(requests.clone());
+        run.run_interrupts()
+            .register(&fx.ctx.run_id, InterruptHandle::new());
+        let outcome = run
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|_| {})
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|entry| entry.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            history.contains("PKG RULES for read_file"),
+            "the child never saw the rules it discovered: {history}"
+        );
+        assert!(
+            !history.contains("PARENT RULES"),
+            "the child drained the parent's queue: {history}"
+        );
+        let left = requests.take_all();
+        assert_eq!(left.len(), 1, "parent instructions were consumed: {left:?}");
+        assert_eq!(left[0].1, "PARENT RULES");
     }
 
     /// The wire projection keeps only the newest images and leaves visible

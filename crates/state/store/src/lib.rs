@@ -183,8 +183,15 @@ impl HistoryEntry {
 pub struct Usage {
     /// Input tokens of the latest sample.
     pub input_tokens: u64,
-    /// Cumulative output tokens.
+    /// Cumulative output tokens of the turn that last settled.
     pub output_tokens: u64,
+    /// Output tokens of the last sample only.
+    ///
+    /// Resident context at the next turn's first loop head is
+    /// `input_tokens + last_output_tokens`. Earlier samples' outputs are
+    /// already inside `input_tokens`; adding [`Self::output_tokens`] would
+    /// count them again and compact too early.
+    pub last_output_tokens: u64,
     /// Cumulative prompt-cache read tokens (0 when the provider reports no
     /// cache accounting).
     pub cache_read_tokens: u64,
@@ -350,6 +357,14 @@ impl Conversation {
         self.entries = entries;
     }
 
+    /// Install `entries` without notifying the sink.
+    ///
+    /// Resume uses this after the repaired snapshot is already durable in
+    /// the journal. [`Self::replace`] would append a second copy.
+    pub fn install_unjournaled(&mut self, entries: Vec<HistoryEntry>) {
+        self.entries = entries;
+    }
+
     /// Usage carried over from the latest settled sample.
     pub fn usage_carry(&self) -> Usage {
         self.usage_carry
@@ -501,6 +516,19 @@ mod tests {
         let mut plain = Conversation::new();
         plain.push(Role::User, "x");
         assert_eq!(plain.len(), 1);
+    }
+
+    /// A snapshot that is already durable must not be written again.
+    #[test]
+    fn install_unjournaled_skips_the_sink() {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let mut conv = Conversation::with_sink(sink.clone());
+        conv.install_unjournaled(vec![HistoryEntry {
+            role: Role::User,
+            blocks: vec![Block::Text("kept".to_string())],
+        }]);
+        assert_eq!(conv.len(), 1);
+        assert!(sink.lines().is_empty());
     }
 
     #[test]

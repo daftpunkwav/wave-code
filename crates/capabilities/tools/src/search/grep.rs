@@ -122,9 +122,23 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
     let mut lines: Vec<String> = Vec::new();
     let mut matched_files = 0usize;
     let mut hit_cap = false;
+    let mut skipped_sensitive: Vec<String> = Vec::new();
+    // An explicit file path already went through the sensitive-file ask.
+    // A directory search (including the default workspace root) would
+    // otherwise return credential bodies with no `path` for that ask to see.
+    let explicit_file = root.is_file();
     'files: for file in &files {
         // Re-check each path: skip junction/symlink targets pointing outside cwd.
         if !under_cwd(file, &cwd_canon) {
+            continue;
+        }
+        let rel = rel_display(file, cwd);
+        if !explicit_file
+            && (wavecode_sandbox::sensitive_credential_reason(&rel).is_some()
+                || wavecode_sandbox::sensitive_credential_reason(file.to_string_lossy().as_ref())
+                    .is_some())
+        {
+            skipped_sensitive.push(rel);
             continue;
         }
         // Input guard aligned with read_file: files over 4 MB are not read wholesale (skipped, not counted as matches).
@@ -142,7 +156,6 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
         let Ok(text) = String::from_utf8(bytes) else {
             continue;
         };
-        let rel = rel_display(file, cwd);
         let mut file_had_match = false;
         for (idx, line) in text.lines().enumerate() {
             if !regex.is_match(line) {
@@ -175,7 +188,14 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
     }
 
     if lines.is_empty() {
-        return ok_output("no matches");
+        if skipped_sensitive.is_empty() {
+            return ok_output("no matches");
+        }
+        return ok_output(format!(
+            "no matches\n[skipped {} sensitive credential file(s); read a path explicitly to request approval: {}]",
+            skipped_sensitive.len(),
+            skipped_sensitive.join(", ")
+        ));
     }
     let mut content = lines.join("\n");
     let mut byte_truncated = false;
@@ -200,5 +220,12 @@ fn grep_search(regex: &regex::Regex, root: &Path, filter: Option<&str>, cwd: &Pa
             String::new()
         }
     ));
+    if !skipped_sensitive.is_empty() {
+        content.push_str(&format!(
+            "\n[skipped {} sensitive credential file(s); read a path explicitly to request approval: {}]",
+            skipped_sensitive.len(),
+            skipped_sensitive.join(", ")
+        ));
+    }
     ok_output(content)
 }

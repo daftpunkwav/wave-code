@@ -98,7 +98,11 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
     /// rules' head (conventions, boundaries) is what matters, and an
     /// oversized injection must not be able to blow the budget in one
     /// loop head.
-    fn discover(&self, dir: &Path) {
+    ///
+    /// `turn` is the child turn's private slot. The session queue still
+    /// receives the same text: the parent keeps the rules after the child
+    /// returns, and the child injects them into its own conversation.
+    fn discover(&self, dir: &Path, turn: Option<&DirectoryInstructions>) {
         for directory in self.candidate_dirs(dir) {
             let mut seen = self.injected.lock().unwrap_or_else(|e| e.into_inner());
             if seen.contains(&directory) {
@@ -108,8 +112,11 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
                 Ok(content) => {
                     seen.insert(directory.clone());
                     drop(seen);
-                    self.requests
-                        .offer(directory, truncate_instructions(content));
+                    let text = truncate_instructions(content);
+                    self.requests.offer(directory.clone(), text.clone());
+                    if let Some(turn) = turn {
+                        turn.offer(directory, text);
+                    }
                 }
                 // Unreadable mid-walk: mark visited and keep climbing, so a
                 // racing delete cannot spin the discovery every call.
@@ -129,7 +136,7 @@ impl<E: ToolExecutor> AgentsInstructionsExecutor<E> {
 
 #[async_trait::async_trait]
 impl<E: ToolExecutor> ToolExecutor for AgentsInstructionsExecutor<E> {
-    async fn execute(&self, call: ToolCall) -> ToolResult {
+    fn note_tool_call(&self, call: &ToolCall, turn: Option<&DirectoryInstructions>) {
         // The file tools share one input convention: the target lives in
         // `path`, and discovery walks its containing directory. Grep's
         // optional search root rides the same field; it is a directory, so
@@ -142,8 +149,15 @@ impl<E: ToolExecutor> ToolExecutor for AgentsInstructionsExecutor<E> {
             .map(PathBuf::from)
             && let Some(dir) = path.parent()
         {
-            self.discover(dir);
+            self.discover(dir, turn);
         }
+    }
+
+    async fn execute(&self, call: ToolCall) -> ToolResult {
+        // Direct callers (and the session turn) discover into the shared
+        // queue. A child turn already offered into its private slot, and
+        // the seen-set makes this second pass a no-op.
+        self.note_tool_call(&call, None);
         self.inner.execute(call).await
     }
 
@@ -239,6 +253,38 @@ mod tests {
             .await;
         assert!(requests.take_all().is_empty());
         assert_eq!(executor.lock_injected().len(), 1);
+    }
+
+    /// A child turn gets its own copy. The session queue still receives
+    /// the rules, and a later execute does not offer them again.
+    #[tokio::test]
+    async fn a_child_slot_receives_the_same_offer_as_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let nested = root.join("crates/app/src");
+        write(&root.join(".git/HEAD"), "x\n");
+        write(&root.join("crates/app/AGENTS.md"), "APP RULES");
+        write(&nested.join("lib.rs"), "fn main() {}");
+
+        let requests = Arc::new(DirectoryInstructions::new());
+        let executor = AgentsInstructionsExecutor::new(
+            PassthroughExecutor,
+            Some(root.clone()),
+            requests.clone(),
+        );
+        let turn = DirectoryInstructions::new();
+        let call = call_at(&nested.join("lib.rs").to_string_lossy());
+        executor.note_tool_call(&call, Some(&turn));
+        let session = requests.take_all();
+        let child = turn.take_all();
+        assert_eq!(session.len(), 1, "{session:?}");
+        assert_eq!(child.len(), 1, "{child:?}");
+        assert_eq!(session[0].1, "APP RULES");
+        assert_eq!(child[0], session[0]);
+
+        executor.execute(call).await;
+        assert!(requests.take_all().is_empty());
+        assert!(turn.take_all().is_empty());
     }
 
     #[tokio::test]

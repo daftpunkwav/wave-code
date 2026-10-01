@@ -408,7 +408,82 @@ struct CallSlot {
     /// `call_id` from the API: the pairing key wave stores and sends back.
     call_id: String,
     name: String,
-    begun: bool,
+    /// Argument bytes for this `output_index`, including fragments that
+    /// arrive while another call is also streaming.
+    arguments: String,
+    /// True once the closed begin/delta/end sequence has been emitted.
+    emitted: bool,
+}
+
+/// Closed tool block for one finished call. Emitted when the call is
+/// finished (`output_item.done`, or the response completing with the
+/// call still open), so argument deltas never attach to a different call.
+fn closed_call_events(slot: &CallSlot) -> Vec<StreamEvent> {
+    let mut events = vec![StreamEvent::ToolUseBegin {
+        id: slot.call_id.clone(),
+        name: slot.name.clone(),
+    }];
+    if !slot.arguments.is_empty() {
+        events.push(StreamEvent::ToolUseInputDelta {
+            partial_json: slot.arguments.clone(),
+        });
+    }
+    events.push(StreamEvent::BlockEnd);
+    events
+}
+
+/// Close every function call that streaming never finished.
+fn take_pending_calls(state: &mut ResponsesStreamState) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+    for slot in &mut state.slots {
+        if slot.emitted || slot.call_id.is_empty() || slot.name.is_empty() {
+            continue;
+        }
+        slot.emitted = true;
+        events.extend(closed_call_events(slot));
+    }
+    events
+}
+
+/// Fill empty slots from the completed response's `output` array.
+///
+/// Some gateways send the finished function call only there, with no
+/// `output_item.added` or `output_item.done`. The array position is the
+/// item's `output_index`. Fields already accumulated from deltas stay.
+fn absorb_output_calls(state: &mut ResponsesStreamState, response: &Value) {
+    let Some(items) = response.get("output").and_then(Value::as_array) else {
+        return;
+    };
+    for (index, item) in items.iter().enumerate() {
+        if item.get("type").and_then(Value::as_str) != Some("function_call") {
+            continue;
+        }
+        if index >= crate::MAX_TOOL_CALL_SLOTS {
+            continue;
+        }
+        while state.slots.len() <= index {
+            state.slots.push(CallSlot::default());
+        }
+        let slot = &mut state.slots[index];
+        if let Some(call_id) = item.get("call_id").and_then(Value::as_str)
+            && slot.call_id.is_empty()
+            && !call_id.is_empty()
+        {
+            slot.call_id = call_id.to_string();
+        }
+        if let Some(name) = item.get("name").and_then(Value::as_str)
+            && slot.name.is_empty()
+            && !name.is_empty()
+        {
+            slot.name = name.to_string();
+        }
+        if slot.arguments.is_empty()
+            && let Some(arguments) = item.get("arguments").and_then(Value::as_str)
+            && !arguments.is_empty()
+        {
+            slot.arguments = arguments.to_string();
+        }
+    }
 }
 
 /// Mutable decode state across SSE data payloads of one stream.
@@ -484,21 +559,10 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
                 {
                     slot.name = name.to_string();
                 }
-                if !slot.begun && !slot.call_id.is_empty() && !slot.name.is_empty() {
-                    slot.begun = true;
-                    events.push(StreamEvent::ToolUseBegin {
-                        id: slot.call_id.clone(),
-                        name: slot.name.clone(),
-                    });
-                }
-                // Some implementations send the opening item with a first
-                // arguments fragment; forward it instead of dropping it.
                 if let Some(arguments) = item.get("arguments").and_then(Value::as_str)
                     && !arguments.is_empty()
                 {
-                    events.push(StreamEvent::ToolUseInputDelta {
-                        partial_json: arguments.to_string(),
-                    });
+                    slot.arguments.push_str(arguments);
                 }
             }
         }
@@ -506,9 +570,10 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
             if let Some(delta) = value.get("delta").and_then(Value::as_str)
                 && !delta.is_empty()
             {
-                events.push(StreamEvent::ToolUseInputDelta {
-                    partial_json: delta.to_string(),
-                });
+                let index = output_index(&value, state)?;
+                if !state.slots[index].emitted {
+                    state.slots[index].arguments.push_str(delta);
+                }
             }
         }
         "response.output_item.done" => {
@@ -519,22 +584,26 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
                         let slot = &mut state.slots[index];
                         // Defensive completion: a stream that skipped
                         // `output_item.added` still yields a usable call.
-                        if !slot.begun {
-                            if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
-                                slot.call_id = call_id.to_string();
-                            }
-                            if let Some(name) = item.get("name").and_then(Value::as_str) {
-                                slot.name = name.to_string();
-                            }
-                            if !slot.call_id.is_empty() && !slot.name.is_empty() {
-                                slot.begun = true;
-                                events.push(StreamEvent::ToolUseBegin {
-                                    id: slot.call_id.clone(),
-                                    name: slot.name.clone(),
-                                });
-                            }
+                        if let Some(call_id) = item.get("call_id").and_then(Value::as_str)
+                            && slot.call_id.is_empty()
+                        {
+                            slot.call_id = call_id.to_string();
                         }
-                        events.push(StreamEvent::BlockEnd);
+                        if let Some(name) = item.get("name").and_then(Value::as_str)
+                            && slot.name.is_empty()
+                        {
+                            slot.name = name.to_string();
+                        }
+                        if slot.arguments.is_empty()
+                            && let Some(arguments) = item.get("arguments").and_then(Value::as_str)
+                            && !arguments.is_empty()
+                        {
+                            slot.arguments = arguments.to_string();
+                        }
+                        if !slot.emitted && !slot.call_id.is_empty() && !slot.name.is_empty() {
+                            slot.emitted = true;
+                            events.extend(closed_call_events(slot));
+                        }
                     }
                     // A finished message item closes the prose block so the
                     // adapter flushes its text buffer at the same boundary
@@ -547,6 +616,7 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
         "response.completed" | "response.incomplete" => {
             if let Some(response) = value.get("response") {
                 read_usage(state, response.get("usage"));
+                absorb_output_calls(state, response);
                 if let Some(reason) = response
                     .get("incomplete_details")
                     .and_then(|details| details.get("reason"))
@@ -559,6 +629,10 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
                     }
                 }
             }
+            // A gateway that skips `output_item.done` would otherwise drop
+            // the call: arguments stay buffered until something closes the
+            // slot, and `MessageComplete` cannot invent a call it never saw.
+            events.extend(take_pending_calls(state));
             events.push(StreamEvent::MessageComplete {
                 stop_reason: stop_reason(state),
                 usage: Usage {
@@ -808,10 +882,7 @@ mod tests {
                     name: "shell".to_string()
                 },
                 StreamEvent::ToolUseInputDelta {
-                    partial_json: "{\"command\":".to_string()
-                },
-                StreamEvent::ToolUseInputDelta {
-                    partial_json: "\"ls\"}".to_string()
+                    partial_json: "{\"command\":\"ls\"}".to_string()
                 },
                 StreamEvent::BlockEnd,
                 StreamEvent::MessageComplete {
@@ -961,6 +1032,109 @@ mod tests {
             "{events:?}"
         );
     }
+
+    /// A stream that skips `output_item.done` still closes the call when
+    /// the response completes. The arguments were buffered on the slot.
+    #[tokio::test]
+    async fn completed_without_item_done_still_closes_the_call() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"shell\"}}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolUseBegin {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                },
+                StreamEvent::ToolUseInputDelta {
+                    partial_json: "{\"command\":\"ls\"}".to_string(),
+                },
+                StreamEvent::BlockEnd,
+                StreamEvent::MessageComplete {
+                    stop_reason: "stop".to_string(),
+                    usage: Usage::default(),
+                },
+            ]
+        );
+    }
+
+    /// A gateway that sends only the completed response, with the function
+    /// call inside `output`, still yields one closed tool block.
+    #[tokio::test]
+    async fn completed_output_alone_still_yields_the_call() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"shell\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}]}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolUseBegin {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                },
+                StreamEvent::ToolUseInputDelta {
+                    partial_json: "{\"command\":\"ls\"}".to_string(),
+                },
+                StreamEvent::BlockEnd,
+                StreamEvent::MessageComplete {
+                    stop_reason: "stop".to_string(),
+                    usage: Usage::default(),
+                },
+            ]
+        );
+    }
+
+    /// Argument deltas for two calls may interleave by `output_index`.
+    /// Each call's bytes stay on its own slot and close as its own block.
+    #[tokio::test]
+    async fn interleaved_argument_deltas_stay_on_their_call() {
+        let results = run_decode(vec![
+            b"data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c0\",\"name\":\"read\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"shell\"}}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"{\\\"path\\\":\"}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"{\\\"command\\\":\"}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":\"\\\"a.rs\\\"}\"}\n\n",
+            b"data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,\"delta\":\"\\\"ls\\\"}\"}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\"}}\n\n",
+            b"data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"function_call\"}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+        ])
+        .await;
+        let events: Vec<StreamEvent> = results.into_iter().collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::ToolUseBegin {
+                    id: "c0".to_string(),
+                    name: "read".to_string(),
+                },
+                StreamEvent::ToolUseInputDelta {
+                    partial_json: "{\"path\":\"a.rs\"}".to_string(),
+                },
+                StreamEvent::BlockEnd,
+                StreamEvent::ToolUseBegin {
+                    id: "c1".to_string(),
+                    name: "shell".to_string(),
+                },
+                StreamEvent::ToolUseInputDelta {
+                    partial_json: "{\"command\":\"ls\"}".to_string(),
+                },
+                StreamEvent::BlockEnd,
+                StreamEvent::MessageComplete {
+                    stop_reason: "stop".to_string(),
+                    usage: Usage::default(),
+                },
+            ]
+        );
+    }
+
     /// The `reasoning` block rides only when an effort is set, and it
     /// always carries the auto summary.
     #[test]

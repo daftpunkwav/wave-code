@@ -508,9 +508,9 @@ fn openai_payload_error(error: &serde_json::Value, raw: &str) -> LlmError {
     api_error(kind, message)
 }
 
-/// Applies one `tool_calls[]` delta fragment: grows the slot table by index,
-/// emits [`StreamEvent::ToolUseBegin`] once both id and name are known, then
-/// forwards non-empty argument fragments as input deltas.
+/// Applies one `tool_calls[]` delta fragment: grows the slot table by index
+/// and appends argument bytes to that slot. Events are emitted once, at
+/// [`finish_turn`], so parallel calls stay paired with their own arguments.
 ///
 /// `index` is provider-controlled input, so growth is bounded by
 /// [`MAX_TOOL_CALL_SLOTS`]: one frame naming a huge index must surface as a
@@ -540,22 +540,19 @@ fn apply_tool_fragment(
     {
         slot.name = name.clone();
     }
-    let mut events = Vec::new();
     if !slot.begun && !slot.id.is_empty() && !slot.name.is_empty() {
         slot.begun = true;
-        events.push(StreamEvent::ToolUseBegin {
-            id: slot.id.clone(),
-            name: slot.name.clone(),
-        });
     }
     if let Some(args) = call.function.as_ref().and_then(|f| f.arguments.as_ref())
         && !args.is_empty()
     {
-        events.push(StreamEvent::ToolUseInputDelta {
-            partial_json: args.clone(),
-        });
+        // Held until `[DONE]`. Emitting a begin as soon as the name is
+        // known lets the next call's begin overwrite a single-slot
+        // consumer, and later fragments for this index would land on
+        // the wrong call.
+        slot.arguments.push_str(args);
     }
-    Ok(events)
+    Ok(Vec::new())
 }
 
 /// Finishes the turn on `[DONE]`: closes every begun tool call, then completes
@@ -563,7 +560,19 @@ fn apply_tool_fragment(
 /// upper layers match on); other reasons pass through verbatim.
 fn finish_turn(state: &OpenAiStreamState) -> Vec<StreamEvent> {
     let mut events = Vec::new();
-    for _ in state.slots.iter().filter(|slot| slot.begun) {
+    // One closed block per call, in index order. Argument bytes that
+    // arrived interleaved across indexes are already concatenated on
+    // the slot, so the consumer never has to demux them.
+    for slot in state.slots.iter().filter(|slot| slot.begun) {
+        events.push(StreamEvent::ToolUseBegin {
+            id: slot.id.clone(),
+            name: slot.name.clone(),
+        });
+        if !slot.arguments.is_empty() {
+            events.push(StreamEvent::ToolUseInputDelta {
+                partial_json: slot.arguments.clone(),
+            });
+        }
         events.push(StreamEvent::BlockEnd);
     }
     let stop_reason = match state.stop_reason.as_deref() {
@@ -592,6 +601,7 @@ struct ToolSlot {
     id: String,
     name: String,
     begun: bool,
+    arguments: String,
 }
 
 /// Mutable decode state across SSE data payloads of one stream.
@@ -1062,10 +1072,7 @@ mod tests {
                     name: "shell".to_string(),
                 },
                 StreamEvent::ToolUseInputDelta {
-                    partial_json: "{\"comma".to_string(),
-                },
-                StreamEvent::ToolUseInputDelta {
-                    partial_json: "nd\":\"ls\"}".to_string(),
+                    partial_json: "{\"command\":\"ls\"}".to_string(),
                 },
                 StreamEvent::BlockEnd,
                 StreamEvent::MessageComplete {
@@ -1094,6 +1101,7 @@ mod tests {
                 StreamEvent::ToolUseInputDelta {
                     partial_json: "{}".to_string(),
                 },
+                StreamEvent::BlockEnd,
                 StreamEvent::ToolUseBegin {
                     id: "c1".to_string(),
                     name: "b".to_string(),
@@ -1101,7 +1109,6 @@ mod tests {
                 StreamEvent::ToolUseInputDelta {
                     partial_json: "{}".to_string(),
                 },
-                StreamEvent::BlockEnd,
                 StreamEvent::BlockEnd,
                 StreamEvent::MessageComplete {
                     stop_reason: "stop".to_string(),

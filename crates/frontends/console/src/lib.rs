@@ -55,7 +55,10 @@ mod dependency_matrix_locked {
     /// test deliberately.
     #[test]
     fn console_ui_internal_dependencies_are_locked() {
-        const INTERNAL: [&str; 6] = [
+        const INTERNAL: [&str; 7] = [
+            // Process-tree kill for the local `!` shell. The tier rules
+            // already allow every crate to depend on infrastructure.
+            "infrastructure-base",
             "tui-engine",
             "wavecode-wire",
             // User paths resolve through the shared home definition.

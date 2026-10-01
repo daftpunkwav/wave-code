@@ -56,13 +56,9 @@ impl ShellJob {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        // Own process group so Unix cancel can signal the shell and the
+        // Own process group so cancel can signal this shell and the
         // command it spawned without hitting this process.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.as_std_mut().process_group(0);
-        }
+        infrastructure_base::lead_process_group(cmd.as_std_mut());
         let mut child = cmd.spawn()?;
         let Some(stdout) = child.stdout.take() else {
             return Err(std::io::Error::other("child stdout unavailable"));
@@ -162,28 +158,18 @@ impl ShellJob {
         // Wake the pump task so the job always reports `Done(None)`,
         // however the child ends up dying.
         self.kill.notify_one();
-        // `start_kill` on Windows terminates only `cmd.exe` itself; the
-        // command tree it spawned survives and keeps the output pipes
-        // open. Kill the whole tree instead (best effort).
-        #[cfg(unix)]
-        if let Some(pid) = self.pid {
-            state_persistence::kill_tree(pid);
-        }
+        // `start_kill` terminates only the shell itself. Descendants
+        // inherit the output pipes and keep them open, so the tree goes
+        // through the shared helper (group signal on Unix, `taskkill /T`
+        // on Windows). Windows waits for `taskkill`; that wait stays off
+        // the UI thread. The pump still hard-kills the shell afterwards.
+        let Some(pid) = self.pid else {
+            return;
+        };
         #[cfg(windows)]
-        if let Some(pid) = self.pid {
-            // Fire-and-forget: taskkill exits on its own once the tree
-            // is terminated (no kill_on_drop — dropping the handle here
-            // must not kill it mid-run). The absolute system path keeps
-            // CreateProcess from resolving a planted `taskkill.exe` in
-            // the working directory (`state_persistence::taskkill_program`).
-            let _ = tokio::process::Command::new(state_persistence::taskkill_program())
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                .spawn();
-        }
+        std::thread::spawn(move || infrastructure_base::kill_tree(pid));
+        #[cfg(not(windows))]
+        infrastructure_base::kill_tree(pid);
     }
 }
 

@@ -289,42 +289,22 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
     }
-    // Step the old binary aside as `.bak` before the staging file takes
-    // its place. Windows cannot delete a running exe, but it can rename
-    // one; a failed second step rolls the `.bak` back. Unix keeps the
-    // same copy so a failed install can restore it.
-    #[cfg(windows)]
+    // Step the old binary aside as `.bak`, then move the staging file
+    // into its place. Windows cannot delete a running exe, but it can
+    // rename one; a failed second step rolls the `.bak` back. A previous
+    // update leaves `.bak` behind, and Windows refuses to rename onto an
+    // existing file, so the old rollback copy is removed first.
     let backup = dir.join(format!("{file_name}.bak"));
-    #[cfg(windows)]
-    {
-        std::fs::rename(target_exe, &backup)
-            .with_context(|| format!("moving the old binary to {}", backup.display()))?;
-        if let Err(error) = std::fs::rename(&staging, target_exe) {
-            let _ = std::fs::rename(&backup, target_exe);
-            let _ = std::fs::remove_file(&staging);
-            return Err(error).context("install failed; the old binary was restored");
-        }
+    let _ = std::fs::remove_file(&backup);
+    if let Err(error) = std::fs::rename(target_exe, &backup) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error)
+            .with_context(|| format!("moving the old binary to {}", backup.display()));
     }
-    #[cfg(unix)]
-    {
-        // Same two-step as Windows: a direct rename of the staging file
-        // over the target would drop the old bytes, and the contract is
-        // that `<name>.bak` survives for rollback.
-        let backup = dir.join(format!("{file_name}.bak"));
-        if let Err(error) = std::fs::rename(target_exe, &backup) {
-            let _ = std::fs::remove_file(&staging);
-            return Err(error)
-                .with_context(|| format!("moving the old binary to {}", backup.display()));
-        }
-        if let Err(error) = std::fs::rename(&staging, target_exe) {
-            let _ = std::fs::rename(&backup, target_exe);
-            let _ = std::fs::remove_file(&staging);
-            return Err(error).context("install failed; the old binary was restored");
-        }
-    }
-    #[cfg(windows)]
-    {
-        let _ = backup; // kept on purpose as the rollback copy
+    if let Err(error) = std::fs::rename(&staging, target_exe) {
+        let _ = std::fs::rename(&backup, target_exe);
+        let _ = std::fs::remove_file(&staging);
+        return Err(error).context("install failed; the old binary was restored");
     }
     Ok(())
 }
@@ -463,6 +443,12 @@ mod tests {
         // The old bytes survive as `.bak` next to the target.
         let backup = dir.path().join("wavecode.exe.bak");
         assert_eq!(std::fs::read(&backup).unwrap(), b"old-binary-bytes");
+        // A second install must replace the leftover `.bak`. Windows
+        // refuses to rename onto an existing file; Unix rename would
+        // have replaced it. Both platforms now drop the old copy first.
+        apply_swap(&target, b"newer-binary-bytes").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"newer-binary-bytes");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"new-binary-bytes");
         // No staging leftovers: the download file was renamed away.
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()

@@ -374,7 +374,13 @@ impl ModelGateway for ModelAdapter {
         let mut stream = self.model.stream(req).await.map_err(|e| map_error(&e))?;
         let mut blocks = Vec::new();
         let mut text = String::new();
-        let mut pending: Option<PendingTool> = None;
+        // Open tool calls, in begin order. A new begin must not drop the
+        // previous call: Chat Completions closes every call at `[DONE]`,
+        // so the stream is Begin, deltas, Begin, deltas, End, End.
+        // Deltas attach to the latest open call; each BlockEnd closes the
+        // oldest one. Parsers that interleave argument bytes across calls
+        // have to assemble those bytes themselves before emitting.
+        let mut open: Vec<PendingTool> = Vec::new();
         let mut input_tokens: Option<u64> = None;
         let mut output_tokens: Option<u64> = None;
         let mut cache_read_tokens: u64 = 0;
@@ -413,14 +419,14 @@ impl ModelGateway for ModelAdapter {
                 }
                 StreamEvent::ToolUseBegin { id, name } => {
                     flush_text(&mut text, &mut blocks);
-                    pending = Some(PendingTool {
+                    open.push(PendingTool {
                         call_id: id,
                         name,
                         input_buf: String::new(),
                     });
                 }
                 StreamEvent::ToolUseInputDelta { partial_json } => {
-                    if let Some(tool) = pending.as_mut() {
+                    if let Some(tool) = open.last_mut() {
                         tool.input_buf.push_str(&partial_json);
                     }
                     // Deltas without a begun block violate the provider
@@ -428,20 +434,21 @@ impl ModelGateway for ModelAdapter {
                     // of inventing a call id.
                 }
                 StreamEvent::BlockEnd => {
-                    if let Some(tool) = pending.take() {
+                    if open.is_empty() {
+                        flush_text(&mut text, &mut blocks);
+                    } else {
+                        let tool = open.remove(0);
                         blocks.push(SampleBlock::ToolUse {
                             call_id: tool.call_id,
                             name: tool.name,
                             input: parse_tool_input(&tool.input_buf),
                         });
-                    } else {
-                        flush_text(&mut text, &mut blocks);
                     }
                 }
                 StreamEvent::MessageComplete { stop_reason, usage } => {
                     // Defensive flush: a well-formed stream ends every block,
                     // but a truncated stream must not lose content silently.
-                    if let Some(tool) = pending.take() {
+                    for tool in open.drain(..) {
                         blocks.push(SampleBlock::ToolUse {
                             call_id: tool.call_id,
                             name: tool.name,
@@ -463,7 +470,7 @@ impl ModelGateway for ModelAdapter {
         // no MessageComplete) is a torn response, not a completed one:
         // silently dropping the pending call would surface as an empty
         // "completed" turn, so fail the sample into the existing error path.
-        if pending.is_some() {
+        if !open.is_empty() {
             return Err(SampleError::Transport(
                 "stream ended mid-tool-call without a completion event".to_string(),
             ));
@@ -693,6 +700,52 @@ mod tests {
             }
         );
         assert_eq!(response.output_tokens, Some(2));
+    }
+
+    /// Parallel calls arrive as begin/delta pairs and close together.
+    /// Dropping the previous pending slot would keep only the last call.
+    #[tokio::test]
+    async fn keeps_every_parallel_tool_call() {
+        let response = adapter(vec![
+            StreamEvent::ToolUseBegin {
+                id: "c0".to_string(),
+                name: "read".to_string(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{\"path\":\"a.rs\"}".to_string(),
+            },
+            StreamEvent::ToolUseBegin {
+                id: "c1".to_string(),
+                name: "shell".to_string(),
+            },
+            StreamEvent::ToolUseInputDelta {
+                partial_json: "{\"command\":\"ls\"}".to_string(),
+            },
+            StreamEvent::BlockEnd,
+            StreamEvent::BlockEnd,
+            StreamEvent::MessageComplete {
+                stop_reason: "tool_calls".to_string(),
+                usage: Usage::default(),
+            },
+        ])
+        .sample(request())
+        .await
+        .unwrap();
+        assert_eq!(
+            response.blocks,
+            vec![
+                SampleBlock::ToolUse {
+                    call_id: "c0".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                },
+                SampleBlock::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            ]
+        );
     }
 
     #[test]

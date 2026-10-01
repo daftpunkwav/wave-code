@@ -1199,6 +1199,31 @@ fn seed_conversation(
         return conv;
     };
     let replayed = crate::history_journal::replay_history(&journal);
+    // A torn tail or a hole hides every byte appended after it. The repaired
+    // snapshot replaces the file in one rename: truncating to a header first
+    // would drop the verified prefix if the process died before the append.
+    let mut next_seq = replayed.next_seq;
+    let mut snapshot_durable = false;
+    if replayed.gapped || replayed.torn_tail {
+        let records = if replayed.entries.is_empty() {
+            Vec::new()
+        } else {
+            vec![serde_json::json!({
+                "k": "replace",
+                "seq": 0,
+                "entries": &replayed.entries,
+            })]
+        };
+        match journal.rewrite(&records) {
+            Ok(()) => {
+                next_seq = if records.is_empty() { 0 } else { 1 };
+                snapshot_durable = !records.is_empty();
+            }
+            Err(error) => warnings.push(format!(
+                "history journal could not be rewritten after damage ({error}); new records may stay unreachable on the next resume"
+            )),
+        }
+    }
     if replayed.torn_tail {
         warnings.push(
             "history journal ended inside a record; the unfinished step was dropped".to_string(),
@@ -1218,10 +1243,13 @@ fn seed_conversation(
         ));
     }
     let mut conv = Conversation::with_sink(std::sync::Arc::new(
-        crate::history_journal::JournalSink::new(journal, replayed.next_seq),
+        crate::history_journal::JournalSink::new(journal, next_seq),
     ));
     if replayed.entries.is_empty() {
         push_text_seed(&mut conv, initial_history);
+    } else if snapshot_durable {
+        // The rewrite already stored this snapshot at seq 0.
+        conv.install_unjournaled(replayed.entries);
     } else {
         // One replace record rather than re-appending every entry: replaying
         // a journal must not lengthen it.
@@ -1244,17 +1272,18 @@ fn push_text_seed(conv: &mut Conversation, initial_history: &[(bool, String)]) {
     }
 }
 
-/// Child-spawning tool surfaces a child run may never invoke. Children
-/// share the session registry, so the child service subtracts these from
-/// every spawn's surface — the runtime depth cap only stays meaningful
-/// if children cannot re-fork.
-const CHILD_FORBIDDEN_TOOLS: [&str; 6] = [
+/// Tools a child run may never invoke. Spawn tools would recurse past the
+/// depth cap. `compact_context` writes the session compaction slot, and
+/// only the parent turn drains that slot — a child request would compact
+/// the parent's history.
+const CHILD_FORBIDDEN_TOOLS: [&str; 7] = [
     "task",
     "skill",
     "task_continue",
     "child_spawn",
     "workflow_run",
     "ralph_run",
+    "compact_context",
 ];
 
 /// Register child task tools against a task service.
@@ -2305,5 +2334,40 @@ base_url = "https://fb.example.com/anthropic"
         let second = seed_conversation(Some(journal), &[], &mut Vec::new());
         assert_eq!(first.len(), conversation.len());
         assert_eq!(second.len(), first.len());
+    }
+
+    /// A sequence hole must not hide records appended after resume.
+    #[test]
+    fn gapped_journal_is_rewritten_before_new_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let journal = state_persistence::history::HistoryJournal::new(&path);
+        journal
+            .append(&serde_json::json!({"k":"append","seq":0,"entry":{"role":"user","blocks":[{"text":"kept"}]}}))
+            .unwrap();
+        journal
+            .append(&serde_json::json!({"k":"append","seq":2,"entry":{"role":"assistant","blocks":[{"text":"dropped"}]}}))
+            .unwrap();
+        let mut warnings = Vec::new();
+        let mut conv = seed_conversation(Some(journal.clone()), &[], &mut warnings);
+        assert!(
+            warnings.iter().any(|warning| warning.contains("prefix")),
+            "{warnings:?}"
+        );
+        assert_eq!(conv.snapshot()[0].text(), "kept");
+        // The prefix is durable before any later append: one replace record,
+        // and the record that sat past the hole is gone.
+        let repaired = crate::history_journal::replay_history(&journal);
+        assert!(!repaired.gapped && !repaired.torn_tail, "{repaired:?}");
+        assert_eq!(repaired.entries.len(), 1);
+        assert_eq!(repaired.entries[0].text(), "kept");
+        assert_eq!(journal.read().records.len(), 1);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("dropped"), "{raw}");
+        conv.push(state_store::Role::Assistant, "after");
+        let replayed = crate::history_journal::replay_history(&journal);
+        assert!(!replayed.gapped && !replayed.torn_tail, "{replayed:?}");
+        assert_eq!(replayed.entries.len(), 2);
+        assert_eq!(replayed.entries[1].text(), "after");
     }
 }

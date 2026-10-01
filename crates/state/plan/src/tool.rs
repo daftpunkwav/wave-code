@@ -42,12 +42,13 @@ pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (PlanState, Op
 }
 
 /// Shared plan handle: the in-memory machine plus its resume file.
-/// Mutations persist outside the lock via blocking IO so tool
-/// execution stays truly async.
+/// [`Self::persist_lock`] covers the mutation and the disk write together,
+/// so an older snapshot cannot land after a newer one.
 #[derive(Debug)]
 pub struct PlanStore {
     state: Mutex<PlanState>,
     file: Option<PathBuf>,
+    persist_lock: tokio::sync::Mutex<()>,
 }
 
 impl PlanStore {
@@ -60,6 +61,7 @@ impl PlanStore {
         Self {
             state: Mutex::new(state),
             file,
+            persist_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -126,6 +128,7 @@ async fn apply_transition(
     action: &'static str,
     transition: impl FnOnce(&mut PlanState) -> std::result::Result<(), crate::PlanError>,
 ) -> ToolOutput {
+    let _persist = store.persist_lock.lock().await;
     let (snapshot, file, rendered) = {
         let mut guard = store.lock();
         if let Err(e) = transition(&mut guard) {

@@ -23,23 +23,6 @@
 /// instead of restating the `cfg` dance per crate.
 pub use infrastructure_base::{atomic_write_private, open_append_private, write_private};
 
-/// Absolute path to Windows `taskkill.exe`.
-///
-/// Re-exported for crates whose dependency set cannot name
-/// `infrastructure-base` directly (the console UI) and for the harness
-/// binary, so a tree kill never resolves a bare `taskkill` from the
-/// working directory. See [`infrastructure_base::taskkill_program`].
-#[cfg(windows)]
-pub use infrastructure_base::taskkill_program;
-
-/// Kill a process-group leader and the children that inherited its group.
-///
-/// Re-exported for the console UI, whose dependency set cannot name
-/// `infrastructure-base`. Unix callers must spawn with `process_group(0)`
-/// first, or the signal hits the caller's own group. See
-/// [`infrastructure_base::kill_tree`].
-pub use infrastructure_base::kill_tree;
-
 /// Legacy engine journal import for session resume.
 pub mod legacy;
 

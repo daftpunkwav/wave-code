@@ -71,6 +71,35 @@ impl HistoryJournal {
         Ok(())
     }
 
+    /// Replace the file with a header plus `records`, in one rename.
+    ///
+    /// A torn tail or a sequence gap hides every byte after it, so a later
+    /// append would never be replayed. Truncating to a header and appending
+    /// the repaired snapshot afterwards opens a crash window that drops the
+    /// verified prefix: the only good copy is already gone, and the snapshot
+    /// has not been written yet. The staging write keeps the previous file
+    /// until the replacement is complete, so a crash leaves either the old
+    /// log or the repaired one.
+    pub fn rewrite(&self, records: &[serde_json::Value]) -> std::io::Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut body = format!(
+            "{}\n",
+            serde_json::json!({"k": "header", "format": HISTORY_FORMAT_VERSION})
+        );
+        for record in records {
+            body.push_str(&record.to_string());
+            body.push('\n');
+        }
+        infrastructure_base::atomic_write_private(&self.path, body.as_bytes())?;
+        // Read-only open cannot flush on Windows. Do not truncate: the
+        // replacement is already in place.
+        let file = std::fs::OpenOptions::new().write(true).open(&self.path)?;
+        file.sync_data()?;
+        Ok(())
+    }
+
     /// Read back the trustworthy prefix of the log.
     ///
     /// Parsing stops at the first unreadable line. That line is a `torn_tail`
@@ -223,5 +252,37 @@ mod tests {
         );
         assert!(read.mid_gap);
         assert!(!read.torn_tail);
+    }
+
+    /// The repaired file is one replacement. A crash during the write keeps
+    /// the previous log; the torn tail does not survive a successful rewrite.
+    #[test]
+    fn rewrite_replaces_a_torn_tail_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = HistoryJournal::new(path_in(dir.path()));
+        journal
+            .append(&serde_json::json!({"k": "append", "seq": 0, "n": 1}))
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(journal.path())
+            .and_then(|mut f| write!(f, "{{\"k\":\"appe"))
+            .unwrap();
+        assert!(journal.read().torn_tail);
+        journal
+            .rewrite(&[serde_json::json!({"k": "replace", "seq": 0, "n": 1})])
+            .unwrap();
+        let read = journal.read();
+        assert_eq!(
+            read.records,
+            vec![serde_json::json!({"k": "replace", "seq": 0, "n": 1})]
+        );
+        assert!(!read.torn_tail && !read.mid_gap);
+        let raw = std::fs::read_to_string(journal.path()).unwrap();
+        assert!(!raw.contains("appe"), "the torn tail is gone: {raw}");
+        assert_eq!(
+            raw.lines().filter(|line| !line.trim().is_empty()).count(),
+            2
+        );
     }
 }

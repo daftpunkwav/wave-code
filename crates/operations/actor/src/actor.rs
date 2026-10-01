@@ -35,7 +35,7 @@ use wavecode_wire::{Event, EventMsg, Op, Submission, WireDecision};
 
 use crate::client::ActorClient;
 use crate::durable::{
-    DurabilityConfig, TurnDurability, checkpoint_turn, render_snapshot, resume_checkpoint,
+    DurabilityConfig, TurnDurability, checkpoint_turn, list_resume_labels, render_snapshot,
     turn_label,
 };
 
@@ -180,7 +180,7 @@ where
         // Offer resume-from-checkpoint: when durable labels exist, name
         // the newest so the frontend can restore it.
         if let Some(dur) = durability.as_ref() {
-            let labels = resume_checkpoint(&dur.root);
+            let labels = list_resume_labels(&dur.root);
             if let Some(newest) = labels.last() {
                 try_send_event(
                     &event_tx,

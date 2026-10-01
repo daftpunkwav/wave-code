@@ -93,28 +93,30 @@ pub fn snapshot_home_dir() -> Option<PathBuf> {
     wavecode_config::home_dir()
 }
 
-/// Default store root for production use: `<home>/.wavecode/snapshots`.
-pub fn snapshot_default_root(home: &Path) -> PathBuf {
+/// Default store root under a home directory: `<home>/.wavecode/snapshots`.
+/// Pure path derivation; see [`effective_snapshot_store_root`] for the
+/// root that production actually uses when nothing is configured.
+pub fn default_snapshot_root(home: &Path) -> PathBuf {
     home.join(".wavecode").join(SNAPSHOTS_DIR)
 }
 
 /// Effective store root when no explicit root is configured: the
 /// home-scoped default, falling back to the system temp dir when the home
 /// directory cannot be resolved (explicit, never silent cwd writes).
-pub fn default_snapshot_store_root() -> PathBuf {
+pub fn effective_snapshot_store_root() -> PathBuf {
     snapshot_home_dir()
-        .map(|h| snapshot_default_root(&h))
+        .map(|h| default_snapshot_root(&h))
         .unwrap_or_else(|| std::env::temp_dir().join(format!("wavecode-{SNAPSHOTS_DIR}")))
 }
 
 /// Snapshot root for a session: derived from the session's memory store
 /// root (`<home>/.wavecode/memories` -> `<home>/.wavecode/snapshots`) so
 /// injected (test) roots stay hermetic; falls back to
-/// [`default_snapshot_store_root`] when no memory root is configured.
+/// [`effective_snapshot_store_root`] when no memory root is configured.
 pub fn snapshot_store_root_for_session(memory_store_root: Option<&Path>) -> PathBuf {
     memory_store_root
         .and_then(|p| p.parent().map(|parent| parent.join(SNAPSHOTS_DIR)))
-        .unwrap_or_else(default_snapshot_store_root)
+        .unwrap_or_else(effective_snapshot_store_root)
 }
 
 /// Validate a snapshot label: `[A-Za-z0-9_-]{1,64}`. Labels become a single
@@ -314,7 +316,7 @@ pub struct SnapshotStore {
 
 impl SnapshotStore {
     /// Build with an explicit root (tests inject a tempdir; production
-    /// uses [`default_snapshot_store_root`] or
+    /// uses [`effective_snapshot_store_root`] or
     /// [`snapshot_store_root_for_session`]).
     pub fn new(root: PathBuf) -> Self {
         Self { root }
@@ -327,7 +329,7 @@ impl SnapshotStore {
 
     /// Default root for a home directory: `<home>/.wavecode/snapshots`.
     pub fn default_root(home: &Path) -> PathBuf {
-        snapshot_default_root(home)
+        default_snapshot_root(home)
     }
 
     /// Directory holding one snapshot's payload.
@@ -896,7 +898,7 @@ mod snapshot_tests {
             home.join(".wavecode").join("snapshots")
         );
         assert_eq!(
-            snapshot_default_root(&home),
+            default_snapshot_root(&home),
             home.join(".wavecode").join("snapshots")
         );
     }

@@ -5,7 +5,7 @@ English | [中文](README.zh.md)
 | Item | Role |
 |---|---|
 | `Cargo.toml` | crate manifest; `thiserror`, `serde_json`, `tokio`, `wavecode-config` (home directory) |
-| `src/lib.rs` | `Checkpoint`/`CheckpointStore` (in-memory, newest-wins rollback), `CheckpointPolicy` with `durable_save`/`durable_load`/`resume_checkpoint` (atomic, fsynced `<label>.json` files), `SnapshotStore` (working-tree captures under `<home>/.wavecode/snapshots` with caps and rewind) |
+| `src/lib.rs` | `Checkpoint`/`CheckpointStore` (in-memory, newest-wins rollback), `CheckpointPolicy` with `durable_save`/`durable_load`/`list_resume_labels` (atomic, fsynced `<label>.json` files), `SnapshotStore` (working-tree captures under `<home>/.wavecode/snapshots` with caps and rewind) |
 
 Snapshot payloads are opaque strings owned by the caller: the store
 never interprets them, and what a restore means belongs to the driver.

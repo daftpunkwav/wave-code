@@ -9,7 +9,7 @@
 | `src/actor.rs` | `SessionActor`：串行 turn 驱动器——输入/compact 进入 pending 队列，控制操作立即路由，另有 rewind、生命周期钩子与可选的持久化 checkpoint |
 | `src/client.rs` | `ActorClient`：进程内句柄——`submit`、事件流、只读 `EventTap`、inbox steering（`steer`/`inject`/`cancel_inbox`）、`SubmitError` |
 | `src/contract.rs` | 与 gateway 共享的词汇：`AssembleOptions`、`SessionError`、`DEFAULT_IDENTITY`，以及 RPC 服务端消费的 `SessionSurface` trait |
-| `src/durable.rs` | persist-then-act checkpoint：`DurabilityConfig`、`CheckpointSink`、`persist_checkpoint`、`resume_checkpoint`、`turn_label` |
+| `src/durable.rs` | persist-then-act checkpoint：`DurabilityConfig`、`CheckpointSink`、`persist_checkpoint`、`list_resume_labels`、`turn_label` |
 | `src/status.rs` | `StatusQueries` trait：供前端 slash 命令按需读取的 plan/goal/snapshot 只读视图 |
 
 actor 将用户 turn 串行化，同时立即路由控制操作（interrupt、审批、

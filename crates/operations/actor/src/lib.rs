@@ -28,8 +28,8 @@ pub use actor::SessionActor;
 pub use client::{ActorClient, EventTap, SubmitError};
 pub use contract::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionSurface};
 pub use durable::{
-    CheckpointSink, DurabilityConfig, persist_checkpoint, persist_then_act, render_snapshot,
-    resume_checkpoint, turn_label,
+    CheckpointSink, DurabilityConfig, list_resume_labels, persist_checkpoint, persist_then_act,
+    render_snapshot, turn_label,
 };
 pub use runtime_runner::SteerTarget;
 pub use status::StatusQueries;

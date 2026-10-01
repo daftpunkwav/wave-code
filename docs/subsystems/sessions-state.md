@@ -36,7 +36,7 @@ Honest status (updated 2026-09-18): the journal now has a production consumer (t
 `crates/state/checkpoint/src/lib.rs`:
 
 - `CheckpointStore`: labelled in-memory snapshots; `rollback` restores the target and drops newer labels; unknown labels fail explicitly.
-- `durable_save` / `durable_load` / `resume_checkpoint`: file-backed labelled state under a root; labels validated (`validate_checkpoint_label`).
+- `durable_save` / `durable_load` / `list_resume_labels`: file-backed labelled state under a root; labels validated (`validate_checkpoint_label`).
 - `SnapshotStore`: workspace file snapshots with caps (`SnapshotCaps`), `create` / `create_with_caps` / `restore` / `list_labels` / `drop_label`, returning reports whose `summary()` is user-visible text.
 
 `crates/operations/actor/src/durable.rs` defines the seam the actor uses: `CheckpointSink` (where durability lands), `DurabilityConfig` (what is enabled; `disabled()` for tests), `persist_checkpoint` and `persist_then_act` (persist before the side effect), `render_snapshot` (conversation ⇒ text), and `turn_label`.

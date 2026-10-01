@@ -36,7 +36,7 @@
 `crates/state/checkpoint/src/lib.rs`：
 
 - `CheckpointStore`：带标签的内存快照；`rollback` 恢复目标并丢弃更新的标签；未知标签显式失败。
-- `durable_save` / `durable_load` / `resume_checkpoint`：根目录下的文件支撑的带标签状态；标签经校验（`validate_checkpoint_label`）。
+- `durable_save` / `durable_load` / `list_resume_labels`：根目录下的文件支撑的带标签状态；标签经校验（`validate_checkpoint_label`）。
 - `SnapshotStore`：工作区文件快照，带上限（`SnapshotCaps`）、`create` / `create_with_caps` / `restore` / `list_labels` / `drop_label`，返回的报告其 `summary()` 是用户可见文本。
 
 `crates/operations/actor/src/durable.rs` 定义 actor 使用的接缝：`CheckpointSink`（持久化落点）、`DurabilityConfig`（启用什么；测试用 `disabled()`）、`persist_checkpoint` 与 `persist_then_act`（在副作用之前持久化）、`render_snapshot`（会话 ⇒ 文本）以及 `turn_label`。

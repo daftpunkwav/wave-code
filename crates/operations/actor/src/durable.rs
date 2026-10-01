@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub use state_checkpoint::resume_checkpoint;
+pub use state_checkpoint::list_resume_labels;
 use state_checkpoint::{CheckpointError, CheckpointPolicy, CheckpointStore};
 
 /// Sink seam for the in-memory half of persist-then-act.
@@ -227,10 +227,10 @@ mod tests {
     fn resume_lists_newest_last() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("checkpoints");
-        assert!(resume_checkpoint(&root).is_empty());
+        assert!(list_resume_labels(&root).is_empty());
         state_checkpoint::durable_save(&root, "turn-1", "a").unwrap();
         state_checkpoint::durable_save(&root, "turn-2", "b").unwrap();
-        let labels = resume_checkpoint(&root);
+        let labels = list_resume_labels(&root);
         assert_eq!(labels, vec!["turn-1".to_owned(), "turn-2".to_owned()]);
         assert_eq!(labels.last().map(String::as_str), Some("turn-2"));
     }

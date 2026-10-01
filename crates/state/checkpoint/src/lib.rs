@@ -146,8 +146,11 @@ pub const CHECKPOINT_FILE_EXTENSION: &str = "json";
 
 /// Validate a turn-checkpoint label before it touches the filesystem.
 ///
-/// Labels become a single `<label>.json` file name, so the rule matches
-/// snapshot labels: 1-64 chars of `[A-Za-z0-9_-]`, blocking `/` and `..`.
+/// This is [`validate_snapshot_label`] with the error mapped to
+/// [`CheckpointError::InvalidLabel`]: one label rule serves both stores,
+/// because labels become a single `<label>.json` file name here and a
+/// single directory name there, so the rule matches snapshot labels:
+/// 1-64 chars of `[A-Za-z0-9_-]`, blocking `/` and `..`.
 pub fn validate_checkpoint_label(label: &str) -> Result<(), CheckpointError> {
     validate_snapshot_label(label).map_err(CheckpointError::InvalidLabel)
 }
@@ -223,12 +226,13 @@ pub fn durable_load(
 
 /// List durable checkpoint labels oldest-first (newest last).
 ///
+/// This only discovers and orders labels; it never performs a resume.
 /// Missing roots and unreadable entries read as empty/skipped, never as
 /// errors: resume is best-effort discovery, and the caller decides what
 /// a missing history means. Use `.last()` for the resume candidate.
 /// Equal mtimes (saves landing within one timestamp tick) order by the
 /// label's trailing number, so `turn-10` stays newer than `turn-2`.
-pub fn resume_checkpoint(root: &std::path::Path) -> Vec<String> {
+pub fn list_resume_labels(root: &std::path::Path) -> Vec<String> {
     let Ok(read_dir) = std::fs::read_dir(root) else {
         return Vec::new();
     };
@@ -310,7 +314,7 @@ mod snapshot;
 pub use snapshot::{
     FILES_DIR, MANIFEST_FILE, MAX_FILE_BYTES, MAX_FILE_COUNT, MAX_TOTAL_BYTES, SNAPSHOTS_DIR,
     SnapshotCaps, SnapshotCreateReport, SnapshotError, SnapshotInfo, SnapshotRestoreReport,
-    SnapshotResult, SnapshotStore, default_snapshot_store_root, snapshot_default_root,
+    SnapshotResult, SnapshotStore, default_snapshot_root, effective_snapshot_store_root,
     snapshot_home_dir, snapshot_store_root_for_session, validate_snapshot_label,
 };
 
@@ -335,7 +339,7 @@ mod durability_tests {
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("checkpoints");
         // Missing roots read as empty, never as errors.
-        assert!(resume_checkpoint(&dir).is_empty());
+        assert!(list_resume_labels(&dir).is_empty());
         durable_save(&dir, "turn-1", "state-one").unwrap();
         durable_save(&dir, "turn-2", "state-two").unwrap();
         assert_eq!(
@@ -344,7 +348,7 @@ mod durability_tests {
         );
         assert_eq!(durable_load(&dir, "missing").unwrap(), None);
         // Oldest first, newest last: the tail is the resume candidate.
-        let labels = resume_checkpoint(&dir);
+        let labels = list_resume_labels(&dir);
         assert_eq!(labels, vec!["turn-1".to_owned(), "turn-2".to_owned()]);
         // No staging temp files leak into the listing or the directory.
         let leftovers: Vec<_> = std::fs::read_dir(&dir)
@@ -379,7 +383,7 @@ mod durability_tests {
                 .unwrap();
         }
         assert_eq!(
-            resume_checkpoint(&root),
+            list_resume_labels(&root),
             vec![
                 "turn-1".to_owned(),
                 "turn-2".to_owned(),
@@ -401,7 +405,7 @@ mod durability_tests {
         ));
         assert!(validate_checkpoint_label("turn-12_ok").is_ok());
         // Rejected labels never touch the filesystem.
-        assert!(resume_checkpoint(root.path()).is_empty());
+        assert!(list_resume_labels(root.path()).is_empty());
     }
 
     #[test]

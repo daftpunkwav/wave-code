@@ -1,10 +1,11 @@
 # Dependabot configuration.
 #
-# The github-actions entry is the important one: every "uses:" in the workflows is
-# pinned to a full commit SHA, and this is what keeps those pins current without
-# anyone hand-editing them. Tag-based refs (dtolnay/rust-toolchain@<version>,
-# taiki-e/install-action@<branch>) are intentionally left unpinned - pinning those
-# would freeze the toolchain and break the msrv/stable gates.
+# Every "uses:" in the workflows is pinned to a full commit SHA, and the
+# github-actions entry is what keeps those pins current without anyone
+# hand-editing them. Rust and Node versions are NOT Dependabot's business:
+# they live in the workflows as explicit inputs (toolchain:, node-version:)
+# and move only as a deliberate change — the msrv leg is a gate, and a
+# lexical "newest version branch" bump once broke every Rust job at once.
 #
 # Updates are grouped so the required-approval flow stays reviewable.
 version: 2
@@ -14,7 +15,7 @@ updates:
     schedule:
       interval: "weekly"
     commit-message:
-      prefix: "ci"
+      prefix: "chore(ci)"
     labels:
       - "dependencies"
       - "github-actions"
@@ -46,3 +47,8 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+    # @types/node must track the Node major that CI actually runs (24,
+    # the active LTS). Lift this when the workflows move to Node 26.
+    ignore:
+      - dependency-name: "@types/node"
+        versions: [">=25"]

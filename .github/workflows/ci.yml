@@ -24,21 +24,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The toolchain is an explicit input, not the action ref: newer
+      # revisions of dtolnay/rust-toolchain require it, and keeping it
+      # here lets Dependabot bump the action without touching Rust.
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: "1.99.0"
           components: rustfmt
       - run: cargo fmt --all --check
 
   # Real MSRV (verified: locked tree-sitter 0.27 needs 1.90). A check
-  # rather than the full test suite keeps this leg fast — the 1.98
+  # rather than the full test suite keeps this leg fast — the 1.99
   # legs carry clippy and the tests.
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        with:
+          toolchain: "1.90.0"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: msrv-1.90.0
@@ -49,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
 
   # The PR title becomes the squash-merge commit message, so it must
@@ -64,11 +70,11 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          pattern='^(feat|fix|docs|refactor|chore|test|perf)(\([a-z0-9-]+\))?: .{1,50}$'
+          pattern='^(feat|fix|docs|refactor|chore|test|perf)(\([a-z0-9-]+\))?: .{1,72}$'
           if [[ ! "$TITLE" =~ $pattern ]]; then
             echo "PR title does not match Conventional Commits: $TITLE"
             echo "Expected: <type>: <subject> — type one of feat/fix/docs/refactor/chore/test/perf,"
-            echo "subject 50 characters or fewer. Acronyms stay allowed."
+            echo "subject 72 characters or fewer. Acronyms stay allowed."
             exit 1
           fi
           if [[ "$TITLE" =~ P[0-9] ]]; then
@@ -87,9 +93,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
         with:
+          toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -119,11 +126,11 @@ jobs:
       run:
         working-directory: sdk/typescript
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 24
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build
       - run: pnpm test

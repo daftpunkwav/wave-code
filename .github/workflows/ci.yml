@@ -70,11 +70,11 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          pattern='^(feat|fix|docs|refactor|chore|test|perf)(\([a-z0-9-]+\))?: .{1,50}$'
+          pattern='^(feat|fix|docs|refactor|chore|test|perf)(\([a-z0-9-]+\))?: .{1,72}$'
           if [[ ! "$TITLE" =~ $pattern ]]; then
             echo "PR title does not match Conventional Commits: $TITLE"
             echo "Expected: <type>: <subject> — type one of feat/fix/docs/refactor/chore/test/perf,"
-            echo "subject 50 characters or fewer. Acronyms stay allowed."
+            echo "subject 72 characters or fewer. Acronyms stay allowed."
             exit 1
           fi
           if [[ "$TITLE" =~ P[0-9] ]]; then

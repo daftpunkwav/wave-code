@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: 11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: 11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.90.0
+      - uses: dtolnay/rust-toolchain@1.120.0
       - uses: 6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: msrv-1.90.0
@@ -88,7 +88,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: 11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@1.120.0
         with:
           components: clippy
       - uses: 6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2

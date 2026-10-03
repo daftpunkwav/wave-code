@@ -40,3 +40,5 @@ desktop.ini
 
 # Local docs directory (local working copy of docs): kept local-only, never committed
 docs-local/
+
+# probe: verify the Codacy PR check posts on this repo (PR closed without merging)

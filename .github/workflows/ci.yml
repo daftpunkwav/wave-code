@@ -20,7 +20,42 @@ env:
 jobs:
   # rustfmt is host-independent. One leg is enough, and it does not
   # need a dependency build.
+  changes:
+    # Fail-open docs triage: only markdown/LICENSE-only diffs skip the heavy
+    # suites; anything unrecognized counts as code and runs everything.
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.classify.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          docs_only=true
+          while IFS= read -r f; do
+            case "$f" in
+              *.md|LICENSE|.gitignore|.gitattributes|docs/*) ;;
+              *) docs_only=false ;;
+            esac
+          done < <(git diff --name-only "$BASE...HEAD")
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
   fmt:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -38,6 +73,8 @@ jobs:
   # rather than the full test suite keeps this leg fast — the 1.99
   # legs carry clippy and the tests.
   msrv:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -52,6 +89,8 @@ jobs:
       - run: cargo check --workspace --locked
 
   supply-chain:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -86,6 +125,8 @@ jobs:
   # not compiled on Ubuntu. Fmt and the TypeScript SDK are not here.
   test:
     name: test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -120,6 +161,8 @@ jobs:
   # The SDK smoke skips live turns unless WAVECODE_SDK_LIVE=1, so this
   # leg only typechecks and runs the node:test file. One OS is enough.
   sdk:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -154,13 +197,14 @@ jobs:
     # masquerade as green. Future jobs join the needs list; the
     # required-checks entry never changes.
     name: gate
-    needs: [fmt, msrv, supply-chain, title, test, sdk, docs]
+    needs: [changes, fmt, msrv, supply-chain, title, test, sdk, docs]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Evaluate gate results
         env:
+          CHANGES: ${{ needs.changes.result }}
           FMT: ${{ needs.fmt.result }}
           MSRV: ${{ needs.msrv.result }}
           SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
@@ -170,7 +214,7 @@ jobs:
           DOCS: ${{ needs.docs.result }}
         run: |
           set -euo pipefail
-          results="fmt=$FMT msrv=$MSRV supply_chain=$SUPPLY_CHAIN title=$TITLE test=$TEST sdk=$SDK docs=$DOCS"
+          results="changes=$CHANGES fmt=$FMT msrv=$MSRV supply_chain=$SUPPLY_CHAIN title=$TITLE test=$TEST sdk=$SDK docs=$DOCS"
           echo "$results"
           if grep -qE '=(failure|cancelled)' <<< "$results"; then
             echo "::error::one or more gates failed or were cancelled"

@@ -123,11 +123,10 @@ jobs:
 
   test:
     name: test (${{ matrix.os }})
-    # Tier 2: the 3-OS full build/test matrix runs after the maintainer key.
+    # Tier 2: the 3-OS full build/test matrix runs after the maintainer
+    # key; the guard already encodes the label, so approval alone governs.
     needs: full-approval
-    if: >-
-      needs.full-approval.result == 'success' &&
-      (github.event_name != 'pull_request' || github.event.action == 'labeled')
+    if: needs.full-approval.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -163,9 +162,7 @@ jobs:
   # leg only typechecks and runs the node:test file. One OS is enough.
   sdk:
     needs: full-approval
-    if: >-
-      needs.full-approval.result == 'success' &&
-      (github.event_name != 'pull_request' || github.event.action == 'labeled')
+    if: needs.full-approval.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:

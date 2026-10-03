@@ -134,3 +134,46 @@ jobs:
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build
       - run: pnpm test
+
+  docs:
+    # docs/ ships as X.md + X.zh.md pairs; a page landing in one language
+    # only would orphan readers of the other. AGENTS/CLAUDE/CHANGELOG and
+    # the root policy files are single-language by convention (skip list
+    # in the script).
+    name: docs bilingual pairs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: python3 scripts/ci/check_docs_pairs.py
+
+  gate:
+    # Merge-time summary: branch protection requires this check. Always runs;
+    # passes when every job that ran succeeded (skipped areas are fine) and
+    # fails on any failure or cancellation, so a cancelled run can never
+    # masquerade as green. Future jobs join the needs list; the
+    # required-checks entry never changes.
+    name: gate
+    needs: [fmt, msrv, supply-chain, title, test, sdk, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate gate results
+        env:
+          FMT: ${{ needs.fmt.result }}
+          MSRV: ${{ needs.msrv.result }}
+          SUPPLY_CHAIN: ${{ needs.supply-chain.result }}
+          TITLE: ${{ needs.title.result }}
+          TEST: ${{ needs.test.result }}
+          SDK: ${{ needs.sdk.result }}
+          DOCS: ${{ needs.docs.result }}
+        run: |
+          set -euo pipefail
+          results="fmt=$FMT msrv=$MSRV supply_chain=$SUPPLY_CHAIN title=$TITLE test=$TEST sdk=$SDK docs=$DOCS"
+          echo "$results"
+          if grep -qE '=(failure|cancelled)' <<< "$results"; then
+            echo "::error::one or more gates failed or were cancelled"
+            exit 1
+          fi
+          echo "all triggered gates passed"

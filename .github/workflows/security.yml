@@ -1,0 +1,100 @@
+# Security: supply-chain and credential gates, split from ci.yml so a leak
+# fails its own workflow instead of being buried in the build gate noise.
+#
+# No path filtering on purpose: leaks and CVEs appear without any code
+# change, so the gates re-run on every push/PR and on a weekly schedule that
+# re-scans main and catches drift even when nothing was pushed all week.
+#
+# Rust dependency work is NOT duplicated here: ci.yml's supply-chain job
+# (cargo-deny: bans, licenses, advisories via deny.toml) already covers the
+# Rust graph on every relevant change. This workflow adds what is missing:
+# the credential history scan and the TypeScript SDK's npm audit.
+name: Security
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Tuesdays 04:17 UTC — deliberately off the dependabot days so findings
+    # land before/around the upgrade PRs, not on top of them.
+    - cron: "17 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    name: secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Full history: a secret added and removed within a PR must still be
+      # caught, which a shallow checkout cannot see.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The binary comes from the official release, checksum-verified, instead
+      # of gitleaks-action. No automation covers this URL; bump deliberately.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          V=8.30.1
+          curl -sSfL --retry 3 -o /tmp/gitleaks.tgz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          curl -sSfL --retry 3 -o /tmp/checksums.txt \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_checksums.txt"
+          grep "gitleaks_${V}_linux_x64.tar.gz" /tmp/checksums.txt \
+            | sed "s|gitleaks_${V}_linux_x64.tar.gz|/tmp/gitleaks.tgz|" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+          /tmp/gitleaks version
+
+      - name: Scan full history
+        run: /tmp/gitleaks detect --redact -v
+
+  sdk-audit:
+    name: sdk npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      # pnpm audit reads pnpm-lock.yaml and needs no install; production
+      # dependencies are the blocking gate (dev-only findings in the SDK
+      # toolchain would otherwise pair the gate to TypeScript releases).
+      - name: Production dependencies (blocking)
+        run: pnpm --dir sdk/typescript audit --prod
+
+  security-gate:
+    name: security-gate
+    # Merge-time summary: branch protection requires this check. Always runs;
+    # passes when everything that ran succeeded and fails on any failure or
+    # cancellation, so a cancelled run can never masquerade as green.
+    needs: [secrets, sdk-audit]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate security gate results
+        env:
+          SECRETS: ${{ needs.secrets.result }}
+          SDK_AUDIT: ${{ needs.sdk-audit.result }}
+        run: |
+          set -euo pipefail
+          results="secrets=$SECRETS sdk_audit=$SDK_AUDIT"
+          echo "$results"
+          if grep -qE '=(failure|cancelled)' <<< "$results"; then
+            echo "::error::one or more security gates failed or were cancelled"
+            exit 1
+          fi
+          echo "all security gates passed"

@@ -24,7 +24,7 @@ Format:
 ```
 
 - `<scope>` is optional; omit the parentheses when there is none.
-- `<subject>`: imperative, lowercase, no trailing period, 72 characters max.
+- `<subject>`: imperative, lowercase, no trailing period, 50 characters max.
 - `<body>` is required. State what changed and why. Wrap at 72 characters.
 
 Example:

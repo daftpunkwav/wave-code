@@ -180,6 +180,36 @@ fn rel_string(path: &Path, cwd: &Path) -> Option<String> {
 }
 
 /// Report of a snapshot capture (counts plus which caps were hit).
+/// What one capture walk observed: the collected files plus the skip and
+/// cap counters the manifest and report surface. Crate-internal — the
+/// public view is [`SnapshotCreateReport`].
+#[derive(Debug, Default)]
+struct SnapshotWalk {
+    /// Collected files as `(relative path, bytes)`.
+    collected: Vec<(String, Vec<u8>)>,
+    /// Stored bytes total.
+    total_bytes: u64,
+    /// Files skipped as binary (extension or null-byte sniff).
+    skipped_binary: usize,
+    /// Files skipped for exceeding the per-file cap.
+    skipped_large: usize,
+    /// Files skipped for other reasons (symlinks, unreadable names).
+    skipped_other: usize,
+    /// Caps that triggered, e.g. "per-file cap 524288 bytes".
+    caps_hit: Vec<String>,
+}
+
+impl SnapshotWalk {
+    /// Record a per-file cap hit once; repeat hits only bump the counter.
+    fn note_per_file_cap(&mut self, caps: &SnapshotCaps) {
+        self.skipped_large += 1;
+        if !self.caps_hit.iter().any(|c| c.starts_with("per-file cap")) {
+            self.caps_hit
+                .push(format!("per-file cap {} bytes", caps.max_file_bytes));
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotCreateReport {
     /// Snapshot label.
@@ -355,109 +385,13 @@ impl SnapshotStore {
     ) -> SnapshotResult<SnapshotCreateReport> {
         validate_snapshot_label(label)
             .map_err(|message| SnapshotError::InvalidInput { message })?;
-        let mut collected: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut total_bytes: u64 = 0;
-        let mut skipped_binary = 0usize;
-        let mut skipped_large = 0usize;
-        let mut skipped_other = 0usize;
-        let mut caps_hit: Vec<String> = Vec::new();
-
-        // Iterative depth-first walk (sorted per directory for determinism).
-        let mut stack = vec![cwd.to_path_buf()];
-        'walk: while let Some(dir) = stack.pop() {
-            let mut entries = Vec::new();
-            let mut read_dir = tokio::fs::read_dir(&dir).await?;
-            while let Some(entry) = read_dir.next_entry().await? {
-                entries.push(entry);
-            }
-            entries.sort_by_key(|e| e.file_name());
-            for entry in entries {
-                // Never capture the store itself when it sits under cwd.
-                if entry.path() == self.root {
-                    continue;
-                }
-                let file_type = entry.file_type().await?;
-                if file_type.is_symlink() {
-                    skipped_other += 1;
-                    continue;
-                }
-                if file_type.is_dir() {
-                    if entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|n| SKIP_DIRS.contains(&n))
-                    {
-                        continue;
-                    }
-                    stack.push(entry.path());
-                    continue;
-                }
-                if !file_type.is_file() {
-                    skipped_other += 1;
-                    continue;
-                }
-                let Some(rel) = rel_string(&entry.path(), cwd) else {
-                    skipped_other += 1;
-                    continue;
-                };
-                if collected.len() >= caps.max_files {
-                    caps_hit.push(format!("file count cap {}", caps.max_files));
-                    break 'walk;
-                }
-                let len = entry.metadata().await?.len();
-                if len > caps.max_file_bytes {
-                    skipped_large += 1;
-                    if !caps_hit.iter().any(|c| c.starts_with("per-file cap")) {
-                        caps_hit.push(format!("per-file cap {} bytes", caps.max_file_bytes));
-                    }
-                    continue;
-                }
-                if total_bytes.saturating_add(len) > caps.max_total_bytes {
-                    caps_hit.push(format!("total size cap {} bytes", caps.max_total_bytes));
-                    break 'walk;
-                }
-                if entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|ext| {
-                        BINARY_EXTENSIONS
-                            .iter()
-                            .any(|b| b.eq_ignore_ascii_case(ext))
-                    })
-                {
-                    skipped_binary += 1;
-                    continue;
-                }
-                // Bounded read: the cap must constrain the allocation, not
-                // just the verdict — a file that grows between the stat and
-                // the read (an active log, a sparse file) streams through a
-                // `take` window instead of being materialized in full.
-                let file = tokio::fs::File::open(entry.path()).await?;
-                let mut limited = file.take(caps.max_file_bytes.saturating_add(1));
-                let mut bytes = Vec::new();
-                limited.read_to_end(&mut bytes).await?;
-                if bytes.len() as u64 > caps.max_file_bytes {
-                    skipped_large += 1;
-                    if !caps_hit.iter().any(|c| c.starts_with("per-file cap")) {
-                        caps_hit.push(format!("per-file cap {} bytes", caps.max_file_bytes));
-                    }
-                    continue;
-                }
-                if bytes.iter().take(SNIFF_BYTES).any(|b| *b == 0) {
-                    skipped_binary += 1;
-                    continue;
-                }
-                total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-                collected.push((rel, bytes));
-            }
-        }
+        let walk = self.walk_snapshot_files(cwd, caps).await?;
 
         // Stage then rename so a failed capture never leaves a half label.
         let staging = self.root.join(format!(".staging-{label}"));
         let _ = tokio::fs::remove_dir_all(&staging).await;
         tokio::fs::create_dir_all(staging.join(FILES_DIR)).await?;
-        for (rel, bytes) in &collected {
+        for (rel, bytes) in &walk.collected {
             let dest = join_rel(&staging.join(FILES_DIR), rel);
             if let Some(parent) = dest.parent() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -471,13 +405,13 @@ impl SnapshotStore {
         let manifest = serde_json::json!({
             "label": label,
             "created_at": created_at,
-            "file_count": collected.len(),
-            "total_bytes": total_bytes,
-            "skipped_binary": skipped_binary,
-            "skipped_large": skipped_large,
-            "skipped_other": skipped_other,
-            "caps_hit": caps_hit,
-            "files": collected.iter().map(|(rel, bytes)| serde_json::json!({
+            "file_count": walk.collected.len(),
+            "total_bytes": walk.total_bytes,
+            "skipped_binary": walk.skipped_binary,
+            "skipped_large": walk.skipped_large,
+            "skipped_other": walk.skipped_other,
+            "caps_hit": walk.caps_hit,
+            "files": walk.collected.iter().map(|(rel, bytes)| serde_json::json!({
                 "path": rel,
                 "size": bytes.len(),
             })).collect::<Vec<_>>(),
@@ -512,13 +446,110 @@ impl SnapshotStore {
 
         Ok(SnapshotCreateReport {
             label: label.to_owned(),
-            file_count: collected.len(),
-            total_bytes,
-            skipped_binary,
-            skipped_large,
-            skipped_other,
-            caps_hit,
+            file_count: walk.collected.len(),
+            total_bytes: walk.total_bytes,
+            skipped_binary: walk.skipped_binary,
+            skipped_large: walk.skipped_large,
+            skipped_other: walk.skipped_other,
+            caps_hit: walk.caps_hit,
         })
+    }
+
+    /// Iterative depth-first walk of `cwd` (sorted per directory for
+    /// determinism) collecting snapshot-eligible files under `caps`.
+    async fn walk_snapshot_files(
+        &self,
+        cwd: &Path,
+        caps: SnapshotCaps,
+    ) -> SnapshotResult<SnapshotWalk> {
+        let mut walk = SnapshotWalk::default();
+
+        let mut stack = vec![cwd.to_path_buf()];
+        'walk: while let Some(dir) = stack.pop() {
+            let mut entries = Vec::new();
+            let mut read_dir = tokio::fs::read_dir(&dir).await?;
+            while let Some(entry) = read_dir.next_entry().await? {
+                entries.push(entry);
+            }
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                // Never capture the store itself when it sits under cwd.
+                if entry.path() == self.root {
+                    continue;
+                }
+                let file_type = entry.file_type().await?;
+                if file_type.is_symlink() {
+                    walk.skipped_other += 1;
+                    continue;
+                }
+                if file_type.is_dir() {
+                    if entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|n| SKIP_DIRS.contains(&n))
+                    {
+                        continue;
+                    }
+                    stack.push(entry.path());
+                    continue;
+                }
+                if !file_type.is_file() {
+                    walk.skipped_other += 1;
+                    continue;
+                }
+                let Some(rel) = rel_string(&entry.path(), cwd) else {
+                    walk.skipped_other += 1;
+                    continue;
+                };
+                if walk.collected.len() >= caps.max_files {
+                    walk.caps_hit
+                        .push(format!("file count cap {}", caps.max_files));
+                    break 'walk;
+                }
+                let len = entry.metadata().await?.len();
+                if len > caps.max_file_bytes {
+                    walk.note_per_file_cap(&caps);
+                    continue;
+                }
+                if walk.total_bytes.saturating_add(len) > caps.max_total_bytes {
+                    walk.caps_hit
+                        .push(format!("total size cap {} bytes", caps.max_total_bytes));
+                    break 'walk;
+                }
+                if entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|ext| {
+                        BINARY_EXTENSIONS
+                            .iter()
+                            .any(|b| b.eq_ignore_ascii_case(ext))
+                    })
+                {
+                    walk.skipped_binary += 1;
+                    continue;
+                }
+                // Bounded read: the cap must constrain the allocation, not
+                // just the verdict — a file that grows between the stat and
+                // the read (an active log, a sparse file) streams through a
+                // `take` window instead of being materialized in full.
+                let file = tokio::fs::File::open(entry.path()).await?;
+                let mut limited = file.take(caps.max_file_bytes.saturating_add(1));
+                let mut bytes = Vec::new();
+                limited.read_to_end(&mut bytes).await?;
+                if bytes.len() as u64 > caps.max_file_bytes {
+                    walk.note_per_file_cap(&caps);
+                    continue;
+                }
+                if bytes.iter().take(SNIFF_BYTES).any(|b| *b == 0) {
+                    walk.skipped_binary += 1;
+                    continue;
+                }
+                walk.total_bytes = walk.total_bytes.saturating_add(bytes.len() as u64);
+                walk.collected.push((rel, bytes));
+            }
+        }
+        Ok(walk)
     }
 
     /// Rewind `cwd` files from `label`. Existing files whose content differs

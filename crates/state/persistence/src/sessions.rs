@@ -398,25 +398,38 @@ fn upsert_index(home: &Path, meta: SessionMeta) -> Result<(), SessionError> {
     Ok(())
 }
 
-/// Append one journal snapshot and upsert its index entry: the shared
-/// body of [`record_turn`] and [`record_rewind`], which differ only in
-/// the stored input text and how the turn count moves. `fresh_turns`
-/// seeds a first-ever entry; `turns_for` derives the count when the
-/// session already has one.
-// Private helper: each parameter is one of the two callers' semantic
-// differences, so a parameter struct would only re-bundle the same names.
-#[allow(clippy::too_many_arguments)]
-fn record_snapshot(
-    home: &Path,
-    id: &str,
-    cwd: &str,
+/// Everything one journal snapshot needs: where the session lives, what
+/// the turn contains, and the redaction contract. The turn-count policy
+/// stays a call-site parameter — it is the only way [`record_turn`] and
+/// [`record_rewind`] differ.
+struct SnapshotRequest<'a> {
+    home: &'a Path,
+    id: &'a str,
+    cwd: &'a str,
     input: String,
-    history: &[(bool, String)],
-    outcome: &str,
+    history: &'a [(bool, String)],
+    outcome: &'a str,
+    redact: &'a dyn Fn(&str) -> String,
+}
+
+/// Append one journal snapshot and upsert its index entry: the shared
+/// body of [`record_turn`] and [`record_rewind`]. `fresh_turns` seeds a
+/// first-ever entry; `turns_for` derives the count when the session
+/// already has one.
+fn record_snapshot(
+    request: SnapshotRequest<'_>,
     fresh_turns: u32,
     turns_for: impl Fn(u32) -> u32,
-    redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
+    let SnapshotRequest {
+        home,
+        id,
+        cwd,
+        input,
+        history,
+        outcome,
+        redact,
+    } = request;
     let path = journal_path(home, id)?;
     std::fs::create_dir_all(sessions_dir(home))?;
     let journal = JsonlJournal::new(path);
@@ -431,7 +444,7 @@ fn record_snapshot(
         }
         None => SessionMeta {
             id: id.to_string(),
-            title: default_title(history),
+            title: default_title(request.history),
             cwd: cwd.to_string(),
             created_at: now,
             updated_at: now,
@@ -458,15 +471,17 @@ pub fn record_turn(
     redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
     record_snapshot(
-        home,
-        id,
-        cwd,
-        redact(input),
-        history,
-        outcome,
+        SnapshotRequest {
+            home,
+            id,
+            cwd,
+            input: redact(input),
+            history,
+            outcome,
+            redact,
+        },
         1,
         |turns| turns + 1,
-        redact,
     )
 }
 
@@ -482,15 +497,17 @@ pub fn record_rewind(
     redact: &dyn Fn(&str) -> String,
 ) -> Result<SessionMeta, SessionError> {
     record_snapshot(
-        home,
-        id,
-        cwd,
-        String::new(),
-        history,
-        "Rewound",
+        SnapshotRequest {
+            home,
+            id,
+            cwd,
+            input: String::new(),
+            history,
+            outcome: "Rewound",
+            redact,
+        },
         0,
         |turns| turns.saturating_sub(turns_removed),
-        redact,
     )
 }
 

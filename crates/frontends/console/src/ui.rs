@@ -3831,4 +3831,16 @@ mod catalog_tests;
 mod vt_repro;
 
 #[cfg(test)]
-mod tests;
+mod tests_common;
+
+#[cfg(test)]
+mod tests_transcript;
+
+#[cfg(test)]
+mod tests_keys;
+
+#[cfg(test)]
+mod tests_commands;
+
+#[cfg(test)]
+mod tests_sessions;

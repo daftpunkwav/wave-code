@@ -9,6 +9,7 @@
  */
 
 import test from "node:test";
+import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -22,6 +23,37 @@ const candidates = [
 ].filter(Boolean);
 
 const bin = candidates.find((p) => existsSync(p));
+
+// No binary and no live provider needed: the decision validation runs
+// before any wire I/O, so a never-spawnable session exercises the
+// fail-closed path directly.
+const neverSpawnable = "wavecode-sdk-test-no-such-binary";
+
+test("answerApproval rejects unknown string decisions fail-closed", () => {
+  const session = execSession({ bin: neverSpawnable, prompt: "x", approvals: true });
+  assert.throws(
+    () => session.answerApproval("call-1", "bogus"),
+    /unknown approval decision/,
+  );
+});
+
+test("answerApproval accepts wire decisions and deny objects without validation errors", () => {
+  const session = execSession({ bin: neverSpawnable, prompt: "x", approvals: true });
+  // The child never spawns (ENOENT surfaces as an error event later), so
+  // these only prove decisionToken accepts every documented decision.
+  assert.doesNotThrow(() => session.answerApproval("call-1", "allow"));
+  assert.doesNotThrow(() => session.answerApproval("call-1", "always"));
+  assert.doesNotThrow(() => session.answerApproval("call-1", "deny"));
+  assert.doesNotThrow(() => session.answerApproval("call-1", { deny: "policy" }));
+});
+
+test("answerApproval refuses sessions without approvals: true", () => {
+  const session = execSession({ bin: neverSpawnable, prompt: "x" });
+  assert.throws(
+    () => session.answerApproval("call-1", "allow"),
+    /approvals: true/,
+  );
+});
 
 test("observer run streams meta, deltas, and a clean completion", { timeout: 120_000 }, async (t) => {
   if (!bin) {

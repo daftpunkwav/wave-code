@@ -184,7 +184,7 @@ export function execSession(options: ExecOptions): ExecSession {
           "answerApproval requires `approvals: true` — without it the run is fail-closed",
         );
       }
-      child.stdin?.write(`${callId} ${decisionToken(decision)}\n`);
+      child.stdin.write(`${callId} ${decisionToken(decision)}\n`);
     },
     wait(): Promise<ExecResult> {
       return new Promise((resolve, reject) => {

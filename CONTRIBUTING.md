@@ -21,6 +21,7 @@ WaveCode is under active development and pre-stable; expect compatibility-breaki
 - One change per commit, with a Conventional Commits subject: `feat:` / `fix:` / `docs:` / `refactor:` / `chore:` / `test:` / `perf:` plus an imperative subject of at most 50 characters.
 - Follow the conventions in [docs/development.md](docs/development.md) — English comments and docs, file headers on crate entry points, dependency rules, tests with new behavior.
 - Run the three commands above before opening a pull request; CI runs the same set on Linux, Windows, and macOS.
+- Optionally enable the pre-commit format gate once per clone: `git config core.hooksPath .githooks` (staged-only rustfmt check mirroring CI's fmt job).
 
 ## Reporting issues
 

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Fast staged-only checks that mirror the CI gates (rustfmt). The full
+# matrix - clippy, tests, the MSRV check, cargo-deny - stays in CI; this
+# hook just keeps formatting from leaving the machine. Zero dependencies:
+# needs rustfmt on PATH (rustup component rustfmt).
+#
+# Checks run against the STAGED contents (git index), never the working
+# tree: an unstaged "fix" in the worktree must not make an unformatted
+# commit pass. Staged blobs are piped to rustfmt via stdin, so no temp
+# copies are materialized.
+#
+# Known rustfmt quirk: in stdin mode `--check` prints the diff but always
+# exits 0, so the exit code cannot be trusted here. What we rely on is
+# --check's documented contract of printing a diff if and only if the
+# input needs reformatting: empty output passes, non-empty output fails
+# the commit with the diff shown.
+#
+# Scope mirrors CI's `cargo fmt --all --check`: workspace members only
+# (`crates/*/*`, edition 2024). The fixture workspaces under
+# benchmarks/tasks/*/workspace carry their own Cargo.toml (edition 2021)
+# and are not formatted by CI either; neither is benchmarks/run.rs.
+#
+# Enable once per clone:
+#   git config core.hooksPath .githooks
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+EDITION=2024  # workspace edition, root Cargo.toml [workspace.package]
+
+command -v rustfmt >/dev/null 2>&1 || {
+  echo "pre-commit: rustfmt not found on PATH (rustup component add rustfmt)" >&2
+  exit 1
+}
+
+rs=()
+while IFS= read -r -d '' f; do [ -n "$f" ] && rs+=("$f"); done < <(
+  git diff --cached -z --name-only --diff-filter=ACMR -- 'crates/*.rs'
+)
+
+for f in "${rs[@]}"; do
+  # stdout is captured because --check prints the diff there; stderr
+  # (rustfmt parse errors, git errors) passes through untouched.
+  out="$(git show ":$f" | rustfmt --check --edition "$EDITION")" || {
+    echo "pre-commit: rustfmt failed on $f" >&2
+    exit 1
+  }
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" >&2
+    echo "pre-commit: rustfmt --check failed on $f" >&2
+    exit 1
+  fi
+done
+
+exit 0

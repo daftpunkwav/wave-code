@@ -1,7 +1,7 @@
 ## Git conventions
 
 `main` must stay releasable at all times. Never commit or push to `main`
-directly — all changes land through reviewed PR merges.
+directly except through a reviewed PR merge.
 
 ### Branch naming
 
@@ -66,8 +66,8 @@ git push --force-with-lease
 ```
 
 - Rebase on `origin/main` regularly. Never use plain `--force` on a shared
-  branch — published history is rewritten only with `--force-with-lease`,
-  immediately after a rebase.
+  branch; the only exception is `--force-with-lease`, used immediately
+  after a rebase.
 - Open a draft PR early when a change spans more than a few commits.
 - Ship a production-breaking fix from a `fix/*` branch off the broken `main` commit, then
   backport if a release branch exists.

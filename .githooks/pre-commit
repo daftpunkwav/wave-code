@@ -35,8 +35,8 @@ command -v rustfmt >/dev/null 2>&1 || {
 }
 
 rs=()
-while IFS= read -r f; do [ -n "$f" ] && rs+=("$f"); done < <(
-  git diff --cached --name-only --diff-filter=ACMR -- 'crates/*.rs'
+while IFS= read -r -d '' f; do [ -n "$f" ] && rs+=("$f"); done < <(
+  git diff --cached -z --name-only --diff-filter=ACMR -- 'crates/*.rs'
 )
 
 for f in "${rs[@]}"; do

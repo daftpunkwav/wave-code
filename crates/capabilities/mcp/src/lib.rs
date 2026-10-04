@@ -278,6 +278,7 @@ pub enum McpServerConfig {
         /// OAuth token endpoint URL (client-credentials grant). Set together
         /// with `oauth_client_id` + `oauth_client_secret`, or not at all
         /// (see `validate`).
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         oauth_token_url: Option<String>,
         /// OAuth client id (client-credentials grant).
         oauth_client_id: Option<String>,
@@ -326,6 +327,7 @@ impl McpServerConfig {
             (None, Some(url)) => Self::Http {
                 url: url.clone(),
                 headers: raw.headers.clone(),
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 oauth_token_url: raw.oauth_token_url.clone(),
                 oauth_client_id: raw.oauth_client_id.clone(),
                 oauth_client_secret: raw.oauth_client_secret.clone(),
@@ -473,6 +475,7 @@ mod tests {
         let http = McpServerConfig::Http {
             url: "https://mcp.example.com/sse".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer x".into())]),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             oauth_token_url: None,
             oauth_client_id: None,
             oauth_client_secret: None,

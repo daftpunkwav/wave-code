@@ -446,9 +446,13 @@ fn wire_text_is_sanitized_before_rendering() {
 fn footer_shows_context_meter() {
     let mut ui = ui();
     ui.handle_wire_event(&EventMsg::TokenCount {
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         input_tokens: 84_000,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         output_tokens: 0,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         cache_read_tokens: 0,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         cache_creation_tokens: 0,
         context_window: Some(200_000),
         context_used: Some(84_000),
@@ -487,9 +491,13 @@ fn update_notice_takes_the_footer_tip_slot() {
 fn usage_command_renders_panel_from_accumulated_samples() {
     let mut ui = ui();
     ui.handle_wire_event(&EventMsg::TokenCount {
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         input_tokens: 6_000,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         output_tokens: 1_500,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         cache_read_tokens: 50_000,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         cache_creation_tokens: 1_000,
         context_window: Some(200_000),
         context_used: Some(60_000),

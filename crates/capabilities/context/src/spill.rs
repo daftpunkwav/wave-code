@@ -130,6 +130,7 @@ pub fn spill_home_dir() -> Option<PathBuf> {
 pub fn default_spill_store_root() -> PathBuf {
     spill_home_dir()
         .map(|h| h.join(".wavecode").join("spills"))
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         .unwrap_or_else(|| std::env::temp_dir().join("wavecode-spills"))
 }
 

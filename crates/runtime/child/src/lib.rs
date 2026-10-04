@@ -125,6 +125,7 @@ impl TaskResult {
         Self {
             status: TaskStatus::Failed,
             summary: summary.into(),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             output_tokens: 0,
         }
     }

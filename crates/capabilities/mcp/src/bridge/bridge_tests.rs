@@ -15,6 +15,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn sensitive_env_strip_covers_secret_shapes_only() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         std::env::set_var("FOO_BRIDGE_API_KEY", "bridge-secret");
         std::env::set_var("FOO_BRIDGE_NORMAL", "visible");
@@ -457,6 +458,7 @@ fn raw(command: Option<&str>, url: Option<&str>) -> wavecode_config::McpServerRa
         env: HashMap::new(),
         url: url.map(|s| s.to_string()),
         headers: HashMap::new(),
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         oauth_token_url: None,
         oauth_client_id: None,
         oauth_client_secret: None,

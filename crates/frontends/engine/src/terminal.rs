@@ -263,6 +263,7 @@ fn probe_background(timeout_ms: u64) -> Option<Background> {
             revents: 0,
         };
         let remaining = (deadline - now).as_millis() as i32;
+        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
         let ready = unsafe { libc::poll(&mut poll_fd, 1, remaining.max(1)) };
         if ready <= 0 {
             return None; // timeout or poll error: give up, read nothing

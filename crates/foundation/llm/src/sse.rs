@@ -24,8 +24,11 @@ use crate::{LlmError, Result, StreamEvent, Usage};
 /// block over in one [`StreamEvent::ThinkingComplete`].
 #[derive(Default)]
 pub struct SseParser {
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     input_tokens: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     cache_read_tokens: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     cache_creation_tokens: u64,
     /// Open thinking block: `(text, signature)`; `None` outside one.
     thinking: Option<(String, Option<String>)>,
@@ -137,9 +140,13 @@ impl SseParser {
                 Ok(Some(StreamEvent::MessageComplete {
                     stop_reason: ev.delta.stop_reason.unwrap_or_default(),
                     usage: Usage {
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         input_tokens: self.input_tokens,
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         output_tokens: ev.usage.output_tokens,
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         cache_read_tokens: self.cache_read_tokens,
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         cache_creation_tokens: self.cache_creation_tokens,
                     },
                 }))
@@ -172,9 +179,11 @@ struct MessageStartUsage {
     input_tokens: u64,
     /// Cache-read counter; third-party gateways may omit it (defaults to 0).
     #[serde(default)]
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     cache_read_input_tokens: u64,
     /// Cache-write counter; third-party gateways may omit it (defaults to 0).
     #[serde(default)]
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     cache_creation_input_tokens: u64,
 }
 
@@ -248,6 +257,7 @@ struct MessageDeltaBody {
 #[derive(Deserialize, Default)]
 struct MessageDeltaUsage {
     #[serde(default)]
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     output_tokens: u64,
 }
 
@@ -545,7 +555,9 @@ mod tests {
             Some(StreamEvent::MessageComplete {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 42,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 7,
                     ..Usage::default()
                 },
@@ -576,9 +588,13 @@ mod tests {
             Some(StreamEvent::MessageComplete {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 50,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                 },
             })
@@ -615,6 +631,7 @@ mod tests {
             Some(StreamEvent::MessageComplete {
                 stop_reason: String::new(),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 0,
                     output_tokens: 1,
                     ..Usage::default()
@@ -738,9 +755,13 @@ mod tests {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
                     // 10 uncached + 100 read + 7 written.
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 117,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 3,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 100,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 7,
                 },
             })
@@ -760,6 +781,7 @@ mod tests {
             Some(StreamEvent::MessageComplete {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 5,
                     output_tokens: 1,
                     cache_read_tokens: 0,

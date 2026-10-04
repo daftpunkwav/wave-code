@@ -1244,6 +1244,7 @@ fn lsp_server_command_is_not_a_read_only_lookup() {
 /// the link). Skipped silently where the OS refuses symlink creation.
 #[test]
 fn symlink_to_credential_file_is_judged_by_target() {
+    // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
     let dir = std::env::temp_dir().join(format!("wavecode-sandbox-sym-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let secret = dir.join(".env");

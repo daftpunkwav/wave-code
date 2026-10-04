@@ -159,10 +159,12 @@ impl ModelSpec {
             env_key: self.api_key_env.clone(),
             api_key: self.api_key.clone(),
             context_window: self.context_window,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_output_tokens: self.max_output,
             fallback_providers: Vec::new(),
             rpm_limit: None,
             reasoning_effort: self.default_effort(),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             thinking_budget_tokens: None,
             prompt_caching: None,
             prompt_cache_ttl: None,
@@ -317,6 +319,7 @@ mod tests {
 
     #[test]
     fn missing_file_is_an_empty_catalog() {
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join("wavecode-catalog-missing");
         let _ = std::fs::remove_dir_all(&dir);
         let catalog = ModelCatalog::load(&dir).unwrap();
@@ -325,6 +328,7 @@ mod tests {
 
     #[test]
     fn malformed_catalog_is_an_error_not_empty() {
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join("wavecode-catalog-bad");
         std::fs::create_dir_all(dir.join(".wavecode")).unwrap();
         std::fs::write(dir.join(".wavecode").join("models.json"), "{ not json").unwrap();
@@ -336,6 +340,7 @@ mod tests {
     /// is a directory) surfaces as an error instead of looking empty.
     #[test]
     fn unreadable_catalog_is_an_error_not_empty() {
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join("wavecode-catalog-blocked");
         let path = dir.join(".wavecode").join("models.json");
         let _ = std::fs::remove_dir_all(&dir);
@@ -381,6 +386,7 @@ mod tests {
     #[test]
     fn saved_catalog_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join("wavecode-catalog-perms");
         let path = dir.join(".wavecode").join("models.json");
         let _ = std::fs::remove_dir_all(&dir);
@@ -410,6 +416,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join("wavecode-catalog-round");
         let _ = std::fs::remove_dir_all(&dir);
         let mut catalog = ModelCatalog::default();

@@ -480,6 +480,7 @@ mod tests {
     /// the temp path carries a space the shell commands cannot quote.
     #[tokio::test]
     async fn recv_message_skips_notifications_over_a_real_child() {
+        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("wavecode-mcp-recv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("lines.txt");
@@ -557,6 +558,7 @@ mod tests {
     #[test]
     fn apply_child_env_strips_inherited_and_keeps_config() {
         let _guard = ENV_LOCK.blocking_lock();
+        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("FOO_MCP_TOKEN", "mcp-token-value");
             std::env::set_var("FOO_MCP_SECRET", "mcp-parent-secret");

@@ -333,9 +333,13 @@ mod tests {
                 duration_ms: 0,
             },
             EventMsg::TokenCount {
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 input_tokens: 100,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 output_tokens: 25,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 cache_read_tokens: 0,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 cache_creation_tokens: 0,
                 context_window: None,
                 context_used: None,
@@ -434,6 +438,7 @@ mod tests {
         let mut metrics = Metrics::new();
         metrics.record(&event(EventMsg::TokenCount {
             input_tokens: 100,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             output_tokens: 5,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -446,7 +451,9 @@ mod tests {
         hit.record(&event(EventMsg::TokenCount {
             input_tokens: 100,
             output_tokens: 5,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: 75,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             cache_creation_tokens: 25,
             context_window: None,
             context_used: None,
@@ -470,9 +477,13 @@ mod tests {
         let mut metrics = Metrics::new();
         for (read, creation) in [(100u64, 7u64), (50, 0)] {
             metrics.record(&event(EventMsg::TokenCount {
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 input_tokens: 10,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 output_tokens: 3,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 cache_read_tokens: read,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 cache_creation_tokens: creation,
                 context_window: None,
                 context_used: None,

@@ -586,8 +586,11 @@ fn finish_turn(state: &OpenAiStreamState) -> Vec<StreamEvent> {
             // `prompt_tokens` already covers `cached_tokens` (a subset
             // detail), so it passes through as the full prompt; folding the
             // cache counters in is the Anthropic parser's job.
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             input_tokens: state.prompt_tokens,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             output_tokens: state.completion_tokens,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: state.cached_tokens,
             ..Usage::default()
         },
@@ -609,8 +612,11 @@ struct ToolSlot {
 struct OpenAiStreamState {
     slots: Vec<ToolSlot>,
     stop_reason: Option<String>,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     prompt_tokens: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     completion_tokens: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     cached_tokens: u64,
 }
 
@@ -692,6 +698,7 @@ struct OpenAiUsage {
     /// Cache accounting (`prompt_tokens_details.cached_tokens`); absent on
     /// providers without the field, degrading to 0.
     #[serde(default)]
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
 }
 
@@ -726,6 +733,7 @@ impl ModelCapabilities {
         if name.starts_with("deepseek-chat") || name.starts_with("deepseek-reasoner") {
             Some(Self {
                 context_window: 128_000,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 8_192,
             })
         } else if name.starts_with("gpt-5") {
@@ -733,16 +741,19 @@ impl ModelCapabilities {
             // reasoning tokens plus visible output.
             Some(Self {
                 context_window: 400_000,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 128_000,
             })
         } else if o_series(&name) {
             Some(Self {
                 context_window: 200_000,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 100_000,
             })
         } else if name.starts_with("gpt-4o-mini") || name.starts_with("gpt-4o") {
             Some(Self {
                 context_window: 128_000,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 16_384,
             })
         } else if name.starts_with("kimi-k2") {
@@ -753,6 +764,7 @@ impl ModelCapabilities {
         } else if name.starts_with("qwen3-coder") {
             Some(Self {
                 context_window: 256_000,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 32_768,
             })
         } else if name.starts_with("glm-4.6") {
@@ -944,6 +956,7 @@ mod tests {
                 }],
             }]),
             tools: Arc::new(vec![tool_spec()]),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 100,
         };
         let body = build_request_body(&req, "deepseek-chat", None);
@@ -966,6 +979,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
             tools: Arc::new(tools),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 4096,
         };
         let reasoning = build_request_body(&req(Vec::new()), "o3-mini", None);
@@ -1215,7 +1229,9 @@ mod tests {
                 // `length` maps to the continuation trigger the upper layers match on.
                 stop_reason: "max_tokens".to_string(),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 5,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 7,
                     ..Usage::default()
                 },
@@ -1346,6 +1362,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(vec![]),
             tools: Arc::new(vec![]),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 1,
         };
         let err = match client.stream(req).await {

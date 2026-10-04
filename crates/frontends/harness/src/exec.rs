@@ -566,11 +566,7 @@ pub(crate) fn approval_what(kind: &wavecode_wire::ApprovalKind) -> &'static str 
 /// Submit one fail-closed denial for `call_id` — used when stdin closed
 /// while the request was still parked, so the answer lands now instead of
 /// at the gate timeout.
-async fn deny_call(
-    client: &mut ActorClient,
-    call_id: &str,
-    reason: &str,
-) -> anyhow::Result<()> {
+async fn deny_call(client: &mut ActorClient, call_id: &str, reason: &str) -> anyhow::Result<()> {
     client
         .submit(Submission {
             id: format!("approval-{call_id}"),

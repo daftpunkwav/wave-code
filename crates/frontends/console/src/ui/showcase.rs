@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn out_dir() -> PathBuf {
+    // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
     let dir = std::env::temp_dir().join("wavecode-showcase");
     let _ = std::fs::create_dir_all(&dir);
     dir
@@ -138,9 +139,13 @@ fn dump_visual_showcase_frames() {
             code: None,
         });
         ui.handle_wire_event(&EventMsg::TokenCount {
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             input_tokens: 3_000,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             output_tokens: 500,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: 0,
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             cache_creation_tokens: 0,
             context_window: Some(195_000),
             context_used: Some(3_500),

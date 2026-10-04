@@ -1165,7 +1165,9 @@ mod tests {
             StreamEvent::MessageComplete {
                 stop_reason: "end_turn".to_string(),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 10,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 5,
                     ..Usage::default()
                 },
@@ -1219,6 +1221,7 @@ mod tests {
                 thinking_effort: None,
                 deny_env: Vec::new(),
                 context_window: 200_000,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 64,
                 per_model_window: None,
                 wave_denylist: Vec::new(),

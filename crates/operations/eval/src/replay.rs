@@ -257,9 +257,13 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 3,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 2,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                     context_window: None,
                     context_used: None,
@@ -311,7 +315,9 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 1,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
@@ -397,7 +403,9 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 10,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 4,
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,
@@ -408,7 +416,9 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: 20,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: 6,
                     cache_read_tokens: 0,
                     cache_creation_tokens: 0,

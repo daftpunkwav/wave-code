@@ -491,8 +491,11 @@ fn absorb_output_calls(state: &mut ResponsesStreamState, response: &Value) {
 struct ResponsesStreamState {
     /// Function-call items, indexed by `output_index`.
     slots: Vec<CallSlot>,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     input_tokens: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     output_tokens: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     cached_tokens: u64,
     /// True once the response reported an output-token limit.
     truncated: bool,
@@ -644,9 +647,13 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
             events.push(StreamEvent::MessageComplete {
                 stop_reason: stop_reason(state),
                 usage: Usage {
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     input_tokens: state.input_tokens,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     output_tokens: state.output_tokens,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: state.cached_tokens,
+                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                 },
             });
@@ -781,6 +788,7 @@ mod tests {
             system: "be terse".to_string(),
             messages: Arc::new(vec![user_text("hi")]),
             tools: Arc::new(vec![tool_spec()]),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 2048,
         };
         let body = build_request_body(&req, "gpt-5", None);
@@ -806,6 +814,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 100,
         };
         let body = build_request_body(&req, "gpt-5", Some("low"));
@@ -896,9 +905,12 @@ mod tests {
                 StreamEvent::MessageComplete {
                     stop_reason: "stop".to_string(),
                     usage: Usage {
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         input_tokens: 120,
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         output_tokens: 9,
                         // Cache reads are a subset detail of input_tokens.
+                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                         cache_read_tokens: 100,
                         cache_creation_tokens: 0,
                     },
@@ -1152,6 +1164,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(vec![user_text("hi")]),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 16,
         };
         let plain = build_request_body(&req, "gpt-5", None);
@@ -1264,6 +1277,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(vec![]),
             tools: Arc::new(vec![]),
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             max_tokens: 1,
         };
         let err = match client.stream(req).await {

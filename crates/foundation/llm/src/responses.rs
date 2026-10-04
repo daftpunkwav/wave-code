@@ -508,6 +508,26 @@ struct ResponsesStreamState {
 /// `response.failed`, `error`) drive the same [`StreamEvent`] vocabulary the
 /// other providers emit; unknown event types are ignored for forward
 /// compatibility.
+/// Reads usage, output calls, and the incomplete reason off a terminal
+/// `response.completed` / `response.incomplete` envelope. The terminating
+/// events stay in the caller: they are emitted even when the envelope is
+/// missing.
+fn read_completion(state: &mut ResponsesStreamState, response: &Value) {
+    read_usage(state, response.get("usage"));
+    absorb_output_calls(state, response);
+    if let Some(reason) = response
+        .get("incomplete_details")
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str)
+    {
+        if reason == "max_output_tokens" {
+            state.truncated = true;
+        } else {
+            state.status = Some(reason.to_string());
+        }
+    }
+}
+
 fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<Vec<StreamEvent>> {
     // Chat-style terminator: the Responses API itself ends with
     // `response.completed`, but gateways bridging both dialects append
@@ -615,19 +635,7 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
         }
         "response.completed" | "response.incomplete" => {
             if let Some(response) = value.get("response") {
-                read_usage(state, response.get("usage"));
-                absorb_output_calls(state, response);
-                if let Some(reason) = response
-                    .get("incomplete_details")
-                    .and_then(|details| details.get("reason"))
-                    .and_then(Value::as_str)
-                {
-                    if reason == "max_output_tokens" {
-                        state.truncated = true;
-                    } else {
-                        state.status = Some(reason.to_string());
-                    }
-                }
+                read_completion(state, response);
             }
             // A gateway that skips `output_item.done` would otherwise drop
             // the call: arguments stay buffered until something closes the

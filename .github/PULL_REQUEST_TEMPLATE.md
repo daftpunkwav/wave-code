@@ -23,18 +23,24 @@ The PR title becomes the subject of the squashed merge commit:
 
 ## Verification
 
-<!-- How you proved it works and did not break anything else. CI runs the
-     same gates (fmt/msrv/test across three OSes); local runs catch failures
-     before the push. -->
+<!-- How you proved it works and did not break anything else. The list
+     below is the CI gate set: fmt, MSRV, clippy, test, the e2e smoke,
+     cargo-deny, the title check, gitleaks, the SDK audit, and the docs
+     pair check. Local runs catch failures before the push. -->
 - [ ] Tests added or updated — a bug fix ships a regression test that fails
       before the fix and passes after it
 - [ ] `cargo fmt --all --check`
-- [ ] `cargo check --workspace --locked`
+- [ ] `cargo check --workspace --locked` (MSRV, Rust 1.90)
 - [ ] `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - [ ] `cargo test --workspace --locked`
 - [ ] `cargo build --locked --bin wavecode`
+- [ ] E2E smoke after the build: `--version`, `mcp serve` initialize, `plugin list`
+- [ ] `cargo deny check` (supply-chain)
+- [ ] Security: gitleaks history scan; SDK changes also run
+      `pnpm --dir sdk/typescript audit --prod`
 - [ ] SDK changes: `pnpm install --no-frozen-lockfile` · `pnpm build` · `pnpm test`
 - [ ] Docs changes: `python3 scripts/ci/check_docs_pairs.py` (bilingual pairs)
+- [ ] PR title matches Conventional Commits and has no phase number (`title` gate)
 - [ ] Anything the tests cannot reach was verified manually (describe below)
 
 <!-- Manual steps, before/after output. Delete if empty. -->

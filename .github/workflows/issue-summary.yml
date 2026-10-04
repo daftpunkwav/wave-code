@@ -3,10 +3,13 @@
 # untrusted data).
 #
 # Inference runs on actions/ai-inference v3, whose only provider is the
-# GitHub Copilot CLI. The CLI comes from the committed lockfile under
-# .github/copilot-cli/ (npm ci), so the whole dependency tree - including
-# transitive packages running beside COPILOT_PAT - is pinned and reviewed
-# instead of resolved from registry ranges on every run. Authenticate with
+# GitHub Copilot CLI. The CLI is GitHub's proprietary distribution, and
+# its npm license field is not an SPDX identifier, so the install does
+# not go through a lockfile. install.py downloads the three tarballs the
+# ubuntu runner executes (the meta package, detect-libc 2.1.2, and the
+# linux-x64 binary) and checks the sha512 pins in integrity-pins.json
+# before extracting them. detect-libc 2.1.2 has no dependencies of its
+# own, so that list is the whole tree. Authenticate with
 # a user-owned fine-grained PAT carrying the "Copilot Requests" account
 # permission and nothing else (classic PATs are not supported by the
 # Copilot CLI; repository secret COPILOT_PAT). The v1 backend this starter
@@ -53,10 +56,10 @@ jobs:
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_PAT }}
 
-      - name: Install the locked Copilot CLI
+      - name: Install the pinned Copilot CLI
         if: steps.gate.outputs.available == 'true'
         run: |
-          npm ci --prefix .github/copilot-cli
+          python3 .github/copilot-cli/install.py
           echo "$(pwd)/.github/copilot-cli/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Build the prompt

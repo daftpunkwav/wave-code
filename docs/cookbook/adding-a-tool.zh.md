@@ -2,7 +2,7 @@
 
 [English](adding-a-tool.md) | 中文
 
-已验证的示例：`web_fetch`（`crates/capabilities/tools/src/web_fetch.rs`，注册于 `Registry::builtin()`）和 `lsp_diagnostics`（`crates/capabilities/tools/src/lsp.rs`，在会话装配中迟注册）。
+已验证的示例：`web_fetch`（`crates/capabilities/tools/src/web_fetch.rs`，注册于 `Registry::builtin()`）和 `lsp_diagnostics`（`crates/capabilities/tools/src/lsp/tools.rs`，经 `src/lsp.rs` 再导出，在会话装配中迟注册）。
 
 ## 1. 实现 `Tool` trait
 

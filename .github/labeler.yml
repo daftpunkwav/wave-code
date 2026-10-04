@@ -1,0 +1,22 @@
+documentation:
+  - changed-files:
+      - any-glob-to-any-file: "**/*.md"
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: ".github/**"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/Cargo.toml"
+          - "**/Cargo.lock"
+          - "**/package.json"
+          - "pnpm-lock.yaml"
+  - head-branch: '^dependabot/github_actions/'
+
+rust:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.rs"
+  - head-branch: '^dependabot/cargo/'

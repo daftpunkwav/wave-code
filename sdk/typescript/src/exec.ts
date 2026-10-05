@@ -121,14 +121,14 @@ export function execSession(options: ExecOptions): ExecSession {
   const eventsQueue: ExecEvent[] = [];
   let wake: (() => void) | null = null;
   let closed = false;
-  // eslint-disable-next-line no-unused-vars -- the parameter name
-  // documents what a rejection receives; the base rule cannot see that
-  // this is a type position, not an unused binding.
+  // The parameter name documents what a rejection receives; the base
+  // rule cannot see that this is a type position, not an unused binding.
+  // eslint-disable-next-line no-unused-vars -- type-position param name
   let fail: ((error: Error) => void) | null = null;
 
-  // biome-ignore lint/correctness/useQwikValidLexicalScope: this SDK file
-  // is not a Qwik component; the framework-scoped rule misfires on a
-  // plain closure.
+  // This SDK file is not a Qwik component; the framework-scoped rule
+  // misfires on a plain closure.
+  // biome-ignore lint/correctness/useQwikValidLexicalScope: not Qwik code
   const push = (event: ExecEvent) => {
     eventsQueue.push(event);
     wake?.();

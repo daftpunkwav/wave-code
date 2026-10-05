@@ -381,7 +381,12 @@ async fn unregistered_extension_is_a_business_error_without_spawning() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // ENV_LOCK serializes env mutation across spawn tests
 async fn explicit_command_still_spawns_per_call_as_fallback() {
+    // Reads WAVECODE_SANDBOX_OS through the confinement path: held
+    // under ENV_LOCK so the confinement test's env mutation cannot
+    // race it.
+    let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Unregistered extension + explicit (missing) binary: the per-call
     // spawn path runs and reports a business error, never touching the pool.
     let dir = tempfile::tempdir().unwrap();

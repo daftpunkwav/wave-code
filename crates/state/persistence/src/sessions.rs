@@ -46,7 +46,7 @@ pub struct SessionMeta {
 }
 
 /// Registry failures: IO problems or invalid session ids.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum SessionError {
     /// Filesystem failure.
     #[error("session IO failed: {0}")]
@@ -57,9 +57,19 @@ pub enum SessionError {
     /// Journal append/load failure.
     #[error("session journal failed: {0}")]
     Journal(#[from] crate::JournalError),
-    /// A session id failed validation (path-escape guard).
-    #[error("invalid session id: {0}")]
+    /// A session id failed validation (path-escape guard). The rejected id
+    /// is not echoed back: error text ends up on terminals and logs, and
+    /// the id is unvalidated input at this point.
+    #[error("invalid session id (expected 1-128 ASCII chars [A-Za-z0-9_-])")]
     InvalidId(String),
+}
+
+/// Debug matches Display: a derived dump would echo the unvalidated input
+/// that Display deliberately omits.
+impl std::fmt::Debug for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 /// Sessions root: `~/.wavecode/sessions/`.

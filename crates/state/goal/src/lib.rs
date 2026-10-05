@@ -149,7 +149,7 @@ pub fn parse_status(raw: &str) -> Result<GoalStatus, GoalError> {
 /// Business failures of the goal machine: CAS mismatches name both
 /// versions, illegal transitions name the expected state, and the round
 /// cap names the cap, so the model can self-correct in each case.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum GoalError {
     /// Transition attempted from the wrong status.
     #[error("cannot {action}: expected status {expected}, found {actual}")]
@@ -186,10 +186,10 @@ pub enum GoalError {
         /// Human-readable reason.
         message: String,
     },
-    /// Session id outside `[A-Za-z0-9_-]{1,64}` (it becomes a file name).
+    /// Session id outside `[A-Za-z0-9_-]{1,128}` (it becomes a file name).
     /// The rejected id is not echoed back: error text ends up on terminals
     /// and logs, and the id is unvalidated input at this point.
-    #[error("invalid session id (expected 1-64 chars [A-Za-z0-9_-])")]
+    #[error("invalid session id (expected 1-128 ASCII chars [A-Za-z0-9_-])")]
     InvalidSessionId {
         /// The rejected id, kept for programmatic matching only.
         id: String,
@@ -203,6 +203,14 @@ pub enum GoalError {
     /// Filesystem failure while loading or saving.
     #[error("goal IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Debug matches Display: a derived dump would echo the unvalidated input
+/// that Display deliberately omits.
+impl std::fmt::Debug for GoalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 /// One durable goal: objective, status, CAS version, driver round, the

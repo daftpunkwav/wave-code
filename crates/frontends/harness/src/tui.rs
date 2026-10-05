@@ -48,7 +48,7 @@ fn resolve_tui_seed(
         if !state_persistence::sessions::is_valid_session_id(id) {
             // Unvalidated CLI input is rejected without being echoed back
             // into message text that surfaces on the terminal.
-            anyhow::bail!("invalid session id (expected 1-64 chars [A-Za-z0-9_-])");
+            anyhow::bail!("invalid session id (expected 1-128 ASCII chars [A-Za-z0-9_-])");
         }
         let history = load_session_history(home, id)
             .map_err(|e| anyhow::anyhow!("cannot load session history: {e}"))?;

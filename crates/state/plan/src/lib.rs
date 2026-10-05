@@ -74,7 +74,7 @@ impl std::fmt::Display for PlanStatus {
 
 /// Business failures of the plan machine: illegal transitions name the
 /// expected state so the model can self-correct.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum PlanError {
     /// Transition attempted from the wrong status.
     #[error("cannot {action}: expected status {expected}, found {actual}")]
@@ -92,10 +92,10 @@ pub enum PlanError {
         /// Human-readable reason.
         message: String,
     },
-    /// Session id outside `[A-Za-z0-9_-]{1,64}` (it becomes a file name).
+    /// Session id outside `[A-Za-z0-9_-]{1,128}` (it becomes a file name).
     /// The rejected id is not echoed back: error text ends up on terminals
     /// and logs, and the id is unvalidated input at this point.
-    #[error("invalid session id (expected 1-64 chars [A-Za-z0-9_-])")]
+    #[error("invalid session id (expected 1-128 ASCII chars [A-Za-z0-9_-])")]
     InvalidSessionId {
         /// The rejected id, kept for programmatic matching only.
         id: String,
@@ -109,6 +109,14 @@ pub enum PlanError {
     /// Filesystem failure while loading or saving.
     #[error("plan IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Debug matches Display: a derived dump would echo the unvalidated input
+/// that Display deliberately omits.
+impl std::fmt::Debug for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 /// One reviewed plan: status, current text, and the transition history.

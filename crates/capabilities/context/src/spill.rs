@@ -94,9 +94,7 @@ impl std::fmt::Display for ManifestEntry {
 /// Validate a spill id: `[A-Za-z0-9_-]{1,64}` (manifest/file-name safe).
 pub fn validate_spill_id(id: &str) -> std::result::Result<(), String> {
     if id.is_empty() || id.len() > 64 {
-        return Err(format!(
-            "invalid spill id {id:?}: expected 1-64 chars ([A-Za-z0-9_-])"
-        ));
+        return Err("invalid spill id (expected 1-64 chars [A-Za-z0-9_-])".to_owned());
     }
     if id
         .chars()
@@ -104,9 +102,7 @@ pub fn validate_spill_id(id: &str) -> std::result::Result<(), String> {
     {
         Ok(())
     } else {
-        Err(format!(
-            "invalid spill id {id:?}: expected [A-Za-z0-9_-] only"
-        ))
+        Err("invalid spill id (expected [A-Za-z0-9_-] only)".to_owned())
     }
 }
 

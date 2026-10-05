@@ -42,14 +42,24 @@ pub struct LegacyThread {
 }
 
 /// Legacy import failures.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum LegacyError {
     /// Filesystem failure listing or reading journals.
     #[error("legacy journal IO failed: {0}")]
     Io(#[from] std::io::Error),
-    /// Thread id rejected by the path-escape whitelist.
-    #[error("invalid thread id: {0:?}")]
+    /// Thread id rejected by the path-escape whitelist. The rejected id
+    /// is not echoed back: error text ends up on terminals and logs, and
+    /// the id is unvalidated input at this point.
+    #[error("invalid thread id (expected path-safe [A-Za-z0-9_-])")]
     InvalidId(String),
+}
+
+/// Debug matches Display: a derived dump would echo the unvalidated input
+/// that Display deliberately omits.
+impl std::fmt::Debug for LegacyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 /// Legacy record mirror: trigger shapes stay unparsed on purpose so

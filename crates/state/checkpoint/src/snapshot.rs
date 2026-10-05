@@ -124,9 +124,7 @@ pub fn snapshot_store_root_for_session(memory_store_root: Option<&Path>) -> Path
 /// directory name, so anything else (including `/` and `..`) is rejected.
 pub fn validate_snapshot_label(label: &str) -> std::result::Result<(), String> {
     if label.is_empty() || label.len() > 64 {
-        return Err(format!(
-            "invalid label {label:?}: expected 1-64 chars ([A-Za-z0-9_-])"
-        ));
+        return Err("invalid label (expected 1-64 chars [A-Za-z0-9_-])".to_owned());
     }
     if label
         .chars()
@@ -134,9 +132,7 @@ pub fn validate_snapshot_label(label: &str) -> std::result::Result<(), String> {
     {
         Ok(())
     } else {
-        Err(format!(
-            "invalid label {label:?}: expected [A-Za-z0-9_-] only (no path separators)"
-        ))
+        Err("invalid label (expected [A-Za-z0-9_-] only, no path separators)".to_owned())
     }
 }
 

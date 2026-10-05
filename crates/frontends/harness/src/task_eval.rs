@@ -418,7 +418,14 @@ pub fn run_tasks(request: TasksRequest) -> anyhow::Result<bool> {
     }
     let temp = request.work_root.clone().unwrap_or_else(|| {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        std::env::temp_dir().join(format!("wavecode-eval-{}", std::process::id()))
+        // Random suffix: the root survives the run on purpose (a failing
+        // task is inspected as-is), so it must not carry a name another
+        // local user could predict and pre-create.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("wavecode-eval-{}-{unique:x}", std::process::id()))
     });
     std::fs::create_dir_all(&temp)?;
     let program = match request.agent_bin.clone() {

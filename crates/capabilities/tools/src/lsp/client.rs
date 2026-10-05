@@ -76,6 +76,13 @@ impl<T: LspTransport> LspClient<T> {
                 }
                 continue;
             }
+            // A message carrying a `method` is a server-to-client
+            // request (e.g. `workspace/configuration`), not the response
+            // to ours — the server picks its own ids, so the id check
+            // alone would consume it as a response.
+            if msg.get("method").is_some() {
+                continue;
+            }
             if msg.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
@@ -117,7 +124,10 @@ impl<T: LspTransport> LspClient<T> {
     /// Polite teardown: `shutdown` request, then `exit` notification.
     /// Best-effort by convention; callers ignore the result.
     pub async fn shutdown(&mut self, timeout: Duration) -> Result<()> {
-        let _ = self.request("shutdown", Value::Null, timeout).await?;
+        // Best-effort by contract: a failed shutdown request (server
+        // error, transport hiccup) must not skip the `exit` notification,
+        // or the server never terminates its session.
+        let _ = self.request("shutdown", Value::Null, timeout).await;
         let _ = self.notify("exit", json!({})).await;
         Ok(())
     }

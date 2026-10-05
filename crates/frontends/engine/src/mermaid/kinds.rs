@@ -70,6 +70,16 @@ pub(super) fn parse_class_diagram(source: &str) -> Option<Diagram> {
                     parse_class_relation(line, &mut diagram, &mut ids)?
                 {
                     diagram.edge(from, to, label, style);
+                } else if open.is_some() {
+                    // Bare member row (`int age`, `quack()`): Mermaid
+                    // accepts members without a visibility prefix inside
+                    // an open class block.
+                    if let Some(index) = open {
+                        let rows = &mut diagram.labels[index];
+                        if rows.len() < 16 {
+                            rows.push(line.to_string());
+                        }
+                    }
                 } else {
                     return None;
                 }
@@ -308,6 +318,9 @@ pub(super) fn parse_c4_diagram(source: &str) -> Option<Diagram> {
         match keyword.as_str() {
             "c4context" | "c4container" | "c4component" | "c4dynamic" | "title" => {}
             "boundary" | "enterprise_boundary" | "system_boundary" | "container_boundary" => {}
+            // A boundary call opens a `{ ... }` block; its closing brace
+            // carries no keyword and must not fail the parse.
+            "}" => {}
             "update_element_style"
             | "update_rel_style"
             | "add_element_tag"

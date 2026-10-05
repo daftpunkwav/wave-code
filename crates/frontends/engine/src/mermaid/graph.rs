@@ -294,30 +294,34 @@ fn scan_arrow(line: &str) -> Option<(Option<String>, usize, EdgeStyle)> {
     let dotted = line.starts_with("-.");
     let thick = !dotted && line.starts_with("==");
     let plain = !dotted && !thick && line.starts_with("--");
+    // Mermaid accepts runs of the link character (`---->`, `====>`,
+    // `-..->`): consume the whole run instead of the shortest form, so a
+    // longer spelling cannot leak `>` into a node id or slice past the
+    // label start (an `===>` line panicked on `line[2..1]`).
     if dotted {
-        if line.starts_with("-.->") {
-            return Some((None, 4, EdgeStyle::Dotted));
+        let dots = line[1..].bytes().take_while(|&b| b == b'.').count();
+        if line[1 + dots..].starts_with("->") {
+            return Some((None, 1 + dots + 2, EdgeStyle::Dotted));
         }
-        let end = line.find(".->")?;
+        let end = line[2..].find(".->")? + 2;
         let label = line[2..end].trim();
         let label = (!label.is_empty()).then(|| label.to_string());
         return Some((label, end + 3, EdgeStyle::Dotted));
     }
     if thick {
-        if line.starts_with("==>") {
-            return Some((None, 3, EdgeStyle::Thick));
+        let run = line.bytes().take_while(|&b| b == b'=').count();
+        if line[run..].starts_with('>') {
+            return Some((None, run + 1, EdgeStyle::Thick));
         }
-        let end = line.find("==>")?;
+        let end = line[2..].find("==>")? + 2;
         let label = line[2..end].trim();
         let label = (!label.is_empty()).then(|| label.to_string());
         return Some((label, end + 3, EdgeStyle::Thick));
     }
     if plain {
-        if line.starts_with("-->") {
-            return Some((None, 3, EdgeStyle::Solid));
-        }
-        if line.starts_with("---") {
-            return Some((None, 3, EdgeStyle::Solid));
+        let run = line.bytes().take_while(|&b| b == b'-').count();
+        if line[run..].starts_with('>') {
+            return Some((None, run + 1, EdgeStyle::Solid));
         }
         let end = line.find("-->")?;
         let label = line[2..end].trim();

@@ -377,15 +377,29 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
     let max_layer = layer.iter().copied().max().unwrap_or(0);
 
     let (box_w, box_h) = box_geometry(&d.labels);
+    // Gutters carry elbow routing and edge labels: a fixed 3-cell gutter
+    // drops every label (draw_horizontal has no room to place it). Widen a
+    // gutter to fit the widest labeled edge crossing it, capped so a huge
+    // label cannot push the frame past the terminal.
+    let mut gutters = vec![3usize; max_layer.max(1)];
+    for edge in &d.edges {
+        if let Some(label) = &edge.label {
+            let fl = layer[edge.from].min(layer[edge.to]);
+            if fl < max_layer {
+                let w = width::width(label).min(24) + 2;
+                gutters[fl] = gutters[fl].max(w);
+            }
+        }
+    }
     let mut col_x = vec![0usize; max_layer + 1];
     let mut col_w = vec![0usize; max_layer + 1];
     let mut total_width = 0usize;
     for depth in 0..=max_layer {
         col_w[depth] = cols[depth].iter().map(|&n| box_w[n]).max().unwrap_or(2);
         col_x[depth] = total_width;
-        total_width += col_w[depth] + 3;
+        total_width += col_w[depth] + gutters.get(depth).copied().unwrap_or(3);
     }
-    let total_width = total_width.saturating_sub(3);
+    let total_width = total_width.saturating_sub(gutters.last().copied().unwrap_or(3));
     let mut total_height = 0usize;
     let mut y = vec![0usize; count];
     for band in &cols {

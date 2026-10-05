@@ -62,6 +62,10 @@ pub struct ModelPickerDialog {
     pub(super) selected: usize,
     /// Thinking draft for the highlighted entry (one of the levels).
     thinking_draft: String,
+    /// Set once the user picks a level with Left/Right: navigation then
+    /// stops re-seeding the draft from the highlighted entry (the explicit
+    /// choice wins until the query or tab changes).
+    draft_touched: bool,
     /// Live effort for the current model (marks the current segment).
     current_effort: Option<String>,
 }
@@ -91,6 +95,7 @@ impl ModelPickerDialog {
             filtered: Vec::new(),
             selected: 0,
             thinking_draft: String::new(),
+            draft_touched: false,
         };
         picker.refilter();
         picker
@@ -110,6 +115,26 @@ impl ModelPickerDialog {
     /// Recompute the filtered list; keeps the cursor in range and
     /// re-seeds the thinking draft from the highlighted entry.
     fn refilter(&mut self) {
+        self.refilter_keep_draft();
+        self.draft_touched = false;
+        self.reseed_draft_from_highlighted();
+    }
+
+    /// Re-seed the thinking draft from the highlighted entry's effort
+    /// default (falling back to the live effort, then the first level).
+    fn reseed_draft_from_highlighted(&mut self) {
+        self.thinking_draft = self
+            .highlighted()
+            .and_then(|entry| entry.effort.clone())
+            .or_else(|| self.current_effort.clone())
+            .or_else(|| self.thinking_levels.first().cloned())
+            .unwrap_or_else(|| "off".to_string());
+    }
+
+    /// Recompute the filtered list and clamp the cursor without touching
+    /// the thinking draft: navigation must not overwrite a level the user
+    /// already chose with Left/Right.
+    fn refilter_keep_draft(&mut self) {
         self.filtered = filter_indices(&self.entries, &self.query)
             .into_iter()
             .filter(|index| {
@@ -117,12 +142,6 @@ impl ModelPickerDialog {
             })
             .collect();
         self.selected = self.selected.min(self.filtered.len().saturating_sub(1));
-        self.thinking_draft = self
-            .highlighted()
-            .and_then(|entry| entry.effort.clone())
-            .or_else(|| self.current_effort.clone())
-            .or_else(|| self.thinking_levels.first().cloned())
-            .unwrap_or_else(|| "off".to_string());
     }
 
     fn highlighted(&self) -> Option<&ModelEntryView> {
@@ -169,12 +188,18 @@ impl ModelPickerDialog {
                 } else {
                     self.selected - 1
                 };
-                self.refilter();
+                self.refilter_keep_draft();
+                if !self.draft_touched {
+                    self.reseed_draft_from_highlighted();
+                }
                 None
             }
             Key::Down if !self.filtered.is_empty() => {
                 self.selected = (self.selected + 1) % self.filtered.len();
-                self.refilter();
+                self.refilter_keep_draft();
+                if !self.draft_touched {
+                    self.reseed_draft_from_highlighted();
+                }
                 None
             }
             Key::Tab => {
@@ -199,6 +224,7 @@ impl ModelPickerDialog {
                     count - 1
                 };
                 self.thinking_draft = self.thinking_levels[(position + step) % count].clone();
+                self.draft_touched = true;
                 None
             }
             Key::Backspace => {

@@ -175,10 +175,11 @@ pub(super) fn layout_sequence(s: &Sequence, columns: usize) -> Option<Vec<String
                 let col = left + 1 + (room - label_w) / 2;
                 label_row.put(col, label.clone());
             } else {
-                // Label wider than the span: place at the left edge and
-                // let the canvas clip what follows. An overflowing label
-                // never reaches this path — the parse-level fit contract
-                // falls the whole diagram back instead.
+                // Label wider than the span: place at the left edge. This
+                // arm is unreachable in practice — a label that overflows
+                // the frame fails the layout's fit check first, and the
+                // whole diagram falls back rather than rendering clipped
+                // rows (pinned by overflowing_labels_fall_back_to_none).
                 label_row.put(left + 1, label.clone());
             }
         } else {

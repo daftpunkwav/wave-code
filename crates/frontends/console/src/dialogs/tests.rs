@@ -348,15 +348,9 @@ fn wizard_text(dialog: &mut ModelWizardDialog, text: &str) {
 fn wizard_resolves_a_full_model() {
     theme::set(theme::Theme::dark());
     let mut dialog = ModelWizardDialog::new(None);
-    macro_rules! trace {
-        ($dialog:expr, $key:expr) => {{
-            $dialog.handle_key($key);
-            eprintln!("after {:?} -> step {:?}", $key, $dialog.step);
-        }};
-    }
     wizard_text(&mut dialog, "minimax");
-    trace!(dialog, KeyEvent::plain(Key::Enter));
-    // dialog.handle_key(KeyEvent::plain(Key::Enter)); // api: anthropic-messages
+    // api: minimax-messages
+    dialog.handle_key(KeyEvent::plain(Key::Enter));
     wizard_text(&mut dialog, "https://api.minimax.chat");
     wizard_text(&mut dialog, "env:MINIMAX_API_KEY");
     wizard_text(&mut dialog, "MiniMax-M3.1-Flash-Preview");

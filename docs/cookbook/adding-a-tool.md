@@ -33,7 +33,7 @@ Attribute truth matters: `is_read_only` puts the tool in the concurrent batch an
 Pick one of the two registration points:
 
 - **Static builtin**: append to `Registry::builtin()` in `crates/capabilities/tools/src/lib.rs`. Use this when the tool needs no session state.
-- **Late registration**: register in `crates/operations/bootstrap/src/session.rs` after the pieces it needs exist — the LSP tools show the shape (`register_lsp_tools` registers the five tools around one shared `LspProviders` handle), as do the `skill` / `task` tools which need the child service built around the driver. The registry is interior-mutable, so late registration reaches every already-shared handle (executor, policy, model adapter) without a rebuild.
+- **Late registration**: register in `crates/operations/bootstrap/src/session/assembly.rs` after the pieces it needs exist — the LSP tools show the shape (`register_lsp_tools` registers the five tools around one shared `LspProviders` handle), as do the `skill` / `task` tools which need the child service built around the driver. The registry is interior-mutable, so late registration reaches every already-shared handle (executor, policy, model adapter) without a rebuild.
 
 Tools needing a session-shared store follow the `todo_write` pattern: `with_todo_write`-style constructor sharing one `Arc` between the tool and the session config.
 

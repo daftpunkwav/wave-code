@@ -16,6 +16,37 @@ graph TD
     C --> E[结束]
     D --> E";
 
+/// Extended Mermaid link spellings (runs of `-`/`=`, dotted runs) parse
+/// as one edge with the right style instead of panicking or leaking `>`
+/// into a node id.
+#[test]
+fn extended_link_spellings_render_one_edge_each() {
+    for src in [
+        "graph TD
+    A ---> B",
+        "graph TD
+    A ----> B",
+        "graph TD
+    A ===> B",
+        "graph TD
+    A ====> B",
+        "graph TD
+    A -..-> B",
+        "graph TD
+    A -- text ---> B",
+    ] {
+        let lines =
+            render_diagram(src, 80).unwrap_or_else(|| panic!("extended link must render: {src}"));
+        let joined = lines.join(
+            "
+",
+        );
+        assert!(joined.contains('A'), "{src}: {joined}");
+        assert!(joined.contains('B'), "{src}: {joined}");
+        assert!(!joined.contains(">B"), "{src}: {joined}");
+    }
+}
+
 #[test]
 fn flowchart_renders_bands_and_arrows() {
     let lines = render_diagram(FLOW, 80).expect("supported flowchart renders");

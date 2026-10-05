@@ -320,7 +320,8 @@ mod tests {
     #[test]
     fn missing_file_is_an_empty_catalog() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join("wavecode-catalog-missing");
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let catalog = ModelCatalog::load(&dir).unwrap();
         assert!(catalog.models.is_empty());
@@ -329,7 +330,8 @@ mod tests {
     #[test]
     fn malformed_catalog_is_an_error_not_empty() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join("wavecode-catalog-bad");
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         std::fs::create_dir_all(dir.join(".wavecode")).unwrap();
         std::fs::write(dir.join(".wavecode").join("models.json"), "{ not json").unwrap();
         assert!(ModelCatalog::load(&dir).is_err());
@@ -341,7 +343,8 @@ mod tests {
     #[test]
     fn unreadable_catalog_is_an_error_not_empty() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join("wavecode-catalog-blocked");
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let path = dir.join(".wavecode").join("models.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&path).unwrap();
@@ -387,7 +390,8 @@ mod tests {
     fn saved_catalog_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join("wavecode-catalog-perms");
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let path = dir.join(".wavecode").join("models.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -417,7 +421,8 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let dir = std::env::temp_dir().join("wavecode-catalog-round");
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let mut catalog = ModelCatalog::default();
         catalog.insert(

@@ -180,9 +180,18 @@ impl LspProviders {
         let client = guard.as_mut().expect("pooled client just installed");
         match call(client, target.uri, target.line, target.character, timeout).await {
             Ok(v) => Ok(v),
+            // A JSON-RPC error reply surfaces as InvalidInput from the
+            // request path: the server answered, so it is alive and
+            // protocol-healthy — keep the pooled client (servers legitimately
+            // reply with errors for unknown methods or out-of-range
+            // positions, and a respawn would not change the next answer).
+            Err(e @ crate::ToolsError::InvalidInput { .. }) => {
+                Err(err_output(format!("LSP {method} failed: {e}")))
+            }
+            // Transport or protocol failure: the pipe may be wedged — drop
+            // the client so the next call respawns fresh instead of reusing
+            // a dead connection.
             Err(e) => {
-                // The server may have died mid-request: drop the client so the
-                // next call respawns fresh instead of reusing a wedged pipe.
                 *guard = None;
                 Err(err_output(format!("LSP {method} failed: {e}")))
             }

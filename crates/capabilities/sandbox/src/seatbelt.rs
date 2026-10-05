@@ -431,6 +431,12 @@ mod tests {
     #[test]
     fn private_profile_dir_rejects_when_creation_is_forbidden() {
         use std::os::unix::fs::PermissionsExt;
+        // Root overrides file permissions, so the read-only parent proves
+        // nothing on a root runner; the guard this test exercises does not
+        // apply there.
+        if current_uid() == 0 {
+            return;
+        }
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let base = std::env::temp_dir().join(format!(
             "wavecode-seatbelt-failclosed-{}",

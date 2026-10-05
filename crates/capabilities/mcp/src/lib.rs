@@ -681,4 +681,29 @@ mod tests {
             "rejection names the offending field: {err}"
         );
     }
+
+    /// The endpoint half of the oauth policy is covered too: a remote
+    /// plain-http endpoint with a full oauth block is rejected through the
+    /// same `from_raw` path doctor uses.
+    #[test]
+    fn from_raw_rejects_plain_http_oauth_endpoint_off_loopback() {
+        let raw = wavecode_config::McpServerRaw {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some("http://mcp.example.com/mcp".into()),
+            headers: HashMap::new(),
+            oauth_token_url: Some("https://auth.example.com/token".into()),
+            oauth_client_id: Some("wave".into()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
+            oauth_client_secret: Some("s3cret".into()),
+            oauth_scope: None,
+        };
+        let err = McpServerConfig::from_raw("srv", &raw)
+            .expect_err("remote plain-http oauth endpoint rejected");
+        assert!(
+            err.contains("oauth_endpoint"),
+            "rejection names the offending field: {err}"
+        );
+    }
 }

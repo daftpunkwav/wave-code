@@ -751,6 +751,7 @@ async fn explicit_server_spawns_confined_or_fails_closed() {
     unsafe {
         std::env::set_var("WAVECODE_SANDBOX_OS", "1");
     }
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
     let spawned = ChildLsp::spawn("cat", &std::env::temp_dir(), &[]);
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {

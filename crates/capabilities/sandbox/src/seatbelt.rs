@@ -94,27 +94,55 @@ pub fn render_seatbelt_profile(cwd: &Path, extra_writable: &[PathBuf]) -> String
 /// the write here and `sandbox-exec`'s read — weakening the confinement
 /// the child runs under. Returns `None` when no acceptable directory can
 /// be established; callers must fail closed on that.
+///
+/// The directory is chosen once per process: its name carries a random
+/// suffix (OS entropy on unix) so a sibling process cannot guess it from
+/// the pid, and [`private_profile_dir`] re-verifies privacy on reuse.
 fn profile_dir() -> Option<PathBuf> {
-    // nosemgrep: rust.lang.security.temp-dir.temp-dir
-    let temp = std::env::temp_dir();
-    let primary = temp.join(format!("wavecode-seatbelt-{}", std::process::id()));
-    if private_profile_dir(&primary) {
-        return Some(primary);
-    }
-    // The primary name is polluted (wrong permissions or owner): fall
-    // back to per-process random suffixes so a hostile leftover cannot
-    // force profile writes into a directory it controls.
-    for _ in 0..4 {
-        let candidate = temp.join(format!(
-            "wavecode-seatbelt-{}-{:x}",
-            std::process::id(),
-            fallback_key()
-        ));
-        if private_profile_dir(&candidate) {
-            return Some(candidate);
+    static SELECTED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SELECTED
+        .get_or_init(|| {
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            let temp = std::env::temp_dir();
+            let primary = temp.join(format!(
+                "wavecode-seatbelt-{}-{}",
+                std::process::id(),
+                random_suffix()
+            ));
+            let mut candidates = vec![primary];
+            // A candidate name polluted before we reach it (wrong
+            // permissions or owner): fall back to further random suffixes
+            // so a hostile leftover cannot force profile writes into a
+            // directory it controls.
+            for _ in 0..4 {
+                candidates.push(temp.join(format!(
+                    "wavecode-seatbelt-{}-{:x}",
+                    std::process::id(),
+                    fallback_key()
+                )));
+            }
+            candidates
+                .into_iter()
+                .find(|candidate| private_profile_dir(candidate))
+        })
+        .clone()
+}
+
+/// Entropy for the random directory-name suffix: the OS entropy source on
+/// unix, falling back to the per-process hash keys plus the clock.
+fn random_suffix() -> u64 {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = [0u8; 8];
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut buf))
+            .is_ok()
+        {
+            return u64::from_ne_bytes(buf);
         }
     }
-    None
+    fallback_key()
 }
 
 /// Establish `dir` as a profile directory this process owns: created here
@@ -226,6 +254,17 @@ fn profile_path_for(cwd: &Path, extra_writable: &[PathBuf]) -> std::io::Result<P
         .get(&key)
         .cloned()
         .unwrap_or_else(|| dir.join(format!("profile-{key:x}.sb")));
+    #[cfg(unix)]
+    {
+        // Re-verify on reuse: a directory that lost its owner-only lock
+        // between selection and this write must not take a profile.
+        if !is_owner_only(&dir) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "seatbelt profile directory is no longer private",
+            ));
+        }
+    }
     std::fs::write(&path, rendered)?;
     guard.insert(key, path.clone());
     Ok(path)
@@ -361,14 +400,20 @@ mod tests {
     #[test]
     fn profile_dir_is_scoped_to_this_process() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let primary =
-            // nosemgrep: rust.lang.security.temp-dir.temp-dir
-            std::env::temp_dir().join(format!("wavecode-seatbelt-{}", std::process::id()));
-        // A leftover from a previous run of this pid would be accepted as
-        //-is; drop it so the test observes the create path it asserts on.
-        let _ = std::fs::remove_dir(&primary);
+        let temp = std::env::temp_dir();
         let dir = profile_dir().expect("a profile directory must be established");
-        assert_eq!(dir, primary, "primary profile dir must be pid-scoped");
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("utf-8 temp name");
+        assert!(
+            name.starts_with(&format!("wavecode-seatbelt-{}-", std::process::id())),
+            "profile dir must be pid-scoped with a random suffix: {name}"
+        );
+        assert!(
+            dir.parent() == Some(temp.as_path()),
+            "profile dir must live in the system temp dir"
+        );
     }
 
     /// A pre-existing directory that is not locked to its owner must be

@@ -45,7 +45,7 @@ impl Tool for MyTool {
 
 ## 4. 要写的测试
 
-模仿现有工具（`web_fetch.rs` 与 `lsp.rs` 是参考集）：
+模仿现有工具（`web_fetch.rs` 与 `lsp/` 是参考集）：
 
 - **注册与属性**：扩展 `builtin_registers_script_lsp_and_web_fetch` 的模式（`crates/capabilities/tools/src/lib.rs`）——工具存在，且其 `is_read_only` 分类符合只读子集的预期。
 - **业务错误是 `Ok(..., is_error: true)`**：缺参数、坏输入、上游"未找到"——断言 `is_error` 且内容解释了失败原因（见 `web_fetch` 在其 `is_error: true` 返回附近的失败路径测试）。

@@ -111,6 +111,17 @@ impl HttpMcpConfig {
         validate_endpoint(&self.endpoint)?;
         if let Some(oauth) = &self.oauth {
             validate_token_url(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
+            // A bearer token minted for a plain-http endpoint would hand the
+            // credential to the network in the Authorization header anyway,
+            // so OAuth and a non-loopback http endpoint are rejected together.
+            let endpoint = reqwest::Url::parse(&self.endpoint)
+                .map_err(|e| format!("invalid endpoint URL: {e}"))?;
+            if endpoint.scheme() == "http" && !is_loopback_target(&endpoint) {
+                return Err(format!(
+                    "oauth bearer tokens require an https or loopback endpoint, got {}",
+                    redacted_url(&endpoint)
+                ));
+            }
             if oauth.client_id.trim().is_empty() {
                 return Err("oauth_client_id must not be empty".to_owned());
             }
@@ -146,19 +157,38 @@ fn is_loopback_target(url: &reqwest::Url) -> bool {
     })
 }
 
+/// Host-only rendering of a URL for error text: scheme, host, and explicit
+/// port only — never userinfo, path, query, or fragment, which a hostile
+/// config could stuff with secrets that must not be echoed into
+/// diagnostics.
+fn redacted_url(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or("<no host>");
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
 /// Check an OAuth token endpoint: the client secret travels in the request
 /// body, so a plain-http endpoint is only acceptable on the loopback
 /// interface (local stubs); anywhere else it would cross the network in
-/// cleartext and the config is rejected at build time.
-fn validate_token_url(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
+/// cleartext and the config is rejected at build time. Error text renders
+/// the URL host-only because token URLs may carry credentials in userinfo
+/// or query parameters.
+pub fn validate_token_url(url: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|e| format!("invalid token endpoint URL: {e}"))?;
     match parsed.scheme() {
         "https" => Ok(()),
         "http" if is_loopback_target(&parsed) => Ok(()),
         "http" => Err(format!(
-            "must use https outside the loopback interface (the client secret would travel in cleartext): {url:?}"
+            "must use https outside the loopback interface (the client secret would travel in cleartext): {}",
+            redacted_url(&parsed)
         )),
-        other => Err(format!("must use http(s), got scheme {other:?}: {url:?}")),
+        other => Err(format!(
+            "must use http(s), got scheme {other:?}: {}",
+            redacted_url(&parsed)
+        )),
     }
 }
 
@@ -198,8 +228,20 @@ impl HttpMcp {
         // No redirects, matching the LLM clients and web tools: a 30x must
         // not rewrite POST semantics or carry headers along a redirect
         // chain the operator never configured.
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+        // A proxy between this process and a plain-http loopback token
+        // endpoint would receive the client-secret POST body in cleartext,
+        // so that configuration dials the token server directly; https
+        // token URLs stay proxyable because TLS protects the body.
+        let token_dials_direct = config.oauth.as_ref().is_some_and(|oauth| {
+            reqwest::Url::parse(&oauth.token_url)
+                .map(|url| url.scheme() == "http" && is_loopback_target(&url))
+                .unwrap_or(false)
+        });
+        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if token_dials_direct {
+            builder = builder.no_proxy();
+        }
+        let client = builder
             .build()
             .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))?;
         Ok(Self {
@@ -1467,6 +1509,48 @@ mod tests {
                 "token url {bad:?} rejected with an oauth_token_url reason, got: {error}"
             );
         }
+    }
+
+    /// OAuth on a plain-http non-loopback endpoint would put the minted
+    /// bearer token into an unencrypted Authorization header, so the
+    /// combination is rejected at build time; loopback http endpoints
+    /// keep working, and the rejection never echoes the full URL.
+    #[test]
+    fn oauth_rejects_plain_http_non_loopback_endpoint() {
+        let oauth = OAuthClientCredentials {
+            token_url: "https://auth.example.com/token".to_owned(),
+            client_id: "wave".to_owned(),
+            client_secret: "s3cret".to_owned(),
+            scope: None,
+        };
+        let config = HttpMcpConfig {
+            endpoint: "http://mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: Some(oauth.clone()),
+        };
+        let error = match HttpMcp::new(config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("oauth over a plain-http endpoint must be rejected"),
+        };
+        assert!(
+            error.contains("https or loopback endpoint"),
+            "unexpected rejection reason: {error}"
+        );
+        // The rejection names the host only, not the credential-bearing
+        // path or query of a hostile endpoint URL.
+        assert!(
+            !error.contains("example.com/mcp"),
+            "rejection must not echo the endpoint path: {error}"
+        );
+        let loopback = HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: Some(oauth),
+        };
+        assert!(
+            HttpMcp::new(loopback).is_ok(),
+            "oauth over a loopback http endpoint stays allowed"
+        );
     }
 
     /// The connect-retry gate is a read-only allowlist: handshake, pings,

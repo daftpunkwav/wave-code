@@ -343,8 +343,10 @@ impl McpServerConfig {
 
     /// Validate the server endpoint configuration: stdio requires a
     /// non-empty `command`; http requires a non-empty `url` starting with
-    /// `http://` or `https://`. Returns `Err` with the reason so the
-    /// assembly layer can surface it as a configuration error.
+    /// `http://` or `https://`, and an OAuth block whose token endpoint
+    /// satisfies the transport's https/loopback policy. Returns `Err`
+    /// with the reason so the assembly layer can surface it as a
+    /// configuration error.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::Stdio { command, .. } => {
@@ -378,6 +380,13 @@ impl McpServerConfig {
                     return Err("OAuth client-credentials needs all of `oauth_token_url`, \
                          `oauth_client_id`, `oauth_client_secret` (or none)"
                         .to_owned());
+                }
+                // Same policy the transport enforces on connect, applied
+                // here so doctor and assembly surface the reason up front
+                // instead of at first use.
+                if let Some(token_url) = oauth_token_url {
+                    transport_mcp::http::validate_token_url(token_url)
+                        .map_err(|e| format!("oauth_token_url: {e}"))?;
                 }
                 Ok(())
             }
@@ -635,5 +644,37 @@ mod tests {
             *oauth_client_secret = Some("s3cret".into());
         }
         assert!(partial.validate().is_ok());
+    }
+
+    /// The config layer applies the same token-endpoint policy the
+    /// transport enforces on connect, so doctor and assembly surface a
+    /// plain-http non-loopback `oauth_token_url` before first use.
+    #[test]
+    fn from_raw_rejects_cleartext_oauth_token_url_off_loopback() {
+        let raw = |token_url: &str| wavecode_config::McpServerRaw {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some("https://mcp.example.com/mcp".into()),
+            headers: HashMap::new(),
+            oauth_token_url: Some(token_url.into()),
+            oauth_client_id: Some("wave".into()),
+            oauth_client_secret: Some("s3cret".into()),
+            oauth_scope: None,
+        };
+        assert!(
+            McpServerConfig::from_raw("srv", &raw("https://auth.example.com/token")).is_ok(),
+            "https token url accepted"
+        );
+        assert!(
+            McpServerConfig::from_raw("srv", &raw("http://127.0.0.1:1/token")).is_ok(),
+            "loopback http token url accepted"
+        );
+        let err = McpServerConfig::from_raw("srv", &raw("http://auth.example.com/token"))
+            .expect_err("non-loopback http token url rejected");
+        assert!(
+            err.contains("oauth_token_url"),
+            "rejection names the offending field: {err}"
+        );
     }
 }

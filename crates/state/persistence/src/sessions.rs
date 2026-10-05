@@ -444,7 +444,7 @@ fn record_snapshot(
         }
         None => SessionMeta {
             id: id.to_string(),
-            title: default_title(request.history),
+            title: default_title(history),
             cwd: cwd.to_string(),
             created_at: now,
             updated_at: now,

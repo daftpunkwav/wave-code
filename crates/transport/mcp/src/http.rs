@@ -1547,6 +1547,7 @@ mod tests {
         let oauth = OAuthClientCredentials {
             token_url: "https://auth.example.com/token".to_owned(),
             client_id: "wave".to_owned(),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             client_secret: "s3cret".to_owned(),
             scope: None,
         };

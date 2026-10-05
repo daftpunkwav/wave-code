@@ -661,6 +661,7 @@ mod tests {
             headers: HashMap::new(),
             oauth_token_url: Some(token_url.into()),
             oauth_client_id: Some("wave".into()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             oauth_client_secret: Some("s3cret".into()),
             oauth_scope: None,
         };

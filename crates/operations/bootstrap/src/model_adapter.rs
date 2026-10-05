@@ -31,6 +31,7 @@ pub struct ModelAdapter {
     /// mid-session (same provider/endpoint only: base URL and credentials
     /// are baked into the wrapped client).
     model_name: std::sync::RwLock<String>,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     max_tokens: u32,
     registry: Arc<wavecode_tools::Registry>,
     /// Fallback window for per-name resolution through the capability
@@ -54,6 +55,7 @@ impl ModelAdapter {
     pub fn new(
         model: Arc<dyn ChatModel>,
         model_name: String,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         max_tokens: u32,
         registry: Arc<wavecode_tools::Registry>,
     ) -> Self {
@@ -365,6 +367,7 @@ impl ModelGateway for ModelAdapter {
             tools: self.tools(&request),
             // The runner's per-sample cap wins when set; `0` keeps the
             // gateway default so old callers behave unchanged.
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: if request.output_cap > 0 {
                 request.output_cap
             } else {
@@ -381,9 +384,13 @@ impl ModelGateway for ModelAdapter {
         // oldest one. Parsers that interleave argument bytes across calls
         // have to assemble those bytes themselves before emitting.
         let mut open: Vec<PendingTool> = Vec::new();
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         let mut input_tokens: Option<u64> = None;
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         let mut output_tokens: Option<u64> = None;
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         let mut cache_read_tokens: u64 = 0;
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         let mut cache_creation_tokens: u64 = 0;
         let mut truncated = false;
         while let Some(event) = stream.next().await {
@@ -567,6 +574,7 @@ mod tests {
     #[derive(Debug, Clone, Default)]
     struct ScriptedModel {
         events: Vec<StreamEvent>,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         last_max_tokens: Arc<std::sync::Mutex<u32>>,
     }
 
@@ -587,6 +595,7 @@ mod tests {
         ModelAdapter::new(
             Arc::new(ScriptedModel {
                 events,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 last_max_tokens: Arc::new(std::sync::Mutex::new(0)),
             }),
             "test-model".to_string(),
@@ -680,7 +689,9 @@ mod tests {
             StreamEvent::MessageComplete {
                 stop_reason: "end_turn".to_string(),
                 usage: Usage {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 2,
                     ..Usage::default()
                 },
@@ -793,7 +804,9 @@ mod tests {
             StreamEvent::MessageComplete {
                 stop_reason: "end_turn".to_string(),
                 usage: Usage {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 2,
                     ..Usage::default()
                 },
@@ -843,7 +856,9 @@ mod tests {
             StreamEvent::MessageComplete {
                 stop_reason: "end_turn".to_string(),
                 usage: Usage {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
                     ..Usage::default()
                 },
@@ -995,7 +1010,9 @@ mod tests {
                     Ok(StreamEvent::MessageComplete {
                         stop_reason: "end_turn".to_string(),
                         usage: Usage {
+                            // nosemgrep: codacy.yaml.security.hard-coded-tokens
                             input_tokens: 1,
+                            // nosemgrep: codacy.yaml.security.hard-coded-tokens
                             output_tokens: 1,
                             ..Usage::default()
                         },
@@ -1023,6 +1040,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 10,
         };
         let mut stream = model.stream(req).await.unwrap();
@@ -1056,6 +1074,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 10,
         };
         assert!(chain.stream(req).await.is_err());
@@ -1076,6 +1095,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 10,
         };
         assert!(matches!(
@@ -1093,6 +1113,7 @@ mod tests {
                 stop_reason: "end_turn".to_string(),
                 usage: Usage::default(),
             }],
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             last_max_tokens: Arc::new(std::sync::Mutex::new(0)),
         });
         let adapter = ModelAdapter::new(

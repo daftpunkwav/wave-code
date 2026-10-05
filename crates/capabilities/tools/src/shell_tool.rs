@@ -63,7 +63,7 @@ const KILL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// with a business error — execution never silently downgrades to an
 /// unconfined spawn.
 fn os_sandbox_enabled() -> bool {
-    std::env::var("WAVECODE_SANDBOX_OS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    wavecode_sandbox::os_sandbox_enabled()
 }
 
 /// Decode and truncate one output stream: UTF-8 boundary safe, console
@@ -128,6 +128,7 @@ fn console_codec() -> Option<&'static encoding_rs::Encoding> {
     static CODEC: OnceLock<Option<&'static encoding_rs::Encoding>> = OnceLock::new();
     *CODEC.get_or_init(|| {
         // SAFETY: `GetACP` takes no arguments and has no preconditions.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
         Some(match code_page {
             // UTF-8 consoles never reach the fallback.
@@ -1086,6 +1087,7 @@ mod tests {
         // unrelated tests failing on PoisonError.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Three variable classes: a suffix-pattern hit, a deny_env-list hit, and an unaffected normal variable.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("FOO_API_KEY", "secret123");
             std::env::set_var("FOO_PROVIDER_KEY", "secret456");
@@ -1103,6 +1105,7 @@ mod tests {
             .execute(serde_json::json!({"command": cmd}), &c)
             .await
             .unwrap();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("FOO_API_KEY");
             std::env::remove_var("FOO_PROVIDER_KEY");
@@ -1120,22 +1123,26 @@ mod tests {
         // Poison recovery, same reason as the scrubbing test above.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
         }
         assert!(!os_sandbox_enabled(), "confinement defaults off");
         for on in ["1", "true", "TRUE"] {
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe {
                 std::env::set_var("WAVECODE_SANDBOX_OS", on);
             }
             assert!(os_sandbox_enabled(), "{on} enables confinement");
         }
         for off in ["0", "false", "yes", ""] {
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe {
                 std::env::set_var("WAVECODE_SANDBOX_OS", off);
             }
             assert!(!os_sandbox_enabled(), "{off:?} must not enable confinement");
         }
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
             if let Some(v) = prior {
@@ -1151,6 +1158,7 @@ mod tests {
         // Poison recovery, same reason as the scrubbing test above.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("WAVECODE_SANDBOX_OS", "1");
         }
@@ -1159,6 +1167,7 @@ mod tests {
             .execute(serde_json::json!({"command": "echo hello"}), &c)
             .await
             .unwrap();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
             if let Some(v) = prior {

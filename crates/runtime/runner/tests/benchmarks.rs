@@ -101,19 +101,27 @@ impl ModelGateway for ScriptedToolModel {
                     name: "echo".to_string(),
                     input: serde_json::json!({"n": *guard}),
                 }],
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 input_tokens: Some(10),
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 output_tokens: Some(5),
                 truncated: false,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 cache_read_tokens: 0,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 cache_creation_tokens: 0,
             });
         }
         Ok(SampleResponse {
             blocks: vec![SampleBlock::Text("bench-done".to_string())],
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             input_tokens: Some(10),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             output_tokens: Some(5),
             truncated: false,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: 0,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_creation_tokens: 0,
         })
     }
@@ -158,6 +166,7 @@ impl Compactor for NullCompactor {
     ) -> Result<Compacted, CompactError> {
         Ok(Compacted {
             summary: "bench".to_string(),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             summary_tokens: 1,
             ..Compacted::default()
         })
@@ -178,6 +187,7 @@ fn bench_config() -> RunConfig {
     RunConfig {
         model_name: "bench-scripted".to_string(),
         context_window: 200_000,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         max_output_tokens: 100,
         max_tool_rounds: 32,
         max_continuations: runtime_runner::MAX_CONTINUATIONS,

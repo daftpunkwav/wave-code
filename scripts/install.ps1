@@ -8,6 +8,13 @@
 #   irm https://raw.githubusercontent.com/daftpunkwav/wave-code/main/scripts/install.ps1 | iex
 # (pipe with care: review the script first, or download and run it.)
 
+# Status messages target the console host on purpose: the script is
+# documented for `irm | iex`, where Write-Output would inject strings
+# into the pipeline iex executes.
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '',
+    Justification = 'Console status output for a pipe-executed script; Write-Output would pollute the iex pipeline.')]
+param()
+
 $ErrorActionPreference = "Stop"
 
 $repo = "daftpunkwav/wave-code"

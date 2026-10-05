@@ -290,16 +290,191 @@ impl Markdown {
             .collect()
     }
 
+    /// Wrap and emit the styled inline buffer as output lines: one line
+    /// per wrap, prefixed with the quote bar while inside a block quote.
+    fn flush_inline(
+        &self,
+        inline: &mut String,
+        out: &mut Vec<String>,
+        in_quote: bool,
+        columns: usize,
+    ) {
+        if inline.is_empty() {
+            return;
+        }
+        let prefix = if in_quote { "│ " } else { "" };
+        for line in width::wrap_line(inline, columns.saturating_sub(prefix.width())) {
+            if in_quote {
+                // Each span already carries the quote look (compose
+                // layers it per span); only the bar prefix needs its
+                // own paint here — an outer paint would be cut at the
+                // first inner reset.
+                out.push(format!("{}{}", self.style.quote.paint(prefix), line));
+            } else {
+                out.push(line);
+            }
+        }
+        inline.clear();
+    }
+
+    /// Emit a finished heading: its raw buffer paints once, wraps like
+    /// any other block, and an H1 gains a rule as wide as its last
+    /// rendered line.
+    fn flush_heading(
+        &self,
+        inline: &mut String,
+        level: Option<HeadingLevel>,
+        columns: usize,
+        out: &mut Vec<String>,
+    ) {
+        if inline.is_empty() {
+            return;
+        }
+        ensure_blank(out);
+        let text = std::mem::take(inline);
+        let style = self.style.heading.bold();
+        // Headings wrap like any other block: an overlong heading left
+        // unwrapped would be hard-truncated by the screen layer and
+        // lose its tail.
+        let lines: Vec<String> = width::wrap_line(&text, columns);
+        let last = lines.len().saturating_sub(1);
+        for (index, line) in lines.into_iter().enumerate() {
+            out.push(style.paint(&line));
+            if let Some(HeadingLevel::H1) = level
+                && index == last
+            {
+                // The rule sits under the heading's last line, as wide
+                // as that line.
+                let rule = self
+                    .style
+                    .rule
+                    .paint(&"─".repeat(columns.min(width::width(&line))));
+                out.push(rule);
+            }
+        }
+    }
+
+    /// Emit one finished code block: sanitize the raw body, then route
+    /// it through the fence renderers (the mermaid seam), diff
+    /// coloring, or the syntax highlighter, and frame the result.
+    fn render_code_block(
+        &self,
+        inline: &mut String,
+        lang: Option<String>,
+        columns: usize,
+        out: &mut Vec<String>,
+    ) {
+        // Code content rides raw through the inline buffer (no style
+        // paint) and is sanitized once here: model-sourced escapes must
+        // never reach the highlighter or the frame.
+        let taken = std::mem::take(inline);
+        let code = sanitize_terminal(&taken).into_owned();
+        // Fence renderers get first pass at the body (the mermaid
+        // seam); then diff fences; the rest rides the highlighter.
+        let body_budget = frame_width(columns).saturating_sub(4);
+        let diagram = lang.as_deref().and_then(|lang| {
+            self.fences
+                .iter()
+                .find_map(|fence| fence.render_fence(lang, &code, body_budget))
+        });
+        // Diff fences get dedicated +- and hunk coloring instead of
+        // generic syntax highlighting.
+        let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
+        let body = match diagram {
+            Some(body) => body,
+            None if is_diff => self.diff_lines(&code),
+            None => self.highlighter.highlight(&code, lang.as_deref()),
+        };
+        // The frame hugs its content (plus the tag) and only stretches
+        // to the width cap on wide rows — a full-width frame starves
+        // the right side.
+        let content = body
+            .iter()
+            .map(|line| width::width(line))
+            .max()
+            .unwrap_or(0);
+        let tag_width = lang
+            .as_deref()
+            .and_then(lang_tag)
+            .map(|tag| width::width(&tag) + 6)
+            .unwrap_or(0);
+        let total = content
+            .max(tag_width)
+            .saturating_add(4)
+            .min(frame_width(columns));
+        out.push(self.frame_top(lang.as_deref(), total));
+        for line in &body {
+            out.push(self.frame_row(line, total));
+        }
+        out.push(self.frame_bottom(total));
+    }
+
+    /// Append one styled text span to the inline buffer: the composed
+    /// span style, plus an OSC 8 hyperlink wrapper when inside a link.
+    fn push_styled_text(
+        &self,
+        inline: &mut String,
+        state: &InlineState,
+        in_quote: bool,
+        text: &str,
+    ) {
+        let styled = state.compose(self.style, in_quote).paint(text);
+        if state.link {
+            // Hyperlink targets must be control-character free or the
+            // link degrades to plain styled text.
+            let safe_url = state
+                .link_url
+                .as_ref()
+                .is_some_and(|url| !url.chars().any(char::is_control));
+            if let (true, Some(url)) = (safe_url, &state.link_url) {
+                inline.push_str(&format!("\x1b]8;;{url}\x07{styled}\x1b]8;;\x07"));
+            } else {
+                inline.push_str(&styled);
+            }
+        } else {
+            inline.push_str(&styled);
+        }
+    }
+
+    /// Emit one display-math block: matrix environments lay out over
+    /// multiple aligned lines, followed by a blank separator.
+    fn push_display_math(&self, math: &str, columns: usize, out: &mut Vec<String>) {
+        ensure_blank(out);
+        for line in crate::math::render_block(math, columns) {
+            out.push(self.style.text.paint(&line));
+        }
+        out.push(String::new());
+    }
+
+    /// Open a block quote: separate it from the previous block and flip
+    /// the quote flag so following spans carry the quote look.
+    fn open_block_quote(
+        &self,
+        inline: &mut String,
+        out: &mut Vec<String>,
+        in_quote: &mut bool,
+        columns: usize,
+    ) {
+        self.flush_inline(inline, out, *in_quote, columns);
+        ensure_blank(out);
+        *in_quote = true;
+    }
+
+    /// Append one list item marker to the inline buffer: the indent
+    /// for the item's nesting depth plus the ordered number or bullet.
+    fn push_item_marker(&self, inline: &mut String, list_stack: &mut [Option<u64>]) {
+        let depth = list_stack.len().saturating_sub(1);
+        let marker = list_marker(list_stack.last_mut());
+        inline.push_str(&"  ".repeat(depth));
+        // The marker rides the text style: unpainted text inherits the
+        // terminal's default foreground, which a recolored (light)
+        // background leaves unreadable.
+        inline.push_str(&self.style.text.paint(&marker));
+    }
+
     fn render_uncached(&self, text: &str, columns: usize) -> Vec<String> {
-        let highlighted = highlight_to_bold(text);
-        let scripted = script_spans_to_unicode(&highlighted);
-        let fixed_html = html_fixups(&scripted);
-        let text = break_before_bold_lines(&fixed_html);
-        let options = Options::ENABLE_TABLES
-            | Options::ENABLE_STRIKETHROUGH
-            | Options::ENABLE_TASKLISTS
-            | Options::ENABLE_MATH
-            | Options::ENABLE_FOOTNOTES;
+        let text = preprocess(text);
+        let options = parser_options();
         let parser = Parser::new_ext(&text, options);
         let mut out: Vec<String> = Vec::new();
         let mut inline = String::new();
@@ -315,83 +490,33 @@ impl Markdown {
         let mut table_row: Vec<String> = Vec::new();
         let mut table_aligns: Vec<pulldown_cmark::Alignment> = Vec::new();
 
-        macro_rules! flush_inline {
-            () => {
-                if !inline.is_empty() {
-                    let prefix = if in_quote { "│ " } else { "" };
-                    for line in width::wrap_line(&inline, columns.saturating_sub(prefix.width())) {
-                        if in_quote {
-                            // Each span already carries the quote look
-                            // (compose layers it per span); only the
-                            // bar prefix needs its own paint here — an
-                            // outer paint would be cut at the first
-                            // inner reset.
-                            out.push(format!("{}{}", self.style.quote.paint(prefix), line));
-                        } else {
-                            out.push(line);
-                        }
-                    }
-                    inline.clear();
-                }
-            };
-        }
-
         for event in parser {
             match event {
                 Event::Start(tag) => match tag {
                     Tag::Heading { level, .. } => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                         heading_level = Some(level);
                     }
                     Tag::Paragraph => ensure_blank(&mut out),
                     Tag::Emphasis => state.italic = true,
                     Tag::Strong => state.bold = true,
                     Tag::Strikethrough => state.strike = true,
-                    Tag::Link { dest_url, .. } => {
+                    Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                         state.link = true;
                         state.link_url = Some(dest_url.to_string());
                     }
-                    Tag::Image { dest_url, .. } => {
-                        state.link = true;
-                        state.link_url = Some(dest_url.to_string());
-                    }
-                    Tag::List(start) => {
-                        let top_level = list_stack.is_empty();
-                        list_stack.push(start);
-                        // Separation belongs around whole lists; items
-                        // inside stay tight.
-                        if top_level {
-                            ensure_blank(&mut out);
-                        }
-                    }
+                    Tag::List(start) => start_list(&mut list_stack, start, &mut out),
                     Tag::Item => {
-                        flush_inline!();
-                        let depth = list_stack.len().saturating_sub(1);
-                        let marker = match (list_stack.last_mut(), depth) {
-                            (Some(Some(number)), _) => {
-                                let marker = format!("{number}. ");
-                                *number += 1;
-                                marker
-                            }
-                            _ => "• ".to_string(),
-                        };
-                        inline.push_str(&"  ".repeat(depth));
-                        // The marker rides the text style: unpainted text
-                        // inherits the terminal's default foreground, which
-                        // a recolored (light) background leaves unreadable.
-                        inline.push_str(&self.style.text.paint(&marker));
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.push_item_marker(&mut inline, &mut list_stack);
                     }
                     Tag::BlockQuote(_) => {
-                        flush_inline!();
-                        ensure_blank(&mut out);
-                        in_quote = true;
+                        self.open_block_quote(&mut inline, &mut out, &mut in_quote, columns);
                     }
                     Tag::CodeBlock(kind) => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                         ensure_blank(&mut out);
-                        if let CodeBlockKind::Fenced(info) = kind {
-                            code_lang = info.split(' ').next().map(|s| s.to_string());
-                        }
+                        code_lang = fenced_lang(kind);
                         in_code = true;
                     }
                     Tag::FootnoteDefinition(label) => {
@@ -399,7 +524,7 @@ impl Markdown {
                         inline.push_str(&self.style.code.paint(&format!("[{label}]: ")));
                     }
                     Tag::Table(alignments) => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                         ensure_blank(&mut out);
                         table_rows = Vec::new();
                         table_aligns = alignments;
@@ -415,34 +540,10 @@ impl Markdown {
                         // parked here would push every later span onto
                         // the raw unstyled path.
                         let level = heading_level.take();
-                        if !inline.is_empty() {
-                            ensure_blank(&mut out);
-                            let text = std::mem::take(&mut inline);
-                            let style = self.style.heading.bold();
-                            // Headings wrap like any other block: an
-                            // overlong heading left unwrapped would be
-                            // hard-truncated by the screen layer and
-                            // lose its tail.
-                            let lines: Vec<String> = width::wrap_line(&text, columns);
-                            let last = lines.len().saturating_sub(1);
-                            for (index, line) in lines.into_iter().enumerate() {
-                                out.push(style.paint(&line));
-                                if let Some(HeadingLevel::H1) = level
-                                    && index == last
-                                {
-                                    // The rule sits under the heading's
-                                    // last line, as wide as that line.
-                                    let rule = self
-                                        .style
-                                        .rule
-                                        .paint(&"─".repeat(columns.min(width::width(&line))));
-                                    out.push(rule);
-                                }
-                            }
-                        }
+                        self.flush_heading(&mut inline, level, columns, &mut out);
                     }
                     TagEnd::Paragraph => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                     }
                     TagEnd::Emphasis => state.italic = false,
                     TagEnd::Strong => state.bold = false,
@@ -453,69 +554,23 @@ impl Markdown {
                     }
                     TagEnd::List(_) => {
                         list_stack.pop();
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                     }
-                    TagEnd::Item => {
-                        flush_inline!();
-                    }
+                    TagEnd::Item => self.flush_inline(&mut inline, &mut out, in_quote, columns),
                     TagEnd::BlockQuote(_) => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                         in_quote = false;
                     }
                     TagEnd::CodeBlock => {
                         in_code = false;
                         let lang = code_lang.take();
-                        // Code content rides raw through the inline
-                        // buffer (no style paint) and is sanitized once
-                        // here: model-sourced escapes must never reach
-                        // the highlighter or the frame.
-                        let taken = std::mem::take(&mut inline);
-                        let code = sanitize_terminal(&taken).into_owned();
-                        // Fence renderers get first pass at the body
-                        // (the mermaid seam); then diff fences; the
-                        // rest rides the syntax highlighter.
-                        let body_budget = frame_width(columns).saturating_sub(4);
-                        let diagram = lang.as_deref().and_then(|lang| {
-                            self.fences
-                                .iter()
-                                .find_map(|fence| fence.render_fence(lang, &code, body_budget))
-                        });
-                        // Diff fences get dedicated +- and hunk coloring
-                        // instead of generic syntax highlighting.
-                        let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
-                        let body = match diagram {
-                            Some(body) => body,
-                            None if is_diff => self.diff_lines(&code),
-                            None => self.highlighter.highlight(&code, lang.as_deref()),
-                        };
-                        // The frame hugs its content (plus the tag) and
-                        // only stretches to the width cap on wide rows —
-                        // a full-width frame starves the right side.
-                        let content = body
-                            .iter()
-                            .map(|line| width::width(line))
-                            .max()
-                            .unwrap_or(0);
-                        let tag_width = lang
-                            .as_deref()
-                            .and_then(lang_tag)
-                            .map(|tag| width::width(&tag) + 6)
-                            .unwrap_or(0);
-                        let total = content
-                            .max(tag_width)
-                            .saturating_add(4)
-                            .min(frame_width(columns));
-                        out.push(self.frame_top(lang.as_deref(), total));
-                        for line in &body {
-                            out.push(self.frame_row(line, total));
-                        }
-                        out.push(self.frame_bottom(total));
+                        self.render_code_block(&mut inline, lang, columns, &mut out);
                     }
                     TagEnd::FootnoteDefinition => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                     }
                     TagEnd::Table => {
-                        flush_inline!();
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
                         render_table(&table_rows, &table_aligns, columns, &self.style, &mut out);
                     }
                     TagEnd::TableHead | TagEnd::TableRow => {
@@ -534,24 +589,7 @@ impl Markdown {
                         inline.push_str(text_event.as_ref());
                         continue;
                     }
-                    let styled = state
-                        .compose(self.style, in_quote)
-                        .paint(text_event.as_ref());
-                    if state.link {
-                        // Hyperlink targets must be control-character free
-                        // or the link degrades to plain styled text.
-                        let safe_url = state
-                            .link_url
-                            .as_ref()
-                            .is_some_and(|url| !url.chars().any(char::is_control));
-                        if let (true, Some(url)) = (safe_url, &state.link_url) {
-                            inline.push_str(&format!("\x1b]8;;{url}\x07{styled}\x1b]8;;\x07"));
-                        } else {
-                            inline.push_str(&styled);
-                        }
-                    } else {
-                        inline.push_str(&styled);
-                    }
+                    self.push_styled_text(&mut inline, &state, in_quote, text_event.as_ref());
                 }
                 Event::Code(code) => {
                     // Inside a heading the span rides raw with the rest
@@ -567,11 +605,9 @@ impl Markdown {
                     inline.push_str(&self.style.code.paint(code.as_ref()));
                 }
                 Event::SoftBreak => inline.push(' '),
-                Event::HardBreak => {
-                    flush_inline!();
-                }
+                Event::HardBreak => self.flush_inline(&mut inline, &mut out, in_quote, columns),
                 Event::Rule => {
-                    flush_inline!();
+                    self.flush_inline(&mut inline, &mut out, in_quote, columns);
                     ensure_blank(&mut out);
                     out.push(self.style.rule.paint("─".repeat(columns.min(80)).as_str()));
                 }
@@ -585,14 +621,8 @@ impl Markdown {
                     inline.push_str(&self.style.text.paint(&converted));
                 }
                 Event::DisplayMath(math) => {
-                    // Block math becomes its own block: matrix
-                    // environments lay out over multiple aligned lines.
-                    flush_inline!();
-                    ensure_blank(&mut out);
-                    for line in crate::math::render_block(math.as_ref(), columns) {
-                        out.push(self.style.text.paint(&line));
-                    }
-                    out.push(String::new());
+                    self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                    self.push_display_math(math.as_ref(), columns, &mut out);
                 }
                 Event::TaskListMarker(checked) => {
                     // Lands right after the item bullet, before the text.
@@ -608,13 +638,53 @@ impl Markdown {
                 }
             }
         }
-        flush_inline!();
+        self.flush_inline(&mut inline, &mut out, in_quote, columns);
         // Trailing blank lines never render.
         while out.last().is_some_and(|l| l.is_empty()) {
             out.pop();
         }
         out
     }
+}
+
+/// The prepasses every document runs through before parsing, in order:
+/// `==highlight==` onto bold, script spans onto unicode code points,
+/// HTML constructs onto markdown, and paragraph breaks before
+/// bold-led lines.
+fn preprocess(text: &str) -> String {
+    let highlighted = highlight_to_bold(text);
+    let scripted = script_spans_to_unicode(&highlighted);
+    let fixed_html = html_fixups(&scripted);
+    break_before_bold_lines(&fixed_html).into_owned()
+}
+
+/// The parser extension set: tables, strikethrough, task lists, math,
+/// and footnotes.
+fn parser_options() -> Options {
+    Options::ENABLE_TABLES
+        | Options::ENABLE_STRIKETHROUGH
+        | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_MATH
+        | Options::ENABLE_FOOTNOTES
+}
+
+/// The language tag of a fenced code block: the first word of the info
+/// string, or `None` for indented (unfenced) blocks.
+fn fenced_lang(kind: CodeBlockKind) -> Option<String> {
+    if let CodeBlockKind::Fenced(info) = kind {
+        info.split(' ').next().map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Open a list: push its start number, separating only whole top-level
+/// lists from the previous block (items inside stay tight).
+fn start_list(list_stack: &mut Vec<Option<u64>>, start: Option<u64>, out: &mut Vec<String>) {
+    if list_stack.is_empty() {
+        ensure_blank(out);
+    }
+    list_stack.push(start);
 }
 
 /// Advance the fenced-code state over one line; returns true when the
@@ -860,6 +930,19 @@ fn kbd_line(line: &str) -> String {
 fn is_bold_led(line: &str) -> bool {
     let indent = line.len() - line.trim_start_matches(' ').len();
     indent <= 3 && line[indent..].starts_with("**")
+}
+
+/// The marker for one list item: an ordered list carries its start
+/// number (advancing it for the next item), a bullet list the dot.
+fn list_marker(start: Option<&mut Option<u64>>) -> String {
+    match start {
+        Some(Some(number)) => {
+            let marker = format!("{number}. ");
+            *number += 1;
+            marker
+        }
+        _ => "• ".to_string(),
+    }
 }
 
 /// The display tag for a fenced block info string: the first word with

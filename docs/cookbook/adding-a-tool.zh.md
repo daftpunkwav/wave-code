@@ -2,7 +2,7 @@
 
 [English](adding-a-tool.md) | 中文
 
-已验证的示例：`web_fetch`（`crates/capabilities/tools/src/web_fetch.rs`，注册于 `Registry::builtin()`）和 `lsp_diagnostics`（`crates/capabilities/tools/src/lsp.rs`，在会话装配中迟注册）。
+已验证的示例：`web_fetch`（`crates/capabilities/tools/src/web_fetch.rs`，注册于 `Registry::builtin()`）和 `lsp_diagnostics`（`crates/capabilities/tools/src/lsp/tools.rs`，经 `src/lsp.rs` 再导出，在会话装配中迟注册）。
 
 ## 1. 实现 `Tool` trait
 
@@ -33,7 +33,7 @@ impl Tool for MyTool {
 在两个注册点中选其一：
 
 - **静态内建**：追加到 `crates/capabilities/tools/src/lib.rs` 的 `Registry::builtin()`。工具不需要会话状态时用这个。
-- **迟注册**：在 `crates/operations/bootstrap/src/session.rs` 中、它依赖的部件就绪之后注册——例如共享 LSP 状态的 `registry.register(Arc::new(LspDiagnostics::with_providers(...)))`，以及需要围绕驱动器构建子任务服务的 `skill` / `task` 工具。注册表是内部可变的，迟注册会到达每一个已共享的句柄（executor、策略、模型适配器），无需重建。
+- **迟注册**：在 `crates/operations/bootstrap/src/session/assembly.rs` 中、它依赖的部件就绪之后注册——LSP 工具展示了这个形态（`register_lsp_tools` 围绕一个共享的 `LspProviders` 句柄注册五个工具），需要围绕驱动器构建子任务服务的 `skill` / `task` 工具同理。注册表是内部可变的，迟注册会到达每一个已共享的句柄（executor、策略、模型适配器），无需重建。
 
 需要会话共享存储的工具遵循 `todo_write` 模式：`with_todo_write` 式的构造函数在工具与会话配置之间共享同一个 `Arc`。
 
@@ -45,7 +45,7 @@ impl Tool for MyTool {
 
 ## 4. 要写的测试
 
-模仿现有工具（`web_fetch.rs` 与 `lsp.rs` 是参考集）：
+模仿现有工具（`web_fetch.rs` 与 `lsp/` 是参考集）：
 
 - **注册与属性**：扩展 `builtin_registers_script_lsp_and_web_fetch` 的模式（`crates/capabilities/tools/src/lib.rs`）——工具存在，且其 `is_read_only` 分类符合只读子集的预期。
 - **业务错误是 `Ok(..., is_error: true)`**：缺参数、坏输入、上游"未找到"——断言 `is_error` 且内容解释了失败原因（见 `web_fetch` 在其 `is_error: true` 返回附近的失败路径测试）。

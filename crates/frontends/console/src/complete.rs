@@ -208,6 +208,7 @@ mod tests {
 
     #[test]
     fn inventory_skips_hidden_and_vendored_dirs() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let temp = std::env::temp_dir().join(format!("wc-inv-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(temp.join("src")).unwrap();
@@ -225,6 +226,7 @@ mod tests {
 
     #[test]
     fn mention_completions_rank_matches() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let temp = std::env::temp_dir().join(format!("wc-inv2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();

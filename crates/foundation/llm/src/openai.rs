@@ -586,8 +586,11 @@ fn finish_turn(state: &OpenAiStreamState) -> Vec<StreamEvent> {
             // `prompt_tokens` already covers `cached_tokens` (a subset
             // detail), so it passes through as the full prompt; folding the
             // cache counters in is the Anthropic parser's job.
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             input_tokens: state.prompt_tokens,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             output_tokens: state.completion_tokens,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: state.cached_tokens,
             ..Usage::default()
         },
@@ -609,8 +612,11 @@ struct ToolSlot {
 struct OpenAiStreamState {
     slots: Vec<ToolSlot>,
     stop_reason: Option<String>,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     prompt_tokens: u64,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     completion_tokens: u64,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     cached_tokens: u64,
 }
 
@@ -686,30 +692,36 @@ struct OpenAiFunctionDelta {
 #[derive(Deserialize, Default)]
 struct OpenAiUsage {
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     prompt_tokens: u64,
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     completion_tokens: u64,
     /// Cache accounting (`prompt_tokens_details.cached_tokens`); absent on
     /// providers without the field, degrading to 0.
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
 }
 
 #[derive(Deserialize, Default)]
 struct OpenAiPromptTokensDetails {
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     cached_tokens: u64,
 }
 
 /// Approximate per-model limits (context window and max output tokens).
 ///
 /// Values are approximations for session sizing only; an explicit
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
 /// `ProviderConfig.context_window` / `max_output_tokens` always overrides them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCapabilities {
     /// Approximate context window in tokens.
     pub context_window: u64,
     /// Approximate max output tokens per round.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub max_output_tokens: u32,
 }
 
@@ -726,6 +738,7 @@ impl ModelCapabilities {
         if name.starts_with("deepseek-chat") || name.starts_with("deepseek-reasoner") {
             Some(Self {
                 context_window: 128_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 8_192,
             })
         } else if name.starts_with("gpt-5") {
@@ -733,31 +746,37 @@ impl ModelCapabilities {
             // reasoning tokens plus visible output.
             Some(Self {
                 context_window: 400_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 128_000,
             })
         } else if o_series(&name) {
             Some(Self {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 100_000,
             })
         } else if name.starts_with("gpt-4o-mini") || name.starts_with("gpt-4o") {
             Some(Self {
                 context_window: 128_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 16_384,
             })
         } else if name.starts_with("kimi-k2") {
             Some(Self {
                 context_window: 256_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 16_384,
             })
         } else if name.starts_with("qwen3-coder") {
             Some(Self {
                 context_window: 256_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 32_768,
             })
         } else if name.starts_with("glm-4.6") {
             Some(Self {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 8_192,
             })
         } else if lowered.contains("ollama") || name.starts_with("local-") {
@@ -771,9 +790,11 @@ impl ModelCapabilities {
 
     /// Resolves limits with explicit caller-supplied fallbacks for unknown names
     /// (typically the session defaults derived from `ProviderConfig`).
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub fn resolve_or(name: &str, context_window: u64, max_output_tokens: u32) -> Self {
         Self::for_model(name).unwrap_or(Self {
             context_window,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens,
         })
     }
@@ -782,6 +803,7 @@ impl ModelCapabilities {
     pub fn local_default() -> Self {
         Self {
             context_window: 32_768,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens: 8_192,
         }
     }
@@ -944,6 +966,7 @@ mod tests {
                 }],
             }]),
             tools: Arc::new(vec![tool_spec()]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 100,
         };
         let body = build_request_body(&req, "deepseek-chat", None);
@@ -966,6 +989,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
             tools: Arc::new(tools),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 4096,
         };
         let reasoning = build_request_body(&req(Vec::new()), "o3-mini", None);
@@ -1000,6 +1024,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 100,
         };
         let body = build_request_body(&req, "deepseek-chat", Some("low"));
@@ -1215,7 +1240,9 @@ mod tests {
                 // `length` maps to the continuation trigger the upper layers match on.
                 stop_reason: "max_tokens".to_string(),
                 usage: Usage {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 5,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 7,
                     ..Usage::default()
                 },
@@ -1346,6 +1373,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(vec![]),
             tools: Arc::new(vec![]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 1,
         };
         let err = match client.stream(req).await {
@@ -1394,9 +1422,11 @@ mod tests {
         // real windows instead of the 200k/8k session default.
         let gpt5 = ModelCapabilities::for_model("gpt-5.2-codex").unwrap();
         assert_eq!(gpt5.context_window, 400_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(gpt5.max_output_tokens, 128_000);
         let o3 = ModelCapabilities::for_model("o3-mini").unwrap();
         assert_eq!(o3.context_window, 200_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(o3.max_output_tokens, 100_000);
         // `opus` is not an o-series model, and a vendor prefix is skipped.
         assert!(ModelCapabilities::for_model("claude-opus-4-1").is_none());
@@ -1404,6 +1434,7 @@ mod tests {
             ModelCapabilities::for_model("openai/o4-mini").unwrap(),
             ModelCapabilities {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 100_000,
             }
         );
@@ -1428,6 +1459,7 @@ mod tests {
             resolved,
             ModelCapabilities {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 8_192,
             }
         );

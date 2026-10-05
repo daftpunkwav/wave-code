@@ -57,6 +57,9 @@ export interface ExecSession {
    * maps onto the wire stdin dialect: `"allow"`, `"always"`, or
    * `{ deny: "reason" }` / `"deny"`.
    */
+  // The parameter name documents the wire protocol; the base rule
+  // cannot see that an interface member list is a type position.
+  // eslint-disable-next-line no-unused-vars -- documentation name, no body exists
   answerApproval(callId: string, decision: ApprovalDecision): void;
   /** Resolve when the child exits; also the iterator end. */
   wait(): Promise<ExecResult>;
@@ -64,10 +67,22 @@ export interface ExecSession {
   interrupt(): void;
 }
 
+/** String decisions the wire stdin dialect accepts verbatim. */
+const WIRE_DECISIONS: readonly string[] = ["allow", "always", "deny"];
+
+type WireDecision = "allow" | "always" | "deny";
+
+function isWireDecision(value: string): value is WireDecision {
+  return WIRE_DECISIONS.includes(value);
+}
+
 /** Internal: the decision token accepted by the wire stdin dialect. */
 function decisionToken(decision: ApprovalDecision): string {
   if (typeof decision === "string") {
-    if (decision === "allow" || decision === "always" || decision === "deny") {
+    // Runtime validation is deliberate: the TypeScript union cannot be
+    // enforced when SDK consumers call from plain JavaScript, so unknown
+    // strings fail closed here instead of leaking into the wire dialect.
+    if (isWireDecision(decision)) {
       return decision;
     }
     throw new Error(`unknown approval decision: ${String(decision)}`);
@@ -106,8 +121,14 @@ export function execSession(options: ExecOptions): ExecSession {
   const eventsQueue: ExecEvent[] = [];
   let wake: (() => void) | null = null;
   let closed = false;
+  // eslint-disable-next-line no-unused-vars -- the parameter name
+  // documents what a rejection receives; the base rule cannot see that
+  // this is a type position, not an unused binding.
   let fail: ((error: Error) => void) | null = null;
 
+  // biome-ignore lint/correctness/useQwikValidLexicalScope: this SDK file
+  // is not a Qwik component; the framework-scoped rule misfires on a
+  // plain closure.
   const push = (event: ExecEvent) => {
     eventsQueue.push(event);
     wake?.();
@@ -115,6 +136,10 @@ export function execSession(options: ExecOptions): ExecSession {
   };
 
   const stdout = child.stdout;
+  // The Readable type claims non-null, but child.stdout is null when
+  // spawn fails (ENOENT); the error handler below surfaces that as a
+  // final event and this guard keeps the readline setup from throwing.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- runtime null despite the type
   if (stdout) {
     const lines = readline.createInterface({ input: stdout, crlfDelay: Infinity });
     lines.on("line", (line) => {

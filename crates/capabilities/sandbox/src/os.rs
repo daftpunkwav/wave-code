@@ -271,6 +271,7 @@ impl SandboxBackend for LinuxLandlockBackend {
         // SAFETY: pre_exec runs in the child after fork and before exec; the
         // closure only owns profile paths and applies the ruleset, returning
         // Err (which aborts the spawn) on any failure — fail-closed.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             use std::os::unix::process::CommandExt;
             cmd.as_std_mut().pre_exec(move || apply_landlock(&profile));

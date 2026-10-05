@@ -42,7 +42,9 @@ export type WireEventPayload =
     }
   | {
       type: "token_count";
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
       input_tokens: number;
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
       output_tokens: number;
       cache_read_tokens?: number;
       cache_creation_tokens?: number;

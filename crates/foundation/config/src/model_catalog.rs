@@ -159,10 +159,12 @@ impl ModelSpec {
             env_key: self.api_key_env.clone(),
             api_key: self.api_key.clone(),
             context_window: self.context_window,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens: self.max_output,
             fallback_providers: Vec::new(),
             rpm_limit: None,
             reasoning_effort: self.default_effort(),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             thinking_budget_tokens: None,
             prompt_caching: None,
             prompt_cache_ttl: None,
@@ -317,7 +319,9 @@ mod tests {
 
     #[test]
     fn missing_file_is_an_empty_catalog() {
-        let dir = std::env::temp_dir().join("wavecode-catalog-missing");
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let catalog = ModelCatalog::load(&dir).unwrap();
         assert!(catalog.models.is_empty());
@@ -325,7 +329,9 @@ mod tests {
 
     #[test]
     fn malformed_catalog_is_an_error_not_empty() {
-        let dir = std::env::temp_dir().join("wavecode-catalog-bad");
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         std::fs::create_dir_all(dir.join(".wavecode")).unwrap();
         std::fs::write(dir.join(".wavecode").join("models.json"), "{ not json").unwrap();
         assert!(ModelCatalog::load(&dir).is_err());
@@ -336,7 +342,9 @@ mod tests {
     /// is a directory) surfaces as an error instead of looking empty.
     #[test]
     fn unreadable_catalog_is_an_error_not_empty() {
-        let dir = std::env::temp_dir().join("wavecode-catalog-blocked");
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let path = dir.join(".wavecode").join("models.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&path).unwrap();
@@ -381,7 +389,9 @@ mod tests {
     #[test]
     fn saved_catalog_is_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join("wavecode-catalog-perms");
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let path = dir.join(".wavecode").join("models.json");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -410,7 +420,9 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let dir = std::env::temp_dir().join("wavecode-catalog-round");
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let guard = tempfile::tempdir().expect("tempdir");
+        let dir = guard.path().to_path_buf();
         let _ = std::fs::remove_dir_all(&dir);
         let mut catalog = ModelCatalog::default();
         catalog.insert(

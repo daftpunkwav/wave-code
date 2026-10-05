@@ -14,6 +14,7 @@
 //!   `function_call` / `function_call_output` items for tool exchange (tool
 //!   pairing rides `call_id`, which is what wave stores as the call id);
 //! - tool definitions are flat (`{type, name, description, parameters}`);
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
 //! - the output cap is `max_output_tokens` and reasoning effort nests under
 //!   `reasoning: {effort}` (with `summary: auto` so reasoning summaries
 //!   stream for display);
@@ -193,6 +194,7 @@ pub(crate) fn build_request_body(
         "input": translate_input(&req.messages),
         "stream": true,
         "store": false,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         "max_output_tokens": req.max_tokens,
     });
     if !req.system.is_empty() {
@@ -491,14 +493,38 @@ fn absorb_output_calls(state: &mut ResponsesStreamState, response: &Value) {
 struct ResponsesStreamState {
     /// Function-call items, indexed by `output_index`.
     slots: Vec<CallSlot>,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     input_tokens: u64,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     output_tokens: u64,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     cached_tokens: u64,
     /// True once the response reported an output-token limit.
     truncated: bool,
     /// Provider status when it was not a clean completion (e.g.
     /// `content_filter`); surfaces as the stop reason.
     status: Option<String>,
+}
+
+/// Reads usage, output calls, and the incomplete reason off a terminal
+/// `response.completed` / `response.incomplete` envelope. The terminating
+/// events stay in the caller: they are emitted even when the envelope is
+/// missing.
+fn read_completion(state: &mut ResponsesStreamState, response: &Value) {
+    read_usage(state, response.get("usage"));
+    absorb_output_calls(state, response);
+    if let Some(reason) = response
+        .get("incomplete_details")
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str)
+    {
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
+        if reason == "max_output_tokens" {
+            state.truncated = true;
+        } else {
+            state.status = Some(reason.to_string());
+        }
+    }
 }
 
 /// Feeds one SSE `data` payload, returning zero or more stream events.
@@ -615,19 +641,7 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
         }
         "response.completed" | "response.incomplete" => {
             if let Some(response) = value.get("response") {
-                read_usage(state, response.get("usage"));
-                absorb_output_calls(state, response);
-                if let Some(reason) = response
-                    .get("incomplete_details")
-                    .and_then(|details| details.get("reason"))
-                    .and_then(Value::as_str)
-                {
-                    if reason == "max_output_tokens" {
-                        state.truncated = true;
-                    } else {
-                        state.status = Some(reason.to_string());
-                    }
-                }
+                read_completion(state, response);
             }
             // A gateway that skips `output_item.done` would otherwise drop
             // the call: arguments stay buffered until something closes the
@@ -636,9 +650,13 @@ fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<V
             events.push(StreamEvent::MessageComplete {
                 stop_reason: stop_reason(state),
                 usage: Usage {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: state.input_tokens,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: state.output_tokens,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: state.cached_tokens,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                 },
             });
@@ -773,6 +791,7 @@ mod tests {
             system: "be terse".to_string(),
             messages: Arc::new(vec![user_text("hi")]),
             tools: Arc::new(vec![tool_spec()]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 2048,
         };
         let body = build_request_body(&req, "gpt-5", None);
@@ -781,6 +800,7 @@ mod tests {
         assert_eq!(body["stream"], true);
         // Conversations stay local: never persisted server-side.
         assert_eq!(body["store"], false);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(body["max_output_tokens"], 2048);
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -798,6 +818,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 100,
         };
         let body = build_request_body(&req, "gpt-5", Some("low"));
@@ -888,10 +909,14 @@ mod tests {
                 StreamEvent::MessageComplete {
                     stop_reason: "stop".to_string(),
                     usage: Usage {
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         input_tokens: 120,
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         output_tokens: 9,
                         // Cache reads are a subset detail of input_tokens.
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         cache_read_tokens: 100,
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         cache_creation_tokens: 0,
                     },
                 },
@@ -902,6 +927,7 @@ mod tests {
     #[tokio::test]
     async fn incomplete_response_maps_to_a_truncation_stop() {
         let results = run_decode(vec![
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":4096}}}\n\n",
         ])
         .await;
@@ -1144,6 +1170,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(vec![user_text("hi")]),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 16,
         };
         let plain = build_request_body(&req, "gpt-5", None);
@@ -1256,6 +1283,7 @@ mod tests {
             system: String::new(),
             messages: Arc::new(vec![]),
             tools: Arc::new(vec![]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 1,
         };
         let err = match client.stream(req).await {

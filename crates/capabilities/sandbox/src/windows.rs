@@ -354,6 +354,7 @@ fn spawn_reaper(job: std::os::windows::io::OwnedHandle) {
         .spawn(move || {
             // SAFETY: the job handle is owned by this thread for its whole
             // lifetime; the wait returns once all member processes exited.
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe {
                 windows_sys::Win32::System::Threading::WaitForSingleObject(
                     job.as_raw_handle().cast(),
@@ -381,6 +382,7 @@ fn create_confined_job() -> std::io::Result<std::os::windows::io::OwnedHandle> {
 
     // SAFETY: no name, no security attributes — both null; the returned raw
     // handle is either null (error) or exclusively owned from here on.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
     if handle.is_null() {
         return Err(std::io::Error::last_os_error());
@@ -388,6 +390,7 @@ fn create_confined_job() -> std::io::Result<std::os::windows::io::OwnedHandle> {
     // SAFETY: the job exists (created above) and the struct is zeroed and
     // fully initialized before the call; on failure ownership stays here and
     // the handle is closed before returning the error.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let configured = unsafe {
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         limits.BasicLimitInformation.LimitFlags =
@@ -403,10 +406,12 @@ fn create_confined_job() -> std::io::Result<std::os::windows::io::OwnedHandle> {
     if configured == 0 {
         let err = std::io::Error::last_os_error();
         // SAFETY: the job handle is still exclusively owned (not yet wrapped).
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { CloseHandle(handle) };
         return Err(err);
     }
     // SAFETY: the raw job handle is owned exclusively and wrapped for RAII.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     Ok(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) })
 }
 
@@ -423,6 +428,7 @@ fn assign_and_resume(job: &std::os::windows::io::OwnedHandle, pid: u32) -> std::
 
     // SAFETY: pid came from the process snapshot as a live child; the
     // returned handle (or null) is exclusively owned by this scope.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let process = unsafe {
         OpenProcess(
             PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_SUSPEND_RESUME,
@@ -434,8 +440,10 @@ fn assign_and_resume(job: &std::os::windows::io::OwnedHandle, pid: u32) -> std::
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: the raw process handle is owned exclusively and wrapped.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let process = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) };
     // SAFETY: both handles are valid and exclusively owned.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let assigned = unsafe {
         AssignProcessToJobObject(job.as_raw_handle().cast(), process.as_raw_handle().cast())
     };
@@ -443,12 +451,14 @@ fn assign_and_resume(job: &std::os::windows::io::OwnedHandle, pid: u32) -> std::
         let err = std::io::Error::last_os_error();
         // Fail-closed: never let the child run unconfined.
         // SAFETY: the process handle is valid and exclusively owned.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { TerminateProcess(process.as_raw_handle().cast(), 1) };
         return Err(err);
     }
     if resume_process(pid).is_err() {
         // Fail-closed: assigned but not runnable is still a dead end — kill.
         // SAFETY: the process handle is valid and exclusively owned.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { TerminateProcess(process.as_raw_handle().cast(), 1) };
         return Err(std::io::Error::other(
             "assigned to job but could not be resumed",
@@ -469,14 +479,17 @@ fn resume_process(pid: u32) -> std::io::Result<()> {
 
     // SAFETY: the snapshot handle is null or INVALID_HANDLE_VALUE on error,
     // exclusively owned otherwise and closed via RAII.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot.is_null() || snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: the raw snapshot handle is owned exclusively and wrapped.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let _snapshot_guard = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(snapshot) };
     // SAFETY: `entry.dwSize` is initialized before each API call as the
     // ToolHelp contract requires; the snapshot handle is valid throughout.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         let mut entry: THREADENTRY32 = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
@@ -516,15 +529,19 @@ fn direct_child_pids() -> Vec<u32> {
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
     // SAFETY: snapshot ownership as in `resume_process`.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot.is_null() || snapshot == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
         return Vec::new();
     }
     // SAFETY: the raw snapshot handle is owned exclusively and wrapped.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let _snapshot_guard = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(snapshot) };
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let self_pid = unsafe { GetCurrentProcessId() };
     let mut children = Vec::new();
     // SAFETY: `entry.dwSize` initialized before each API call; snapshot valid.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -553,14 +570,17 @@ fn process_in_job(pid: u32, job: &std::os::windows::io::OwnedHandle) -> std::io:
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     // SAFETY: pid is a live process in tests; handle exclusively owned here.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if process.is_null() {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: the raw process handle is owned exclusively and wrapped.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let process = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) };
     let mut in_job = FALSE;
     // SAFETY: both handles are valid and exclusively owned.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let ok = unsafe {
         IsProcessInJob(
             process.as_raw_handle().cast(),

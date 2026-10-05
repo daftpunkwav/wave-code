@@ -1,5 +1,3 @@
-import os
-
 TIMEOUT = 3
 
 

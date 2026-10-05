@@ -583,6 +583,7 @@ mod tests {
         JobRequest {
             owner: owner.to_string(),
             command: command.to_string(),
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
             timeout_ms: None,
@@ -718,6 +719,7 @@ mod tests {
     async fn deny_env_is_stripped_before_spawn() {
         const NAME: &str = "WAVECODE_JOB_TEST_SECRET";
         // SAFETY: unique name; no other test reads it.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var(NAME, "leaked");
         }
@@ -738,6 +740,7 @@ mod tests {
             end.log_tail
         );
         // SAFETY: restores the pre-test environment.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var(NAME);
         }

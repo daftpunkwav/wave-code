@@ -52,6 +52,7 @@ impl TestAssemble {
                 thinking_effort: None,
                 deny_env: Vec::new(),
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 64,
                 per_model_window: None,
                 headless: options.headless,
@@ -216,6 +217,7 @@ async fn serve_rejects_an_empty_token() {
         ServeOptions {
             config_path: None,
             model_override: None,
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             cwd: std::env::temp_dir(),
             home: None,
             token: String::new(),
@@ -447,6 +449,7 @@ fn state_with_session(id: &str, commands: mpsc::Sender<SessionCommand>) -> AppSt
         base: ServeOptions {
             config_path: None,
             model_override: None,
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             cwd: std::env::temp_dir(),
             home: None,
             port: 0,

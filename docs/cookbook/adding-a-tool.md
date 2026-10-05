@@ -2,7 +2,7 @@
 
 English | [中文](adding-a-tool.zh.md)
 
-Worked examples: `web_fetch` (`crates/capabilities/tools/src/web_fetch.rs`, registered in `Registry::builtin()`) and `lsp_diagnostics` (`crates/capabilities/tools/src/lsp.rs`, late-registered in session assembly).
+Worked examples: `web_fetch` (`crates/capabilities/tools/src/web_fetch.rs`, registered in `Registry::builtin()`) and `lsp_diagnostics` (`crates/capabilities/tools/src/lsp/tools.rs`, re-exported from `src/lsp.rs`, late-registered in session assembly).
 
 ## 1. Implement the `Tool` trait
 
@@ -33,7 +33,7 @@ Attribute truth matters: `is_read_only` puts the tool in the concurrent batch an
 Pick one of the two registration points:
 
 - **Static builtin**: append to `Registry::builtin()` in `crates/capabilities/tools/src/lib.rs`. Use this when the tool needs no session state.
-- **Late registration**: register in `crates/operations/bootstrap/src/session.rs` after the pieces it needs exist — e.g. `registry.register(Arc::new(LspDiagnostics::with_providers(...)))` for shared LSP state, and the `skill` / `task` tools which need the child service built around the driver. The registry is interior-mutable, so late registration reaches every already-shared handle (executor, policy, model adapter) without a rebuild.
+- **Late registration**: register in `crates/operations/bootstrap/src/session/assembly.rs` after the pieces it needs exist — the LSP tools show the shape (`register_lsp_tools` registers the five tools around one shared `LspProviders` handle), as do the `skill` / `task` tools which need the child service built around the driver. The registry is interior-mutable, so late registration reaches every already-shared handle (executor, policy, model adapter) without a rebuild.
 
 Tools needing a session-shared store follow the `todo_write` pattern: `with_todo_write`-style constructor sharing one `Arc` between the tool and the session config.
 
@@ -45,7 +45,7 @@ Tools needing a session-shared store follow the `todo_write` pattern: `with_todo
 
 ## 4. Tests to write
 
-Mirror the existing tools (`web_fetch.rs` and `lsp.rs` are the reference set):
+Mirror the existing tools (`web_fetch.rs` and `lsp/` are the reference set):
 
 - **Registration and attributes**: extend the pattern of `builtin_registers_script_lsp_and_web_fetch` (`crates/capabilities/tools/src/lib.rs`) — the tool is present, and its `is_read_only` classification matches the read-only subset expectations.
 - **Business errors are `Ok(..., is_error: true)`**: missing params, bad input, upstream "not found" — assert `is_error` and that content explains the failure (see the `web_fetch` failure-path tests around its `is_error: true` returns).

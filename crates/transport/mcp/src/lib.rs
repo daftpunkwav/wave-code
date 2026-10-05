@@ -480,6 +480,7 @@ mod tests {
     /// the temp path carries a space the shell commands cannot quote.
     #[tokio::test]
     async fn recv_message_skips_notifications_over_a_real_child() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("wavecode-mcp-recv-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("lines.txt");
@@ -557,6 +558,7 @@ mod tests {
     #[test]
     fn apply_child_env_strips_inherited_and_keeps_config() {
         let _guard = ENV_LOCK.blocking_lock();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("FOO_MCP_TOKEN", "mcp-token-value");
             std::env::set_var("FOO_MCP_SECRET", "mcp-parent-secret");
@@ -584,6 +586,7 @@ mod tests {
         apply_child_env(&mut cmd, &env, &["FOO_MCP_TOKEN".to_owned()]);
         let out = cmd.output().expect("child runs");
         let text = String::from_utf8_lossy(&out.stdout);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("FOO_MCP_TOKEN");
             std::env::remove_var("FOO_MCP_SECRET");
@@ -618,6 +621,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_with_env_strips_the_inherited_environment() {
         let _guard = ENV_LOCK.lock().await;
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("FOO_MCP_E2E_TOKEN", "e2e-token-value");
             std::env::set_var("FOO_MCP_E2E_KEEP", "e2e-keep-value");
@@ -627,7 +631,7 @@ mod tests {
                 "cmd",
                 vec![
                     "/C".into(),
-                    "echo T=%FOO_MCP_E2E_TOKEN% K=%FOO_MCP_E2E_KEEP%".into(),
+                    "echo T=%FOO_MCP_E2E_TOKEN% K=%FOO_MCP_E2E_KEEP% & more > nul".into(),
                 ],
             )
         } else {
@@ -635,7 +639,7 @@ mod tests {
                 "sh",
                 vec![
                     "-c".into(),
-                    "echo T=$FOO_MCP_E2E_TOKEN K=$FOO_MCP_E2E_KEEP".into(),
+                    "echo T=$FOO_MCP_E2E_TOKEN K=$FOO_MCP_E2E_KEEP; read _".into(),
                 ],
             )
         };
@@ -650,6 +654,7 @@ mod tests {
         {
             Ok(transport) => transport,
             Err(_) => {
+                // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 unsafe {
                     std::env::remove_var("FOO_MCP_E2E_TOKEN");
                     std::env::remove_var("FOO_MCP_E2E_KEEP");
@@ -663,6 +668,7 @@ mod tests {
             .await
             .unwrap();
         let err = transport.recv_response().await.unwrap_err();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("FOO_MCP_E2E_TOKEN");
             std::env::remove_var("FOO_MCP_E2E_KEEP");

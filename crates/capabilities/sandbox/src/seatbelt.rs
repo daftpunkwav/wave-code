@@ -87,26 +87,187 @@ pub fn render_seatbelt_profile(cwd: &Path, extra_writable: &[PathBuf]) -> String
     out
 }
 
-/// Cached profile file for `cwd` inside a process-kept temp dir (the file
-/// must outlive `spawn_confined` — the child execs after we return — so
-/// profiles are never deleted, only rewritten when the cwd set changes).
-fn profile_path_for(cwd: &Path, extra_writable: &[PathBuf]) -> PathBuf {
+/// Directory holding this process's generated profiles: pid-scoped under
+/// the system temp dir, created by this process with owner-only
+/// permissions on unix. A shared, predictable directory would let a local
+/// attacker pre-create it (owning it), then swap profile files between
+/// the write here and `sandbox-exec`'s read — weakening the confinement
+/// the child runs under. Returns `None` when no acceptable directory can
+/// be established; callers must fail closed on that.
+///
+/// The directory is chosen once per process: its name carries a random
+/// suffix (OS entropy on unix) so a sibling process cannot guess it from
+/// the pid, and [`private_profile_dir`] re-verifies privacy on reuse.
+fn profile_dir() -> Option<PathBuf> {
+    static SELECTED: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SELECTED
+        .get_or_init(|| {
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            let temp = std::env::temp_dir();
+            let primary = temp.join(format!(
+                "wavecode-seatbelt-{}-{}",
+                std::process::id(),
+                random_suffix()
+            ));
+            let mut candidates = vec![primary];
+            // A candidate name polluted before we reach it (wrong
+            // permissions or owner): fall back to further random suffixes
+            // so a hostile leftover cannot force profile writes into a
+            // directory it controls.
+            for _ in 0..4 {
+                candidates.push(temp.join(format!(
+                    "wavecode-seatbelt-{}-{:x}",
+                    std::process::id(),
+                    fallback_key()
+                )));
+            }
+            candidates
+                .into_iter()
+                .find(|candidate| private_profile_dir(candidate))
+        })
+        .clone()
+}
+
+/// Entropy for the random directory-name suffix: the OS entropy source on
+/// unix, falling back to the per-process hash keys plus the clock.
+fn random_suffix() -> u64 {
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut buf = [0u8; 8];
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut buf))
+            .is_ok()
+        {
+            return u64::from_ne_bytes(buf);
+        }
+    }
+    fallback_key()
+}
+
+/// Establish `dir` as a profile directory this process owns: created here
+/// and locked to the owner on unix (`0o700`), or accepted when an existing
+/// directory is already owner-only AND owned by this effective user. The
+/// owner check is what makes the mode check meaningful: running as root,
+/// a write into a foreign-owned `0o700` directory would succeed and the
+/// directory's owner could then swap the profile between the write and
+/// `sandbox-exec`'s read; a foreign-owned directory otherwise makes every
+/// profile write fail, which callers turn into a refused spawn rather
+/// than a confinement bypass.
+fn private_profile_dir(dir: &Path) -> bool {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {
+            #[cfg(unix)]
+            {
+                set_owner_only(dir) && is_owner_only(dir)
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            #[cfg(unix)]
+            {
+                is_owner_only(dir)
+            }
+            #[cfg(not(unix))]
+            {
+                dir.is_dir()
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+fn set_owner_only(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(dir, permissions).is_ok()
+}
+
+#[cfg(unix)]
+fn is_owner_only(dir: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    match std::fs::symlink_metadata(dir) {
+        // Reject symlinks outright: a link planted over the expected name
+        // must never resolve into attacker-controlled territory.
+        Ok(meta) => {
+            meta.is_dir()
+                && meta.permissions().mode() & 0o777 == 0o700
+                && meta.uid() == current_uid()
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: `geteuid` is thread-free and has no preconditions.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe { libc::geteuid() }
+}
+
+/// Random per-process suffix for fallback directory names, seeded from
+/// `RandomState`'s per-process random keys plus the clock.
+fn fallback_key() -> u64 {
+    use std::hash::{BuildHasher, Hash, Hasher};
+    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    std::process::id().hash(&mut hasher);
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Cached profile file for `cwd` inside the process-private profile
+/// directory (the file must outlive `spawn_confined` — the child execs
+/// after we return — so profiles are never deleted, only rewritten when
+/// the cwd set changes). Fails closed: an unwritable profile directory or
+/// file refuses the spawn instead of letting `sandbox-exec` read a stale
+/// or foreign profile.
+fn profile_path_for(cwd: &Path, extra_writable: &[PathBuf]) -> std::io::Result<PathBuf> {
     static CACHE: OnceLock<Mutex<std::collections::HashMap<u64, PathBuf>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     let mut hasher = DefaultHasher::new();
     cwd.hash(&mut hasher);
     extra_writable.hash(&mut hasher);
     let key = hasher.finish();
+    // The profile is rewritten on every call, cache hit or not: the child
+    // execs after this returns, so the file it reads must hold exactly
+    // this render even if another thread served the same key between the
+    // cache lookup and the write. (The 64-bit key is only an in-process
+    // path label — the directory is pid-scoped, so cross-session
+    // interference is out of scope.)
+    let rendered = render_seatbelt_profile(cwd, extra_writable);
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(path) = guard.get(&key) {
-        return path.clone();
+    let dir = profile_dir().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "no private seatbelt profile directory could be established",
+        )
+    })?;
+    let path = guard
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| dir.join(format!("profile-{key:x}.sb")));
+    #[cfg(unix)]
+    {
+        // Re-verify on reuse: a directory that lost its owner-only lock
+        // between selection and this write must not take a profile.
+        if !is_owner_only(&dir) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "seatbelt profile directory is no longer private",
+            ));
+        }
     }
-    let dir = std::env::temp_dir().join("wavecode-seatbelt");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join(format!("profile-{key:x}.sb"));
-    let _ = std::fs::write(&path, render_seatbelt_profile(cwd, extra_writable));
+    std::fs::write(&path, rendered)?;
     guard.insert(key, path.clone());
-    path
+    Ok(path)
 }
 
 impl SandboxBackend for SeatbeltBackend {
@@ -141,7 +302,10 @@ impl SandboxBackend for SeatbeltBackend {
             .map(PathBuf::as_path)
             .unwrap_or_else(|| Path::new("/tmp"));
         let extra: Vec<PathBuf> = profile.writable_roots.iter().skip(1).cloned().collect();
-        let profile_path = profile_path_for(cwd, &extra);
+        let profile_path =
+            profile_path_for(cwd, &extra).map_err(|error| SandboxError::ConfineFailed {
+                reason: format!("seatbelt profile unavailable: {error}"),
+            })?;
         let (program, args, dir, envs) = {
             let view = cmd.as_std();
             (
@@ -231,5 +395,109 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn profile_dir_is_scoped_to_this_process() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let temp = std::env::temp_dir();
+        let dir = profile_dir().expect("a profile directory must be established");
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("utf-8 temp name");
+        assert!(
+            name.starts_with(&format!("wavecode-seatbelt-{}-", std::process::id())),
+            "profile dir must be pid-scoped with a random suffix: {name}"
+        );
+        assert!(
+            dir.parent() == Some(temp.as_path()),
+            "profile dir must live in the system temp dir"
+        );
+    }
+
+    /// A pre-existing directory that is not locked to its owner must be
+    /// rejected: it may be a hostile leftover trying to capture the
+    /// profile writes (unix checks real mode bits; other platforms only
+    /// have the directory check).
+    #[test]
+    fn profile_dir_rejects_unlocked_precreated_directory() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let base = std::env::temp_dir().join(format!(
+            "wavecode-seatbelt-reject-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir(&base).expect("test dir creation");
+        #[cfg(unix)]
+        {
+            // The acceptable pre-existing shape is the owner-locked one;
+            // a default-permission directory is (correctly) rejected.
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+                .expect("lock base down");
+        }
+        assert!(private_profile_dir(&base));
+
+        let hostile = base.join("hostile");
+        std::fs::create_dir(&hostile).expect("hostile dir creation");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hostile, std::fs::Permissions::from_mode(0o777))
+                .expect("open the hostile dir");
+            assert!(
+                !private_profile_dir(&hostile),
+                "a world-accessible directory must never be accepted"
+            );
+
+            // One locked down by us (0o700) is the expected reusable shape.
+            let ours = base.join("ours");
+            std::fs::create_dir(&ours).expect("ours dir creation");
+            std::fs::set_permissions(&ours, std::fs::Permissions::from_mode(0o700))
+                .expect("lock ours down");
+            assert!(private_profile_dir(&ours));
+        }
+        #[cfg(not(unix))]
+        assert!(private_profile_dir(&hostile));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A directory that cannot be established as private — here because a
+    /// `0o500` parent forbids creating it — is rejected rather than
+    /// accepted by name; `profile_path_for` turns such rejections into an
+    /// error, which `spawn_confined` maps to `ConfineFailed` (fail-closed
+    /// for the spawn).
+    #[cfg(unix)]
+    #[test]
+    fn private_profile_dir_rejects_when_creation_is_forbidden() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root overrides file permissions, so the read-only parent proves
+        // nothing on a root runner; the guard this test exercises does not
+        // apply there.
+        if current_uid() == 0 {
+            return;
+        }
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        let base = std::env::temp_dir().join(format!(
+            "wavecode-seatbelt-failclosed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir(&base).expect("base dir");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o500))
+            .expect("make base read-only");
+        let locked = base.join("locked");
+        assert!(
+            !private_profile_dir(&locked),
+            "0o500 parent forbids creation and a missing dir is never accepted"
+        );
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+            .expect("restore base");
+        std::fs::remove_dir_all(&base).ok();
     }
 }

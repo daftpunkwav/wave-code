@@ -257,9 +257,13 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 3,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 2,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                     context_window: None,
                     context_used: None,
@@ -311,9 +315,13 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                     context_window: None,
                     context_used: None,
@@ -322,9 +330,13 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                     context_window: None,
                     context_used: None,
@@ -397,9 +409,13 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 10,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 4,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                     context_window: None,
                     context_used: None,
@@ -408,9 +424,13 @@ mod tests {
             event(
                 "s1",
                 EventMsg::TokenCount {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 20,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 6,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                     context_window: None,
                     context_used: None,

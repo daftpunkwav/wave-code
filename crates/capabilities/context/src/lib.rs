@@ -126,6 +126,7 @@ pub fn estimate_with_overhead(messages: &[Message], cfg: &ContextConfig) -> u64 
 /// overhead quota.
 pub fn resolve_used_tokens(
     messages: &[Message],
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     usage_input_tokens: Option<u64>,
     cfg: &ContextConfig,
 ) -> u64 {
@@ -240,6 +241,7 @@ pub struct ContextConfig {
     /// Count of most-recent verbatim messages kept after compaction.
     pub keep_recent: usize,
     /// Output budget (max_tokens) for summary calls.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub summary_max_tokens: u32,
     /// Chars/token ratio for the no-usage fallback estimate (error bounds, see
     /// [`estimate_tokens`]).
@@ -251,7 +253,9 @@ impl Default for ContextConfig {
         Self {
             thresholds: Thresholds::default(),
             keep_recent: DEFAULT_KEEP_RECENT,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             summary_max_tokens: DEFAULT_SUMMARY_MAX_TOKENS,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             estimate_chars_per_token: DEFAULT_CHARS_PER_TOKEN,
         }
     }
@@ -367,6 +371,7 @@ impl CompactionStrategy for ModelSummary {
             system: SUMMARY_SYSTEM.to_owned(),
             messages: Arc::new(messages),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: budget.max(1),
         };
         let mut stream = self.model.stream(req).await?;
@@ -410,6 +415,7 @@ pub async fn compact_history(
     strategy: &dyn CompactionStrategy,
     cfg: &ContextConfig,
 ) -> Result<CompactOutcome> {
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     let summary = strategy.summarize(history, cfg.summary_max_tokens).await?;
     let start = history.len().saturating_sub(cfg.keep_recent);
     let mut messages = Vec::with_capacity(history.len() - start + 1);
@@ -646,6 +652,7 @@ pub struct EvictionConfig {
     pub recent_window: usize,
     /// Soft threshold (estimated tokens) above which
     /// [`should_evict_tool_results`] fires.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub soft_threshold_tokens: u64,
     /// Messages per eviction step (see
     /// [`DEFAULT_EVICTION_BATCH_MESSAGES`]); `0` is treated as `1`.
@@ -657,6 +664,7 @@ impl Default for EvictionConfig {
         Self {
             anchored_prefix: DEFAULT_EVICTION_ANCHORED_PREFIX,
             recent_window: DEFAULT_EVICTION_RECENT_WINDOW,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS,
             batch_messages: DEFAULT_EVICTION_BATCH_MESSAGES,
         }
@@ -666,6 +674,7 @@ impl Default for EvictionConfig {
 /// Eviction trigger policy: run the pass once estimated usage reaches the
 /// soft threshold. Pure and parameterized; callers feed it the same
 /// `resolve_used_tokens` result they already compute for the threshold check.
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
 pub fn should_evict_tool_results(used_tokens: u64, cfg: &EvictionConfig) -> bool {
     used_tokens >= cfg.soft_threshold_tokens
 }
@@ -1190,7 +1199,9 @@ Concurrent stock-deduction test; settlement ledger integration.";
             StreamEvent::MessageComplete {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 5000,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 120,
                     ..Usage::default()
                 },
@@ -1232,6 +1243,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let strategy = ModelSummary::new(model, "mock".into());
         let cfg = ContextConfig {
             keep_recent: 4,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             summary_max_tokens: 777,
             ..Default::default()
         };
@@ -1291,6 +1303,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let strategy = ModelSummary::new(model, "mock".into());
         let cfg = ContextConfig {
             keep_recent: 2,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             summary_max_tokens: 777,
             ..Default::default()
         };
@@ -1452,6 +1465,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
     #[test]
     fn evict_reclaims_only_what_the_threshold_asks_for() {
         let history = eviction_history();
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         let stubbed = |soft_threshold_tokens: u64| {
             let cfg = EvictionConfig {
                 anchored_prefix: 1,
@@ -1492,6 +1506,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             recent_window: 2,
             // Reclaim-everything demand: these fixtures assert the pass does
             // stub the middle range, so the frontier must reach the range end.
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: 0,
             ..Default::default()
         };
@@ -1568,6 +1583,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let cfg = EvictionConfig {
             anchored_prefix: 2,
             recent_window: 1,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: 0,
             ..Default::default()
         };
@@ -1602,6 +1618,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let cfg = EvictionConfig {
             anchored_prefix: 1,
             recent_window: 1,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: 0,
             ..Default::default()
         };

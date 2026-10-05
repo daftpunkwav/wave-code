@@ -434,18 +434,7 @@ pub(crate) async fn run_exec(
                     if approvals && input_closed {
                         // --approvals ran but stdin closed: deny now,
                         // instead of parking until the gate timeout.
-                        client
-                            .submit(Submission {
-                                id: format!("approval-{call_id}"),
-                                op: Op::ExecApproval {
-                                    call_id: call_id.clone(),
-                                    decision: WireDecision::Deny {
-                                        reason: "stdin closed".to_string(),
-                                    },
-                                },
-                            })
-                            .await
-                            .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                        deny_call(client, call_id, "stdin closed").await?;
                     } else if approvals {
                         pending_approvals.push_back(call_id.clone());
                         if !json {
@@ -487,15 +476,9 @@ pub(crate) async fn run_exec(
                         // text dialect lines answer the oldest parked
                         // request, and unrecognized input denies (same
                         // as the REPL).
-                        let answer = if json {
-                            parse_approval_line(&line)
-                        } else {
-                            pending_approvals
-                                .front()
-                                .cloned()
-                                .map(|id| (id, decide_approval(&line)))
-                        };
-                        let Some((target, decision)) = answer else {
+                        let Some((target, decision)) =
+                            resolve_approval_answer(json, &line, &pending_approvals)
+                        else {
                             continue;
                         };
                         if !pending_approvals.iter().any(|id| *id == target) {
@@ -519,18 +502,7 @@ pub(crate) async fn run_exec(
                         input_closed = true;
                         stdin_lines = None;
                         for call_id in pending_approvals.drain(..) {
-                            client
-                                .submit(Submission {
-                                    id: format!("approval-{call_id}"),
-                                    op: Op::ExecApproval {
-                                        call_id,
-                                        decision: WireDecision::Deny {
-                                            reason: "stdin closed".to_string(),
-                                        },
-                                    },
-                                })
-                                .await
-                                .map_err(|e| anyhow::anyhow!("submission failed: {e}"))?;
+                            deny_call(client, &call_id, "stdin closed").await?;
                         }
                     }
                 }
@@ -588,6 +560,43 @@ pub(crate) fn approval_what(kind: &wavecode_wire::ApprovalKind) -> &'static str 
     match kind {
         wavecode_wire::ApprovalKind::Exec => "execute a command",
         wavecode_wire::ApprovalKind::Write => "modify files",
+    }
+}
+
+/// Submit one fail-closed denial for `call_id` — used when stdin closed
+/// while the request was still parked, so the answer lands now instead of
+/// at the gate timeout.
+async fn deny_call(client: &mut ActorClient, call_id: &str, reason: &str) -> anyhow::Result<()> {
+    client
+        .submit(Submission {
+            id: format!("approval-{call_id}"),
+            op: Op::ExecApproval {
+                call_id: call_id.to_string(),
+                decision: WireDecision::Deny {
+                    reason: reason.to_string(),
+                },
+            },
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("submission failed: {e}"))
+}
+
+/// Map a raw stdin line to `(call id, decision)`: JSON dialect lines
+/// carry an explicit call id and are ignored when malformed; text
+/// dialect lines answer the oldest parked request, and unrecognized
+/// input denies (same as the REPL).
+fn resolve_approval_answer(
+    json: bool,
+    line: &str,
+    pending_approvals: &std::collections::VecDeque<String>,
+) -> Option<(String, WireDecision)> {
+    if json {
+        parse_approval_line(line)
+    } else {
+        pending_approvals
+            .front()
+            .cloned()
+            .map(|id| (id, decide_approval(line)))
     }
 }
 

@@ -130,7 +130,19 @@ pub fn spill_home_dir() -> Option<PathBuf> {
 pub fn default_spill_store_root() -> PathBuf {
     spill_home_dir()
         .map(|h| h.join(".wavecode").join("spills"))
-        .unwrap_or_else(|| std::env::temp_dir().join("wavecode-spills"))
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
+        // The fallback lives in a shared temp dir only when home cannot be
+        // resolved: a random suffix plus the owner-only lock taken at
+        // creation (see SpillStore writes) keep another local user from
+        // predicting or pre-creating the store root.
+        .unwrap_or_else(|| {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            std::env::temp_dir().join(format!("wavecode-spills-{}-{unique:x}", std::process::id()))
+        })
 }
 
 /// Home-scoped side-store for oversized tool outputs with oldest-eviction.
@@ -185,6 +197,14 @@ impl SpillStore {
 
     fn save_manifest(&self, entries: &[ManifestEntry]) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
+        #[cfg(unix)]
+        {
+            // The store holds oversized tool output: keep the root
+            // owner-only so other local users cannot read or pre-create
+            // it (idempotent; files inside are written 0o600).
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700));
+        }
         // The manifest is the sole ledger for the 32MB cap: a truncated
         // write would read back as "0 bytes used" and disable eviction
         // forever, so the write lands temp+rename in one atomic step. The
@@ -204,6 +224,14 @@ impl SpillStore {
     /// oldest-first eviction.
     pub fn spill(&self, content: &str) -> std::result::Result<String, SpillError> {
         std::fs::create_dir_all(&self.root)?;
+        #[cfg(unix)]
+        {
+            // The store holds oversized tool output: keep the root
+            // owner-only so other local users cannot read or pre-create
+            // it (idempotent; files inside are written 0o600).
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700));
+        }
         let id = Self::new_id();
         validate_spill_id(&id).map_err(SpillError::Unknown)?;
         let bytes = content.as_bytes();

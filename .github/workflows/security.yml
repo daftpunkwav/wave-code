@@ -74,6 +74,12 @@ jobs:
       # toolchain would otherwise pair the gate to TypeScript releases).
       - name: Production dependencies (blocking)
         run: pnpm --dir sdk/typescript audit --prod
+      # Dev dependencies stay visible too: reported, not blocking, so a
+      # vulnerable SDK toolchain dependency surfaces without gating
+      # releases on it.
+      - name: Development dependencies (reported)
+        run: pnpm --dir sdk/typescript audit
+        continue-on-error: true
 
   security-gate:
     name: security-gate

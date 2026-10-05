@@ -74,6 +74,7 @@ impl MemoryFinisher {
                 content: vec![ContentBlock::Text { text }],
             }]),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: DISTILL_MAX_TOKENS,
         };
         let mut stream = self

@@ -169,6 +169,7 @@ pub fn kill_tree(pid: u32) {
     {
         // SAFETY: killpg with SIGKILL takes no callbacks and touches no
         // Rust state; ESRCH (already exited) and EPERM need no handling.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
@@ -483,10 +484,12 @@ mod tests {
     fn shell_invocation_defaults_to_the_platform_shell() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SHELL").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SHELL");
         }
         let (program, flag) = shell_invocation();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             if let Some(v) = prior {
                 std::env::set_var("WAVECODE_SHELL", v);
@@ -504,6 +507,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SHELL").ok();
         // A cmd-like name keeps the Windows command-string flag.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("WAVECODE_SHELL", r"C:\tools\my-cmd.exe");
         }
@@ -511,12 +515,14 @@ mod tests {
         assert_eq!(program, r"C:\tools\my-cmd.exe");
         assert_eq!(flag, "/C");
         // Any other name gets the Unix command-string flag.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("WAVECODE_SHELL", "/usr/bin/zsh");
         }
         let (program, flag) = shell_invocation();
         assert_eq!(program, "/usr/bin/zsh");
         assert_eq!(flag, "-c");
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SHELL");
             if let Some(v) = prior {

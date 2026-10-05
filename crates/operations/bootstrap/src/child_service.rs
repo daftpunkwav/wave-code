@@ -415,6 +415,7 @@ impl TaskService for TurnChildService {
                 runtime_child::TaskResult {
                     status: child_task_status(&outcome),
                     summary,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: conv.usage_carry().output_tokens,
                 }
             },

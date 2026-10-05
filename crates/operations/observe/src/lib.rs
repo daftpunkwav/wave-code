@@ -50,9 +50,11 @@ pub struct Metrics {
     /// Sum of prompt-cache read tokens reported by the provider (0 when
     /// the provider reports no cache accounting). Cache reads bill at a
     /// fraction of fresh input, so cost estimates must weight them apart.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub cache_read_tokens: u64,
     /// Sum of prompt-cache write tokens reported by the provider (billed
     /// at a premium over fresh input).
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub cache_creation_tokens: u64,
     /// CompactCompleted events seen.
     pub compactions: u64,
@@ -333,13 +335,18 @@ mod tests {
                 duration_ms: 0,
             },
             EventMsg::TokenCount {
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 input_tokens: 100,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 output_tokens: 25,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 cache_read_tokens: 0,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 cache_creation_tokens: 0,
                 context_window: None,
                 context_used: None,
             },
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             EventMsg::CompactCompleted { summary_tokens: 25 },
             EventMsg::Warning {
                 message: "w".to_string(),
@@ -433,9 +440,13 @@ mod tests {
     fn cache_share_separates_unreported_from_unhit() {
         let mut metrics = Metrics::new();
         metrics.record(&event(EventMsg::TokenCount {
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             input_tokens: 100,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             output_tokens: 5,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: 0,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_creation_tokens: 0,
             context_window: None,
             context_used: None,
@@ -444,9 +455,13 @@ mod tests {
 
         let mut hit = Metrics::new();
         hit.record(&event(EventMsg::TokenCount {
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             input_tokens: 100,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             output_tokens: 5,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: 75,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_creation_tokens: 25,
             context_window: None,
             context_used: None,
@@ -470,9 +485,13 @@ mod tests {
         let mut metrics = Metrics::new();
         for (read, creation) in [(100u64, 7u64), (50, 0)] {
             metrics.record(&event(EventMsg::TokenCount {
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 input_tokens: 10,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 output_tokens: 3,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 cache_read_tokens: read,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 cache_creation_tokens: creation,
                 context_window: None,
                 context_used: None,

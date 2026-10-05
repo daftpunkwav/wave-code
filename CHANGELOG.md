@@ -111,12 +111,14 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `max_tool_rounds` config key.
 - Edit tool cards and edit settings render as a single unified diff
   column (the `diff layout` setting is gone).
-- Internal module organization: oversized source files split at real
-  seams (LSP tools into `lsp/` transport/client/diagnostics/providers/
-  tools, dialogs into per-dialog files, editor/actor/session assembly
-  stage helpers, inline test modules moved to directory-form test
-  files) so every file stays under the analyzer line budgets; no
-  public API changes.
+- Internal module organization: the oversized source files named by
+  the static-analysis findings split at real seams (LSP tools into
+  `lsp/` transport/client/diagnostics/providers/tools, dialogs into
+  per-dialog files, editor/actor/session assembly stage helpers,
+  inline test modules moved to directory-form test files); no public
+  API changes.
+- Markdown rendering: an indented code block following a fenced block
+  no longer inherits the fenced block's language tag.
 - Model catalog editing moved from `/model list|add|set|remove` to
   `/provider`; the old spellings report the move instead of doing
   nothing, bare `/provider` lists saved providers (picking one

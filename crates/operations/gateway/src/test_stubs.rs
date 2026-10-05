@@ -40,9 +40,9 @@ pub(crate) fn done_script() -> Vec<StreamEvent> {
         StreamEvent::MessageComplete {
             stop_reason: "end_turn".to_string(),
             usage: Usage {
-                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 input_tokens: 1,
-                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 output_tokens: 1,
                 ..Usage::default()
             },

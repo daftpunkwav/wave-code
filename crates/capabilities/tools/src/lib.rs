@@ -496,7 +496,7 @@ mod tests {
             .get("todowrite")
             .expect("listed todowrite should be kept");
         let ctx = ToolCtx {
-            // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
         };

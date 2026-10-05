@@ -72,7 +72,7 @@ pub(crate) async fn run_update_install() {
             std::process::exit(Outcome::Failed.exit_code())
         }
     };
-    // nosemgrep: Semgrep_rust.lang.security.current-exe.current-exe
+    // nosemgrep: rust.lang.security.current-exe.current-exe
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(cause) => {

@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn round_trips_through_jsonl() {
         let temp =
-// nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+// nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wc-history-test-{}.jsonl", std::process::id()));
         let _ = std::fs::remove_file(&temp);
         append(&temp, "first prompt");
@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn malformed_lines_are_skipped() {
         let temp =
-// nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+// nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wc-history-bad-{}.jsonl", std::process::id()));
         std::fs::write(&temp, "{\"content\": \"good\"}\nnot json\n{\"other\": 1}\n").unwrap();
         let entries = load(&temp, None);
@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn load_caps_entries() {
         let temp =
-// nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+// nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wc-history-cap-{}.jsonl", std::process::id()));
         let mut body = String::new();
         for i in 0..150 {

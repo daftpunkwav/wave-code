@@ -128,7 +128,7 @@ fn console_codec() -> Option<&'static encoding_rs::Encoding> {
     static CODEC: OnceLock<Option<&'static encoding_rs::Encoding>> = OnceLock::new();
     *CODEC.get_or_init(|| {
         // SAFETY: `GetACP` takes no arguments and has no preconditions.
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let code_page = unsafe { windows_sys::Win32::Globalization::GetACP() };
         Some(match code_page {
             // UTF-8 consoles never reach the fallback.
@@ -1087,7 +1087,7 @@ mod tests {
         // unrelated tests failing on PoisonError.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Three variable classes: a suffix-pattern hit, a deny_env-list hit, and an unaffected normal variable.
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("FOO_API_KEY", "secret123");
             std::env::set_var("FOO_PROVIDER_KEY", "secret456");

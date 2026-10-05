@@ -324,21 +324,21 @@ pub enum EventMsg {
     /// Token usage settled after a sample.
     TokenCount {
         /// Input tokens of the sample.
-        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         input_tokens: u64,
         /// Output tokens of the sample.
-        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         output_tokens: u64,
         /// Tokens served from the provider prompt cache; 0 when the
         /// provider reports no cache accounting (default for
         /// backward-compatible deserialization of older emitters).
         #[serde(default)]
-        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         cache_read_tokens: u64,
         /// Tokens written to the provider prompt cache by this sample;
         /// 0 when the provider reports no cache accounting.
         #[serde(default)]
-        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         cache_creation_tokens: u64,
         /// Session context window in tokens; absent from senders that
         /// predate this field.
@@ -356,7 +356,7 @@ pub enum EventMsg {
     /// Compaction completed.
     CompactCompleted {
         /// Token estimate of the summary message.
-        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         summary_tokens: u64,
     },
     /// A rewind landed: the conversation no longer contains the

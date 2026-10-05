@@ -289,7 +289,7 @@ env_key = "A_KEY"
         .unwrap();
         let saved_user = std::env::var_os("USERPROFILE");
         let saved_home = std::env::var_os("HOME");
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("USERPROFILE", dir.path());
             std::env::set_var("HOME", dir.path());

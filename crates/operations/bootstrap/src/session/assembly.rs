@@ -213,7 +213,7 @@ fn run_config(
     config: &wavecode_config::Config,
     model_name: &str,
     context_window: u64,
-    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     max_output_tokens: u32,
 ) -> runtime_runner::RunConfig {
     runtime_runner::RunConfig {
@@ -590,6 +590,7 @@ struct RuntimeInputs<'a> {
     /// Effective context window (fixed by provider config).
     context_window: u64,
     /// Effective output cap.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     max_output_tokens: u32,
     /// Capability-table fallback for per-name window resolution; `Some`
     /// when a `/model` switch moves the loop's budget gate onto the new

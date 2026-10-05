@@ -126,7 +126,7 @@ pub fn estimate_with_overhead(messages: &[Message], cfg: &ContextConfig) -> u64 
 /// overhead quota.
 pub fn resolve_used_tokens(
     messages: &[Message],
-    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     usage_input_tokens: Option<u64>,
     cfg: &ContextConfig,
 ) -> u64 {
@@ -252,9 +252,9 @@ impl Default for ContextConfig {
         Self {
             thresholds: Thresholds::default(),
             keep_recent: DEFAULT_KEEP_RECENT,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             summary_max_tokens: DEFAULT_SUMMARY_MAX_TOKENS,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             estimate_chars_per_token: DEFAULT_CHARS_PER_TOKEN,
         }
     }
@@ -370,7 +370,7 @@ impl CompactionStrategy for ModelSummary {
             system: SUMMARY_SYSTEM.to_owned(),
             messages: Arc::new(messages),
             tools: Arc::new(Vec::new()),
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: budget.max(1),
         };
         let mut stream = self.model.stream(req).await?;
@@ -661,7 +661,7 @@ impl Default for EvictionConfig {
         Self {
             anchored_prefix: DEFAULT_EVICTION_ANCHORED_PREFIX,
             recent_window: DEFAULT_EVICTION_RECENT_WINDOW,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: DEFAULT_EVICTION_SOFT_THRESHOLD_TOKENS,
             batch_messages: DEFAULT_EVICTION_BATCH_MESSAGES,
         }
@@ -1195,9 +1195,9 @@ Concurrent stock-deduction test; settlement ledger integration.";
             StreamEvent::MessageComplete {
                 stop_reason: "end_turn".into(),
                 usage: Usage {
-                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 5000,
-                    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 120,
                     ..Usage::default()
                 },
@@ -1239,7 +1239,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
         let strategy = ModelSummary::new(model, "mock".into());
         let cfg = ContextConfig {
             keep_recent: 4,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             summary_max_tokens: 777,
             ..Default::default()
         };
@@ -1500,7 +1500,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             recent_window: 2,
             // Reclaim-everything demand: these fixtures assert the pass does
             // stub the middle range, so the frontier must reach the range end.
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: 0,
             ..Default::default()
         };

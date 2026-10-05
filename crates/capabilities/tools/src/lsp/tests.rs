@@ -689,7 +689,7 @@ async fn server_command_child_env_is_scrubbed() {
         format!("sh {}", script.display())
     };
 
-    // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         std::env::set_var("FOO_LSP_SECRET", "lsp-secret-value");
         std::env::set_var("FOO_LSP_DENY", "lsp-deny-value");

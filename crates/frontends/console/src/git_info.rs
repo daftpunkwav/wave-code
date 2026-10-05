@@ -59,7 +59,7 @@ mod tests {
     use super::*;
 
     fn temp_repo(name: &str) -> std::path::PathBuf {
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("wc-gitinfo-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".git")).unwrap();
@@ -100,7 +100,7 @@ mod tests {
     fn gitdir_file_form_resolves() {
         // A plain working directory whose `.git` is a FILE pointing at
         // the real repository (worktree / submodule checkout form).
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("wc-gitinfo-wt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn no_repo_returns_none() {
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let dir = std::env::temp_dir().join(format!("wc-gitinfo-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

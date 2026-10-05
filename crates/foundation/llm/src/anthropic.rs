@@ -635,7 +635,7 @@ mod tests {
                 description: "read".into(),
                 input_schema: serde_json::json!({"type":"object"}),
             }]),
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8192,
         };
         let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
@@ -861,7 +861,7 @@ mod tests {
 
         // A max_tokens that cannot satisfy the minimum keeps thinking off.
         let tiny = ChatRequest {
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 1024,
             ..req.clone()
         };
@@ -897,7 +897,7 @@ mod tests {
                 },
             ]),
             tools: Arc::new(vec![]),
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8,
         };
         let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
@@ -1073,7 +1073,7 @@ mod tests {
             system: "s".into(),
             messages: std::sync::Arc::new(vec![]),
             tools: Arc::new(vec![]),
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 1,
         };
         let err = match client.stream(req).await {

@@ -15,7 +15,7 @@ use wavecode_config::ModelCatalog;
 /// A console over a throwaway home directory.
 fn ui_with_home(name: &str) -> (ConsoleUi, PathBuf) {
     theme::set(theme::Theme::dark());
-    // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
     let home = std::env::temp_dir().join(format!("wavecode-ui-catalog-{name}"));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(home.join(".wavecode")).unwrap();
@@ -212,7 +212,7 @@ fn malformed_catalog_cancels_the_subcommands() {
 #[test]
 fn memory_lists_the_agents_chain() {
     let (mut ui, home) = ui_with_home("memory");
-    // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
     let cwd = std::env::temp_dir().join("wavecode-memory-cwd");
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(cwd.join(".wavecode").join("rules")).unwrap();

@@ -169,7 +169,7 @@ pub fn kill_tree(pid: u32) {
     {
         // SAFETY: killpg with SIGKILL takes no callbacks and touches no
         // Rust state; ESRCH (already exited) and EPERM need no handling.
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }

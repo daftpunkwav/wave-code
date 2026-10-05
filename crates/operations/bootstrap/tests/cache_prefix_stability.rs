@@ -153,7 +153,7 @@ fn growing_history_never_rewrites_its_prefix_below_the_eviction_threshold() {
 #[test]
 fn eviction_pass_is_idempotent() {
     let cfg = EvictionConfig {
-        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         soft_threshold_tokens: 0,
         ..EvictionConfig::default()
     };

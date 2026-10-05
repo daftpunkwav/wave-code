@@ -95,7 +95,7 @@ pub fn render_seatbelt_profile(cwd: &Path, extra_writable: &[PathBuf]) -> String
 /// the child runs under. Returns `None` when no acceptable directory can
 /// be established; callers must fail closed on that.
 fn profile_dir() -> Option<PathBuf> {
-    // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+    // nosemgrep: rust.lang.security.temp-dir.temp-dir
     let temp = std::env::temp_dir();
     let primary = temp.join(format!("wavecode-seatbelt-{}", std::process::id()));
     if private_profile_dir(&primary) {
@@ -177,7 +177,7 @@ fn is_owner_only(dir: &Path) -> bool {
 #[cfg(unix)]
 fn current_uid() -> u32 {
     // SAFETY: `geteuid` is thread-free and has no preconditions.
-    // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe { libc::geteuid() }
 }
 
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn profile_dir_is_scoped_to_this_process() {
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let primary =
             std::env::temp_dir().join(format!("wavecode-seatbelt-{}", std::process::id()));
         // A leftover from a previous run of this pid would be accepted as
@@ -376,7 +376,7 @@ mod tests {
     /// have the directory check).
     #[test]
     fn profile_dir_rejects_unlocked_precreated_directory() {
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let base = std::env::temp_dir().join(format!(
             "wavecode-seatbelt-reject-{}-{}",
             std::process::id(),
@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn private_profile_dir_rejects_when_creation_is_forbidden() {
         use std::os::unix::fs::PermissionsExt;
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let base = std::env::temp_dir().join(format!(
             "wavecode-seatbelt-failclosed-{}",
             std::process::id()

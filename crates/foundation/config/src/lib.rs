@@ -422,7 +422,7 @@ headers = {{ Authorization = "Bearer t" }}
     fn missing_api_key_is_error() {
         let _guard = ENV_LOCK.lock().unwrap();
         // env unset and no inline api_key -> MissingApiKey
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::remove_var("TEST_KEY") };
         let cfg: Config = toml::from_str(TOML_OK).unwrap();
         assert!(matches!(
@@ -434,7 +434,7 @@ headers = {{ Authorization = "Bearer t" }}
     #[test]
     fn env_key_takes_precedence() {
         let _guard = ENV_LOCK.lock().unwrap();
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::set_var("TEST_KEY", "k-from-env") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
@@ -456,7 +456,7 @@ headers = {{ Authorization = "Bearer t" }}
     fn empty_env_key_falls_back_to_inline() {
         let _guard = ENV_LOCK.lock().unwrap();
         // export KEY= (empty string): treated as unset, falls back to the inline api_key
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::set_var("TEST_KEY", "") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
@@ -575,7 +575,7 @@ headers = {{ Authorization = "Bearer t" }}
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved_user = std::env::var_os("USERPROFILE");
         let saved_home = std::env::var_os("HOME");
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("USERPROFILE");
             std::env::remove_var("HOME");

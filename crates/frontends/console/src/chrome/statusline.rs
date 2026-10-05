@@ -161,7 +161,7 @@ mod tests {
         // `\"`, which `cmd /C` mangles into a syntax error. Windows skips
         // the test when the temp directory itself contains a space.
         let dir =
-// nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+// nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wavecode-statusline-esc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("red-line.txt");

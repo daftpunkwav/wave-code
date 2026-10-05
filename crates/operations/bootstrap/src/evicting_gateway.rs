@@ -232,7 +232,7 @@ mod tests {
         EvictionConfig {
             anchored_prefix: 1,
             recent_window: 2,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             soft_threshold_tokens: 10,
             batch_messages: 1,
         }
@@ -244,7 +244,7 @@ mod tests {
         let gateway = EvictingGateway::with_config(
             inner,
             EvictionConfig {
-                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 soft_threshold_tokens: u64::MAX,
                 ..EvictionConfig::default()
             },

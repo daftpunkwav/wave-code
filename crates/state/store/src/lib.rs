@@ -799,9 +799,9 @@ mod tests {
     fn settle_carries_usage_to_the_next_sample() {
         let mut conv = Conversation::new();
         conv.settle(Usage {
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             input_tokens: 100,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             output_tokens: 50,
             ..Usage::default()
         });

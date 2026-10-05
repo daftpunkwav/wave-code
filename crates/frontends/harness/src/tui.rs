@@ -554,12 +554,12 @@ mod tests {
             env_key: None,
             api_key: Some("k".to_string()),
             context_window: None,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens: None,
             fallback_providers: Vec::new(),
             rpm_limit: None,
             reasoning_effort: None,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             thinking_budget_tokens: None,
             prompt_caching: None,
             prompt_cache_ttl: None,

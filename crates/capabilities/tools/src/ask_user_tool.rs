@@ -114,7 +114,7 @@ mod tests {
 
     fn ctx() -> ToolCtx {
         ToolCtx {
-            // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             cwd: std::env::temp_dir(),
             deny_env: Vec::new(),
         }

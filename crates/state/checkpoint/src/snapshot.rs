@@ -106,7 +106,7 @@ pub fn default_snapshot_root(home: &Path) -> PathBuf {
 pub fn effective_snapshot_store_root() -> PathBuf {
     snapshot_home_dir()
         .map(|h| default_snapshot_root(&h))
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         .unwrap_or_else(|| std::env::temp_dir().join(format!("wavecode-{SNAPSHOTS_DIR}")))
 }
 
@@ -950,7 +950,7 @@ mod snapshot_tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let saved_userprofile = std::env::var_os("USERPROFILE");
         let saved_home = std::env::var_os("HOME");
-        // nosemgrep: Semgrep_rust.lang.security.unsafe-usage.unsafe-usage
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("USERPROFILE");
             std::env::remove_var("HOME");

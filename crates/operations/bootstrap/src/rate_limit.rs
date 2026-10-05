@@ -110,7 +110,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 1,
         }
     }

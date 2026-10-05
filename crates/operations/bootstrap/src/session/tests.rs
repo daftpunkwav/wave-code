@@ -630,9 +630,9 @@ impl ChatModel for ScriptedModel {
                 vec![StreamEvent::MessageComplete {
                     stop_reason: "end_turn".to_string(),
                     usage: Usage {
-                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         input_tokens: 1,
-                        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         output_tokens: 1,
                         ..Usage::default()
                     },
@@ -658,9 +658,9 @@ fn write_turn_script() -> Vec<StreamEvent> {
         StreamEvent::MessageComplete {
             stop_reason: "end_turn".to_string(),
             usage: Usage {
-                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 input_tokens: 10,
-                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 output_tokens: 5,
                 ..Usage::default()
             },
@@ -676,8 +676,9 @@ fn done_script() -> Vec<StreamEvent> {
         StreamEvent::MessageComplete {
             stop_reason: "end_turn".to_string(),
             usage: Usage {
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 input_tokens: 10,
-                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 output_tokens: 2,
                 ..Usage::default()
             },
@@ -743,7 +744,7 @@ async fn scripted_loop_writes_a_real_file_across_rounds() {
         runtime_runner::RunConfig {
             model_name: "scripted".to_string(),
             context_window: 200_000,
-            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens: 100,
             max_tool_rounds: 8,
             max_continuations: runtime_runner::MAX_CONTINUATIONS,

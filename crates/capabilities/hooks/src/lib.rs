@@ -896,7 +896,7 @@ mod tests {
     /// a marker file well after the timeout must never get to run.
     #[tokio::test]
     async fn timeout_tree_kill_covers_grandchildren() {
-        // nosemgrep: Semgrep_rust.lang.security.temp-dir.temp-dir
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let marker = std::env::temp_dir().join(format!(
             "wavecode-hook-tree-kill-{}-{}.marker",
             std::process::id(),

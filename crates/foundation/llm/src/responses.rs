@@ -504,13 +504,6 @@ struct ResponsesStreamState {
     status: Option<String>,
 }
 
-/// Feeds one SSE `data` payload, returning zero or more stream events.
-///
-/// Named events (`response.output_text.delta`, `response.function_call_arguments.
-/// delta`, `response.output_item.added|done`, `response.completed|incomplete`,
-/// `response.failed`, `error`) drive the same [`StreamEvent`] vocabulary the
-/// other providers emit; unknown event types are ignored for forward
-/// compatibility.
 /// Reads usage, output calls, and the incomplete reason off a terminal
 /// `response.completed` / `response.incomplete` envelope. The terminating
 /// events stay in the caller: they are emitted even when the envelope is
@@ -531,6 +524,13 @@ fn read_completion(state: &mut ResponsesStreamState, response: &Value) {
     }
 }
 
+/// Feeds one SSE `data` payload, returning zero or more stream events.
+///
+/// Named events (`response.output_text.delta`, `response.function_call_arguments.
+/// delta`, `response.output_item.added|done`, `response.completed|incomplete`,
+/// `response.failed`, `error`) drive the same [`StreamEvent`] vocabulary the
+/// other providers emit; unknown event types are ignored for forward
+/// compatibility.
 fn feed_responses_data(state: &mut ResponsesStreamState, data: &str) -> Result<Vec<StreamEvent>> {
     // Chat-style terminator: the Responses API itself ends with
     // `response.completed`, but gateways bridging both dialects append

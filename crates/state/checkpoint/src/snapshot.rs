@@ -180,7 +180,6 @@ fn rel_string(path: &Path, cwd: &Path) -> Option<String> {
     })
 }
 
-/// Report of a snapshot capture (counts plus which caps were hit).
 /// What one capture walk observed: the collected files plus the skip and
 /// cap counters the manifest and report surface. Crate-internal — the
 /// public view is [`SnapshotCreateReport`].
@@ -211,6 +210,7 @@ impl SnapshotWalk {
     }
 }
 
+/// Report of a snapshot capture (counts plus which caps were hit).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotCreateReport {
     /// Snapshot label.

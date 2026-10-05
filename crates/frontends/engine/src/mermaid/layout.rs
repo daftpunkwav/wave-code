@@ -386,7 +386,10 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         if let Some(label) = &edge.label {
             let fl = layer[edge.from].min(layer[edge.to]);
             if fl < max_layer {
-                let w = width::width(label).min(24) + 2;
+                // The labeled horizontal segment between the elbow and the
+                // arrowhead loses a cell on each side (the elbow join and
+                // the head), so the gutter needs the label width plus four.
+                let w = width::width(label).min(24) + 4;
                 gutters[fl] = gutters[fl].max(w);
             }
         }
@@ -397,9 +400,14 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
     for depth in 0..=max_layer {
         col_w[depth] = cols[depth].iter().map(|&n| box_w[n]).max().unwrap_or(2);
         col_x[depth] = total_width;
-        total_width += col_w[depth] + gutters.get(depth).copied().unwrap_or(3);
+        total_width += col_w[depth];
+        // Inter-column gutters only: the final column carries no trailing
+        // gutter, so the canvas width includes it (and the arrowhead drawn
+        // against labeled edges) exactly.
+        if depth < max_layer {
+            total_width += gutters[depth];
+        }
     }
-    let total_width = total_width.saturating_sub(gutters.last().copied().unwrap_or(3));
     let mut total_height = 0usize;
     let mut y = vec![0usize; count];
     for band in &cols {

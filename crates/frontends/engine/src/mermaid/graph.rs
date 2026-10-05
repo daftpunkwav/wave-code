@@ -323,6 +323,11 @@ fn scan_arrow(line: &str) -> Option<(Option<String>, usize, EdgeStyle)> {
         if line[run..].starts_with('>') {
             return Some((None, run + 1, EdgeStyle::Solid));
         }
+        if run >= 3 {
+            // Open link `A --- B`: no arrowhead; what follows is the
+            // target side.
+            return Some((None, run, EdgeStyle::Solid));
+        }
         let end = line.find("-->")?;
         let label = line[2..end].trim();
         let label = (!label.is_empty()).then(|| label.to_string());

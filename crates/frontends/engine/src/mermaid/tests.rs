@@ -23,6 +23,8 @@ graph TD
 fn extended_link_spellings_render_one_edge_each() {
     for src in [
         "graph TD
+    A --- B",
+        "graph TD
     A ---> B",
         "graph TD
     A ----> B",

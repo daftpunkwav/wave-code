@@ -458,6 +458,7 @@ fn assign_and_resume(job: &std::os::windows::io::OwnedHandle, pid: u32) -> std::
     if resume_process(pid).is_err() {
         // Fail-closed: assigned but not runnable is still a dead end — kill.
         // SAFETY: the process handle is valid and exclusively owned.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { TerminateProcess(process.as_raw_handle().cast(), 1) };
         return Err(std::io::Error::other(
             "assigned to job but could not be resumed",
@@ -488,6 +489,7 @@ fn resume_process(pid: u32) -> std::io::Result<()> {
     let _snapshot_guard = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(snapshot) };
     // SAFETY: `entry.dwSize` is initialized before each API call as the
     // ToolHelp contract requires; the snapshot handle is valid throughout.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         let mut entry: THREADENTRY32 = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
@@ -533,11 +535,13 @@ fn direct_child_pids() -> Vec<u32> {
         return Vec::new();
     }
     // SAFETY: the raw snapshot handle is owned exclusively and wrapped.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let _snapshot_guard = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(snapshot) };
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let self_pid = unsafe { GetCurrentProcessId() };
     let mut children = Vec::new();
     // SAFETY: `entry.dwSize` initialized before each API call; snapshot valid.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         let mut entry: PROCESSENTRY32W = std::mem::zeroed();
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -572,6 +576,7 @@ fn process_in_job(pid: u32, job: &std::os::windows::io::OwnedHandle) -> std::io:
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: the raw process handle is owned exclusively and wrapped.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let process = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(process) };
     let mut in_job = FALSE;
     // SAFETY: both handles are valid and exclusively owned.

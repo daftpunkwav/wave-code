@@ -21,6 +21,7 @@ fn sensitive_env_strip_covers_secret_shapes_only() {
         std::env::set_var("FOO_BRIDGE_NORMAL", "visible");
     }
     let strip = sensitive_env_strip();
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         std::env::remove_var("FOO_BRIDGE_API_KEY");
         std::env::remove_var("FOO_BRIDGE_NORMAL");

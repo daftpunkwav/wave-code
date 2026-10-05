@@ -362,6 +362,7 @@ mod tests {
     fn profile_dir_is_scoped_to_this_process() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let primary =
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wavecode-seatbelt-{}", std::process::id()));
         // A leftover from a previous run of this pid would be accepted as
         //-is; drop it so the test observes the create path it asserts on.

@@ -176,6 +176,7 @@ struct MessageStartMessage {
 #[derive(Deserialize)]
 struct MessageStartUsage {
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     input_tokens: u64,
     /// Cache-read counter; third-party gateways may omit it (defaults to 0).
     #[serde(default)]
@@ -633,6 +634,7 @@ mod tests {
                 usage: Usage {
                     // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
                     ..Usage::default()
                 },
@@ -783,8 +785,11 @@ mod tests {
                 usage: Usage {
                     // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     input_tokens: 5,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 1,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_read_tokens: 0,
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     cache_creation_tokens: 0,
                 },
             })

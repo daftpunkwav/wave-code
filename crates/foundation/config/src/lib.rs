@@ -198,6 +198,7 @@ env_key = "TEST_KEY"
         assert_eq!(prov.kind, ProviderKind::Anthropic);
         assert_eq!(prov.base_url, "https://api.minimaxi.com/anthropic");
         assert_eq!(prov.context_window(), 200_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(prov.max_output_tokens(), 8192);
         // The models catalog is optional and empty by default.
         assert!(cfg.models.is_empty());
@@ -440,6 +441,7 @@ headers = {{ Authorization = "Bearer t" }}
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
         let (_p, key) = cfg.resolve_provider().unwrap();
         assert_eq!(key, "k-from-env");
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::remove_var("TEST_KEY") };
     }
 
@@ -468,6 +470,7 @@ headers = {{ Authorization = "Bearer t" }}
             cfg.resolve_provider(),
             Err(ConfigError::MissingApiKey(_))
         ));
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::remove_var("TEST_KEY") };
     }
 
@@ -476,6 +479,7 @@ headers = {{ Authorization = "Bearer t" }}
         let _guard = ENV_LOCK.lock().unwrap();
         // Whitespace-only env values are never valid API keys: fall back
         // to the inline key instead of sending blanks to the API.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::set_var("TEST_KEY", "   ") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("k-inline".into());
@@ -487,12 +491,14 @@ headers = {{ Authorization = "Bearer t" }}
             cfg.resolve_provider(),
             Err(ConfigError::MissingApiKey(_))
         ));
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::remove_var("TEST_KEY") };
     }
 
     #[test]
     fn whitespace_only_inline_key_is_missing_api_key() {
         let _guard = ENV_LOCK.lock().unwrap();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { std::env::remove_var("TEST_KEY") };
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         cfg.model_providers.get_mut("minimax").unwrap().api_key = Some("   ".into());
@@ -509,19 +515,25 @@ headers = {{ Authorization = "Bearer t" }}
         let mut cfg: Config = toml::from_str(TOML_OK).unwrap();
         let prov = cfg.model_providers.get_mut("minimax").unwrap();
         prov.context_window = Some(0);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         prov.max_output_tokens = Some(0);
         assert_eq!(prov.context_window(), DEFAULT_CONTEXT_WINDOW);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(prov.max_output_tokens(), DEFAULT_MAX_OUTPUT_TOKENS);
         assert_eq!(DEFAULT_CONTEXT_WINDOW, 200_000);
         assert_eq!(DEFAULT_MAX_OUTPUT_TOKENS, 8192);
         // Non-zero values are still honored; None still means default.
         prov.context_window = Some(100_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         prov.max_output_tokens = Some(4096);
         assert_eq!(prov.context_window(), 100_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(prov.max_output_tokens(), 4096);
         prov.context_window = None;
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         prov.max_output_tokens = None;
         assert_eq!(prov.context_window(), 200_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(prov.max_output_tokens(), 8192);
     }
 
@@ -582,6 +594,7 @@ headers = {{ Authorization = "Bearer t" }}
         }
         let result = Config::load();
         // Restore the process-level env before asserting either way (same ENV_LOCK discipline).
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             if let Some(v) = saved_user {
                 std::env::set_var("USERPROFILE", v);

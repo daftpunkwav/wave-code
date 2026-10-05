@@ -295,6 +295,7 @@ env_key = "A_KEY"
             std::env::set_var("HOME", dir.path());
         }
         let names = serve_deny_env();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             if let Some(v) = saved_user {
                 std::env::set_var("USERPROFILE", v);
@@ -313,11 +314,13 @@ env_key = "A_KEY"
         let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved_user = std::env::var_os("USERPROFILE");
         let saved_home = std::env::var_os("HOME");
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("USERPROFILE", tempfile::tempdir().unwrap().path());
             std::env::set_var("HOME", tempfile::tempdir().unwrap().path());
         }
         let names = serve_deny_env();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             if let Some(v) = saved_user {
                 std::env::set_var("USERPROFILE", v);

@@ -112,6 +112,7 @@ impl AnthropicClient {
     /// clamped per request into the API-satisfiable range (>= 1024 and
     /// < `max_tokens`); requests whose `max_tokens` cannot satisfy the
     /// 1024 minimum silently keep thinking off for that request.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub fn with_thinking_budget(mut self, budget_tokens: u32) -> Self {
         self.thinking_budget = Some(budget_tokens);
         self
@@ -306,6 +307,7 @@ fn tools_body(tools: &[ToolSpec], prompt_caching: bool, ttl: CacheTtl) -> serde_
 /// `max_tokens > budget_tokens`. A `max_tokens` that cannot satisfy the
 /// minimum keeps thinking off for that request (a config problem must not
 /// fail every turn); otherwise the budget is clamped into the valid range.
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
 fn thinking_body(budget: u32, max_tokens: u32) -> Option<serde_json::Value> {
     if max_tokens <= 1024 {
         return None;
@@ -665,6 +667,7 @@ mod tests {
                 }],
             }]),
             tools: Arc::new(vec![]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8192,
         };
         let v = build_request_body(&req, false, CacheTtl::FiveMinutes, None);
@@ -710,6 +713,7 @@ mod tests {
                     input_schema: serde_json::json!({"type":"object"}),
                 },
             ]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8192,
         };
         let v = build_request_body(&req, true, CacheTtl::FiveMinutes, None);
@@ -755,6 +759,7 @@ mod tests {
                 description: "da".into(),
                 input_schema: serde_json::json!({"type":"object"}),
             }]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8192,
         };
         assert_eq!(CacheTtl::FiveMinutes.wire(), None);
@@ -791,6 +796,7 @@ mod tests {
                 content: vec![ContentBlock::Text { text: "hi".into() }],
             }]),
             tools: Arc::new(vec![]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8192,
         };
         // Local endpoint that records the request head; the response status
@@ -846,6 +852,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(vec![]),
             tools: Arc::new(vec![]),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 8192,
         };
         let v = build_request_body(&req, true, CacheTtl::FiveMinutes, Some(4096));

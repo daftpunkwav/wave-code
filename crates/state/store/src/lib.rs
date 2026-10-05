@@ -182,8 +182,10 @@ impl HistoryEntry {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
     /// Input tokens of the latest sample.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub input_tokens: u64,
     /// Cumulative output tokens of the turn that last settled.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub output_tokens: u64,
     /// Output tokens of the last sample only.
     ///
@@ -191,12 +193,15 @@ pub struct Usage {
     /// `input_tokens + last_output_tokens`. Earlier samples' outputs are
     /// already inside `input_tokens`; adding [`Self::output_tokens`] would
     /// count them again and compact too early.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub last_output_tokens: u64,
     /// Cumulative prompt-cache read tokens (0 when the provider reports no
     /// cache accounting).
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub cache_read_tokens: u64,
     /// Cumulative prompt-cache write tokens (0 when the provider reports no
     /// cache accounting).
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub cache_creation_tokens: u64,
 }
 

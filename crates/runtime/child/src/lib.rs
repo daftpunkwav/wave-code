@@ -107,11 +107,13 @@ pub struct TaskResult {
     /// Human-readable outcome, re-injected into the parent conversation.
     pub summary: String,
     /// Output tokens consumed by the child, for cost accounting.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub output_tokens: u64,
 }
 
 impl TaskResult {
     /// Convenience constructor for a completed task.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub fn completed(summary: impl Into<String>, output_tokens: u64) -> Self {
         Self {
             status: TaskStatus::Completed,
@@ -378,6 +380,7 @@ impl ChildRuntime {
                 slot.finish(TaskResult {
                     status: TaskStatus::Stopped,
                     summary: "stop requested before start".to_string(),
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 0,
                 });
             } else {
@@ -578,6 +581,7 @@ mod tests {
                 return TaskResult {
                     status: TaskStatus::Stopped,
                     summary: "observed stop".to_string(),
+                    // nosemgrep: codacy.yaml.security.hard-coded-tokens
                     output_tokens: 0,
                 };
             }

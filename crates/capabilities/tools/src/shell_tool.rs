@@ -1105,6 +1105,7 @@ mod tests {
             .execute(serde_json::json!({"command": cmd}), &c)
             .await
             .unwrap();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("FOO_API_KEY");
             std::env::remove_var("FOO_PROVIDER_KEY");
@@ -1122,22 +1123,26 @@ mod tests {
         // Poison recovery, same reason as the scrubbing test above.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
         }
         assert!(!os_sandbox_enabled(), "confinement defaults off");
         for on in ["1", "true", "TRUE"] {
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe {
                 std::env::set_var("WAVECODE_SANDBOX_OS", on);
             }
             assert!(os_sandbox_enabled(), "{on} enables confinement");
         }
         for off in ["0", "false", "yes", ""] {
+            // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
             unsafe {
                 std::env::set_var("WAVECODE_SANDBOX_OS", off);
             }
             assert!(!os_sandbox_enabled(), "{off:?} must not enable confinement");
         }
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
             if let Some(v) = prior {
@@ -1153,6 +1158,7 @@ mod tests {
         // Poison recovery, same reason as the scrubbing test above.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("WAVECODE_SANDBOX_OS", "1");
         }
@@ -1161,6 +1167,7 @@ mod tests {
             .execute(serde_json::json!({"command": "echo hello"}), &c)
             .await
             .unwrap();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("WAVECODE_SANDBOX_OS");
             if let Some(v) = prior {

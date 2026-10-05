@@ -114,10 +114,14 @@ impl ModelGateway for ScriptedToolModel {
         }
         Ok(SampleResponse {
             blocks: vec![SampleBlock::Text("bench-done".to_string())],
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             input_tokens: Some(10),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             output_tokens: Some(5),
             truncated: false,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_read_tokens: 0,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             cache_creation_tokens: 0,
         })
     }

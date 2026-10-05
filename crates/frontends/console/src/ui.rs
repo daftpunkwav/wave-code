@@ -1989,6 +1989,7 @@ impl ConsoleUi {
             self.push_status("no editor configured — set $EDITOR or /editor <cmd>", true);
             return Ok(());
         };
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir
         let temp = std::env::temp_dir().join(format!("wavecode-edit-{}.md", Uuid::new_v4()));
         if let Err(error) = std::fs::write(&temp, &draft) {
             self.editor.set_text(&draft);
@@ -2180,6 +2181,7 @@ verify from the repository.";
             _ => "context: n/a".to_string(),
         };
         let usage_line = format!(
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             "tokens: {} in / {} out / {} total",
             crate::state::format_tokens(state.usage.input),
             crate::state::format_tokens(state.usage.output),

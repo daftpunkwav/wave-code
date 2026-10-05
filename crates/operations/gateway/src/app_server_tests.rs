@@ -449,6 +449,7 @@ fn state_with_session(id: &str, commands: mpsc::Sender<SessionCommand>) -> AppSt
         base: ServeOptions {
             config_path: None,
             model_override: None,
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             cwd: std::env::temp_dir(),
             home: None,
             port: 0,

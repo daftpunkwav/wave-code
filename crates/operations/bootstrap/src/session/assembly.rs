@@ -219,6 +219,7 @@ fn run_config(
     runtime_runner::RunConfig {
         model_name: model_name.to_string(),
         context_window,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         max_output_tokens,
         max_tool_rounds: config.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS),
         max_continuations: runtime_runner::MAX_CONTINUATIONS,
@@ -289,6 +290,7 @@ pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
         thinking_effort,
         deny_env,
         context_window,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         max_output_tokens,
         per_model_window,
         permission_override,
@@ -325,6 +327,7 @@ pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
             home: &home,
             session_id: &session_id,
             context_window,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens,
             per_model_window,
             headless,
@@ -657,6 +660,7 @@ fn build_runtime_wiring(
         home,
         session_id,
         context_window,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         max_output_tokens,
         per_model_window,
         headless,
@@ -690,6 +694,7 @@ fn build_runtime_wiring(
         let adapter = ModelAdapter::new(
             model.clone(),
             model_name.to_string(),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens,
             ctx.registry.clone(),
         );
@@ -753,6 +758,7 @@ fn build_runtime_wiring(
             gate_source,
             plans,
             compactor,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             run_config(config, model_name, context_window, max_output_tokens),
             interrupt.clone(),
         )

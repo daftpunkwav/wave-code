@@ -692,8 +692,10 @@ struct OpenAiFunctionDelta {
 #[derive(Deserialize, Default)]
 struct OpenAiUsage {
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     prompt_tokens: u64,
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     completion_tokens: u64,
     /// Cache accounting (`prompt_tokens_details.cached_tokens`); absent on
     /// providers without the field, degrading to 0.
@@ -705,18 +707,21 @@ struct OpenAiUsage {
 #[derive(Deserialize, Default)]
 struct OpenAiPromptTokensDetails {
     #[serde(default)]
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     cached_tokens: u64,
 }
 
 /// Approximate per-model limits (context window and max output tokens).
 ///
 /// Values are approximations for session sizing only; an explicit
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
 /// `ProviderConfig.context_window` / `max_output_tokens` always overrides them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelCapabilities {
     /// Approximate context window in tokens.
     pub context_window: u64,
     /// Approximate max output tokens per round.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub max_output_tokens: u32,
 }
 
@@ -759,6 +764,7 @@ impl ModelCapabilities {
         } else if name.starts_with("kimi-k2") {
             Some(Self {
                 context_window: 256_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 16_384,
             })
         } else if name.starts_with("qwen3-coder") {
@@ -770,6 +776,7 @@ impl ModelCapabilities {
         } else if name.starts_with("glm-4.6") {
             Some(Self {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 8_192,
             })
         } else if lowered.contains("ollama") || name.starts_with("local-") {
@@ -783,9 +790,11 @@ impl ModelCapabilities {
 
     /// Resolves limits with explicit caller-supplied fallbacks for unknown names
     /// (typically the session defaults derived from `ProviderConfig`).
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens
     pub fn resolve_or(name: &str, context_window: u64, max_output_tokens: u32) -> Self {
         Self::for_model(name).unwrap_or(Self {
             context_window,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens,
         })
     }
@@ -794,6 +803,7 @@ impl ModelCapabilities {
     pub fn local_default() -> Self {
         Self {
             context_window: 32_768,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_output_tokens: 8_192,
         }
     }
@@ -1014,6 +1024,7 @@ mod tests {
             system: String::new(),
             messages: std::sync::Arc::new(Vec::new()),
             tools: Arc::new(Vec::new()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             max_tokens: 100,
         };
         let body = build_request_body(&req, "deepseek-chat", Some("low"));
@@ -1411,9 +1422,11 @@ mod tests {
         // real windows instead of the 200k/8k session default.
         let gpt5 = ModelCapabilities::for_model("gpt-5.2-codex").unwrap();
         assert_eq!(gpt5.context_window, 400_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(gpt5.max_output_tokens, 128_000);
         let o3 = ModelCapabilities::for_model("o3-mini").unwrap();
         assert_eq!(o3.context_window, 200_000);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(o3.max_output_tokens, 100_000);
         // `opus` is not an o-series model, and a vendor prefix is skipped.
         assert!(ModelCapabilities::for_model("claude-opus-4-1").is_none());
@@ -1421,6 +1434,7 @@ mod tests {
             ModelCapabilities::for_model("openai/o4-mini").unwrap(),
             ModelCapabilities {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 100_000,
             }
         );
@@ -1445,6 +1459,7 @@ mod tests {
             resolved,
             ModelCapabilities {
                 context_window: 200_000,
+                // nosemgrep: codacy.yaml.security.hard-coded-tokens
                 max_output_tokens: 8_192,
             }
         );

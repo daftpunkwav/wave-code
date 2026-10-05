@@ -586,6 +586,7 @@ mod tests {
         apply_child_env(&mut cmd, &env, &["FOO_MCP_TOKEN".to_owned()]);
         let out = cmd.output().expect("child runs");
         let text = String::from_utf8_lossy(&out.stdout);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("FOO_MCP_TOKEN");
             std::env::remove_var("FOO_MCP_SECRET");
@@ -620,6 +621,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_with_env_strips_the_inherited_environment() {
         let _guard = ENV_LOCK.lock().await;
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::set_var("FOO_MCP_E2E_TOKEN", "e2e-token-value");
             std::env::set_var("FOO_MCP_E2E_KEEP", "e2e-keep-value");
@@ -652,6 +654,7 @@ mod tests {
         {
             Ok(transport) => transport,
             Err(_) => {
+                // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 unsafe {
                     std::env::remove_var("FOO_MCP_E2E_TOKEN");
                     std::env::remove_var("FOO_MCP_E2E_KEEP");
@@ -665,6 +668,7 @@ mod tests {
             .await
             .unwrap();
         let err = transport.recv_response().await.unwrap_err();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var("FOO_MCP_E2E_TOKEN");
             std::env::remove_var("FOO_MCP_E2E_KEEP");

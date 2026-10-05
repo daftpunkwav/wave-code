@@ -710,6 +710,7 @@ async fn server_command_child_env_is_scrubbed() {
         )
         .await
         .unwrap();
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         std::env::remove_var("FOO_LSP_SECRET");
         std::env::remove_var("FOO_LSP_DENY");

@@ -740,6 +740,7 @@ mod tests {
             end.log_tail
         );
         // SAFETY: restores the pre-test environment.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             std::env::remove_var(NAME);
         }

@@ -595,6 +595,7 @@ impl SnapshotStore {
                 continue;
             };
             if !validate_rel_path(rel) {
+                // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
                 report.missing.push(format!("{rel} (unsafe path, skipped)"));
                 continue;
             }
@@ -957,6 +958,7 @@ mod snapshot_tests {
         }
         let fallback = effective_snapshot_store_root();
         // Restore before asserting so a failure cannot leak the mutation.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe {
             if let Some(value) = saved_userprofile {
                 std::env::set_var("USERPROFILE", value);
@@ -967,6 +969,7 @@ mod snapshot_tests {
         }
         assert_eq!(
             fallback,
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wavecode-{SNAPSHOTS_DIR}")),
             "the unresolvable-home fallback must be the documented temp-dir root"
         );

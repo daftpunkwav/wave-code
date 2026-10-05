@@ -14,6 +14,7 @@
 //!   `function_call` / `function_call_output` items for tool exchange (tool
 //!   pairing rides `call_id`, which is what wave stores as the call id);
 //! - tool definitions are flat (`{type, name, description, parameters}`);
+// nosemgrep: codacy.yaml.security.hard-coded-tokens
 //! - the output cap is `max_output_tokens` and reasoning effort nests under
 //!   `reasoning: {effort}` (with `summary: auto` so reasoning summaries
 //!   stream for display);
@@ -193,6 +194,7 @@ pub(crate) fn build_request_body(
         "input": translate_input(&req.messages),
         "stream": true,
         "store": false,
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         "max_output_tokens": req.max_tokens,
     });
     if !req.system.is_empty() {
@@ -516,6 +518,7 @@ fn read_completion(state: &mut ResponsesStreamState, response: &Value) {
         .and_then(|details| details.get("reason"))
         .and_then(Value::as_str)
     {
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         if reason == "max_output_tokens" {
             state.truncated = true;
         } else {
@@ -797,6 +800,7 @@ mod tests {
         assert_eq!(body["stream"], true);
         // Conversations stay local: never persisted server-side.
         assert_eq!(body["store"], false);
+        // nosemgrep: codacy.yaml.security.hard-coded-tokens
         assert_eq!(body["max_output_tokens"], 2048);
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
@@ -912,6 +916,7 @@ mod tests {
                         // Cache reads are a subset detail of input_tokens.
                         // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         cache_read_tokens: 100,
+                        // nosemgrep: codacy.yaml.security.hard-coded-tokens
                         cache_creation_tokens: 0,
                     },
                 },
@@ -922,6 +927,7 @@ mod tests {
     #[tokio::test]
     async fn incomplete_response_maps_to_a_truncation_stop() {
         let results = run_decode(vec![
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             b"data: {\"type\":\"response.completed\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":4096}}}\n\n",
         ])
         .await;

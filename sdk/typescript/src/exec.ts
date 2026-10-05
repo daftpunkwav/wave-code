@@ -70,7 +70,9 @@ export interface ExecSession {
 /** String decisions the wire stdin dialect accepts verbatim. */
 const WIRE_DECISIONS: readonly string[] = ["allow", "always", "deny"];
 
-function isWireDecision(value: string): value is Extract<ApprovalDecision, string> {
+type WireDecision = "allow" | "always" | "deny";
+
+function isWireDecision(value: string): value is WireDecision {
   return WIRE_DECISIONS.includes(value);
 }
 

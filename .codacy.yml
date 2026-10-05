@@ -29,6 +29,10 @@ engines:
     exclude_paths:
       - "crates/capabilities/tools/src/fs/mod.rs"
       - "crates/capabilities/tools/src/web_fetch.rs"
+      # pooled_call and run_lsp_call take `impl AsyncFnOnce(...)` closure
+      # parameters; the parser counts the closure's argument types as
+      # function parameters (6 real, 9 reported).
+      - "crates/capabilities/tools/src/lsp/providers.rs"
       - "crates/foundation/llm/src/openai.rs"
       - "crates/frontends/console/src/dialogs/model_wizard.rs"
       - "crates/frontends/console/src/dialogs/tests.rs"

@@ -134,9 +134,13 @@ fn wire_tags_event_msg_are_locked() {
         ),
         (
             EventMsg::TokenCount {
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 input_tokens: 1,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 output_tokens: 2,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 cache_read_tokens: 0,
+                // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
                 cache_creation_tokens: 0,
                 context_window: Some(200_000),
                 context_used: Some(3),
@@ -150,6 +154,7 @@ fn wire_tags_event_msg_are_locked() {
             "compact_started",
         ),
         (
+            // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
             EventMsg::CompactCompleted { summary_tokens: 10 },
             "compact_completed",
         ),
@@ -445,6 +450,7 @@ fn every_event_msg_variant_round_trips_with_its_locked_tag() {
         EventMsg::CompactStarted {
             trigger: "auto".to_string(),
         },
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         EventMsg::CompactCompleted { summary_tokens: 99 },
         EventMsg::HistoryRewound { turns: 2 },
         EventMsg::PlanProposed {

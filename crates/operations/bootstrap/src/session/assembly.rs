@@ -213,6 +213,7 @@ fn run_config(
     config: &wavecode_config::Config,
     model_name: &str,
     context_window: u64,
+    // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
     max_output_tokens: u32,
 ) -> runtime_runner::RunConfig {
     runtime_runner::RunConfig {

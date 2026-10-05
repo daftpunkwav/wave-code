@@ -503,9 +503,13 @@ fn usage_command_renders_panel_from_accumulated_samples() {
         context_used: Some(60_000),
     });
     ui.handle_wire_event(&EventMsg::TokenCount {
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         input_tokens: 6_000,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         output_tokens: 1_500,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         cache_read_tokens: 50_000,
+        // nosemgrep: Semgrep_codacy.yaml.security.hard-coded-tokens
         cache_creation_tokens: 1_000,
         context_window: Some(200_000),
         context_used: Some(84_000),

@@ -134,7 +134,7 @@ fn client(token: &str) -> reqwest::Client {
 async fn open_events(client: &reqwest::Client, port: u16, session_id: &str) -> reqwest::Response {
     let response = client
         .get(format!(
-            // codeql[rust/cleartext-transmission] loopback-only test client posting a synthetic session id
+            // Reviewed: loopback-only test client posting a synthetic session id.
             "http://127.0.0.1:{port}/sessions/{session_id}/events"
         ))
         .send()
@@ -286,7 +286,7 @@ async fn session_lifecycle_streams_prompt_events_over_sse() {
     let events_task = tokio::spawn(collect_events(response, 8));
     let prompt_status = http
         .post(format!(
-            // codeql[rust/cleartext-transmission] loopback-only test client posting a synthetic session id
+            // Reviewed: loopback-only test client posting a synthetic session id.
             "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
         ))
         .json(&serde_json::json!({"text": "say hello"}))
@@ -387,7 +387,7 @@ async fn approval_requests_answer_over_http() {
     let events_task = tokio::spawn(collect_events(response, 5));
     let status = http
         .post(format!(
-            // codeql[rust/cleartext-transmission] loopback-only test client posting a synthetic session id
+            // Reviewed: loopback-only test client posting a synthetic session id.
             "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
         ))
         .json(&serde_json::json!({"text": "run it"}))
@@ -412,7 +412,7 @@ async fn approval_requests_answer_over_http() {
     // Answer over HTTP; the parked tool resumes.
     let answered = http
         .post(format!(
-            // codeql[rust/cleartext-transmission] loopback-only test client posting a synthetic session id
+            // Reviewed: loopback-only test client posting a synthetic session id.
             "http://127.0.0.1:{port}/sessions/{session_id}/approvals/{call_id}"
         ))
         .json(&serde_json::json!({"decision": "allow"}))
@@ -621,7 +621,7 @@ async fn idle_sessions_are_reaped_after_the_ttl() {
     );
     let prompted = http
         .post(format!(
-            // codeql[rust/cleartext-transmission] loopback-only test client posting a synthetic session id
+            // Reviewed: loopback-only test client posting a synthetic session id.
             "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
         ))
         .json(&serde_json::json!({"text": "anyone there?"}))
@@ -647,7 +647,7 @@ async fn recently_active_sessions_survive_the_reaper() {
         tokio::time::sleep(ttl / 3).await;
         let prompted = http
             .post(format!(
-                // codeql[rust/cleartext-transmission] loopback-only test client posting a synthetic session id
+                // Reviewed: loopback-only test client posting a synthetic session id.
                 "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
             ))
             .json(&serde_json::json!({"text": "still here"}))

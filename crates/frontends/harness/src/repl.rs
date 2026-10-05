@@ -254,7 +254,7 @@ pub(crate) async fn run_repl(
             // renders current status without knowing the storage layout;
             // the model mutates it through the plan tool.
             Slash::Plan(_) => match status.plan_status() {
-                Some(text) => println!("{text}"), // codeql[rust/cleartext-logging] local terminal display of the user's own session state; no cross-boundary sink
+                Some(text) => println!("{text}"), // Reviewed: prints the user's own session state to their terminal; no cross-boundary sink.
                 None => println!(
                     "(no reviewed plan yet; ask the agent to propose one with the plan tool)"
                 ),
@@ -263,7 +263,7 @@ pub(crate) async fn run_repl(
             // state comes from the assembly-side queries; the model
             // mutates it through the goal tool.
             Slash::Goal(_) => match status.goal_status() {
-                Some(text) => println!("{text}"), // codeql[rust/cleartext-logging] local terminal display of the user's own session state; no cross-boundary sink
+                Some(text) => println!("{text}"), // Reviewed: prints the user's own session state to their terminal; no cross-boundary sink.
                 None => {
                     println!("(no durable goal yet; ask the agent to set one with the goal tool)")
                 }

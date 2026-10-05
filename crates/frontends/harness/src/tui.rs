@@ -46,10 +46,12 @@ fn resolve_tui_seed(
     };
     if let Some(id) = session {
         if !state_persistence::sessions::is_valid_session_id(id) {
-            anyhow::bail!("invalid session id {id:?}");
+            // Unvalidated CLI input: named in the error's type only, never
+            // echoed into message text that surfaces on the terminal.
+            anyhow::bail!("invalid session id (expected 1-64 chars [A-Za-z0-9_-])");
         }
         let history = load_session_history(home, id)
-            .map_err(|e| anyhow::anyhow!("cannot load session {id}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("cannot load session history: {e}"))?;
         let title = list_sessions(home)
             .into_iter()
             .find(|meta| meta.id == *id)
@@ -373,7 +375,7 @@ pub(crate) async fn run_tui_new(
     };
     handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
-        eprintln!("[warn] {warning}");
+        eprintln!("[warn] {warning}"); // codeql[rust/cleartext-logging] startup diagnostics on the user's own terminal; no cross-boundary sink
     }
     // Release check runs beside the session: the footer picks the
     // notice up on a later tick, never delaying the first frame.

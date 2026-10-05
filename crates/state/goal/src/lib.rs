@@ -187,9 +187,11 @@ pub enum GoalError {
         message: String,
     },
     /// Session id outside `[A-Za-z0-9_-]{1,64}` (it becomes a file name).
-    #[error("invalid session id {id:?}: expected 1-64 chars ([A-Za-z0-9_-])")]
+    /// The rejected id is not echoed back: error text ends up on terminals
+    /// and logs, and the id is unvalidated input at this point.
+    #[error("invalid session id (expected 1-64 chars [A-Za-z0-9_-])")]
     InvalidSessionId {
-        /// The rejected id.
+        /// The rejected id, kept for programmatic matching only.
         id: String,
     },
     /// Stored goal exists but does not parse.

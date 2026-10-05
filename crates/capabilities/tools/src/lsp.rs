@@ -121,14 +121,17 @@ fn opt_server_command(input: &Value) -> std::result::Result<Option<String>, Tool
 /// Shared flow: parse params, resolve the server (explicit `server_command`
 /// override spawns per call; otherwise the registry's pooled server for the
 /// file extension is used), run one request closure, pretty-print the result.
-async fn run_lsp_call(
+async fn run_lsp_call<F>(
     input: &Value,
     ctx: &ToolCtx,
     providers: Option<&Arc<LspProviders>>,
     with_position: bool,
     method: &str,
-    call: impl AsyncFnOnce(&mut LspClient<AnyTransport>, &str, u32, u32, Duration) -> Result<Value>,
-) -> Result<ToolOutput> {
+    call: F,
+) -> Result<ToolOutput>
+where
+    F: AsyncFnOnce(&mut LspClient<AnyTransport>, &str, u32, u32, Duration) -> Result<Value>,
+{
     let override_command = match opt_server_command(input) {
         Ok(c) => c,
         Err(out) => return Ok(out),

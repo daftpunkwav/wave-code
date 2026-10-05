@@ -545,6 +545,7 @@ mod tests {
             env: HashMap::new(),
             url: url.map(|s| s.to_string()),
             headers: HashMap::new(),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
             oauth_token_url: None,
             oauth_client_id: None,
             oauth_client_secret: None,

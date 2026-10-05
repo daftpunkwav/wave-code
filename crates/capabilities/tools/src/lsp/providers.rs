@@ -143,14 +143,17 @@ impl LspProviders {
 
     /// Run one request against the pooled server for `ext` (spawn +
     /// initialize lazily on first use). `Err` is a business-failure output.
-    pub(super) async fn pooled_call(
+    pub(super) async fn pooled_call<F>(
         &self,
         ext: &str,
         target: RequestTarget<'_>,
         timeout: Duration,
         method: &str,
-        call: impl AsyncFnOnce(&mut LspClient<AnyTransport>, &str, u32, u32, Duration) -> Result<Value>,
-    ) -> std::result::Result<Value, ToolOutput> {
+        call: F,
+    ) -> std::result::Result<Value, ToolOutput>
+    where
+        F: AsyncFnOnce(&mut LspClient<AnyTransport>, &str, u32, u32, Duration) -> Result<Value>,
+    {
         let command = lock(&self.commands).get(ext).cloned().ok_or_else(|| {
             err_output(format!(
                 "no language server registered for extension '{ext}': provide server_command explicitly or register one"

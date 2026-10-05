@@ -521,6 +521,7 @@ pub(super) fn parse_gantt(source: &str) -> Option<Gantt> {
     let mut title = None;
     let mut tasks: Vec<(String, i64, i64)> = Vec::new();
     let mut starts: HashMap<String, i64> = HashMap::new();
+    let mut ends: HashMap<String, i64> = HashMap::new();
     for raw in source.lines() {
         let line = raw
             .trim()
@@ -548,7 +549,12 @@ pub(super) fn parse_gantt(source: &str) -> Option<Gantt> {
         // id-less task is referenced by its name.
         let (name, spec) = line.split_once(':')?;
         let name = name.trim().to_string();
-        let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+        let mut parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+        // A leading tag (`done`, `active`, `crit`, `milestone`) precedes
+        // the id when the task carries one: `Task :done, id, date, 3d`.
+        if matches!(parts.first(), Some(tag) if is_gantt_tag(tag)) {
+            parts.remove(0);
+        }
         // A leading date or `after` clause means the id was omitted.
         let (id, rest): (&str, &[&str]) = match parts.split_first() {
             Some((first, _)) if is_start_spec(first) => ("", parts.as_slice()),
@@ -563,15 +569,18 @@ pub(super) fn parse_gantt(source: &str) -> Option<Gantt> {
         if !(0..=MAX_GANTT_DAYS).contains(&duration) {
             return None;
         }
+        // `after x` starts the task when `x` ends, not when it starts.
         let start = if let Some(dep) = start_spec.strip_prefix("after ") {
-            *starts.get(dep.trim())?
+            *ends.get(dep.trim())?
         } else {
             days_from_civil(start_spec)?
         };
-        if !id.is_empty() {
-            starts.insert(id.to_string(), start);
-        } else {
+        if id.is_empty() {
             starts.insert(name.clone(), start);
+            ends.insert(name.clone(), start + duration);
+        } else {
+            starts.insert(id.to_string(), start);
+            ends.insert(id.to_string(), start + duration);
         }
         tasks.push((name, start, duration));
     }
@@ -579,6 +588,11 @@ pub(super) fn parse_gantt(source: &str) -> Option<Gantt> {
         return None;
     }
     Some(Gantt { title, tasks })
+}
+
+/// Mermaid task status tags, which may lead the comma list before the id.
+fn is_gantt_tag(part: &str) -> bool {
+    matches!(part, "done" | "active" | "crit" | "milestone")
 }
 
 /// True when the part is a start spec (a `YYYY-MM-DD` date or an

@@ -222,7 +222,7 @@ impl SettingsDialog {
         body.push(String::new());
         body.push(theme.paint(
             Token::TextMuted,
-            "the wave denylist lives in ~/.wavecode/console-settings.json",
+            "the wave denylist lives in ~/.wavecode/wave-denylist.json",
         ));
         border::frame(
             body,

@@ -192,6 +192,50 @@ fn sequence_diagrams_render_participants_and_arrows() {
     assert!(lines.iter().all(|l| width::width(l) <= 80), "{lines:?}");
 }
 
+/// Messages may reference participants that were never declared: both
+/// ends register on first use, as Mermaid does.
+#[test]
+fn sequence_messages_register_implicit_participants() {
+    let src = "sequenceDiagram\n    A->>B: hi";
+    let lines = render_diagram(src, 80).expect("implicit participants render");
+    let joined = lines.join("\n");
+    for label in ["A", "B", "hi"] {
+        assert!(joined.contains(label), "{label}: {joined}");
+    }
+}
+
+/// A right-to-left message points its arrowhead at the receiver: for
+/// `B-->>A` the head is the left-pointing triangle, sitting on A's
+/// lifeline (A is declared first, so its box sits left of B's).
+#[test]
+fn sequence_right_to_left_messages_point_at_the_receiver() {
+    let src = "sequenceDiagram\n    participant A\n    participant B\n    B-->>A: reply";
+    let lines = render_diagram(src, 80).expect("sequence renders");
+    let arrow_row = lines
+        .iter()
+        .find(|l| l.contains('◀') || l.contains('▶'))
+        .expect("an arrow row exists");
+    assert!(
+        arrow_row.contains('◀'),
+        "right-to-left arrowhead points left: {arrow_row}"
+    );
+}
+
+/// A leading status tag (`done`) precedes the id, and `after x` starts
+/// the dependent task when `x` ends, not when it starts.
+#[test]
+fn gantt_tags_and_after_dependencies_resolve() {
+    let src = "gantt\n    title plan\n    Task1 :done, t1, 2024-01-01, 3d\n    Task2 :after t1, 2d";
+    let lines = render_diagram(src, 80).expect("gantt with tag and after renders");
+    let joined = lines.join("\n");
+    assert!(joined.contains("Task1"), "{joined}");
+    assert!(joined.contains("Task2"), "{joined}");
+    // Task1 ends 2024-01-04; `after t1` starts Task2 there, so its bar
+    // ends 2024-01-06 (not 01-03, which a start-aligned read would give).
+    assert!(joined.contains("01-04"), "{joined}");
+    assert!(joined.contains("01-06"), "{joined}");
+}
+
 #[test]
 fn pie_charts_render_as_labeled_bars() {
     let src = "pie title langs\n    \"JS\" : 35\n    \"Go\" : 15";

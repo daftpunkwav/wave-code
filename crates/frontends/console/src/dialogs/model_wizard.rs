@@ -59,11 +59,21 @@ fn parse_size(raw: &str) -> Option<u64> {
     if let Ok(count) = lower.parse::<u64>() {
         return Some(count);
     }
+    // checked_mul: a huge custom value must fall through to the
+    // validation error, not panic (debug) or wrap (release).
     if let Some(head) = lower.strip_suffix('k') {
-        return head.trim().parse::<u64>().ok().map(|n| n * 1024);
+        return head
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_mul(1024));
     }
     if let Some(head) = lower.strip_suffix('m') {
-        return head.trim().parse::<u64>().ok().map(|n| n * 1024 * 1024);
+        return head
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .and_then(|n| n.checked_mul(1024 * 1024));
     }
     None
 }

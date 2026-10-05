@@ -77,8 +77,16 @@ pub(super) fn parse_sequence(source: &str) -> Option<Sequence> {
                     let (from, to) = heads.split_once("->")?;
                     (from, to, false)
                 };
-                let from = *ids.get(from.trim())?;
-                let to = *ids.get(to.trim())?;
+                // Mermaid creates participants implicitly from messages:
+                // `A->>B: hi` with no participant lines renders both ends.
+                for id in [from.trim(), to.trim()] {
+                    if !ids.contains_key(id) {
+                        ids.insert(id.to_string(), names.len());
+                        names.push(id.to_string());
+                    }
+                }
+                let from = ids[from.trim()];
+                let to = ids[to.trim()];
                 messages.push((from, to, label, dotted));
             }
         }
@@ -168,7 +176,9 @@ pub(super) fn layout_sequence(s: &Sequence, columns: usize) -> Option<Vec<String
                 label_row.put(col, label.clone());
             } else {
                 // Label wider than the span: place at the left edge and
-                // let the canvas clip what follows.
+                // let the canvas clip what follows. An overflowing label
+                // never reaches this path — the parse-level fit contract
+                // falls the whole diagram back instead.
                 label_row.put(left + 1, label.clone());
             }
         } else {
@@ -186,7 +196,13 @@ pub(super) fn layout_sequence(s: &Sequence, columns: usize) -> Option<Vec<String
             for col in left..right {
                 arrow_row.put(col, fill);
             }
-            arrow_row.put(right, "▶");
+            // The arrowhead sits on the receiver's lifeline: `A->>B` points
+            // right, `B-->>A` points left.
+            if a < b {
+                arrow_row.put(right, "▶");
+            } else {
+                arrow_row.put(left, "◀");
+            }
         }
         lines.push(arrow_row.render());
     }

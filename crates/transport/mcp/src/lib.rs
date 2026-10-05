@@ -631,7 +631,7 @@ mod tests {
                 "cmd",
                 vec![
                     "/C".into(),
-                    "echo T=%FOO_MCP_E2E_TOKEN% K=%FOO_MCP_E2E_KEEP%".into(),
+                    "echo T=%FOO_MCP_E2E_TOKEN% K=%FOO_MCP_E2E_KEEP% & more > nul".into(),
                 ],
             )
         } else {
@@ -639,7 +639,7 @@ mod tests {
                 "sh",
                 vec![
                     "-c".into(),
-                    "echo T=$FOO_MCP_E2E_TOKEN K=$FOO_MCP_E2E_KEEP".into(),
+                    "echo T=$FOO_MCP_E2E_TOKEN K=$FOO_MCP_E2E_KEEP; read _".into(),
                 ],
             )
         };

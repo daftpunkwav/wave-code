@@ -387,6 +387,8 @@ impl McpServerConfig {
                 if let Some(token_url) = oauth_token_url {
                     transport_mcp::http::validate_token_url(token_url)
                         .map_err(|e| format!("oauth_token_url: {e}"))?;
+                    transport_mcp::http::validate_oauth_endpoint(trimmed)
+                        .map_err(|e| format!("oauth_endpoint: {e}"))?;
                 }
                 Ok(())
             }

@@ -114,14 +114,7 @@ impl HttpMcpConfig {
             // A bearer token minted for a plain-http endpoint would hand the
             // credential to the network in the Authorization header anyway,
             // so OAuth and a non-loopback http endpoint are rejected together.
-            let endpoint = reqwest::Url::parse(&self.endpoint)
-                .map_err(|e| format!("invalid endpoint URL: {e}"))?;
-            if endpoint.scheme() == "http" && !is_loopback_target(&endpoint) {
-                return Err(format!(
-                    "oauth bearer tokens require an https or loopback endpoint, got {}",
-                    redacted_url(&endpoint)
-                ));
-            }
+            validate_oauth_endpoint(&self.endpoint)?;
             if oauth.client_id.trim().is_empty() {
                 return Err("oauth_client_id must not be empty".to_owned());
             }
@@ -192,6 +185,22 @@ pub fn validate_token_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Check the MCP endpoint an OAuth grant would protect: the minted bearer
+/// token rides the `Authorization` header, so a plain-http endpoint outside
+/// the loopback interface would publish it to the network and the
+/// combination is rejected at build time. Error text renders the URL
+/// host-only, matching [`validate_token_url`].
+pub fn validate_oauth_endpoint(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid endpoint URL: {e}"))?;
+    if parsed.scheme() == "http" && !is_loopback_target(&parsed) {
+        return Err(format!(
+            "oauth bearer tokens require an https or loopback endpoint, got {}",
+            redacted_url(&parsed)
+        ));
+    }
+    Ok(())
+}
+
 /// Streamable-HTTP MCP transport: POSTs JSON-RPC messages and reads either
 /// plain-JSON or SSE-stream responses.
 ///
@@ -200,6 +209,11 @@ pub fn validate_token_url(url: &str) -> Result<(), String> {
 /// across tasks.
 pub struct HttpMcp {
     client: reqwest::Client,
+    /// Client used for the OAuth token endpoint. It dials plain-http
+    /// loopback token servers directly (no proxy, which would otherwise
+    /// see the client-secret body); https token requests reuse the main
+    /// client because TLS protects them.
+    token_client: reqwest::Client,
     endpoint: String,
     headers: HashMap<String, String>,
     oauth: Option<OAuthClientCredentials>,
@@ -228,24 +242,33 @@ impl HttpMcp {
         // No redirects, matching the LLM clients and web tools: a 30x must
         // not rewrite POST semantics or carry headers along a redirect
         // chain the operator never configured.
-        // A proxy between this process and a plain-http loopback token
-        // endpoint would receive the client-secret POST body in cleartext,
-        // so that configuration dials the token server directly; https
-        // token URLs stay proxyable because TLS protects the body.
-        let token_dials_direct = config.oauth.as_ref().is_some_and(|oauth| {
-            reqwest::Url::parse(&oauth.token_url)
-                .map(|url| url.scheme() == "http" && is_loopback_target(&url))
+        // Plain-http loopback traffic never detours through a proxy: a
+        // proxy would see the client-secret POST body and any bearer
+        // Authorization header in cleartext, and a loopback peer is local
+        // anyway. Https targets stay proxyable because TLS protects them.
+        let dials_loopback_http = |url: &str| {
+            reqwest::Url::parse(url)
+                .map(|parsed| parsed.scheme() == "http" && is_loopback_target(&parsed))
                 .unwrap_or(false)
-        });
-        let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-        if token_dials_direct {
-            builder = builder.no_proxy();
-        }
-        let client = builder
-            .build()
-            .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))?;
+        };
+        let build = |no_proxy: bool| -> Result<reqwest::Client, TransportError> {
+            let mut builder =
+                reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+            if no_proxy {
+                builder = builder.no_proxy();
+            }
+            builder
+                .build()
+                .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))
+        };
+        let client = build(dials_loopback_http(&config.endpoint))?;
+        let token_client = match &config.oauth {
+            Some(oauth) if dials_loopback_http(&oauth.token_url) => build(true)?,
+            _ => client.clone(),
+        };
         Ok(Self {
             client,
+            token_client,
             endpoint: config.endpoint,
             headers: config.headers,
             oauth: config.oauth,
@@ -464,7 +487,7 @@ impl HttpMcp {
                 return Ok(Some(cached.value));
             }
         }
-        let token = fetch_client_credentials(&self.client, &oauth).await?;
+        let token = fetch_client_credentials(&self.token_client, &oauth).await?;
         let value = token.value.clone();
         *self.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
         Ok(Some(value))
@@ -532,8 +555,12 @@ async fn fetch_client_credentials(
             Ok(Ok(response)) => break response,
             Ok(Err(error)) => {
                 if attempt > 0 || !error.is_connect() {
+                    // The reqwest Display carries the full request URL; a
+                    // token URL may embed credentials, so it is stripped
+                    // before the error reaches any message text.
                     return Err(TransportError::Http(format!(
-                        "OAuth token request failed: {error}"
+                        "OAuth token request failed: {error}",
+                        error = error.without_url()
                     )));
                 }
                 attempt += 1;

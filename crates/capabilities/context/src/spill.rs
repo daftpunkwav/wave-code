@@ -69,14 +69,24 @@ fn render_manifest(entries: &[ManifestEntry]) -> String {
 }
 
 /// Spill error type.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum SpillError {
     /// Filesystem failure.
     #[error("spill IO failed: {0}")]
     Io(String),
-    /// Unknown or malformed spill URI.
-    #[error("unknown spill: {0}")]
+    /// Unknown or malformed spill URI. The offending value is kept for
+    /// programmatic matching only, never echoed into message text: a
+    /// malformed URI is unvalidated input.
+    #[error("unknown spill")]
     Unknown(String),
+}
+
+/// Debug matches Display: a derived dump would echo the unvalidated input
+/// that Display deliberately omits.
+impl std::fmt::Debug for SpillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 impl From<std::io::Error> for SpillError {

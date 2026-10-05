@@ -112,12 +112,13 @@ impl HttpMcpConfig {
         let endpoint = reqwest::Url::parse(&self.endpoint)
             .map_err(|e| format!("invalid endpoint URL: {e}"))?;
         validate_endpoint_url(&endpoint)?;
-        // A static Authorization header rides every request, so a
-        // plain-http endpoint outside the loopback interface ships it in
-        // cleartext exactly like an oauth bearer token would.
-        if has_static_authorization(&self.headers) && is_cleartext_endpoint(&endpoint) {
+        // A credential header rides every request, so a plain-http
+        // endpoint outside the loopback interface ships it in cleartext
+        // exactly like an oauth bearer token would.
+        let carries_credential = self.headers.keys().any(|name| is_credential_header(name));
+        if carries_credential && is_cleartext_endpoint(&endpoint) {
             return Err(format!(
-                "a static Authorization header requires an https or loopback endpoint, got {}",
+                "a credential header requires an https or loopback endpoint, got {}",
                 redacted_url(&endpoint)
             ));
         }
@@ -154,10 +155,24 @@ fn validate_endpoint_url(url: &reqwest::Url) -> Result<(), String> {
     }
 }
 
-/// Whether the endpoint would send credential headers in cleartext: plain
-/// http to anywhere but the loopback interface.
+/// Whether a parsed endpoint URL would send credential headers in
+/// cleartext: plain http to anywhere but the loopback interface.
 fn is_cleartext_endpoint(url: &reqwest::Url) -> bool {
     url.scheme() == "http" && !is_loopback_target(url)
+}
+
+/// Whether a header name plausibly carries a credential: the standard
+/// authorization headers or a name naming a key, token, secret, or
+/// credential. Only this class is restricted to https-or-loopback
+/// endpoints; plain metadata headers (`X-Custom` and friends) may ride any
+/// validated endpoint.
+pub fn is_credential_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("authorization")
+        || lower.contains("credential")
+        || lower.contains("key")
+        || lower.contains("secret")
+        || lower.contains("token")
 }
 
 /// Whether an http URL targets the loopback interface: `localhost` by name
@@ -1608,34 +1623,45 @@ mod tests {
         );
     }
 
-    /// A static Authorization header rides every request, so a remote
-    /// plain-http endpoint with one is rejected at build time while the
-    /// same header on a loopback endpoint stays allowed.
+    /// A credential header rides every request, so a remote plain-http
+    /// endpoint with one is rejected at build time while the same header
+    /// on a loopback endpoint stays allowed; non-credential metadata
+    /// headers are never restricted.
     #[test]
     fn static_authorization_rejects_remote_plain_http() {
-        let headers =
-            |token: &str| HashMap::from([("Authorization".to_owned(), format!("Bearer {token}"))]);
-        let config = HttpMcpConfig {
-            endpoint: "http://mcp.example.com/mcp".to_owned(),
-            headers: headers("pre-provisioned"),
-            oauth: None,
-        };
-        let error = match HttpMcp::new(config) {
-            Err(error) => error.to_string(),
-            Ok(_) => panic!("static Authorization over plain http must be rejected"),
-        };
-        assert!(
-            error.contains("static Authorization header"),
-            "unexpected rejection reason: {error}"
-        );
+        let headers = |name: &str| HashMap::from([(name.to_owned(), "pre-provisioned".to_owned())]);
+        for name in ["Authorization", "X-API-Key", "Api-Token"] {
+            let config = HttpMcpConfig {
+                endpoint: "http://mcp.example.com/mcp".to_owned(),
+                headers: headers(name),
+                oauth: None,
+            };
+            let error = match HttpMcp::new(config) {
+                Err(error) => error.to_string(),
+                Ok(_) => panic!("{name} over plain http must be rejected"),
+            };
+            assert!(
+                error.contains("credential header"),
+                "{name}: unexpected rejection reason: {error}"
+            );
+        }
         let loopback = HttpMcpConfig {
             endpoint: "http://127.0.0.1:1/mcp".to_owned(),
-            headers: headers("pre-provisioned"),
+            headers: headers("Authorization"),
             oauth: None,
         };
         assert!(
             HttpMcp::new(loopback).is_ok(),
-            "static Authorization on a loopback endpoint stays allowed"
+            "a credential header on a loopback endpoint stays allowed"
+        );
+        let metadata = HttpMcpConfig {
+            endpoint: "http://mcp.example.com/mcp".to_owned(),
+            headers: headers("X-Custom"),
+            oauth: None,
+        };
+        assert!(
+            HttpMcp::new(metadata).is_ok(),
+            "a non-credential header needs no https"
         );
     }
 

@@ -391,15 +391,15 @@ impl McpServerConfig {
                     transport_mcp::http::validate_oauth_endpoint(trimmed)
                         .map_err(|e| format!("oauth_endpoint: {e}"))?;
                 }
-                // A static Authorization header rides every request, so it
-                // answers to the same endpoint policy the transport gives
-                // the oauth bearer token.
-                let has_static_authorization = headers
+                // A credential header rides every request, so it answers
+                // to the same endpoint policy the transport gives the
+                // oauth bearer token.
+                let has_credential_header = headers
                     .keys()
-                    .any(|name| name.eq_ignore_ascii_case("authorization"));
-                if has_static_authorization {
+                    .any(|name| transport_mcp::http::is_credential_header(name));
+                if has_credential_header {
                     transport_mcp::http::validate_oauth_endpoint(trimmed)
-                        .map_err(|e| format!("static_authorization_endpoint: {e}"))?;
+                        .map_err(|e| format!("credential_endpoint: {e}"))?;
                 }
                 Ok(())
             }

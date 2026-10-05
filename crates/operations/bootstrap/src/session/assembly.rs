@@ -937,7 +937,6 @@ const CHILD_FORBIDDEN_TOOLS: [&str; 7] = [
     "compact_context",
 ];
 
-/// Register child task tools against a task service.
 /// The credential values the journal redaction gate masks: every
 /// provider's env-var key (read now) and inline key. Best-effort
 /// hygiene — only values known to config/env are masked — but it keeps
@@ -957,6 +956,7 @@ pub fn build_secret_store(config: &wavecode_config::Config) -> safety_secrets::S
     store
 }
 
+/// Register child task tools against a task service.
 fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChildService>) {
     let spawn_service = tasks.clone();
     native

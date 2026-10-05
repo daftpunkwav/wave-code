@@ -33,7 +33,7 @@ impl Tool for MyTool {
 在两个注册点中选其一：
 
 - **静态内建**：追加到 `crates/capabilities/tools/src/lib.rs` 的 `Registry::builtin()`。工具不需要会话状态时用这个。
-- **迟注册**：在 `crates/operations/bootstrap/src/session.rs` 中、它依赖的部件就绪之后注册——例如共享 LSP 状态的 `registry.register(Arc::new(LspDiagnostics::with_providers(...)))`，以及需要围绕驱动器构建子任务服务的 `skill` / `task` 工具。注册表是内部可变的，迟注册会到达每一个已共享的句柄（executor、策略、模型适配器），无需重建。
+- **迟注册**：在 `crates/operations/bootstrap/src/session.rs` 中、它依赖的部件就绪之后注册——LSP 工具展示了这个形态（`register_lsp_tools` 围绕一个共享的 `LspProviders` 句柄注册五个工具），需要围绕驱动器构建子任务服务的 `skill` / `task` 工具同理。注册表是内部可变的，迟注册会到达每一个已共享的句柄（executor、策略、模型适配器），无需重建。
 
 需要会话共享存储的工具遵循 `todo_write` 模式：`with_todo_write` 式的构造函数在工具与会话配置之间共享同一个 `Arc`。
 

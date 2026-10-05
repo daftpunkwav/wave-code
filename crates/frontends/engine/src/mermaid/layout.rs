@@ -372,37 +372,11 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
     if count == 0 || count > 100 {
         return None;
     }
-    let mut layer = vec![0usize; count];
-    for _ in 0..count {
-        for edge in &d.edges {
-            if layer[edge.to] < layer[edge.from] + 1 {
-                layer[edge.to] = layer[edge.from] + 1;
-                if layer[edge.to] >= count {
-                    return None; // cycle
-                }
-            }
-        }
-    }
+    let layer = assign_layers(&d.edges, count)?;
+    let cols = band_members(&layer);
     let max_layer = layer.iter().copied().max().unwrap_or(0);
-    let mut cols: Vec<Vec<usize>> = vec![Vec::new(); max_layer + 1];
-    for (index, depth) in layer.iter().enumerate() {
-        cols[*depth].push(index);
-    }
 
-    let box_w: Vec<usize> = d
-        .labels
-        .iter()
-        .map(|lines| {
-            lines
-                .iter()
-                .map(|l| width::width(l))
-                .max()
-                .unwrap_or(2)
-                .max(2)
-                + 4
-        })
-        .collect();
-    let box_h: Vec<usize> = d.labels.iter().map(|lines| lines.len() + 2).collect();
+    let (box_w, box_h) = box_geometry(&d.labels);
     let mut col_x = vec![0usize; max_layer + 1];
     let mut col_w = vec![0usize; max_layer + 1];
     let mut total_width = 0usize;

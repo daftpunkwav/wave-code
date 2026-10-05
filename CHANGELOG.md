@@ -82,6 +82,7 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   pipeline with sha256-verified archives.
 
 ### Security
+
 - macOS Seatbelt sandbox profiles are written to a process-private,
   owner-only temp directory instead of a shared predictable one, and a
   failed profile write now refuses the confined spawn instead of

@@ -372,7 +372,7 @@ fn session_state_tools_allowed_in_all_modes() {
     for mode in [
         PermissionMode::Auto,
         PermissionMode::Plan,
-        PermissionMode::Auto,
+        PermissionMode::Wave,
     ] {
         let sb = Sandbox::without_rules(mode);
         assert_eq!(
@@ -408,7 +408,7 @@ fn plan_approve_asks_in_every_mode_but_other_actions_stay_exempt() {
     for mode in [
         PermissionMode::Auto,
         PermissionMode::Plan,
-        PermissionMode::Auto,
+        PermissionMode::Wave,
     ] {
         let sb = Sandbox::without_rules(mode);
         assert!(

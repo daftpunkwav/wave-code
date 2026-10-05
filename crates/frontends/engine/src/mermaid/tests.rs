@@ -169,7 +169,6 @@ fn subgraphs_render_as_titled_frames() {
     assert!(joined.contains('▼'), "edges still route: {joined}");
 }
 
-/// The markdown hook only renders when the global toggle is on.
 #[test]
 fn state_diagrams_render_as_flowcharts() {
     let src = "stateDiagram-v2\n    [*] --> \u{5f85}\u{5904}\u{7406}\n    \u{5f85}\u{5904}\u{7406} --> \u{5b8c}\u{6210}: start\n    \u{5b8c}\u{6210} --> [*]";
@@ -476,6 +475,7 @@ fn gantt_out_of_range_values_fall_back_to_none() {
     assert!(render_diagram(negative, 80).is_none(), "negative duration");
 }
 
+/// The markdown hook only renders when the global toggle is on.
 #[test]
 fn toggle_switches_render_mode() {
     let _guard = TOGGLE_LOCK.lock().unwrap();

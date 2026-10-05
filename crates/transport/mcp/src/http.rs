@@ -262,9 +262,13 @@ impl HttpMcp {
                 .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))
         };
         let client = build(dials_loopback_http(&config.endpoint))?;
+        // The token client follows the token URL's own policy, never the
+        // endpoint's: a remote https token server stays proxyable even
+        // when the loopback endpoint dialed without a proxy.
         let token_client = match &config.oauth {
             Some(oauth) if dials_loopback_http(&oauth.token_url) => build(true)?,
-            _ => client.clone(),
+            Some(_) => build(false)?,
+            None => client.clone(),
         };
         Ok(Self {
             client,

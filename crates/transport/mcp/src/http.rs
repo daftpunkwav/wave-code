@@ -1647,7 +1647,7 @@ mod tests {
         assert!(validate_oauth_endpoint("http://127.0.0.1:1/mcp").is_ok());
         for bad in [
             "ftp://mcp.example.com/mcp",
-            "ws://mcp.example.com/mcp",
+            "wss://mcp.example.com/mcp",
             "http://mcp.example.com/mcp",
         ] {
             assert!(

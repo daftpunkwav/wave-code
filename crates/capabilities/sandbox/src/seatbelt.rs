@@ -118,10 +118,13 @@ fn profile_dir() -> Option<PathBuf> {
 
 /// Establish `dir` as a profile directory this process owns: created here
 /// and locked to the owner on unix (`0o700`), or accepted when an existing
-/// directory is already owner-only (a `0o700` directory grants group and
-/// other no entry, so one we can write into is ours by construction — a
-/// foreign-owned one makes every profile write fail, which callers turn
-/// into a refused spawn rather than a confinement bypass).
+/// directory is already owner-only AND owned by this effective user. The
+/// owner check is what makes the mode check meaningful: running as root,
+/// a write into a foreign-owned `0o700` directory would succeed and the
+/// directory's owner could then swap the profile between the write and
+/// `sandbox-exec`'s read; a foreign-owned directory otherwise makes every
+/// profile write fail, which callers turn into a refused spawn rather
+/// than a confinement bypass.
 fn private_profile_dir(dir: &Path) -> bool {
     match std::fs::create_dir(dir) {
         Ok(()) => {
@@ -157,13 +160,23 @@ fn set_owner_only(dir: &Path) -> bool {
 
 #[cfg(unix)]
 fn is_owner_only(dir: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     match std::fs::symlink_metadata(dir) {
         // Reject symlinks outright: a link planted over the expected name
         // must never resolve into attacker-controlled territory.
-        Ok(meta) => meta.is_dir() && meta.permissions().mode() & 0o777 == 0o700,
+        Ok(meta) => {
+            meta.is_dir()
+                && meta.permissions().mode() & 0o777 == 0o700
+                && meta.uid() == current_uid()
+        }
         Err(_) => false,
     }
+}
+
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: `geteuid` is thread-free and has no preconditions.
+    unsafe { libc::geteuid() }
 }
 
 /// Random per-process suffix for fallback directory names, seeded from
@@ -193,18 +206,25 @@ fn profile_path_for(cwd: &Path, extra_writable: &[PathBuf]) -> std::io::Result<P
     cwd.hash(&mut hasher);
     extra_writable.hash(&mut hasher);
     let key = hasher.finish();
+    // The profile is rewritten on every call, cache hit or not: the child
+    // execs after this returns, so the file it reads must hold exactly
+    // this render even if another thread served the same key between the
+    // cache lookup and the write. (The 64-bit key is only an in-process
+    // path label — the directory is pid-scoped, so cross-session
+    // interference is out of scope.)
+    let rendered = render_seatbelt_profile(cwd, extra_writable);
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(path) = guard.get(&key) {
-        return Ok(path.clone());
-    }
     let dir = profile_dir().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "no private seatbelt profile directory could be established",
         )
     })?;
-    let path = dir.join(format!("profile-{key:x}.sb"));
-    std::fs::write(&path, render_seatbelt_profile(cwd, extra_writable))?;
+    let path = guard
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| dir.join(format!("profile-{key:x}.sb")));
+    std::fs::write(&path, rendered)?;
     guard.insert(key, path.clone());
     Ok(path)
 }
@@ -389,12 +409,14 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// Profile writes fail closed: an unwritable location must surface as
-    /// an error from `profile_path_for` instead of leaving `sandbox-exec`
-    /// to read a stale or foreign profile.
+    /// A directory that cannot be established as private — here because a
+    /// `0o500` parent forbids creating it — is rejected rather than
+    /// accepted by name; `profile_path_for` turns such rejections into an
+    /// error, which `spawn_confined` maps to `ConfineFailed` (fail-closed
+    /// for the spawn).
     #[cfg(unix)]
     #[test]
-    fn profile_write_fails_closed_when_directory_is_unwritable() {
+    fn private_profile_dir_rejects_when_creation_is_forbidden() {
         use std::os::unix::fs::PermissionsExt;
         let base = std::env::temp_dir().join(format!(
             "wavecode-seatbelt-failclosed-{}",

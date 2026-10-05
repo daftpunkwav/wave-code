@@ -375,7 +375,9 @@ pub(crate) async fn run_tui_new(
     };
     handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
-        eprintln!("[warn] {warning}"); // Reviewed: startup diagnostics on the user's own terminal; no cross-boundary sink.
+        // Reviewed: startup diagnostics on the user's own terminal; no
+        // cross-boundary sink.
+        eprintln!("[warn] {warning}");
     }
     // Release check runs beside the session: the footer picks the
     // notice up on a later tick, never delaying the first frame.

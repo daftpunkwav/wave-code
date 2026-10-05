@@ -106,15 +106,32 @@ pub struct HttpMcpConfig {
 }
 
 impl HttpMcpConfig {
-    /// Validate the endpoint URL and the OAuth block (if present).
+    /// Validate the endpoint URL, any credential-carrying endpoint, and the
+    /// OAuth block (if present).
     pub fn validate(&self) -> Result<(), String> {
-        validate_endpoint(&self.endpoint)?;
+        let endpoint = reqwest::Url::parse(&self.endpoint)
+            .map_err(|e| format!("invalid endpoint URL: {e}"))?;
+        validate_endpoint_url(&endpoint)?;
+        // A static Authorization header rides every request, so a
+        // plain-http endpoint outside the loopback interface ships it in
+        // cleartext exactly like an oauth bearer token would.
+        if has_static_authorization(&self.headers) && is_cleartext_endpoint(&endpoint) {
+            return Err(format!(
+                "a static Authorization header requires an https or loopback endpoint, got {}",
+                redacted_url(&endpoint)
+            ));
+        }
         if let Some(oauth) = &self.oauth {
             validate_token_url(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
             // A bearer token minted for a plain-http endpoint would hand the
             // credential to the network in the Authorization header anyway,
             // so OAuth and a non-loopback http endpoint are rejected together.
-            validate_oauth_endpoint(&self.endpoint)?;
+            if is_cleartext_endpoint(&endpoint) {
+                return Err(format!(
+                    "oauth bearer tokens require an https or loopback endpoint, got {}",
+                    redacted_url(&endpoint)
+                ));
+            }
             if oauth.client_id.trim().is_empty() {
                 return Err("oauth_client_id must not be empty".to_owned());
             }
@@ -126,15 +143,21 @@ impl HttpMcpConfig {
     }
 }
 
-/// Check that a URL parses and uses the http(s) scheme.
-fn validate_endpoint(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
-    match parsed.scheme() {
+/// Check that a parsed endpoint URL uses the http(s) scheme.
+fn validate_endpoint_url(url: &reqwest::Url) -> Result<(), String> {
+    match url.scheme() {
         "http" | "https" => Ok(()),
         other => Err(format!(
-            "URL must use http(s), got scheme {other:?}: {url:?}"
+            "URL must use http(s), got scheme {other:?}: {}",
+            redacted_url(url)
         )),
     }
+}
+
+/// Whether the endpoint would send credential headers in cleartext: plain
+/// http to anywhere but the loopback interface.
+fn is_cleartext_endpoint(url: &reqwest::Url) -> bool {
+    url.scheme() == "http" && !is_loopback_target(url)
 }
 
 /// Whether an http URL targets the loopback interface: `localhost` by name
@@ -186,19 +209,19 @@ pub fn validate_token_url(url: &str) -> Result<(), String> {
 }
 
 /// Check the MCP endpoint an OAuth grant would protect: the minted bearer
-/// token rides the `Authorization` header, so a plain-http endpoint outside
-/// the loopback interface would publish it to the network and the
-/// combination is rejected at build time. Error text renders the URL
-/// host-only, matching [`validate_token_url`].
+/// token rides the `Authorization` header, so only https or a plain-http
+/// loopback endpoint is acceptable and any other scheme is rejected. Error
+/// text renders the URL host-only, matching [`validate_token_url`].
 pub fn validate_oauth_endpoint(url: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid endpoint URL: {e}"))?;
-    if parsed.scheme() == "http" && !is_loopback_target(&parsed) {
-        return Err(format!(
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_target(&parsed) => Ok(()),
+        _ => Err(format!(
             "oauth bearer tokens require an https or loopback endpoint, got {}",
             redacted_url(&parsed)
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// Streamable-HTTP MCP transport: POSTs JSON-RPC messages and reads either
@@ -1583,6 +1606,55 @@ mod tests {
             HttpMcp::new(loopback).is_ok(),
             "oauth over a loopback http endpoint stays allowed"
         );
+    }
+
+    /// A static Authorization header rides every request, so a remote
+    /// plain-http endpoint with one is rejected at build time while the
+    /// same header on a loopback endpoint stays allowed.
+    #[test]
+    fn static_authorization_rejects_remote_plain_http() {
+        let headers =
+            |token: &str| HashMap::from([("Authorization".to_owned(), format!("Bearer {token}"))]);
+        let config = HttpMcpConfig {
+            endpoint: "http://mcp.example.com/mcp".to_owned(),
+            headers: headers("pre-provisioned"),
+            oauth: None,
+        };
+        let error = match HttpMcp::new(config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("static Authorization over plain http must be rejected"),
+        };
+        assert!(
+            error.contains("static Authorization header"),
+            "unexpected rejection reason: {error}"
+        );
+        let loopback = HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: headers("pre-provisioned"),
+            oauth: None,
+        };
+        assert!(
+            HttpMcp::new(loopback).is_ok(),
+            "static Authorization on a loopback endpoint stays allowed"
+        );
+    }
+
+    /// The public OAuth endpoint validator enforces its documented policy:
+    /// https or loopback http only, never other schemes.
+    #[test]
+    fn validate_oauth_endpoint_rejects_non_http_schemes() {
+        assert!(validate_oauth_endpoint("https://mcp.example.com/mcp").is_ok());
+        assert!(validate_oauth_endpoint("http://127.0.0.1:1/mcp").is_ok());
+        for bad in [
+            "ftp://mcp.example.com/mcp",
+            "ws://mcp.example.com/mcp",
+            "http://mcp.example.com/mcp",
+        ] {
+            assert!(
+                validate_oauth_endpoint(bad).is_err(),
+                "{bad:?} must be rejected for oauth"
+            );
+        }
     }
 
     /// The connect-retry gate is a read-only allowlist: handshake, pings,

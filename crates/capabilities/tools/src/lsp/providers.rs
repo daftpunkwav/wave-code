@@ -48,6 +48,13 @@ pub(super) struct RequestTarget<'a> {
     pub(super) character: u32,
 }
 
+/// Lazy per-provider language-server registry, keyed by file extension.
+///
+/// Servers spawn once per extension on first use (initialized against the
+/// workspace root) and are reused across calls; a failed request drops the
+/// pooled client so the next call respawns fresh. Dropping the registry reaps
+/// every child via `kill_on_drop` (polite `shutdown` first with
+/// [`LspProviders::shutdown_all`]).
 pub struct LspProviders {
     /// Workspace root: server working directory and `initialize` rootUri.
     /// Required at construction (no per-call cwd guessing).

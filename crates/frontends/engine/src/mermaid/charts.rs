@@ -550,9 +550,10 @@ pub(super) fn parse_gantt(source: &str) -> Option<Gantt> {
         let (name, spec) = line.split_once(':')?;
         let name = name.trim().to_string();
         let mut parts: Vec<&str> = spec.split(',').map(str::trim).collect();
-        // A leading tag (`done`, `active`, `crit`, `milestone`) precedes
-        // the id when the task carries one: `Task :done, id, date, 3d`.
-        if matches!(parts.first(), Some(tag) if is_gantt_tag(tag)) {
+        // Leading status tags (`done`, `active`, `crit`, `milestone`)
+        // precede the id when the task carries one, and Mermaid allows
+        // more than one: `Task :crit, done, after des1, 2d`.
+        while matches!(parts.first(), Some(tag) if is_gantt_tag(tag)) {
             parts.remove(0);
         }
         // A leading date or `after` clause means the id was omitted.

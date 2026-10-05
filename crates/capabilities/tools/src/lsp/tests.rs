@@ -736,3 +736,46 @@ async fn server_command_child_env_is_scrubbed() {
         out.content
     );
 }
+
+/// An explicitly spawned server is model-facing input: with OS
+/// confinement requested it must run inside the confinement (the
+/// command still works) or fail closed with the confinement error —
+/// never silently unconfined.
+#[tokio::test]
+// Spawns a child: held under ENV_LOCK (see its docs in lib.rs).
+#[allow(clippy::await_holding_lock)]
+async fn explicit_server_spawns_confined_or_fails_closed() {
+    let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prior = std::env::var("WAVECODE_SANDBOX_OS").ok();
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe {
+        std::env::set_var("WAVECODE_SANDBOX_OS", "1");
+    }
+    let spawned = ChildLsp::spawn("cat", &std::env::temp_dir(), &[]);
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe {
+        std::env::remove_var("WAVECODE_SANDBOX_OS");
+        if let Some(v) = prior {
+            std::env::set_var("WAVECODE_SANDBOX_OS", v);
+        }
+    }
+    if wavecode_sandbox::detect_backend().is_available() {
+        // Confinement armed: the trivially well-behaved server still
+        // runs inside it. (`cat` with no stdin input simply waits.)
+        assert!(
+            spawned.is_ok(),
+            "confined spawn failed: {err}",
+            err = spawned.err().map(|e| e.to_string()).unwrap_or_default()
+        );
+    } else {
+        // No backend: fail closed, never silently unconfined.
+        let err = match spawned {
+            Ok(_) => panic!("must fail closed without a backend"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("OS sandbox confinement failed"),
+            "hard error names confinement: {err}"
+        );
+    }
+}

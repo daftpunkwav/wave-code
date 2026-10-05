@@ -63,7 +63,7 @@ const KILL_DRAIN_GRACE: Duration = Duration::from_secs(5);
 /// with a business error — execution never silently downgrades to an
 /// unconfined spawn.
 fn os_sandbox_enabled() -> bool {
-    std::env::var("WAVECODE_SANDBOX_OS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    wavecode_sandbox::os_sandbox_enabled()
 }
 
 /// Decode and truncate one output stream: UTF-8 boundary safe, console

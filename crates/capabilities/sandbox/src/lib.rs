@@ -57,6 +57,15 @@ pub mod seatbelt;
 pub mod windows;
 pub use bwrap::BwrapBackend;
 pub use chain::{PROBE_ORDER, first_available, status_line, unavailable};
+
+/// Whether OS-level confinement was requested: `WAVECODE_SANDBOX_OS=1`
+/// (or `true`, case-insensitive). Default off; the environment variable is
+/// the only switch. Every model-facing spawn path asks this before
+/// spawning, and a requested confinement that cannot be armed fails
+/// closed — execution never silently downgrades to an unconfined child.
+pub fn os_sandbox_enabled() -> bool {
+    std::env::var("WAVECODE_SANDBOX_OS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
 #[cfg(target_os = "linux")]
 pub use os::LinuxLandlockBackend;
 pub use os::{

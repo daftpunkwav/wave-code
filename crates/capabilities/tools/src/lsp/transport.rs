@@ -155,15 +155,41 @@ impl ChildLsp {
         let program = parts.next().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty server_command")
         })?;
+        // OS confinement (chain: bwrap -> Landlock -> seatbelt -> Windows
+        // job object; opt-in via WAVECODE_SANDBOX_OS), mirroring the shell
+        // tool: a `server_command` is model-facing input, so when
+        // confinement was requested the server must never run unconfined.
+        // Rewriting backends replace the command wholesale, so the stdio
+        // and env scrubbing below land on the final confined command. Any
+        // backend failure fails closed: the spawn errors out and the call
+        // surfaces it instead of downgrading to an unconfined child.
         let mut cmd = tokio::process::Command::new(program);
-        cmd.args(parts)
-            .current_dir(cwd)
+        cmd.args(parts).current_dir(cwd);
+        let mut armed = if wavecode_sandbox::os_sandbox_enabled() {
+            let profile = wavecode_sandbox::ConfinementProfile::for_shell(cwd);
+            let backend = wavecode_sandbox::detect_backend();
+            match backend.spawn_confined(cmd, &profile) {
+                Ok(armed) => armed,
+                Err(e) => {
+                    return Err(std::io::Error::other(format!(
+                        "OS sandbox confinement failed ({}): {e}",
+                        backend.backend_name()
+                    )));
+                }
+            }
+        } else {
+            wavecode_sandbox::ArmedSpawn::new(cmd)
+        };
+        armed
+            .command()
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
-        crate::shell_tool::strip_child_env(cmd.as_std_mut(), deny_env);
-        let mut child = cmd.spawn()?;
+        // Env scrubbing lands on the final command (post-confinement),
+        // same contract as the shell tool.
+        crate::shell_tool::strip_child_env(armed.command().as_std_mut(), deny_env);
+        let mut child = armed.spawn()?;
         let stdin = child
             .stdin
             .take()

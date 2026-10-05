@@ -225,7 +225,7 @@ fn sequence_right_to_left_messages_point_at_the_receiver() {
 /// the dependent task when `x` ends, not when it starts.
 #[test]
 fn gantt_tags_and_after_dependencies_resolve() {
-    let src = "gantt\n    title plan\n    Task1 :done, t1, 2024-01-01, 3d\n    Task2 :after t1, 2d";
+    let src = "gantt\n    title plan\n    Task1 :done, t1, 2024-01-01, 3d\n    Task2 :crit, done, after t1, 2d";
     let lines = render_diagram(src, 80).expect("gantt with tag and after renders");
     let joined = lines.join("\n");
     assert!(joined.contains("Task1"), "{joined}");

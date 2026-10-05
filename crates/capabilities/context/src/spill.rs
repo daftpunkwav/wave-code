@@ -140,6 +140,7 @@ pub fn default_spill_store_root() -> PathBuf {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
+            // nosemgrep: rust.lang.security.temp-dir.temp-dir
             std::env::temp_dir().join(format!("wavecode-spills-{}-{unique:x}", std::process::id()))
         })
 }

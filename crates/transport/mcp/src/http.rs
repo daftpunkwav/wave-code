@@ -80,7 +80,9 @@ const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// (authorization-code / PKCE / device flow) are out of scope by design.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OAuthClientCredentials {
-    /// Token endpoint URL (e.g. `https://auth.example.com/oauth/token`).
+    /// Token endpoint URL. Must be `https` outside the loopback interface:
+    /// the client secret travels in the request body, so plain http to a
+    /// non-loopback host is rejected at build time.
     pub token_url: String,
     /// OAuth client id.
     pub client_id: String,
@@ -108,7 +110,7 @@ impl HttpMcpConfig {
     pub fn validate(&self) -> Result<(), String> {
         validate_endpoint(&self.endpoint)?;
         if let Some(oauth) = &self.oauth {
-            validate_endpoint(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
+            validate_token_url(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
             if oauth.client_id.trim().is_empty() {
                 return Err("oauth_client_id must not be empty".to_owned());
             }
@@ -128,6 +130,35 @@ fn validate_endpoint(url: &str) -> Result<(), String> {
         other => Err(format!(
             "URL must use http(s), got scheme {other:?}: {url:?}"
         )),
+    }
+}
+
+/// Whether an http URL targets the loopback interface: `localhost` by name
+/// or a loopback IP literal (IPv4/IPv6).
+fn is_loopback_target(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+/// Check an OAuth token endpoint: the client secret travels in the request
+/// body, so a plain-http endpoint is only acceptable on the loopback
+/// interface (local stubs); anywhere else it would cross the network in
+/// cleartext and the config is rejected at build time.
+fn validate_token_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_target(&parsed) => Ok(()),
+        "http" => Err(format!(
+            "must use https outside the loopback interface (the client secret would travel in cleartext): {url:?}"
+        )),
+        other => Err(format!("must use http(s), got scheme {other:?}: {url:?}")),
     }
 }
 
@@ -1387,6 +1418,55 @@ mod tests {
             scope: None,
         });
         assert!(HttpMcp::new(oauth).is_err(), "empty client id rejected");
+    }
+
+    /// The OAuth token endpoint carries the client secret in the request
+    /// body: plain http is only accepted on the loopback interface, and a
+    /// non-loopback http token URL is rejected at build time.
+    #[test]
+    fn oauth_token_url_rejects_cleartext_off_loopback() {
+        let base = HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        for ok in [
+            "https://auth.example.com/token",
+            "http://127.0.0.1:1/token",
+            "http://localhost:1/token",
+            "http://[::1]:1/token",
+        ] {
+            let mut config = base.clone();
+            config.oauth = Some(OAuthClientCredentials {
+                token_url: ok.to_owned(),
+                client_id: "wave".to_owned(),
+                client_secret: "s".to_owned(),
+                scope: None,
+            });
+            assert!(HttpMcp::new(config).is_ok(), "token url {ok:?} accepted");
+        }
+        for bad in [
+            "http://auth.example.com/token",
+            "http://192.168.1.10/token",
+            "http://10.0.0.1/token",
+            "ftp://auth.example.com/token",
+        ] {
+            let mut config = base.clone();
+            config.oauth = Some(OAuthClientCredentials {
+                token_url: bad.to_owned(),
+                client_id: "wave".to_owned(),
+                client_secret: "s".to_owned(),
+                scope: None,
+            });
+            let error = match HttpMcp::new(config) {
+                Err(error) => error,
+                Ok(_) => panic!("token url {bad:?} must be rejected"),
+            };
+            assert!(
+                error.to_string().contains("oauth_token_url"),
+                "token url {bad:?} rejected with an oauth_token_url reason, got: {error}"
+            );
+        }
     }
 
     /// The connect-retry gate is a read-only allowlist: handshake, pings,

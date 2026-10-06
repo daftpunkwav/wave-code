@@ -70,8 +70,11 @@ fn resolve_tui_seed(
         let Some(meta) = target else {
             anyhow::bail!("no sessions to continue under {cwd_text}; starting a fresh session");
         };
-        let history = load_session_history(home, &meta.id)
-            .map_err(|e| anyhow::anyhow!("cannot load session {}: {e}", meta.id))?;
+        let history = load_session_history(home, &meta.id).map_err(|e| {
+            // The indexed id is unvalidated disk content and is never
+            // echoed; the underlying error keeps the Io/journal cause.
+            anyhow::anyhow!("cannot load session history: {e}")
+        })?;
         return Ok(Some(TuiSeed {
             session_id: meta.id,
             title: (!meta.title.is_empty()).then_some(meta.title),

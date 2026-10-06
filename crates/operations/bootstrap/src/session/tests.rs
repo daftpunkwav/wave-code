@@ -253,6 +253,7 @@ async fn assembly_builds_a_live_client_offline() {
             .warnings
             .iter()
             .any(|w| w.contains("child-forbidden")),
+        // Reviewed: assertion diagnostics for a synthetic test session.
         "unexpected drift warning: {:?}",
         handle.warnings
     );
@@ -443,6 +444,7 @@ async fn stale_provider_override_falls_back_and_reports_configured_provider() {
             .warnings
             .iter()
             .any(|w| w.contains("provider override")),
+        // Reviewed: assertion diagnostics for a synthetic test session.
         "fallback must warn: {:?}",
         handle.warnings
     );
@@ -513,6 +515,7 @@ base_url = "https://fb.example.com/anthropic"
     assert_eq!(
         skips.len(),
         2,
+        // Reviewed: assertion diagnostics for a synthetic test session.
         "both broken fallbacks warn individually: {:?}",
         handle.warnings
     );
@@ -530,6 +533,7 @@ base_url = "https://fb.example.com/anthropic"
     );
     assert!(
         !handle.warnings.iter().any(|w| w.contains("fb-good")),
+        // Reviewed: assertion diagnostics for a synthetic test session.
         "the resolvable fallback joins the chain without a warning: {:?}",
         handle.warnings
     );

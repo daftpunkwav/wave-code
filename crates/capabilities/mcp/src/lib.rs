@@ -343,8 +343,12 @@ impl McpServerConfig {
 
     /// Validate the server endpoint configuration: stdio requires a
     /// non-empty `command`; http requires a non-empty `url` starting with
-    /// `http://` or `https://`. Returns `Err` with the reason so the
-    /// assembly layer can surface it as a configuration error.
+    /// `http://` or `https://` that is itself https or loopback (the
+    /// streamable-http exchange is stateful, so remote plain-http
+    /// endpoints are rejected), and an OAuth block whose token endpoint
+    /// satisfies the same https/loopback policy. Returns `Err` with the
+    /// reason so the assembly layer can surface it as a configuration
+    /// error.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::Stdio { command, .. } => {
@@ -355,6 +359,7 @@ impl McpServerConfig {
             }
             Self::Http {
                 url,
+                headers: _,
                 oauth_token_url,
                 oauth_client_id,
                 oauth_client_secret,
@@ -365,9 +370,11 @@ impl McpServerConfig {
                     return Err("http MCP server url must not be empty".to_owned());
                 }
                 if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-                    return Err(format!(
-                        "http MCP server url must start with http:// or https://: {trimmed}"
-                    ));
+                    // The raw url is not echoed: it may embed credentials
+                    // or sensitive query data.
+                    return Err(
+                        "http MCP server url must start with http:// or https://".to_owned()
+                    );
                 }
                 let triple = [
                     oauth_token_url.is_some(),
@@ -379,25 +386,35 @@ impl McpServerConfig {
                          `oauth_client_id`, `oauth_client_secret` (or none)"
                         .to_owned());
                 }
+                // Same endpoint policy the transport enforces on connect:
+                // the streamable-http exchange is stateful (the server may
+                // issue a session handle that rides every later request),
+                // so only https or loopback http endpoints are accepted.
+                // Applied here so doctor and assembly surface the reason
+                // up front instead of at first use.
+                transport_mcp::http::validate_mcp_endpoint(trimmed)
+                    .map_err(|e| format!("endpoint: {e}"))?;
+                if let Some(token_url) = oauth_token_url {
+                    transport_mcp::http::validate_token_url(token_url)
+                        .map_err(|e| format!("oauth_token_url: {e}"))?;
+                }
                 Ok(())
             }
         }
     }
 
-    /// One-line summary (the `/mcp` display surface): command + args joined
-    /// for stdio, the URL for http. env / headers never display (they may
-    /// hold secrets).
+    /// One-line summary (the `/mcp` display surface): the command for
+    /// stdio (arguments are omitted — they sometimes carry credentials and
+    /// status output is not the place for them), the host-only URL for
+    /// http. env / headers never display (they may hold secrets).
     pub fn summary(&self) -> String {
         match self {
-            Self::Stdio { command, args, .. } => {
-                let mut line = command.clone();
-                for arg in args {
-                    line.push(' ');
-                    line.push_str(arg);
-                }
-                format!("stdio: {line}")
+            Self::Stdio { command, .. } => format!("stdio: {command}"),
+            Self::Http { url, .. } => {
+                // The configured url may embed userinfo or a sensitive
+                // query; status output carries the host only.
+                format!("http: {}", transport_mcp::http::redacted_endpoint(url))
             }
-            Self::Http { url, .. } => format!("http: {url}"),
         }
     }
 }
@@ -469,7 +486,8 @@ mod tests {
             env: HashMap::from([("SECRET".into(), "x".into())]),
         };
         assert_eq!(stdio.transport_kind(), "stdio");
-        assert_eq!(stdio.summary(), "stdio: npx @playwright/mcp@latest");
+        // Arguments are omitted from the summary (they may carry secrets).
+        assert_eq!(stdio.summary(), "stdio: npx");
         assert!(!stdio.summary().contains("SECRET"));
 
         let http = McpServerConfig::Http {
@@ -482,7 +500,8 @@ mod tests {
             oauth_scope: None,
         };
         assert_eq!(http.transport_kind(), "http");
-        assert_eq!(http.summary(), "http: https://mcp.example.com/sse");
+        // Status output carries the host only (no path, userinfo, or query).
+        assert_eq!(http.summary(), "http: https://mcp.example.com");
         assert!(!http.summary().contains("Bearer"));
     }
 
@@ -636,5 +655,63 @@ mod tests {
             *oauth_client_secret = Some("s3cret".into());
         }
         assert!(partial.validate().is_ok());
+    }
+
+    /// The config layer applies the same token-endpoint policy the
+    /// transport enforces on connect, so doctor and assembly surface a
+    /// plain-http non-loopback `oauth_token_url` before first use.
+    #[test]
+    fn from_raw_rejects_cleartext_oauth_token_url_off_loopback() {
+        let raw = |token_url: &str| wavecode_config::McpServerRaw {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some("https://mcp.example.com/mcp".into()),
+            headers: HashMap::new(),
+            oauth_token_url: Some(token_url.into()),
+            oauth_client_id: Some("wave".into()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
+            oauth_client_secret: Some("s3cret".into()),
+            oauth_scope: None,
+        };
+        assert!(
+            McpServerConfig::from_raw("srv", &raw("https://auth.example.com/token")).is_ok(),
+            "https token url accepted"
+        );
+        assert!(
+            McpServerConfig::from_raw("srv", &raw("http://127.0.0.1:1/token")).is_ok(),
+            "loopback http token url accepted"
+        );
+        let err = McpServerConfig::from_raw("srv", &raw("http://auth.example.com/token"))
+            .expect_err("non-loopback http token url rejected");
+        assert!(
+            err.contains("oauth_token_url"),
+            "rejection names the offending field: {err}"
+        );
+    }
+
+    /// The endpoint half of the oauth policy is covered too: a remote
+    /// plain-http endpoint with a full oauth block is rejected through the
+    /// same `from_raw` path doctor uses.
+    #[test]
+    fn from_raw_rejects_plain_http_oauth_endpoint_off_loopback() {
+        let raw = wavecode_config::McpServerRaw {
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: Some("http://mcp.example.com/mcp".into()),
+            headers: HashMap::new(),
+            oauth_token_url: Some("https://auth.example.com/token".into()),
+            oauth_client_id: Some("wave".into()),
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens
+            oauth_client_secret: Some("s3cret".into()),
+            oauth_scope: None,
+        };
+        let err = McpServerConfig::from_raw("srv", &raw)
+            .expect_err("remote plain-http endpoint rejected");
+        assert!(
+            err.contains("endpoint: the MCP endpoint must use https"),
+            "rejection names the endpoint policy: {err}"
+        );
     }
 }

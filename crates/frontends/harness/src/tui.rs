@@ -46,10 +46,12 @@ fn resolve_tui_seed(
     };
     if let Some(id) = session {
         if !state_persistence::sessions::is_valid_session_id(id) {
-            anyhow::bail!("invalid session id {id:?}");
+            // Unvalidated CLI input is rejected without being echoed back
+            // into message text that surfaces on the terminal.
+            anyhow::bail!("invalid session id (expected 1-128 ASCII chars [A-Za-z0-9_-])");
         }
         let history = load_session_history(home, id)
-            .map_err(|e| anyhow::anyhow!("cannot load session {id}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("cannot load session history: {e}"))?;
         let title = list_sessions(home)
             .into_iter()
             .find(|meta| meta.id == *id)
@@ -68,8 +70,11 @@ fn resolve_tui_seed(
         let Some(meta) = target else {
             anyhow::bail!("no sessions to continue under {cwd_text}; starting a fresh session");
         };
-        let history = load_session_history(home, &meta.id)
-            .map_err(|e| anyhow::anyhow!("cannot load session {}: {e}", meta.id))?;
+        let history = load_session_history(home, &meta.id).map_err(|e| {
+            // The indexed id is unvalidated disk content and is never
+            // echoed; the underlying error keeps the Io/journal cause.
+            anyhow::anyhow!("cannot load session history: {e}")
+        })?;
         return Ok(Some(TuiSeed {
             session_id: meta.id,
             title: (!meta.title.is_empty()).then_some(meta.title),
@@ -373,6 +378,8 @@ pub(crate) async fn run_tui_new(
     };
     handle.connect_mcp_servers().await;
     for warning in &handle.warnings {
+        // Reviewed: startup diagnostics on the user's own terminal; no
+        // cross-boundary sink.
         eprintln!("[warn] {warning}");
     }
     // Release check runs beside the session: the footer picks the

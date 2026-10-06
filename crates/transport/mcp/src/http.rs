@@ -80,7 +80,9 @@ const MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// (authorization-code / PKCE / device flow) are out of scope by design.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OAuthClientCredentials {
-    /// Token endpoint URL (e.g. `https://auth.example.com/oauth/token`).
+    /// Token endpoint URL. Must be `https` outside the loopback interface:
+    /// the client secret travels in the request body, so plain http to a
+    /// non-loopback host is rejected at build time.
     pub token_url: String,
     /// OAuth client id.
     pub client_id: String,
@@ -106,9 +108,25 @@ pub struct HttpMcpConfig {
 impl HttpMcpConfig {
     /// Validate the endpoint URL and the OAuth block (if present).
     pub fn validate(&self) -> Result<(), String> {
-        validate_endpoint(&self.endpoint)?;
+        let endpoint = reqwest::Url::parse(&self.endpoint)
+            .map_err(|e| format!("invalid endpoint URL: {e}"))?;
+        validate_endpoint_url(&endpoint)?;
+        // The streamable-http exchange is stateful in practice: the server
+        // may issue an mcp-session-id bearer handle that rides every later
+        // request, and prompts and responses flow through the same
+        // connection. A plain-http endpoint outside the loopback interface
+        // exposes credentials, traffic, and session handles in cleartext,
+        // so it is rejected outright; loopback endpoints keep serving
+        // local servers.
+        if is_cleartext_endpoint(&endpoint) {
+            return Err(format!(
+                "the MCP endpoint must use https or the loopback interface \
+                 (traffic and session handles would travel in cleartext): {}",
+                redacted_url(&endpoint)
+            ));
+        }
         if let Some(oauth) = &self.oauth {
-            validate_endpoint(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
+            validate_token_url(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
             if oauth.client_id.trim().is_empty() {
                 return Err("oauth_client_id must not be empty".to_owned());
             }
@@ -120,13 +138,94 @@ impl HttpMcpConfig {
     }
 }
 
-/// Check that a URL parses and uses the http(s) scheme.
-fn validate_endpoint(url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url:?}: {e}"))?;
-    match parsed.scheme() {
+/// Check that a parsed endpoint URL uses the http(s) scheme.
+fn validate_endpoint_url(url: &reqwest::Url) -> Result<(), String> {
+    match url.scheme() {
         "http" | "https" => Ok(()),
         other => Err(format!(
-            "URL must use http(s), got scheme {other:?}: {url:?}"
+            "URL must use http(s), got scheme {other:?}: {}",
+            redacted_url(url)
+        )),
+    }
+}
+
+/// Whether a parsed endpoint URL would send credential headers in
+/// cleartext: plain http to anywhere but the loopback interface.
+fn is_cleartext_endpoint(url: &reqwest::Url) -> bool {
+    url.scheme() == "http" && !is_loopback_target(url)
+}
+
+/// Whether an http URL targets the loopback interface by IP literal
+/// (IPv4/IPv6). Host names are not accepted — not even `localhost`: what
+/// such a name reaches is the system resolver's decision, not this check's.
+fn is_loopback_target(url: &reqwest::Url) -> bool {
+    url.host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| ip.is_loopback())
+}
+
+/// Host-only rendering of a URL for error text: scheme, host, and explicit
+/// port only — never userinfo, path, query, or fragment, which a hostile
+/// config could stuff with secrets that must not be echoed into
+/// diagnostics.
+fn redacted_url(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or("<no host>");
+    match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
+/// Host-only rendering of an endpoint URL for terminals and status
+/// output: userinfo, path, query, and fragment never survive, and an
+/// unparseable URL renders as a placeholder instead of being echoed.
+pub fn redacted_endpoint(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|parsed| redacted_url(&parsed))
+        .unwrap_or_else(|_| "<endpoint>".to_owned())
+}
+
+/// Check an OAuth token endpoint: the client secret travels in the request
+/// body, so a plain-http endpoint is only acceptable on the loopback
+/// interface (local stubs); anywhere else it would cross the network in
+/// cleartext and the config is rejected at build time. Error text renders
+/// the URL host-only because token URLs may carry credentials in userinfo
+/// or query parameters.
+pub fn validate_token_url(url: &str) -> Result<(), String> {
+    let parsed =
+        reqwest::Url::parse(url).map_err(|e| format!("invalid token endpoint URL: {e}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_target(&parsed) => Ok(()),
+        "http" => Err(format!(
+            "must use https outside the loopback interface (the client secret would travel in cleartext): {}",
+            redacted_url(&parsed)
+        )),
+        other => Err(format!(
+            "must use http(s), got scheme {other:?}: {}",
+            redacted_url(&parsed)
+        )),
+    }
+}
+
+/// Check the MCP endpoint an OAuth grant would protect: the minted bearer
+/// token rides the `Authorization` header, so only https or a plain-http
+/// loopback endpoint is acceptable and any other scheme is rejected. Error
+/// text renders the URL host-only, matching [`validate_token_url`].
+pub fn validate_mcp_endpoint(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid endpoint URL: {e}"))?;
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_target(&parsed) => Ok(()),
+        _ => Err(format!(
+            "the MCP endpoint must use https or the loopback interface \
+             (traffic and session handles would travel in cleartext): {}",
+            redacted_url(&parsed)
         )),
     }
 }
@@ -139,6 +238,11 @@ fn validate_endpoint(url: &str) -> Result<(), String> {
 /// across tasks.
 pub struct HttpMcp {
     client: reqwest::Client,
+    /// Client used for the OAuth token endpoint. It dials plain-http
+    /// loopback token servers directly (no proxy, which would otherwise
+    /// see the client-secret body); https token requests reuse the main
+    /// client because TLS protects them.
+    token_client: reqwest::Client,
     endpoint: String,
     headers: HashMap<String, String>,
     oauth: Option<OAuthClientCredentials>,
@@ -167,12 +271,37 @@ impl HttpMcp {
         // No redirects, matching the LLM clients and web tools: a 30x must
         // not rewrite POST semantics or carry headers along a redirect
         // chain the operator never configured.
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))?;
+        // Plain-http loopback traffic never detours through a proxy: a
+        // proxy would see the client-secret POST body and any bearer
+        // Authorization header in cleartext, and a loopback peer is local
+        // anyway. Https targets stay proxyable because TLS protects them.
+        let dials_loopback_http = |url: &str| {
+            reqwest::Url::parse(url)
+                .map(|parsed| parsed.scheme() == "http" && is_loopback_target(&parsed))
+                .unwrap_or(false)
+        };
+        let build = |no_proxy: bool| -> Result<reqwest::Client, TransportError> {
+            let mut builder =
+                reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+            if no_proxy {
+                builder = builder.no_proxy();
+            }
+            builder
+                .build()
+                .map_err(|e| TransportError::Http(format!("failed to build HTTP client: {e}")))
+        };
+        let client = build(dials_loopback_http(&config.endpoint))?;
+        // The token client follows the token URL's own policy, never the
+        // endpoint's: a remote https token server stays proxyable even
+        // when the loopback endpoint dialed without a proxy.
+        let token_client = match &config.oauth {
+            Some(oauth) if dials_loopback_http(&oauth.token_url) => build(true)?,
+            Some(_) => build(false)?,
+            None => client.clone(),
+        };
         Ok(Self {
             client,
+            token_client,
             endpoint: config.endpoint,
             headers: config.headers,
             oauth: config.oauth,
@@ -191,9 +320,17 @@ impl HttpMcp {
         self
     }
 
-    /// Endpoint this transport posts to, for diagnostics.
+    /// Endpoint this transport posts to, as configured. Callers that
+    /// print it should prefer [`HttpMcp::redacted_endpoint`]: the
+    /// configured URL may embed userinfo or a sensitive query.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Host-only rendering of the endpoint for terminals and status
+    /// output.
+    pub fn redacted_endpoint(&self) -> String {
+        redacted_endpoint(&self.endpoint)
     }
 
     /// Send a JSON-RPC request and unwrap the `result` (or raise the `error`).
@@ -294,8 +431,12 @@ impl HttpMcp {
                         let may_retry =
                             attempt == 0 && error.is_connect() && is_connect_retryable(method);
                         if !may_retry {
+                            // The reqwest Display carries the full request
+                            // URL; endpoint userinfo or query secrets must
+                            // not reach error text, so the URL is stripped.
                             return Err(TransportError::Http(format!(
-                                "MCP HTTP request failed: {error}"
+                                "MCP HTTP request failed: {error}",
+                                error = error.without_url()
                             )));
                         }
                         tracing::warn!(
@@ -354,6 +495,8 @@ impl HttpMcp {
     /// Build the error for a 401 response: interactive challenges become a
     /// protocol error that names the unsupported flow, anything else is an
     /// HTTP error that points at the auth configuration.
+    /// HTTP error that points at the auth configuration. The challenge text
+    /// is server-controlled and is never echoed into the message.
     fn unauthorized_error(&self, headers: &reqwest::header::HeaderMap) -> TransportError {
         let challenge = headers
             .get(reqwest::header::WWW_AUTHENTICATE)
@@ -365,14 +508,14 @@ impl HttpMcp {
                 "MCP server requires interactive OAuth authorization (browser/PKCE flow), \
                  which is not supported: configure static request `headers` (e.g. `Authorization`) \
                  or OAuth client-credentials (`oauth_token_url` + `oauth_client_id`/`oauth_client_secret`) \
-                 instead. endpoint={} challenge={challenge:?}",
-                self.endpoint,
+                 instead. endpoint={}",
+                self.redacted_endpoint(),
             ))
         } else {
             TransportError::Http(format!(
-                "MCP HTTP request unauthorized (401) for endpoint {} challenge={challenge:?}: \
+                "MCP HTTP request unauthorized (401) for endpoint {}: \
                  check static `headers` or the OAuth client-credentials configuration",
-                self.endpoint,
+                self.redacted_endpoint(),
             ))
         }
     }
@@ -391,7 +534,7 @@ impl HttpMcp {
                 return Ok(Some(cached.value));
             }
         }
-        let token = fetch_client_credentials(&self.client, &oauth).await?;
+        let token = fetch_client_credentials(&self.token_client, &oauth).await?;
         let value = token.value.clone();
         *self.token.lock().unwrap_or_else(|e| e.into_inner()) = Some(token);
         Ok(Some(value))
@@ -459,8 +602,12 @@ async fn fetch_client_credentials(
             Ok(Ok(response)) => break response,
             Ok(Err(error)) => {
                 if attempt > 0 || !error.is_connect() {
+                    // The reqwest Display carries the full request URL; a
+                    // token URL may embed credentials, so it is stripped
+                    // before the error reaches any message text.
                     return Err(TransportError::Http(format!(
-                        "OAuth token request failed: {error}"
+                        "OAuth token request failed: {error}",
+                        error = error.without_url()
                     )));
                 }
                 attempt += 1;
@@ -477,8 +624,7 @@ async fn fetch_client_credentials(
         .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
     if !status.is_success() {
         return Err(TransportError::Http(format!(
-            "OAuth token request failed with status {status}: {}",
-            preview(&bytes),
+            "OAuth token request failed with status {status}",
         )));
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -518,12 +664,6 @@ fn form_encode(input: &str) -> String {
     out
 }
 
-/// Truncate a body preview for error messages (bodies may be large HTML).
-fn preview(bytes: &[u8]) -> String {
-    const MAX: usize = 200;
-    String::from_utf8_lossy(&bytes[..bytes.len().min(MAX)]).into_owned()
-}
-
 /// Read one response body into memory with a hard byte cap.
 ///
 /// Streams chunk by chunk so the process never holds more than `cap`
@@ -545,8 +685,10 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>,
             }
             Ok(None) => return Ok(body),
             Err(e) => {
+                // The reqwest Display carries the full request URL.
                 return Err(TransportError::Http(format!(
-                    "MCP HTTP response read failed: {e}"
+                    "MCP HTTP response read failed: {e}",
+                    e = e.without_url()
                 )));
             }
         }
@@ -584,8 +726,8 @@ fn parse_response_body_for_request(
     match parse_sse_stream_for_request(text, expected_id) {
         Some(value) => Ok(Some(value)),
         None => Err(TransportError::Protocol(format!(
-            "MCP response is neither a JSON-RPC object nor an SSE stream: {:?}",
-            preview(body),
+            "MCP response is neither a JSON-RPC object nor an SSE stream ({} bytes)",
+            body.len(),
         ))),
     }
 }
@@ -673,8 +815,11 @@ fn into_result(
     }
     match response.get("result") {
         Some(result) => Ok(result.clone()),
+        // The response is server-controlled: only its size is reported,
+        // never the body, so hostile content cannot reach error text.
         None => Err(TransportError::Protocol(format!(
-            "MCP method {method:?} response has neither `result` nor `error`: {response}"
+            "MCP method {method:?} response has neither `result` nor `error` ({} bytes)",
+            serde_json::to_string(&response).map_or(0, |text| text.len()),
         ))),
     }
 }
@@ -1365,6 +1510,28 @@ mod tests {
         assert!(parse_response_body(b"<html>nope</html>").is_err());
     }
 
+    /// A valid-JSON response with neither `result` nor `error` is a
+    /// protocol error that reports only the body size: the response is
+    /// server-controlled, so hostile content must not reach error text.
+    #[test]
+    fn malformed_rpc_error_hides_the_body() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "leak": "secret-from-hostile-server"
+        });
+        let error = into_result(body, "tools/list", Some(1)).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("neither `result` nor `error`"),
+            "unexpected error: {text}"
+        );
+        assert!(
+            !text.contains("secret-from-hostile-server"),
+            "error text leaks the response body: {text}"
+        );
+    }
+
     /// Endpoint and OAuth validation rejects bad input at build time.
     #[test]
     fn config_validation() {
@@ -1387,6 +1554,200 @@ mod tests {
             scope: None,
         });
         assert!(HttpMcp::new(oauth).is_err(), "empty client id rejected");
+    }
+
+    /// The OAuth token endpoint carries the client secret in the request
+    /// body: plain http is only accepted on the loopback interface, and a
+    /// non-loopback http token URL is rejected at build time.
+    #[test]
+    fn oauth_token_url_rejects_cleartext_off_loopback() {
+        let base = HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        // Loopback means IP literals: a host name such as `localhost` is
+        // resolved by the system, so it is not accepted for plain http.
+        for ok in [
+            "https://auth.example.com/token",
+            "http://127.0.0.1:1/token",
+            "http://[::1]:1/token",
+        ] {
+            let mut config = base.clone();
+            config.oauth = Some(OAuthClientCredentials {
+                token_url: ok.to_owned(),
+                client_id: "wave".to_owned(),
+                client_secret: "s".to_owned(),
+                scope: None,
+            });
+            assert!(HttpMcp::new(config).is_ok(), "token url {ok:?} accepted");
+        }
+        for bad in [
+            "http://auth.example.com/token",
+            "http://localhost:1/token",
+            "http://192.168.1.10/token",
+            "http://10.0.0.1/token",
+            "ftp://auth.example.com/token",
+        ] {
+            let mut config = base.clone();
+            config.oauth = Some(OAuthClientCredentials {
+                token_url: bad.to_owned(),
+                client_id: "wave".to_owned(),
+                client_secret: "s".to_owned(),
+                scope: None,
+            });
+            let error = match HttpMcp::new(config) {
+                Err(error) => error,
+                Ok(_) => panic!("token url {bad:?} must be rejected"),
+            };
+            assert!(
+                error.to_string().contains("oauth_token_url"),
+                "token url {bad:?} rejected with an oauth_token_url reason, got: {error}"
+            );
+        }
+    }
+
+    /// A remote plain-http endpoint cannot even build a transport: the
+    /// streamable-http exchange is stateful (the server may issue a
+    /// session handle that rides every later request) and prompts flow
+    /// through the same connection, so traffic and session handles would
+    /// travel in cleartext. Loopback and https endpoints build; the
+    /// rejection renders the URL host-only.
+    #[test]
+    fn remote_plain_http_endpoints_are_rejected_at_build() {
+        let config = HttpMcpConfig {
+            endpoint: "http://user:pass@mcp.example.com/mcp?token=q-secret".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        let error = match HttpMcp::new(config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a remote plain-http endpoint must be rejected"),
+        };
+        assert!(
+            error.contains("must use https or the loopback interface"),
+            "unexpected rejection reason: {error}"
+        );
+        // The rejection names the host only: no userinfo, query, or path
+        // from a hostile endpoint URL.
+        for leak in ["user", "pass", "q-secret", "example.com/mcp"] {
+            assert!(!error.contains(leak), "rejection echoed {leak:?}: {error}");
+        }
+        let loopback = HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        assert!(
+            HttpMcp::new(loopback).is_ok(),
+            "a loopback http endpoint stays allowed"
+        );
+        let https = HttpMcpConfig {
+            endpoint: "https://mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        assert!(
+            HttpMcp::new(https).is_ok(),
+            "an https endpoint stays allowed"
+        );
+    }
+
+    /// URL userinfo is credentials: it is covered by the same endpoint
+    /// policy, and the same userinfo on https stays allowed.
+    #[test]
+    fn endpoint_userinfo_rejects_remote_plain_http() {
+        let config = HttpMcpConfig {
+            endpoint: "http://user:pass@mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        let error = match HttpMcp::new(config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("userinfo over plain http must be rejected"),
+        };
+        assert!(
+            error.contains("must use https or the loopback interface"),
+            "unexpected rejection reason: {error}"
+        );
+        // The rejection renders host-only and never echoes the password.
+        assert!(
+            !error.contains("user") && !error.contains("pass"),
+            "rejection must not echo the userinfo: {error}"
+        );
+        let https = HttpMcpConfig {
+            endpoint: "https://user:pass@mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        assert!(
+            HttpMcp::new(https).is_ok(),
+            "userinfo on an https endpoint stays allowed"
+        );
+    }
+
+    /// A stored session id is stored verbatim so later requests hit the
+    /// right session, and an empty header value is ignored.
+    #[test]
+    fn loopback_session_id_is_stored_verbatim() {
+        let transport = HttpMcp::new(HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        })
+        .unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static("sess-1"),
+        );
+        // Header values may arrive with surrounding whitespace; the
+        // transport trims before storing (locked here so a change to that
+        // behavior is deliberate).
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static("  sess-2  "),
+        );
+        transport.store_session_id(&headers);
+        assert_eq!(
+            transport.session_id.lock().unwrap().as_deref(),
+            Some("sess-2"),
+            "the session id is trimmed and stored verbatim"
+        );
+        transport.store_session_id(&headers);
+        assert_eq!(
+            transport.session_id.lock().unwrap().as_deref(),
+            Some("sess-2"),
+            "the session id is stored exactly as issued"
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static(""),
+        );
+        transport.store_session_id(&headers);
+        assert_eq!(
+            transport.session_id.lock().unwrap().as_deref(),
+            Some("sess-2"),
+            "an empty session id never replaces a stored one"
+        );
+    }
+
+    /// The public endpoint validator enforces its documented policy:
+    /// https or loopback http only, never other schemes.
+    #[test]
+    fn validate_mcp_endpoint_rejects_non_http_schemes() {
+        assert!(validate_mcp_endpoint("https://mcp.example.com/mcp").is_ok());
+        assert!(validate_mcp_endpoint("http://127.0.0.1:1/mcp").is_ok());
+        for bad in [
+            "ftp://mcp.example.com/mcp",
+            "wss://mcp.example.com/mcp",
+            "http://mcp.example.com/mcp",
+        ] {
+            assert!(
+                validate_mcp_endpoint(bad).is_err(),
+                "{bad:?} must be rejected for oauth"
+            );
+        }
     }
 
     /// The connect-retry gate is a read-only allowlist: handshake, pings,

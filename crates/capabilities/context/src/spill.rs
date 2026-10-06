@@ -69,14 +69,24 @@ fn render_manifest(entries: &[ManifestEntry]) -> String {
 }
 
 /// Spill error type.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum SpillError {
     /// Filesystem failure.
     #[error("spill IO failed: {0}")]
     Io(String),
-    /// Unknown or malformed spill URI.
-    #[error("unknown spill: {0}")]
+    /// Unknown or malformed spill URI. The offending value is kept for
+    /// programmatic matching only, never echoed into message text: a
+    /// malformed URI is unvalidated input.
+    #[error("unknown spill")]
     Unknown(String),
+}
+
+/// Debug matches Display: a derived dump would echo the unvalidated input
+/// that Display deliberately omits.
+impl std::fmt::Debug for SpillError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
 
 impl From<std::io::Error> for SpillError {
@@ -94,9 +104,7 @@ impl std::fmt::Display for ManifestEntry {
 /// Validate a spill id: `[A-Za-z0-9_-]{1,64}` (manifest/file-name safe).
 pub fn validate_spill_id(id: &str) -> std::result::Result<(), String> {
     if id.is_empty() || id.len() > 64 {
-        return Err(format!(
-            "invalid spill id {id:?}: expected 1-64 chars ([A-Za-z0-9_-])"
-        ));
+        return Err("invalid spill id (expected 1-64 chars [A-Za-z0-9_-])".to_owned());
     }
     if id
         .chars()
@@ -104,9 +112,7 @@ pub fn validate_spill_id(id: &str) -> std::result::Result<(), String> {
     {
         Ok(())
     } else {
-        Err(format!(
-            "invalid spill id {id:?}: expected [A-Za-z0-9_-] only"
-        ))
+        Err("invalid spill id (expected [A-Za-z0-9_-] only)".to_owned())
     }
 }
 
@@ -115,7 +121,7 @@ pub fn parse_spill_uri(uri: &str) -> std::result::Result<String, SpillError> {
     let id = uri
         .strip_prefix(SPILL_SCHEME)
         .ok_or_else(|| SpillError::Unknown(uri.to_owned()))?;
-    validate_spill_id(id).map_err(SpillError::Unknown)?;
+    validate_spill_id(id).map_err(|_| SpillError::Unknown(id.to_owned()))?;
     Ok(id.to_owned())
 }
 

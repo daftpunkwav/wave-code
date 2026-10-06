@@ -75,10 +75,9 @@ pub fn parse_sub_goal_status(raw: &str) -> Result<SubGoalStatus, GoalError> {
     match raw {
         "in_progress" => Ok(SubGoalStatus::InProgress),
         "achieved" => Ok(SubGoalStatus::Achieved),
+        // The rejected value is not echoed into message text.
         _ => Err(GoalError::InvalidInput {
-            message: format!(
-                "unknown sub-goal status {raw:?}: expected one of in_progress, achieved"
-            ),
+            message: "unknown sub-goal status: expected one of in_progress, achieved".to_owned(),
         }),
     }
 }
@@ -138,10 +137,10 @@ pub fn parse_status(raw: &str) -> Result<GoalStatus, GoalError> {
         "blocked" => Ok(GoalStatus::Blocked),
         "paused" => Ok(GoalStatus::Paused),
         "completed" => Ok(GoalStatus::Completed),
+        // The rejected value is not echoed into message text.
         _ => Err(GoalError::InvalidInput {
-            message: format!(
-                "unknown goal status {raw:?}: expected one of active, blocked, paused, completed"
-            ),
+            message: "unknown goal status: expected one of active, blocked, paused, completed"
+                .to_owned(),
         }),
     }
 }
@@ -149,7 +148,7 @@ pub fn parse_status(raw: &str) -> Result<GoalStatus, GoalError> {
 /// Business failures of the goal machine: CAS mismatches name both
 /// versions, illegal transitions name the expected state, and the round
 /// cap names the cap, so the model can self-correct in each case.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum GoalError {
     /// Transition attempted from the wrong status.
     #[error("cannot {action}: expected status {expected}, found {actual}")]
@@ -186,10 +185,12 @@ pub enum GoalError {
         /// Human-readable reason.
         message: String,
     },
-    /// Session id outside `[A-Za-z0-9_-]{1,64}` (it becomes a file name).
-    #[error("invalid session id {id:?}: expected 1-64 chars ([A-Za-z0-9_-])")]
+    /// Session id outside `[A-Za-z0-9_-]{1,128}` (it becomes a file name).
+    /// The rejected id is not echoed back: error text ends up on terminals
+    /// and logs, and the id is unvalidated input at this point.
+    #[error("invalid session id (expected 1-128 ASCII chars [A-Za-z0-9_-])")]
     InvalidSessionId {
-        /// The rejected id.
+        /// The rejected id, kept for programmatic matching only.
         id: String,
     },
     /// Stored goal exists but does not parse.
@@ -201,6 +202,23 @@ pub enum GoalError {
     /// Filesystem failure while loading or saving.
     #[error("goal IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Debug keeps the variant name for diagnostics while routing the fields
+/// through Display, which never echoes unvalidated input.
+impl std::fmt::Debug for GoalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant = match self {
+            Self::UnexpectedState { .. } => "UnexpectedState",
+            Self::VersionMismatch { .. } => "VersionMismatch",
+            Self::RoundCapped { .. } => "RoundCapped",
+            Self::InvalidInput { .. } => "InvalidInput",
+            Self::InvalidSessionId { .. } => "InvalidSessionId",
+            Self::Corrupt { .. } => "Corrupt",
+            Self::Io(_) => "Io",
+        };
+        write!(f, "{variant}: {self}")
+    }
 }
 
 /// One durable goal: objective, status, CAS version, driver round, the

@@ -112,6 +112,14 @@ impl HttpMcpConfig {
         let endpoint = reqwest::Url::parse(&self.endpoint)
             .map_err(|e| format!("invalid endpoint URL: {e}"))?;
         validate_endpoint_url(&endpoint)?;
+        // URL userinfo is credentials too: a username or password embedded
+        // in the endpoint URL must not cross the network unencrypted.
+        if !endpoint.username().is_empty() && is_cleartext_endpoint(&endpoint) {
+            return Err(format!(
+                "endpoint URL userinfo requires an https or loopback endpoint, got {}",
+                redacted_url(&endpoint)
+            ));
+        }
         // A credential header rides every request, so a plain-http
         // endpoint outside the loopback interface ships it in cleartext
         // exactly like an oauth bearer token would.
@@ -162,13 +170,14 @@ fn is_cleartext_endpoint(url: &reqwest::Url) -> bool {
 }
 
 /// Whether a header name plausibly carries a credential: the standard
-/// authorization headers or a name naming a key, token, secret, or
-/// credential. Only this class is restricted to https-or-loopback
-/// endpoints; plain metadata headers (`X-Custom` and friends) may ride any
-/// validated endpoint.
+/// authorization and cookie headers, or a name naming a key, token,
+/// secret, or credential. Only this class is restricted to
+/// https-or-loopback endpoints; plain metadata headers (`X-Custom` and
+/// friends) may ride any validated endpoint.
 pub fn is_credential_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.contains("authorization")
+        || lower.contains("cookie")
         || lower.contains("credential")
         || lower.contains("key")
         || lower.contains("secret")
@@ -1647,7 +1656,7 @@ mod tests {
     #[test]
     fn static_authorization_rejects_remote_plain_http() {
         let headers = |name: &str| HashMap::from([(name.to_owned(), "pre-provisioned".to_owned())]);
-        for name in ["Authorization", "X-API-Key", "Api-Token"] {
+        for name in ["Authorization", "Cookie", "X-API-Key", "Api-Token"] {
             let config = HttpMcpConfig {
                 endpoint: "http://mcp.example.com/mcp".to_owned(),
                 headers: headers(name),
@@ -1679,6 +1688,40 @@ mod tests {
         assert!(
             HttpMcp::new(metadata).is_ok(),
             "a non-credential header needs no https"
+        );
+    }
+
+    /// URL userinfo is credentials: a username embedded in a remote
+    /// plain-http endpoint URL is rejected, while the same userinfo on
+    /// https stays allowed.
+    #[test]
+    fn endpoint_userinfo_rejects_remote_plain_http() {
+        let config = HttpMcpConfig {
+            endpoint: "http://user:pass@mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        let error = match HttpMcp::new(config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("userinfo over plain http must be rejected"),
+        };
+        assert!(
+            error.contains("userinfo requires an https or loopback endpoint"),
+            "unexpected rejection reason: {error}"
+        );
+        // The rejection renders host-only and never echoes the password.
+        assert!(
+            !error.contains("pass"),
+            "rejection must not echo the userinfo: {error}"
+        );
+        let https = HttpMcpConfig {
+            endpoint: "https://user:pass@mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        };
+        assert!(
+            HttpMcp::new(https).is_ok(),
+            "userinfo on an https endpoint stays allowed"
         );
     }
 

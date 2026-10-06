@@ -75,10 +75,9 @@ pub fn parse_sub_goal_status(raw: &str) -> Result<SubGoalStatus, GoalError> {
     match raw {
         "in_progress" => Ok(SubGoalStatus::InProgress),
         "achieved" => Ok(SubGoalStatus::Achieved),
+        // The rejected value is not echoed into message text.
         _ => Err(GoalError::InvalidInput {
-            message: format!(
-                "unknown sub-goal status {raw:?}: expected one of in_progress, achieved"
-            ),
+            message: "unknown sub-goal status: expected one of in_progress, achieved".to_owned(),
         }),
     }
 }
@@ -138,10 +137,10 @@ pub fn parse_status(raw: &str) -> Result<GoalStatus, GoalError> {
         "blocked" => Ok(GoalStatus::Blocked),
         "paused" => Ok(GoalStatus::Paused),
         "completed" => Ok(GoalStatus::Completed),
+        // The rejected value is not echoed into message text.
         _ => Err(GoalError::InvalidInput {
-            message: format!(
-                "unknown goal status {raw:?}: expected one of active, blocked, paused, completed"
-            ),
+            message: "unknown goal status: expected one of active, blocked, paused, completed"
+                .to_owned(),
         }),
     }
 }

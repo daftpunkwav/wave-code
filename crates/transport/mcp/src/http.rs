@@ -155,17 +155,18 @@ fn is_cleartext_endpoint(url: &reqwest::Url) -> bool {
     url.scheme() == "http" && !is_loopback_target(url)
 }
 
-/// Whether an http URL targets the loopback interface: `localhost` by name
-/// or a loopback IP literal (IPv4/IPv6).
+/// Whether an http URL targets the loopback interface by IP literal
+/// (IPv4/IPv6). Host names are not accepted — not even `localhost`: what
+/// such a name reaches is the system resolver's decision, not this check's.
 fn is_loopback_target(url: &reqwest::Url) -> bool {
-    url.host_str().is_some_and(|host| {
-        host.eq_ignore_ascii_case("localhost")
-            || host
-                .trim_start_matches('[')
+    url.host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
                 .trim_end_matches(']')
                 .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    })
+                .ok()
+        })
+        .is_some_and(|ip| ip.is_loopback())
 }
 
 /// Host-only rendering of a URL for error text: scheme, host, and explicit
@@ -1540,10 +1541,11 @@ mod tests {
             headers: HashMap::new(),
             oauth: None,
         };
+        // Loopback means IP literals: a host name such as `localhost` is
+        // resolved by the system, so it is not accepted for plain http.
         for ok in [
             "https://auth.example.com/token",
             "http://127.0.0.1:1/token",
-            "http://localhost:1/token",
             "http://[::1]:1/token",
         ] {
             let mut config = base.clone();
@@ -1557,6 +1559,7 @@ mod tests {
         }
         for bad in [
             "http://auth.example.com/token",
+            "http://localhost:1/token",
             "http://192.168.1.10/token",
             "http://10.0.0.1/token",
             "ftp://auth.example.com/token",

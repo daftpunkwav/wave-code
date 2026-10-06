@@ -403,19 +403,13 @@ impl McpServerConfig {
         }
     }
 
-    /// One-line summary (the `/mcp` display surface): command + args joined
-    /// for stdio, the URL for http. env / headers never display (they may
-    /// hold secrets).
+    /// One-line summary (the `/mcp` display surface): the command for
+    /// stdio (arguments are omitted — they sometimes carry credentials and
+    /// status output is not the place for them), the host-only URL for
+    /// http. env / headers never display (they may hold secrets).
     pub fn summary(&self) -> String {
         match self {
-            Self::Stdio { command, args, .. } => {
-                let mut line = command.clone();
-                for arg in args {
-                    line.push(' ');
-                    line.push_str(arg);
-                }
-                format!("stdio: {line}")
-            }
+            Self::Stdio { command, .. } => format!("stdio: {command}"),
             Self::Http { url, .. } => {
                 // The configured url may embed userinfo or a sensitive
                 // query; status output carries the host only.
@@ -492,7 +486,8 @@ mod tests {
             env: HashMap::from([("SECRET".into(), "x".into())]),
         };
         assert_eq!(stdio.transport_kind(), "stdio");
-        assert_eq!(stdio.summary(), "stdio: npx @playwright/mcp@latest");
+        // Arguments are omitted from the summary (they may carry secrets).
+        assert_eq!(stdio.summary(), "stdio: npx");
         assert!(!stdio.summary().contains("SECRET"));
 
         let http = McpServerConfig::Http {

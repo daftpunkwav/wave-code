@@ -684,8 +684,10 @@ async fn read_capped(response: reqwest::Response, cap: usize) -> Result<Vec<u8>,
             }
             Ok(None) => return Ok(body),
             Err(e) => {
+                // The reqwest Display carries the full request URL.
                 return Err(TransportError::Http(format!(
-                    "MCP HTTP response read failed: {e}"
+                    "MCP HTTP response read failed: {e}",
+                    e = e.without_url()
                 )));
             }
         }
@@ -1671,10 +1673,23 @@ mod tests {
             reqwest::header::HeaderName::from_static("mcp-session-id"),
             reqwest::header::HeaderValue::from_static("sess-1"),
         );
+        // Header values may arrive with surrounding whitespace; the
+        // transport trims before storing (locked here so a change to that
+        // behavior is deliberate).
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static("  sess-2  "),
+        );
         transport.store_session_id(&headers);
         assert_eq!(
             transport.session_id.lock().unwrap().as_deref(),
-            Some("sess-1"),
+            Some("sess-2"),
+            "the session id is trimmed and stored verbatim"
+        );
+        transport.store_session_id(&headers);
+        assert_eq!(
+            transport.session_id.lock().unwrap().as_deref(),
+            Some("sess-2"),
             "the session id is stored exactly as issued"
         );
         headers.insert(
@@ -1684,7 +1699,7 @@ mod tests {
         transport.store_session_id(&headers);
         assert_eq!(
             transport.session_id.lock().unwrap().as_deref(),
-            Some("sess-1"),
+            Some("sess-2"),
             "an empty session id never replaces a stored one"
         );
     }

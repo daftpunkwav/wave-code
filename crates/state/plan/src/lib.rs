@@ -111,11 +111,18 @@ pub enum PlanError {
     Io(#[from] std::io::Error),
 }
 
-/// Debug matches Display: a derived dump would echo the unvalidated input
-/// that Display deliberately omits.
+/// Debug keeps the variant name for diagnostics while routing the fields
+/// through Display, which never echoes unvalidated input.
 impl std::fmt::Debug for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
+        let variant = match self {
+            Self::UnexpectedState { .. } => "UnexpectedState",
+            Self::InvalidInput { .. } => "InvalidInput",
+            Self::InvalidSessionId { .. } => "InvalidSessionId",
+            Self::Corrupt { .. } => "Corrupt",
+            Self::Io(_) => "Io",
+        };
+        write!(f, "{variant}: {self}")
     }
 }
 

@@ -121,7 +121,7 @@ pub fn parse_spill_uri(uri: &str) -> std::result::Result<String, SpillError> {
     let id = uri
         .strip_prefix(SPILL_SCHEME)
         .ok_or_else(|| SpillError::Unknown(uri.to_owned()))?;
-    validate_spill_id(id).map_err(SpillError::Unknown)?;
+    validate_spill_id(id).map_err(|_| SpillError::Unknown(id.to_owned()))?;
     Ok(id.to_owned())
 }
 

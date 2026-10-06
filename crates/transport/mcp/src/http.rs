@@ -815,8 +815,11 @@ fn into_result(
     }
     match response.get("result") {
         Some(result) => Ok(result.clone()),
+        // The response is server-controlled: only its size is reported,
+        // never the body, so hostile content cannot reach error text.
         None => Err(TransportError::Protocol(format!(
-            "MCP method {method:?} response has neither `result` nor `error`: {response}"
+            "MCP method {method:?} response has neither `result` nor `error` ({} bytes)",
+            serde_json::to_string(&response).map_or(0, |text| text.len()),
         ))),
     }
 }
@@ -1505,6 +1508,28 @@ mod tests {
             Some(value)
         );
         assert!(parse_response_body(b"<html>nope</html>").is_err());
+    }
+
+    /// A valid-JSON response with neither `result` nor `error` is a
+    /// protocol error that reports only the body size: the response is
+    /// server-controlled, so hostile content must not reach error text.
+    #[test]
+    fn malformed_rpc_error_hides_the_body() {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "leak": "secret-from-hostile-server"
+        });
+        let error = into_result(body, "tools/list", Some(1)).unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("neither `result` nor `error`"),
+            "unexpected error: {text}"
+        );
+        assert!(
+            !text.contains("secret-from-hostile-server"),
+            "error text leaks the response body: {text}"
+        );
     }
 
     /// Endpoint and OAuth validation rejects bad input at build time.

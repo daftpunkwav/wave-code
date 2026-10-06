@@ -448,7 +448,7 @@ impl HttpMcp {
         };
         let status = response.status();
         let headers = response.headers().clone();
-        self.store_session_id(&headers);
+        self.store_session_id(&headers)?;
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(self.unauthorized_error(&headers));
         }
@@ -478,15 +478,32 @@ impl HttpMcp {
     }
 
     /// Persist the `mcp-session-id` response header for later requests.
-    fn store_session_id(&self, headers: &reqwest::header::HeaderMap) {
+    ///
+    /// A server-issued session id is a bearer handle for the whole
+    /// conversation, and every later request sends it back; over a remote
+    /// plain-http endpoint it would cross the network in cleartext and
+    /// could be replayed by anyone on the path. Stateful sessions there
+    /// are refused instead of continued; loopback endpoints and servers
+    /// that never issue a session id (stateless http) are unaffected.
+    fn store_session_id(&self, headers: &reqwest::header::HeaderMap) -> Result<(), TransportError> {
         let session = headers
             .get(MCP_SESSION_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
             .filter(|value| !value.is_empty());
         if let Some(session) = session {
+            let endpoint = reqwest::Url::parse(&self.endpoint)
+                .map_err(|e| TransportError::Protocol(format!("invalid endpoint URL: {e}")))?;
+            if is_cleartext_endpoint(&endpoint) {
+                return Err(TransportError::Protocol(
+                    "the server issued a session id over a remote plain-http endpoint; \
+                     stateful MCP sessions require https or a loopback endpoint"
+                        .to_owned(),
+                ));
+            }
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.to_owned());
         }
+        Ok(())
     }
 
     /// Build the error for a 401 response: interactive challenges become a
@@ -1662,6 +1679,47 @@ mod tests {
         assert!(
             HttpMcp::new(metadata).is_ok(),
             "a non-credential header needs no https"
+        );
+    }
+
+    /// A server-issued session id is a bearer handle: over a remote
+    /// plain-http endpoint it would travel in cleartext on every later
+    /// request, so stateful sessions there are refused instead. Loopback
+    /// endpoints keep accepting one, and nothing is stored on refusal.
+    #[test]
+    fn remote_plain_http_session_ids_are_refused() {
+        let transport = HttpMcp::new(HttpMcpConfig {
+            endpoint: "http://mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        })
+        .unwrap();
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static("sess-1"),
+        );
+        let error = transport.store_session_id(&headers).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stateful MCP sessions require https"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            transport.session_id.lock().unwrap().is_none(),
+            "a refused session id must not be stored"
+        );
+        let loopback = HttpMcp::new(HttpMcpConfig {
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
+            headers: HashMap::new(),
+            oauth: None,
+        })
+        .unwrap();
+        loopback.store_session_id(&headers).unwrap();
+        assert!(
+            loopback.session_id.lock().unwrap().is_some(),
+            "a loopback session id is stored for later requests"
         );
     }
 

@@ -368,9 +368,11 @@ impl McpServerConfig {
                     return Err("http MCP server url must not be empty".to_owned());
                 }
                 if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
-                    return Err(format!(
-                        "http MCP server url must start with http:// or https://: {trimmed}"
-                    ));
+                    // The raw url is not echoed: it may embed credentials
+                    // or sensitive query data.
+                    return Err(
+                        "http MCP server url must start with http:// or https://".to_owned()
+                    );
                 }
                 let triple = [
                     oauth_token_url.is_some(),

@@ -413,8 +413,12 @@ impl HttpMcp {
                         let may_retry =
                             attempt == 0 && error.is_connect() && is_connect_retryable(method);
                         if !may_retry {
+                            // The reqwest Display carries the full request
+                            // URL; endpoint userinfo or query secrets must
+                            // not reach error text, so the URL is stripped.
                             return Err(TransportError::Http(format!(
-                                "MCP HTTP request failed: {error}"
+                                "MCP HTTP request failed: {error}",
+                                error = error.without_url()
                             )));
                         }
                         tracing::warn!(
@@ -1591,7 +1595,7 @@ mod tests {
         );
         // The rejection names the host only: no userinfo, query, or path
         // from a hostile endpoint URL.
-        for leak in ["user:pass", "q-secret", "example.com/mcp"] {
+        for leak in ["user", "pass", "q-secret", "example.com/mcp"] {
             assert!(!error.contains(leak), "rejection echoed {leak:?}: {error}");
         }
         let loopback = HttpMcpConfig {
@@ -1633,7 +1637,7 @@ mod tests {
         );
         // The rejection renders host-only and never echoes the password.
         assert!(
-            !error.contains("pass"),
+            !error.contains("user") && !error.contains("pass"),
             "rejection must not echo the userinfo: {error}"
         );
         let https = HttpMcpConfig {

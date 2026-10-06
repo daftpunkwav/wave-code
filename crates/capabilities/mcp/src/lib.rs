@@ -357,7 +357,7 @@ impl McpServerConfig {
             }
             Self::Http {
                 url,
-                headers,
+                headers: _,
                 oauth_token_url,
                 oauth_client_id,
                 oauth_client_secret,
@@ -382,24 +382,17 @@ impl McpServerConfig {
                          `oauth_client_id`, `oauth_client_secret` (or none)"
                         .to_owned());
                 }
-                // Same policy the transport enforces on connect, applied
-                // here so doctor and assembly surface the reason up front
-                // instead of at first use.
+                // Same endpoint policy the transport enforces on connect:
+                // the streamable-http exchange is stateful (the server may
+                // issue a session handle that rides every later request),
+                // so only https or loopback http endpoints are accepted.
+                // Applied here so doctor and assembly surface the reason
+                // up front instead of at first use.
+                transport_mcp::http::validate_mcp_endpoint(trimmed)
+                    .map_err(|e| format!("endpoint: {e}"))?;
                 if let Some(token_url) = oauth_token_url {
                     transport_mcp::http::validate_token_url(token_url)
                         .map_err(|e| format!("oauth_token_url: {e}"))?;
-                    transport_mcp::http::validate_oauth_endpoint(trimmed)
-                        .map_err(|e| format!("oauth_endpoint: {e}"))?;
-                }
-                // A credential header rides every request, so it answers
-                // to the same endpoint policy the transport gives the
-                // oauth bearer token.
-                let has_credential_header = headers
-                    .keys()
-                    .any(|name| transport_mcp::http::is_credential_header(name));
-                if has_credential_header {
-                    transport_mcp::http::validate_oauth_endpoint(trimmed)
-                        .map_err(|e| format!("credential_endpoint: {e}"))?;
                 }
                 Ok(())
             }
@@ -711,10 +704,10 @@ mod tests {
             oauth_scope: None,
         };
         let err = McpServerConfig::from_raw("srv", &raw)
-            .expect_err("remote plain-http oauth endpoint rejected");
+            .expect_err("remote plain-http endpoint rejected");
         assert!(
-            err.contains("oauth_endpoint"),
-            "rejection names the offending field: {err}"
+            err.contains("endpoint: the MCP endpoint must use https"),
+            "rejection names the endpoint policy: {err}"
         );
     }
 }

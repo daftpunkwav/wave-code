@@ -106,41 +106,27 @@ pub struct HttpMcpConfig {
 }
 
 impl HttpMcpConfig {
-    /// Validate the endpoint URL, any credential-carrying endpoint, and the
-    /// OAuth block (if present).
+    /// Validate the endpoint URL and the OAuth block (if present).
     pub fn validate(&self) -> Result<(), String> {
         let endpoint = reqwest::Url::parse(&self.endpoint)
             .map_err(|e| format!("invalid endpoint URL: {e}"))?;
         validate_endpoint_url(&endpoint)?;
-        // URL userinfo is credentials too: a username or password embedded
-        // in the endpoint URL must not cross the network unencrypted.
-        if !endpoint.username().is_empty() && is_cleartext_endpoint(&endpoint) {
+        // The streamable-http exchange is stateful in practice: the server
+        // may issue an mcp-session-id bearer handle that rides every later
+        // request, and prompts and responses flow through the same
+        // connection. A plain-http endpoint outside the loopback interface
+        // exposes credentials, traffic, and session handles in cleartext,
+        // so it is rejected outright; loopback endpoints keep serving
+        // local servers.
+        if is_cleartext_endpoint(&endpoint) {
             return Err(format!(
-                "endpoint URL userinfo requires an https or loopback endpoint, got {}",
-                redacted_url(&endpoint)
-            ));
-        }
-        // A credential header rides every request, so a plain-http
-        // endpoint outside the loopback interface ships it in cleartext
-        // exactly like an oauth bearer token would.
-        let carries_credential = self.headers.keys().any(|name| is_credential_header(name));
-        if carries_credential && is_cleartext_endpoint(&endpoint) {
-            return Err(format!(
-                "a credential header requires an https or loopback endpoint, got {}",
+                "the MCP endpoint must use https or the loopback interface \
+                 (traffic and session handles would travel in cleartext): {}",
                 redacted_url(&endpoint)
             ));
         }
         if let Some(oauth) = &self.oauth {
             validate_token_url(&oauth.token_url).map_err(|e| format!("oauth_token_url: {e}"))?;
-            // A bearer token minted for a plain-http endpoint would hand the
-            // credential to the network in the Authorization header anyway,
-            // so OAuth and a non-loopback http endpoint are rejected together.
-            if is_cleartext_endpoint(&endpoint) {
-                return Err(format!(
-                    "oauth bearer tokens require an https or loopback endpoint, got {}",
-                    redacted_url(&endpoint)
-                ));
-            }
             if oauth.client_id.trim().is_empty() {
                 return Err("oauth_client_id must not be empty".to_owned());
             }
@@ -167,21 +153,6 @@ fn validate_endpoint_url(url: &reqwest::Url) -> Result<(), String> {
 /// cleartext: plain http to anywhere but the loopback interface.
 fn is_cleartext_endpoint(url: &reqwest::Url) -> bool {
     url.scheme() == "http" && !is_loopback_target(url)
-}
-
-/// Whether a header name plausibly carries a credential: the standard
-/// authorization and cookie headers, or a name naming a key, token,
-/// secret, or credential. Only this class is restricted to
-/// https-or-loopback endpoints; plain metadata headers (`X-Custom` and
-/// friends) may ride any validated endpoint.
-pub fn is_credential_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.contains("authorization")
-        || lower.contains("cookie")
-        || lower.contains("credential")
-        || lower.contains("key")
-        || lower.contains("secret")
-        || lower.contains("token")
 }
 
 /// Whether an http URL targets the loopback interface: `localhost` by name
@@ -236,13 +207,14 @@ pub fn validate_token_url(url: &str) -> Result<(), String> {
 /// token rides the `Authorization` header, so only https or a plain-http
 /// loopback endpoint is acceptable and any other scheme is rejected. Error
 /// text renders the URL host-only, matching [`validate_token_url`].
-pub fn validate_oauth_endpoint(url: &str) -> Result<(), String> {
+pub fn validate_mcp_endpoint(url: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid endpoint URL: {e}"))?;
     match parsed.scheme() {
         "https" => Ok(()),
         "http" if is_loopback_target(&parsed) => Ok(()),
         _ => Err(format!(
-            "oauth bearer tokens require an https or loopback endpoint, got {}",
+            "the MCP endpoint must use https or the loopback interface \
+             (traffic and session handles would travel in cleartext): {}",
             redacted_url(&parsed)
         )),
     }
@@ -457,7 +429,7 @@ impl HttpMcp {
         };
         let status = response.status();
         let headers = response.headers().clone();
-        self.store_session_id(&headers)?;
+        self.store_session_id(&headers);
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(self.unauthorized_error(&headers));
         }
@@ -487,32 +459,23 @@ impl HttpMcp {
     }
 
     /// Persist the `mcp-session-id` response header for later requests.
-    ///
-    /// A server-issued session id is a bearer handle for the whole
-    /// conversation, and every later request sends it back; over a remote
-    /// plain-http endpoint it would cross the network in cleartext and
-    /// could be replayed by anyone on the path. Stateful sessions there
-    /// are refused instead of continued; loopback endpoints and servers
-    /// that never issue a session id (stateless http) are unaffected.
-    fn store_session_id(&self, headers: &reqwest::header::HeaderMap) -> Result<(), TransportError> {
+    fn store_session_id(&self, headers: &reqwest::header::HeaderMap) {
         let session = headers
             .get(MCP_SESSION_ID_HEADER)
             .and_then(|value| value.to_str().ok())
             .map(str::trim)
             .filter(|value| !value.is_empty());
         if let Some(session) = session {
-            let endpoint = reqwest::Url::parse(&self.endpoint)
-                .map_err(|e| TransportError::Protocol(format!("invalid endpoint URL: {e}")))?;
-            if is_cleartext_endpoint(&endpoint) {
-                return Err(TransportError::Protocol(
-                    "the server issued a session id over a remote plain-http endpoint; \
-                     stateful MCP sessions require https or a loopback endpoint"
-                        .to_owned(),
-                ));
-            }
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.to_owned());
         }
-        Ok(())
+    }
+
+    /// Host-only rendering of the endpoint for error text: the URL may
+    /// embed userinfo or a sensitive query that must not be echoed.
+    fn redacted_endpoint(&self) -> String {
+        reqwest::Url::parse(&self.endpoint)
+            .map(|url| redacted_url(&url))
+            .unwrap_or_else(|_| "<endpoint>".to_owned())
     }
 
     /// Build the error for a 401 response: interactive challenges become a
@@ -530,13 +493,13 @@ impl HttpMcp {
                  which is not supported: configure static request `headers` (e.g. `Authorization`) \
                  or OAuth client-credentials (`oauth_token_url` + `oauth_client_id`/`oauth_client_secret`) \
                  instead. endpoint={} challenge={challenge:?}",
-                self.endpoint,
+                self.redacted_endpoint(),
             ))
         } else {
             TransportError::Http(format!(
                 "MCP HTTP request unauthorized (401) for endpoint {} challenge={challenge:?}: \
                  check static `headers` or the OAuth client-credentials configuration",
-                self.endpoint,
+                self.redacted_endpoint(),
             ))
         }
     }
@@ -645,8 +608,7 @@ async fn fetch_client_credentials(
         .map_err(|_| TransportError::Timeout(REQUEST_TIMEOUT_SECS))??;
     if !status.is_success() {
         return Err(TransportError::Http(format!(
-            "OAuth token request failed with status {status}: {}",
-            preview(&bytes),
+            "OAuth token request failed with status {status}",
         )));
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes)
@@ -1606,94 +1568,54 @@ mod tests {
         }
     }
 
-    /// OAuth on a plain-http non-loopback endpoint would put the minted
-    /// bearer token into an unencrypted Authorization header, so the
-    /// combination is rejected at build time; loopback http endpoints
-    /// keep working, and the rejection never echoes the full URL.
+    /// A remote plain-http endpoint cannot even build a transport: the
+    /// streamable-http exchange is stateful (the server may issue a
+    /// session handle that rides every later request) and prompts flow
+    /// through the same connection, so traffic and session handles would
+    /// travel in cleartext. Loopback and https endpoints build; the
+    /// rejection renders the URL host-only.
     #[test]
-    fn oauth_rejects_plain_http_non_loopback_endpoint() {
-        let oauth = OAuthClientCredentials {
-            token_url: "https://auth.example.com/token".to_owned(),
-            client_id: "wave".to_owned(),
-            // nosemgrep: codacy.yaml.security.hard-coded-tokens
-            client_secret: "s3cret".to_owned(),
-            scope: None,
-        };
+    fn remote_plain_http_endpoints_are_rejected_at_build() {
         let config = HttpMcpConfig {
-            endpoint: "http://mcp.example.com/mcp".to_owned(),
+            endpoint: "http://user:pass@mcp.example.com/mcp?token=q-secret".to_owned(),
             headers: HashMap::new(),
-            oauth: Some(oauth.clone()),
+            oauth: None,
         };
         let error = match HttpMcp::new(config) {
             Err(error) => error.to_string(),
-            Ok(_) => panic!("oauth over a plain-http endpoint must be rejected"),
+            Ok(_) => panic!("a remote plain-http endpoint must be rejected"),
         };
         assert!(
-            error.contains("https or loopback endpoint"),
+            error.contains("must use https or the loopback interface"),
             "unexpected rejection reason: {error}"
         );
-        // The rejection names the host only, not the credential-bearing
-        // path or query of a hostile endpoint URL.
-        assert!(
-            !error.contains("example.com/mcp"),
-            "rejection must not echo the endpoint path: {error}"
-        );
-        let loopback = HttpMcpConfig {
-            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
-            headers: HashMap::new(),
-            oauth: Some(oauth),
-        };
-        assert!(
-            HttpMcp::new(loopback).is_ok(),
-            "oauth over a loopback http endpoint stays allowed"
-        );
-    }
-
-    /// A credential header rides every request, so a remote plain-http
-    /// endpoint with one is rejected at build time while the same header
-    /// on a loopback endpoint stays allowed; non-credential metadata
-    /// headers are never restricted.
-    #[test]
-    fn static_authorization_rejects_remote_plain_http() {
-        let headers = |name: &str| HashMap::from([(name.to_owned(), "pre-provisioned".to_owned())]);
-        for name in ["Authorization", "Cookie", "X-API-Key", "Api-Token"] {
-            let config = HttpMcpConfig {
-                endpoint: "http://mcp.example.com/mcp".to_owned(),
-                headers: headers(name),
-                oauth: None,
-            };
-            let error = match HttpMcp::new(config) {
-                Err(error) => error.to_string(),
-                Ok(_) => panic!("{name} over plain http must be rejected"),
-            };
-            assert!(
-                error.contains("credential header"),
-                "{name}: unexpected rejection reason: {error}"
-            );
+        // The rejection names the host only: no userinfo, query, or path
+        // from a hostile endpoint URL.
+        for leak in ["user:pass", "q-secret", "example.com/mcp"] {
+            assert!(!error.contains(leak), "rejection echoed {leak:?}: {error}");
         }
         let loopback = HttpMcpConfig {
             endpoint: "http://127.0.0.1:1/mcp".to_owned(),
-            headers: headers("Authorization"),
+            headers: HashMap::new(),
             oauth: None,
         };
         assert!(
             HttpMcp::new(loopback).is_ok(),
-            "a credential header on a loopback endpoint stays allowed"
+            "a loopback http endpoint stays allowed"
         );
-        let metadata = HttpMcpConfig {
-            endpoint: "http://mcp.example.com/mcp".to_owned(),
-            headers: headers("X-Custom"),
+        let https = HttpMcpConfig {
+            endpoint: "https://mcp.example.com/mcp".to_owned(),
+            headers: HashMap::new(),
             oauth: None,
         };
         assert!(
-            HttpMcp::new(metadata).is_ok(),
-            "a non-credential header needs no https"
+            HttpMcp::new(https).is_ok(),
+            "an https endpoint stays allowed"
         );
     }
 
-    /// URL userinfo is credentials: a username embedded in a remote
-    /// plain-http endpoint URL is rejected, while the same userinfo on
-    /// https stays allowed.
+    /// URL userinfo is credentials: it is covered by the same endpoint
+    /// policy, and the same userinfo on https stays allowed.
     #[test]
     fn endpoint_userinfo_rejects_remote_plain_http() {
         let config = HttpMcpConfig {
@@ -1706,7 +1628,7 @@ mod tests {
             Ok(_) => panic!("userinfo over plain http must be rejected"),
         };
         assert!(
-            error.contains("userinfo requires an https or loopback endpoint"),
+            error.contains("must use https or the loopback interface"),
             "unexpected rejection reason: {error}"
         );
         // The rejection renders host-only and never echoes the password.
@@ -1725,14 +1647,12 @@ mod tests {
         );
     }
 
-    /// A server-issued session id is a bearer handle: over a remote
-    /// plain-http endpoint it would travel in cleartext on every later
-    /// request, so stateful sessions there are refused instead. Loopback
-    /// endpoints keep accepting one, and nothing is stored on refusal.
+    /// A stored session id is stored verbatim so later requests hit the
+    /// right session, and an empty header value is ignored.
     #[test]
-    fn remote_plain_http_session_ids_are_refused() {
+    fn loopback_session_id_is_stored_verbatim() {
         let transport = HttpMcp::new(HttpMcpConfig {
-            endpoint: "http://mcp.example.com/mcp".to_owned(),
+            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
             headers: HashMap::new(),
             oauth: None,
         })
@@ -1742,43 +1662,37 @@ mod tests {
             reqwest::header::HeaderName::from_static("mcp-session-id"),
             reqwest::header::HeaderValue::from_static("sess-1"),
         );
-        let error = transport.store_session_id(&headers).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("stateful MCP sessions require https"),
-            "unexpected error: {error}"
+        transport.store_session_id(&headers);
+        assert_eq!(
+            transport.session_id.lock().unwrap().as_deref(),
+            Some("sess-1"),
+            "the session id is stored exactly as issued"
         );
-        assert!(
-            transport.session_id.lock().unwrap().is_none(),
-            "a refused session id must not be stored"
+        headers.insert(
+            reqwest::header::HeaderName::from_static("mcp-session-id"),
+            reqwest::header::HeaderValue::from_static(""),
         );
-        let loopback = HttpMcp::new(HttpMcpConfig {
-            endpoint: "http://127.0.0.1:1/mcp".to_owned(),
-            headers: HashMap::new(),
-            oauth: None,
-        })
-        .unwrap();
-        loopback.store_session_id(&headers).unwrap();
-        assert!(
-            loopback.session_id.lock().unwrap().is_some(),
-            "a loopback session id is stored for later requests"
+        transport.store_session_id(&headers);
+        assert_eq!(
+            transport.session_id.lock().unwrap().as_deref(),
+            Some("sess-1"),
+            "an empty session id never replaces a stored one"
         );
     }
 
-    /// The public OAuth endpoint validator enforces its documented policy:
+    /// The public endpoint validator enforces its documented policy:
     /// https or loopback http only, never other schemes.
     #[test]
-    fn validate_oauth_endpoint_rejects_non_http_schemes() {
-        assert!(validate_oauth_endpoint("https://mcp.example.com/mcp").is_ok());
-        assert!(validate_oauth_endpoint("http://127.0.0.1:1/mcp").is_ok());
+    fn validate_mcp_endpoint_rejects_non_http_schemes() {
+        assert!(validate_mcp_endpoint("https://mcp.example.com/mcp").is_ok());
+        assert!(validate_mcp_endpoint("http://127.0.0.1:1/mcp").is_ok());
         for bad in [
             "ftp://mcp.example.com/mcp",
             "wss://mcp.example.com/mcp",
             "http://mcp.example.com/mcp",
         ] {
             assert!(
-                validate_oauth_endpoint(bad).is_err(),
+                validate_mcp_endpoint(bad).is_err(),
                 "{bad:?} must be rejected for oauth"
             );
         }

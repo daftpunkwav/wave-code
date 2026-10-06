@@ -414,7 +414,11 @@ impl McpServerConfig {
                 }
                 format!("stdio: {line}")
             }
-            Self::Http { url, .. } => format!("http: {url}"),
+            Self::Http { url, .. } => {
+                // The configured url may embed userinfo or a sensitive
+                // query; status output carries the host only.
+                format!("http: {}", transport_mcp::http::redacted_endpoint(url))
+            }
         }
     }
 }
@@ -499,7 +503,8 @@ mod tests {
             oauth_scope: None,
         };
         assert_eq!(http.transport_kind(), "http");
-        assert_eq!(http.summary(), "http: https://mcp.example.com/sse");
+        // Status output carries the host only (no path, userinfo, or query).
+        assert_eq!(http.summary(), "http: https://mcp.example.com");
         assert!(!http.summary().contains("Bearer"));
     }
 

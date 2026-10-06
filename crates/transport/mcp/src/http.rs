@@ -180,6 +180,15 @@ fn redacted_url(url: &reqwest::Url) -> String {
     }
 }
 
+/// Host-only rendering of an endpoint URL for terminals and status
+/// output: userinfo, path, query, and fragment never survive, and an
+/// unparseable URL renders as a placeholder instead of being echoed.
+pub fn redacted_endpoint(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|parsed| redacted_url(&parsed))
+        .unwrap_or_else(|_| "<endpoint>".to_owned())
+}
+
 /// Check an OAuth token endpoint: the client secret travels in the request
 /// body, so a plain-http endpoint is only acceptable on the loopback
 /// interface (local stubs); anywhere else it would cross the network in
@@ -310,9 +319,10 @@ impl HttpMcp {
         self
     }
 
-    /// Endpoint this transport posts to, for diagnostics.
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
+    /// Endpoint this transport posts to, for diagnostics (host-only:
+    /// the configured URL may embed userinfo or a sensitive query).
+    pub fn endpoint(&self) -> String {
+        redacted_endpoint(&self.endpoint)
     }
 
     /// Send a JSON-RPC request and unwrap the `result` (or raise the `error`).
@@ -474,17 +484,16 @@ impl HttpMcp {
         }
     }
 
-    /// Host-only rendering of the endpoint for error text: the URL may
-    /// embed userinfo or a sensitive query that must not be echoed.
+    /// Host-only rendering of the endpoint for error text.
     fn redacted_endpoint(&self) -> String {
-        reqwest::Url::parse(&self.endpoint)
-            .map(|url| redacted_url(&url))
-            .unwrap_or_else(|_| "<endpoint>".to_owned())
+        redacted_endpoint(&self.endpoint)
     }
 
     /// Build the error for a 401 response: interactive challenges become a
     /// protocol error that names the unsupported flow, anything else is an
     /// HTTP error that points at the auth configuration.
+    /// HTTP error that points at the auth configuration. The challenge text
+    /// is server-controlled and is never echoed into the message.
     fn unauthorized_error(&self, headers: &reqwest::header::HeaderMap) -> TransportError {
         let challenge = headers
             .get(reqwest::header::WWW_AUTHENTICATE)
@@ -496,12 +505,12 @@ impl HttpMcp {
                 "MCP server requires interactive OAuth authorization (browser/PKCE flow), \
                  which is not supported: configure static request `headers` (e.g. `Authorization`) \
                  or OAuth client-credentials (`oauth_token_url` + `oauth_client_id`/`oauth_client_secret`) \
-                 instead. endpoint={} challenge={challenge:?}",
+                 instead. endpoint={}",
                 self.redacted_endpoint(),
             ))
         } else {
             TransportError::Http(format!(
-                "MCP HTTP request unauthorized (401) for endpoint {} challenge={challenge:?}: \
+                "MCP HTTP request unauthorized (401) for endpoint {}: \
                  check static `headers` or the OAuth client-credentials configuration",
                 self.redacted_endpoint(),
             ))

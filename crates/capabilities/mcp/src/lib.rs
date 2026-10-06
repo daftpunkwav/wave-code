@@ -343,10 +343,12 @@ impl McpServerConfig {
 
     /// Validate the server endpoint configuration: stdio requires a
     /// non-empty `command`; http requires a non-empty `url` starting with
-    /// `http://` or `https://`, and an OAuth block whose token endpoint
-    /// satisfies the transport's https/loopback policy. Returns `Err`
-    /// with the reason so the assembly layer can surface it as a
-    /// configuration error.
+    /// `http://` or `https://` that is itself https or loopback (the
+    /// streamable-http exchange is stateful, so remote plain-http
+    /// endpoints are rejected), and an OAuth block whose token endpoint
+    /// satisfies the same https/loopback policy. Returns `Err` with the
+    /// reason so the assembly layer can surface it as a configuration
+    /// error.
     pub fn validate(&self) -> Result<(), String> {
         match self {
             Self::Stdio { command, .. } => {

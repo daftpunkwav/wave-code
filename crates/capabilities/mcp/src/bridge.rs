@@ -1433,6 +1433,9 @@ async fn connect_one(
         Ok(config) => config,
         Err(reason) => return (format!("{name} — skipped ({reason})"), Some(reason)),
     };
+    // Status output carries the host only (no userinfo/query in the url,
+    // no env values in the command line).
+    let summary = config.summary();
     match config {
         crate::McpServerConfig::Http {
             url,
@@ -1453,7 +1456,6 @@ async fn connect_one(
                 }
                 _ => None,
             };
-            let summary = format!("http: {url}");
             connect_within_budget(
                 connect_http(name, &url, headers, oauth, registry),
                 name,
@@ -1462,12 +1464,6 @@ async fn connect_one(
             .await
         }
         crate::McpServerConfig::Stdio { command, args, env } => {
-            let summary = crate::McpServerConfig::Stdio {
-                command: command.clone(),
-                args: args.clone(),
-                env: HashMap::new(),
-            }
-            .summary();
             connect_within_budget(
                 connect_stdio(name, &command, args, &env, registry),
                 name,

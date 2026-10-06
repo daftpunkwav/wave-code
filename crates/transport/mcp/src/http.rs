@@ -319,9 +319,16 @@ impl HttpMcp {
         self
     }
 
-    /// Endpoint this transport posts to, for diagnostics (host-only:
-    /// the configured URL may embed userinfo or a sensitive query).
-    pub fn endpoint(&self) -> String {
+    /// Endpoint this transport posts to, as configured. Callers that
+    /// print it should prefer [`HttpMcp::redacted_endpoint`]: the
+    /// configured URL may embed userinfo or a sensitive query.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Host-only rendering of the endpoint for terminals and status
+    /// output.
+    pub fn redacted_endpoint(&self) -> String {
         redacted_endpoint(&self.endpoint)
     }
 
@@ -482,11 +489,6 @@ impl HttpMcp {
         if let Some(session) = session {
             *self.session_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(session.to_owned());
         }
-    }
-
-    /// Host-only rendering of the endpoint for error text.
-    fn redacted_endpoint(&self) -> String {
-        redacted_endpoint(&self.endpoint)
     }
 
     /// Build the error for a 401 response: interactive challenges become a
@@ -661,12 +663,6 @@ fn form_encode(input: &str) -> String {
     out
 }
 
-/// Truncate a body preview for error messages (bodies may be large HTML).
-fn preview(bytes: &[u8]) -> String {
-    const MAX: usize = 200;
-    String::from_utf8_lossy(&bytes[..bytes.len().min(MAX)]).into_owned()
-}
-
 /// Read one response body into memory with a hard byte cap.
 ///
 /// Streams chunk by chunk so the process never holds more than `cap`
@@ -727,8 +723,8 @@ fn parse_response_body_for_request(
     match parse_sse_stream_for_request(text, expected_id) {
         Some(value) => Ok(Some(value)),
         None => Err(TransportError::Protocol(format!(
-            "MCP response is neither a JSON-RPC object nor an SSE stream: {:?}",
-            preview(body),
+            "MCP response is neither a JSON-RPC object nor an SSE stream ({} bytes)",
+            body.len(),
         ))),
     }
 }

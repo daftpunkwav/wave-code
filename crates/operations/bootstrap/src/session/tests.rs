@@ -503,8 +503,7 @@ async fn catalog_provider_override_resolves_after_merge() {
     .unwrap();
     assert_eq!(
         handle.provider_id, "catalog:catprov",
-        "the catalog provider resolves, no fallback warning: {:?}",
-        handle.warnings
+        "the catalog provider resolves to catalog:catprov without fallback"
     );
     assert_eq!(handle.model_name, "cat-model");
     handle

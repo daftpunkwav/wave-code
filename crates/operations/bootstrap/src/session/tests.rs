@@ -459,6 +459,111 @@ async fn stale_provider_override_falls_back_and_reports_configured_provider() {
         .unwrap();
 }
 
+/// The model catalog merges into the assembly config: a saved default
+/// model on a `catalog:` provider (the `/model` picker's saved default)
+/// resolves through the synthesized provider instead of falling back
+/// with a warning — the regression behind the startup crash when the
+/// configured provider was itself unusable.
+#[tokio::test]
+async fn catalog_provider_override_resolves_after_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, CONFIG).unwrap();
+    let mut catalog = wavecode_config::ModelCatalog::default();
+    catalog.insert(
+        "Alias",
+        wavecode_config::ModelSpec {
+            provider: "catprov".into(),
+            model: "cat-model".into(),
+            kind: wavecode_config::ApiKind::OpenaiChat,
+            base_url: "https://cat.example.com/v1".into(),
+            api_key_env: None,
+            api_key: Some("k-cat".into()),
+            context_window: Some(200_000),
+            max_output: Some(8192),
+            reasoning: wavecode_config::ReasoningSpec::default(),
+            modalities: wavecode_config::ModalitiesSpec::default(),
+        },
+    );
+    catalog.save(dir.path()).unwrap();
+    let handle = assemble_session(AssembleOptions {
+        config_path: Some(path),
+        model_override: Some("cat-model".to_string()),
+        provider_override: Some("catalog:catprov".to_string()),
+        permission_override: None,
+        thinking_override: None,
+        wave_denylist: None,
+        cwd: dir.path().to_path_buf(),
+        home: Some(dir.path().to_path_buf()),
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: true,
+        initial_history: Vec::new(),
+        session_id: None,
+    })
+    .unwrap();
+    assert_eq!(
+        handle.provider_id, "catalog:catprov",
+        "the catalog provider resolves, no fallback warning: {:?}",
+        handle.warnings
+    );
+    assert_eq!(handle.model_name, "cat-model");
+    handle
+        .client
+        .submit(Submission {
+            id: "s-end".to_string(),
+            op: Op::Shutdown,
+        })
+        .await
+        .unwrap();
+}
+
+/// A malformed catalog degrades to an empty one with a warning instead
+/// of failing assembly: config.toml models keep the session usable.
+#[tokio::test]
+async fn malformed_catalog_warns_and_assembly_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, CONFIG).unwrap();
+    std::fs::create_dir_all(dir.path().join(".wavecode")).unwrap();
+    std::fs::write(
+        dir.path().join(".wavecode").join("models.json"),
+        "{ not json",
+    )
+    .unwrap();
+    let handle = assemble_session(AssembleOptions {
+        config_path: Some(path),
+        model_override: None,
+        provider_override: None,
+        permission_override: None,
+        thinking_override: None,
+        wave_denylist: None,
+        cwd: dir.path().to_path_buf(),
+        home: Some(dir.path().to_path_buf()),
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: true,
+        initial_history: Vec::new(),
+        session_id: None,
+    })
+    .unwrap();
+    assert_eq!(handle.provider_id, "p1");
+    assert!(
+        handle
+            .warnings
+            .iter()
+            .any(|w| w.contains("model catalog ignored")),
+        "the broken catalog warns: {:?}",
+        handle.warnings
+    );
+    handle
+        .client
+        .submit(Submission {
+            id: "s-end".to_string(),
+            op: Op::Shutdown,
+        })
+        .await
+        .unwrap();
+}
+
 /// A fallback that cannot resolve (unknown name, missing key) is
 /// skipped with one warning each while the session still assembles:
 /// a broken fallback entry must never brick startup, the surviving

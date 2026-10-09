@@ -192,7 +192,7 @@ fn model_picker_enter_persists_default_and_cross_provider_skips_live_switch() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        joined.contains("restart to apply"),
+        joined.contains("restart to switch"),
         "cross-provider default explains the restart: {joined}"
     );
 }
@@ -231,7 +231,9 @@ fn cross_provider_session_only_switch_is_rejected_with_guidance() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        joined.contains("use Enter to save"),
+        // The status line wraps at the frame width, so only match a
+        // fragment short enough to survive the fold.
+        joined.replace('\n', " ").contains("save it as the default"),
         "guidance points at saving a default: {joined}"
     );
 }

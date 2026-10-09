@@ -398,10 +398,24 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let wave_denylist = resolve_denylist(wave_denylist, home.as_deref());
 
     // 1. Configuration and provider resolution (hard failure surface).
-    let config = match config_path {
+    let mut config = match config_path {
         Some(path) => wavecode_config::Config::load_from(&path)?,
         None => wavecode_config::Config::load()?,
     };
+    // The model catalog (`~/.wavecode/models.json`) merges on top: its
+    // models become `[models]` entries and synthesized `catalog:<provider>`
+    // providers. Without this a saved default model on a catalog-only
+    // provider resolves against a config that has never heard of it —
+    // the override falls back with a warning and, when the configured
+    // provider is itself unusable, assembly aborts outright. Load
+    // failures degrade to an empty catalog with a warning; config.toml
+    // models keep the session usable.
+    if let Some(home_root) = home.as_deref() {
+        match wavecode_config::ModelCatalog::load(home_root) {
+            Ok(catalog) => catalog.merge_into(&mut config),
+            Err(e) => warnings.push(format!("model catalog ignored: {e}")),
+        }
+    }
     // A provider override (saved default model on another provider)
     // degrades to the configured provider with a warning when unknown,
     // matching the permission-mode fallback style: a stale saved default

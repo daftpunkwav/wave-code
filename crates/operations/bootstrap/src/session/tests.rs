@@ -550,8 +550,8 @@ async fn malformed_catalog_warns_and_assembly_continues() {
             .warnings
             .iter()
             .any(|w| w.contains("model catalog ignored")),
-        "the broken catalog warns: {:?}",
-        handle.warnings
+        "the broken catalog warning was not emitted (warnings_count={})",
+        handle.warnings.len()
     );
     handle
         .client

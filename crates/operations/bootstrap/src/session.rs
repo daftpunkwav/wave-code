@@ -397,6 +397,68 @@ fn merge_model_catalog(
     }
 }
 
+/// Build the primary model client plus its ordered fallback chain, each
+/// wrapped in in-layer transient-failure retries.
+///
+/// The primary and every fallback share one constructor; each fallback
+/// resolves its own provider entry and key, so credentials never cross
+/// providers. Unresolvable fallbacks (unknown name, missing key, client
+/// init failure) warn and skip instead of failing the session. The
+/// primary has nothing to degrade to — a client that cannot even build
+/// (TLS init) aborts assembly, matching the hard-failure convention.
+/// Retries live in this layer (backoff + deadline + auth fail-fast);
+/// cross-provider failover stays in `FallbackModel`, so the two never
+/// amplify each other. Without the retry wrap a single 5xx/429 at
+/// request establishment fails the whole turn.
+fn build_model_chain(
+    config: &wavecode_config::Config,
+    provider: &wavecode_config::ProviderConfig,
+    api_key: String,
+    model_name: &str,
+    thinking_override: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> Result<Arc<dyn wavecode_llm::ChatModel>, SessionError> {
+    let primary: Arc<dyn wavecode_llm::ChatModel> =
+        crate::model_adapter::build_chat_model(provider, api_key, model_name, thinking_override)
+            .map_err(SessionError::Model)?;
+    let mut chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = vec![primary];
+    for name in &provider.fallback_providers {
+        match config.resolve_named_provider(name) {
+            Ok((fallback_provider, fallback_key)) => {
+                match crate::model_adapter::build_chat_model(
+                    fallback_provider,
+                    fallback_key,
+                    model_name,
+                    thinking_override,
+                ) {
+                    Ok(model) => chain.push(model),
+                    Err(error) => {
+                        warnings.push(format!("skipping fallback provider {name:?}: {error}"))
+                    }
+                }
+            }
+            Err(error) => warnings.push(format!("skipping fallback provider {name:?}: {error}")),
+        }
+    }
+    let chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = chain
+        .into_iter()
+        .map(|model| {
+            Arc::new(wavecode_llm::retry::RetryingModel::new(
+                model,
+                wavecode_llm::retry::RetryPolicy::default(),
+            )) as Arc<dyn wavecode_llm::ChatModel>
+        })
+        .collect();
+    Ok(if chain.len() > 1 {
+        Arc::new(crate::model_adapter::FallbackModel::new(chain))
+    } else {
+        chain
+            .into_iter()
+            .next()
+            .expect("primary model always present")
+    })
+}
+
 /// Assemble a live session: config to client handle.
 ///
 /// Must be called inside a tokio runtime (the actor task spawns here).
@@ -468,59 +530,14 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         None
     };
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
-    // Primary plus ordered fallbacks share one constructor; each fallback
-    // resolves its own provider entry and key, so credentials never cross
-    // providers. Unresolvable fallbacks (unknown name, missing key, client
-    // init failure) warn and skip instead of failing the session. The
-    // primary has nothing to degrade to — a client that cannot even build
-    // (TLS init) aborts assembly, matching the hard-failure convention.
-    let primary: Arc<dyn wavecode_llm::ChatModel> = crate::model_adapter::build_chat_model(
+    let model = build_model_chain(
+        &config,
         provider,
         api_key,
         &model_name,
         thinking_override.as_deref(),
-    )
-    .map_err(SessionError::Model)?;
-    let mut chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = vec![primary];
-    for name in &provider.fallback_providers {
-        match config.resolve_named_provider(name) {
-            Ok((fallback_provider, fallback_key)) => {
-                match crate::model_adapter::build_chat_model(
-                    fallback_provider,
-                    fallback_key,
-                    &model_name,
-                    thinking_override.as_deref(),
-                ) {
-                    Ok(model) => chain.push(model),
-                    Err(error) => {
-                        warnings.push(format!("skipping fallback provider {name:?}: {error}"))
-                    }
-                }
-            }
-            Err(error) => warnings.push(format!("skipping fallback provider {name:?}: {error}")),
-        }
-    }
-    // In-layer transient-failure retries (backoff + deadline + auth
-    // fail-fast); cross-provider failover stays in FallbackModel, so the
-    // two never amplify each other. Without this a single 5xx/429 at
-    // request establishment fails the whole turn.
-    let chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = chain
-        .into_iter()
-        .map(|model| {
-            Arc::new(wavecode_llm::retry::RetryingModel::new(
-                model,
-                wavecode_llm::retry::RetryPolicy::default(),
-            )) as Arc<dyn wavecode_llm::ChatModel>
-        })
-        .collect();
-    let model: Arc<dyn wavecode_llm::ChatModel> = if chain.len() > 1 {
-        Arc::new(crate::model_adapter::FallbackModel::new(chain))
-    } else {
-        chain
-            .into_iter()
-            .next()
-            .expect("primary model always present")
-    };
+        &mut warnings,
+    )?;
     let deny_env = provider
         .env_key
         .as_deref()

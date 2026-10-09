@@ -666,7 +666,7 @@ impl ConsoleUi {
                 // session-only would persist nothing; point at the
                 // caller's persist path.
                 self.push_status(
-                    &format!("switching provider needs a restart — {restart_hint}"),
+                    &format!("{label} is on a different provider ({provider}); {restart_hint}, then restart"),
                     true,
                 );
             }
@@ -682,7 +682,13 @@ impl ConsoleUi {
         let scope = if same_provider {
             format!("{label} as default")
         } else {
-            format!("{label} ({provider}) as default; restart to apply")
+            // Say what actually happens: the current session keeps
+            // sampling through the old model until the restart.
+            format!(
+                "{label} ({provider}) as default — this session keeps {current}; \
+                 restart to switch",
+                current = self.state.model_name
+            )
         };
         self.push_status(&format!("saved {scope}"), false);
     }

@@ -349,7 +349,7 @@ impl ModelWizardDialog {
     fn step_title(&self) -> &'static str {
         match self.step {
             WizardStep::ProviderName => "Provider name",
-            WizardStep::ApiKind => "API format (←/→ to cycle)",
+            WizardStep::ApiKind => "API format",
             WizardStep::BaseUrl => "Base URL",
             WizardStep::ApiKey => "API key (env:NAME stores the variable name, blank skips)",
             WizardStep::ModelId => "Model name (the wire id)",
@@ -529,12 +529,12 @@ impl ModelWizardDialog {
                 }
                 self.error = None;
             }
-            Key::Left | Key::Right if self.step == WizardStep::ApiKind => {
-                let step = if event.key == Key::Right {
-                    1
-                } else {
-                    API_KINDS.len() - 1
-                };
+            Key::Left | Key::Right | Key::Up | Key::Down if self.step == WizardStep::ApiKind => {
+                // The vertical list answers ↑/↓ with wrap-around (the
+                // ←/→ shortcut semantics); the pick lists below stop at
+                // the ends instead — a 3-item cycle has no dead ends.
+                let down = matches!(event.key, Key::Right | Key::Down);
+                let step = if down { 1 } else { API_KINDS.len() - 1 };
                 self.api = (self.api + step) % API_KINDS.len();
             }
             Key::Char(c) if !event.mods.ctrl && !event.mods.alt => {
@@ -690,6 +690,11 @@ impl ModelWizardDialog {
             _ => "↵ next · backspace back · esc cancel",
         };
         body.push(theme.paint(Token::TextDim, hint));
+        if self.step == WizardStep::ApiKind {
+            // The hint tail is generic; this step adds its wrap-around
+            // shortcut to the list navigation.
+            body.push(theme.paint(Token::TextDim, "←/→ cycle · ↵ pick & next"));
+        }
         border::frame(
             body,
             columns,

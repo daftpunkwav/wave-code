@@ -472,8 +472,9 @@ fn wizard_validates_before_saving() {
     assert_eq!(dialog.error.as_deref(), Some("model name is required"));
 }
 
-/// Left and right cycle the API dialect; a provider preset seeds
-/// the first four steps.
+/// Left and right cycle the API dialect, and the vertical list answers
+/// ↑/↓ like every other step; a provider preset seeds the first four
+/// steps.
 #[test]
 fn wizard_cycles_api_and_accepts_presets() {
     theme::set(theme::Theme::dark());
@@ -483,6 +484,12 @@ fn wizard_cycles_api_and_accepts_presets() {
     assert_eq!(dialog.api, 1);
     dialog.handle_key(KeyEvent::plain(Key::Left));
     dialog.handle_key(KeyEvent::plain(Key::Left));
+    assert_eq!(dialog.api, 2);
+    // The up/down arrows move the same cursor: the step renders a
+    // vertical list, so arrows are first-class navigation there.
+    dialog.handle_key(KeyEvent::plain(Key::Up));
+    assert_eq!(dialog.api, 1);
+    dialog.handle_key(KeyEvent::plain(Key::Down));
     assert_eq!(dialog.api, 2);
 
     let preset = crate::ui::ProviderPreset {

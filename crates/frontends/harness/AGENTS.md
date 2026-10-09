@@ -14,8 +14,9 @@ The command map lives in [README.md](README.md).
   missing, the directory cannot be created, or
   `RollingFileAppender` fails to build. `init` then installs the
   subscriber on stderr. Do not write tracing logs to stdout.
-- A `ModelCatalog` load failure is printed to stderr and the session
-  continues on `config.toml`.
+- The picker-derivation catalog load (`load_config_opt`) stays
+  silent: a broken `ModelCatalog` is reported through assembly's
+  warning, and the session continues on `config.toml`.
 - Headless `exec` denies parked approvals unless `--approvals` is
   set.
 - `--plan` starts plan mode. `-y` / `--yolo` starts auto mode. Each

@@ -18,7 +18,10 @@ The adapter map lives in [README.md](README.md).
 
 - Missing config, provider, or credentials fail assembly.
 - Memory, skills, hooks, and the skill catalog warn and continue
-  when they degrade. `ModelCatalog` is not loaded here.
+  when they degrade.
+- `assemble_session` loads `ModelCatalog` from the supplied home,
+  when present, and merges it into config before provider resolution.
+  Catalog load failures warn and continue with the unmerged config.
 - Session-scoped tools are registered in `session.rs` after their
   dependencies exist. Late registration stays visible through an
   already-shared `Arc`.

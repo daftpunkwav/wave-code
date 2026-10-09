@@ -17,8 +17,12 @@ The adapter map lives in [README.md](README.md).
 ## Assembly
 
 - Missing config, provider, or credentials fail assembly.
-- Memory, skills, hooks, and the skill catalog warn and continue
-  when they degrade. `ModelCatalog` is not loaded here.
+- Memory, skills, hooks, and the model catalog warn and continue
+  when they degrade. The catalog (`~/.wavecode/models.json`) merges
+  here, inside `assemble_session`: saved `catalog:<provider>`
+  defaults from `/model` must resolve on every surface, not only on
+  the picker-derivation path. A config.toml provider wins an id
+  collision.
 - Session-scoped tools are registered in `session.rs` after their
   dependencies exist. Late registration stays visible through an
   already-shared `Arc`.

@@ -397,6 +397,17 @@ fn merge_model_catalog(
     }
 }
 
+/// What the model chain samples through: the resolved provider with its
+/// key, the wire model name, and the reasoning-effort override. One
+/// bundle so the chain builder takes a single sampling argument beside
+/// its two side channels (fallback resolution config, warnings).
+struct ModelChainSpec<'a> {
+    provider: &'a wavecode_config::ProviderConfig,
+    api_key: String,
+    model_name: &'a str,
+    thinking_override: Option<&'a str>,
+}
+
 /// Build the primary model client plus its ordered fallback chain, each
 /// wrapped in in-layer transient-failure retries.
 ///
@@ -412,24 +423,25 @@ fn merge_model_catalog(
 /// request establishment fails the whole turn.
 fn build_model_chain(
     config: &wavecode_config::Config,
-    provider: &wavecode_config::ProviderConfig,
-    api_key: String,
-    model_name: &str,
-    thinking_override: Option<&str>,
+    spec: ModelChainSpec<'_>,
     warnings: &mut Vec<String>,
 ) -> Result<Arc<dyn wavecode_llm::ChatModel>, SessionError> {
-    let primary: Arc<dyn wavecode_llm::ChatModel> =
-        crate::model_adapter::build_chat_model(provider, api_key, model_name, thinking_override)
-            .map_err(SessionError::Model)?;
+    let primary: Arc<dyn wavecode_llm::ChatModel> = crate::model_adapter::build_chat_model(
+        spec.provider,
+        spec.api_key,
+        spec.model_name,
+        spec.thinking_override,
+    )
+    .map_err(SessionError::Model)?;
     let mut chain: Vec<Arc<dyn wavecode_llm::ChatModel>> = vec![primary];
-    for name in &provider.fallback_providers {
+    for name in &spec.provider.fallback_providers {
         match config.resolve_named_provider(name) {
             Ok((fallback_provider, fallback_key)) => {
                 match crate::model_adapter::build_chat_model(
                     fallback_provider,
                     fallback_key,
-                    model_name,
-                    thinking_override,
+                    spec.model_name,
+                    spec.thinking_override,
                 ) {
                     Ok(model) => chain.push(model),
                     Err(error) => {
@@ -532,10 +544,12 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
     let model_name = model_override.unwrap_or_else(|| config.model.clone());
     let model = build_model_chain(
         &config,
-        provider,
-        api_key,
-        &model_name,
-        thinking_override.as_deref(),
+        ModelChainSpec {
+            provider,
+            api_key,
+            model_name: &model_name,
+            thinking_override: thinking_override.as_deref(),
+        },
         &mut warnings,
     )?;
     let deny_env = provider

@@ -442,12 +442,13 @@ fn load_config_opt(
     // models become `[models]` entries and synthesized
     // `catalog:<provider>` providers (config.toml providers win on id
     // collisions). Catalog load failures degrade to an empty catalog —
-    // config.toml models keep the session usable.
-    if let Some(home) = wavecode_config::home_dir() {
-        match wavecode_config::ModelCatalog::load(&home) {
-            Ok(catalog) => catalog.merge_into(&mut config),
-            Err(e) => eprintln!("model catalog ignored: {e}"),
-        }
+    // config.toml models keep the session usable. Assembly warns about
+    // the same file again on its own load; this copy only serves the
+    // picker derivation below, so it stays silent.
+    if let Some(home) = wavecode_config::home_dir()
+        && let Ok(catalog) = wavecode_config::ModelCatalog::load(&home)
+    {
+        catalog.merge_into(&mut config);
     }
     Ok(config)
 }

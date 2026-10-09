@@ -231,9 +231,10 @@ fn cross_provider_session_only_switch_is_rejected_with_guidance() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        // The status line wraps at the frame width, so only match a
-        // fragment short enough to survive the fold.
-        joined.replace('\n', " ").contains("save it as the default"),
+        // The status line wraps mid-word at the frame width, so the
+        // fold inserts a break inside any long phrase; match the
+        // short head that stays on the first line.
+        joined.contains("is on a different provider"),
         "guidance points at saving a default: {joined}"
     );
 }

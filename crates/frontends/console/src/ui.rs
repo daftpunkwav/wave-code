@@ -666,10 +666,7 @@ impl ConsoleUi {
                 // session-only would persist nothing; point at the
                 // caller's persist path.
                 self.push_status(
-                    &format!(
-                        "{label} is on {provider}, a different provider: save it as the \
-                         default ({restart_hint}), then restart"
-                    ),
+                    &format!("{label} is on a different provider ({provider}); {restart_hint}, then restart"),
                     true,
                 );
             }

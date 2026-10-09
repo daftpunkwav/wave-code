@@ -530,8 +530,9 @@ impl ModelWizardDialog {
                 self.error = None;
             }
             Key::Left | Key::Right | Key::Up | Key::Down if self.step == WizardStep::ApiKind => {
-                // The vertical list also answers ↑/↓ like every other
-                // step; ←/→ keep working as the wrap-around shortcut.
+                // The vertical list answers ↑/↓ with wrap-around (the
+                // ←/→ shortcut semantics); the pick lists below stop at
+                // the ends instead — a 3-item cycle has no dead ends.
                 let down = matches!(event.key, Key::Right | Key::Down);
                 let step = if down { 1 } else { API_KINDS.len() - 1 };
                 self.api = (self.api + step) % API_KINDS.len();

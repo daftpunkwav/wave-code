@@ -374,6 +374,29 @@ fn bash_scope(entry: &str) -> String {
     }
 }
 
+/// Merge the model catalog (`~/.wavecode/models.json`) into the
+/// assembly config: its models become `[models]` entries and
+/// synthesized `catalog:<provider>` providers. Without this a saved
+/// default model on a catalog-only provider resolves against a config
+/// that has never heard of it — the override falls back with a
+/// warning and, when the configured provider is itself unusable,
+/// assembly aborts outright. Load failures degrade to an empty catalog
+/// with a warning; config.toml models keep the session usable. No
+/// home means no catalog file to find.
+fn merge_model_catalog(
+    config: &mut wavecode_config::Config,
+    home: Option<&Path>,
+    warnings: &mut Vec<String>,
+) {
+    let Some(home_root) = home else {
+        return;
+    };
+    match wavecode_config::ModelCatalog::load(home_root) {
+        Ok(catalog) => catalog.merge_into(config),
+        Err(e) => warnings.push(format!("model catalog ignored: {e}")),
+    }
+}
+
 /// Assemble a live session: config to client handle.
 ///
 /// Must be called inside a tokio runtime (the actor task spawns here).
@@ -402,20 +425,7 @@ pub fn assemble_session(options: AssembleOptions) -> Result<SessionHandle, Sessi
         Some(path) => wavecode_config::Config::load_from(&path)?,
         None => wavecode_config::Config::load()?,
     };
-    // The model catalog (`~/.wavecode/models.json`) merges on top: its
-    // models become `[models]` entries and synthesized `catalog:<provider>`
-    // providers. Without this a saved default model on a catalog-only
-    // provider resolves against a config that has never heard of it —
-    // the override falls back with a warning and, when the configured
-    // provider is itself unusable, assembly aborts outright. Load
-    // failures degrade to an empty catalog with a warning; config.toml
-    // models keep the session usable.
-    if let Some(home_root) = home.as_deref() {
-        match wavecode_config::ModelCatalog::load(home_root) {
-            Ok(catalog) => catalog.merge_into(&mut config),
-            Err(e) => warnings.push(format!("model catalog ignored: {e}")),
-        }
-    }
+    merge_model_catalog(&mut config, home.as_deref(), &mut warnings);
     // A provider override (saved default model on another provider)
     // degrades to the configured provider with a warning when unknown,
     // matching the permission-mode fallback style: a stale saved default

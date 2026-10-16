@@ -11,10 +11,10 @@ license.workspace = true
 action-tasks = { path = "../../action/tasks" }
 serde.workspace = true
 serde_json.workspace = true
-# Frontmatter is YAML (SPEC section 8.1), so use serde_yaml instead of a
+# Frontmatter is YAML (SPEC section 8.1), so use serde-saphyr instead of a
 # hand-rolled parser; the version is unified at the workspace root
 # (SPEC section 3 discipline).
-serde_yaml.workspace = true
+serde-saphyr.workspace = true
 thiserror.workspace = true
 # plugin.toml manifests (plugin packs); version unified at the workspace root.
 toml.workspace = true

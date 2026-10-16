@@ -6,8 +6,11 @@
 version = 2
 yanked = "deny"
 # No safe upgrades exist; both are tracked leftovers, not forgotten:
-# - yaml-rust (RUSTSEC-2024-0320) rides syntect's parser; serde_yaml's
-#   archive is the same family. Move when a syntect release drops it.
+# - yaml-rust (RUSTSEC-2024-0320) rides syntect's parser. Move when a
+#   syntect release drops it. It is not the parser serde_yaml used: that
+#   chain went through unsafe-libyaml (RUSTSEC-2024-0449), which is why
+#   frontmatter parsing moved to serde-saphyr rather than relying on an
+#   ignore here.
 # - bincode (RUSTSEC-2025-0141) is a transitive guest, not our format.
 ignore = [
   "RUSTSEC-2024-0320",

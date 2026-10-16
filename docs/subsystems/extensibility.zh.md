@@ -8,7 +8,7 @@
 
 技能是 `<root>/skills/<name>/SKILL.md`——YAML frontmatter 加 Markdown 正文。发现按优先级升序遍历根目录——builtin < `~/.wavecode/skills` < `<cwd>/.wavecode/skills`——同名技能被更高优先级的根覆盖（`standard_roots`）；经 MCP 暴露的技能是规定的第四个来源，目前仍只是占位。必填字段是 `description`；可选字段：`when_to_use`、`allowed-tools`、`context: inline | fork`、`user-invocable`、`argument-hint`、`paths`（serde 别名同时接受 kebab-case 与 snake_case）。
 
-Frontmatter 解析使用 `serde_yaml` 而不是手写扫描器——一个刻意的取舍：技能值可能含冒号、列表与多行字符串，极简解析器的边界情况会无声降级。Frontmatter 字段取 frontmatter 表的交集（`description` 必填，其余可选）。
+Frontmatter 解析使用 `serde-saphyr` 而不是手写扫描器——一个刻意的取舍：技能值可能含冒号、列表与多行字符串，极简解析器的边界情况会无声降级。`serde-saphyr` 以安全 Rust 解析同一套语法；`serde_yaml` 走的是 `unsafe-libyaml`——一份 c2rust 移植，其仓库已于 2024 年归档、不再接受上游修复（RUSTSEC-2024-0449）。Frontmatter 字段取 frontmatter 表的交集（`description` 必填，其余可选）。
 
 - **Inline**（默认）：正文展开进当前会话的结果文本，`$ARGUMENTS` 被替换为调用参数。
 - **Fork**：技能经任务服务在专用 subagent 中运行；其 `allowed-tools` 限制子 agent 的工具面（没有工具面的 fork 得到注册表面减去生成子任务的工具，因此任何 fork 都不可能再生成子 agent）。

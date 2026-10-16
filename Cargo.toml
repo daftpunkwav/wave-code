@@ -13,7 +13,11 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+# Frontmatter deserialization only; `serialize` stays off so the YAML
+# emitter dependencies never enter the tree. `serde-saphyr` parses YAML in
+# safe Rust, unlike the archived `serde_yaml` -> `unsafe-libyaml` chain
+# (RUSTSEC-2024-0449).
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 # "full" is deliberate: the workspace-wide union needs process, signal, net,
 # io, fs, time, sync and the multi-threaded runtime, so per-crate trimming
 # collapses to the same feature set once features unify across the build.

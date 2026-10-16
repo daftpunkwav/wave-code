@@ -20,19 +20,23 @@
 //!   in place, forks spawn through the `action-tasks` seam, the
 //!   vocabulary-tier crate below this one).
 //!
-//! **Frontmatter parsing tradeoff**: `serde_yaml` instead of a hand-rolled
+//! **Frontmatter parsing tradeoff**: `serde-saphyr` instead of a hand-rolled
 //! minimal parser — frontmatter is YAML (field values may hold colons, lists,
 //! multi-line strings), and a hand-rolled parser's edge cases (quotes,
-//! indented lists) would silently degrade; serde_yaml is already in the
+//! indented lists) would silently degrade; serde-saphyr is already in the
 //! workspace-root `[workspace.dependencies]` at a unified version (SPEC
 //! discipline).
 //!
-//! **Upstream status caveat**: `serde_yaml` is archived upstream and receives
-//! no further security patches. The risk is accepted for now: there is no open
-//! advisory against it, and frontmatter comes from local `SKILL.md` files
-//! (builtin pack, `~/.wavecode/skills`, `<cwd>/.wavecode/skills`) — the
-//! MCP-sourced prompt input is an unwired placeholder. Revisit the parser
-//! choice before any remote/untrusted content is fed into this path.
+//! **Parser choice**: `serde_yaml` parses through `unsafe-libyaml`, a c2rust
+//! translation of the C library whose repository was archived in 2024 and
+//! carries no fixes upstream (RUSTSEC-2024-0449). `serde-saphyr` parses the
+//! same grammar in safe Rust, so the dependency does not age into an
+//! unpatchable tree.
+//!
+//! Frontmatter comes from local `SKILL.md` files (builtin pack,
+//! `~/.wavecode/skills`, `<cwd>/.wavecode/skills`); the MCP-sourced prompt
+//! input is an unwired placeholder. Revisit the parser choice before any
+//! remote or untrusted content is fed into this path.
 //!
 //! The frontmatter table mixes kebab-case
 //! (`allowed-tools`) with snake_case (`when_to_use`) field names, so the
@@ -163,10 +167,11 @@ impl Skill {
             path: path.clone(),
             reason: "missing YAML frontmatter (a header block delimited by ---)".to_owned(),
         })?;
-        let meta: SkillMeta = serde_yaml::from_str(frontmatter).map_err(|e| SkillError::Parse {
-            path: path.clone(),
-            reason: e.to_string(),
-        })?;
+        let meta: SkillMeta =
+            serde_saphyr::from_str(frontmatter).map_err(|e| SkillError::Parse {
+                path: path.clone(),
+                reason: e.to_string(),
+            })?;
         if meta.description.trim().is_empty() {
             return Err(SkillError::Parse {
                 path: path.clone(),
@@ -583,6 +588,28 @@ paths:
         assert!(skill.meta.user_invocable);
         assert!(skill.meta.argument_hint.is_none());
         assert!(skill.meta.paths.is_empty());
+    }
+
+    #[test]
+    fn yaml_boolean_spellings_are_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        // `no` / `off` are booleans in YAML 1.1 as well as 1.2. Lock the
+        // spelling here so a future parser swap cannot turn a written
+        // skill into a silently skipped one.
+        write_skill(
+            dir.path(),
+            "yamlbool",
+            "---\ndescription: Spells booleans the YAML 1.1 way\nuser-invocable: no\n---",
+            "Body",
+        );
+        let root = SkillRoot {
+            source: SkillSource::User,
+            dir: dir.path().to_path_buf(),
+        };
+        let discovery = discover(&[root]);
+        assert!(discovery.warnings.is_empty(), "{:?}", discovery.warnings);
+        let skill = discovery.set.get("yamlbool").unwrap();
+        assert!(!skill.meta.user_invocable);
     }
 
     #[test]

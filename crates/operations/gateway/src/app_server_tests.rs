@@ -141,15 +141,14 @@ fn server_url(port: u16, path: &str) -> String {
 /// `201`. Callers address the session through that URL instead of
 /// carrying its id around.
 async fn create_session_url(http: &reqwest::Client, port: u16) -> String {
-    let created: serde_json::Value = http
+    let response = http
         .post(server_url(port, "/sessions"))
         .json(&serde_json::json!({}))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = response.json().await.unwrap();
     assert_eq!(created["permission_mode"], "auto");
     let path = format!(
         "/sessions/{}",
@@ -584,10 +583,14 @@ async fn idle_sessions_are_reaped_after_the_ttl() {
         .json()
         .await
         .unwrap();
+    let listed_sessions = listed["sessions"]
+        .as_array()
+        .expect("sessions must be an array");
+    assert_eq!(listed_sessions.len(), 1);
     assert_eq!(
-        listed["sessions"].as_array().map(Vec::len),
-        Some(1),
-        "the fresh session is the only listed one"
+        listed_sessions[0].as_str(),
+        session_url.rsplit('/').next(),
+        "the created session is the only listed one"
     );
 
     // Past TTL + one reap tick the session is gone for clients.
@@ -648,9 +651,13 @@ async fn recently_active_sessions_survive_the_reaper() {
         .json()
         .await
         .unwrap();
+    let listed_sessions = listed["sessions"]
+        .as_array()
+        .expect("sessions must be an array");
+    assert_eq!(listed_sessions.len(), 1);
     assert_eq!(
-        listed["sessions"].as_array().map(Vec::len),
-        Some(1),
+        listed_sessions[0].as_str(),
+        session_url.rsplit('/').next(),
         "activity across several TTLs keeps the session"
     );
     // Activity stops: the reap takes over.

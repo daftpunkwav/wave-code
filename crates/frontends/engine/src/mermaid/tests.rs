@@ -190,6 +190,61 @@ fn lr_flowcharts_render_columns_and_side_arrows() {
     assert!(lines.iter().all(|l| width::width(l) <= 80), "{lines:?}");
 }
 
+/// TD bands center in the canvas: a single-box band no longer hugs
+/// the left edge of the widest band.
+#[test]
+fn td_bands_center_in_the_canvas() {
+    let lines = render_diagram("graph TD\n A --> B\n A --> C", 60).expect("diamond renders");
+    assert!(lines[0].starts_with("    "), "top band centered: {lines:?}");
+}
+
+/// Bands order by predecessor barycenter: with crossed definition
+/// order the children still land under their own parents, keeping the
+/// edge elbows short and readable.
+#[test]
+fn td_bands_order_by_predecessor_centers() {
+    // Definition order X, Y would cross without barycenter sorting:
+    // A feeds X (first), B feeds Y; the barycenter keeps X left.
+    let lines = render_diagram("graph TD\n A --> X\n B --> Y\n B --> X\n A --> Y2", 60)
+        .expect("crossed graph renders");
+    let joined = lines.join("\n");
+    for label in ["A", "B", "X", "Y", "Y2"] {
+        assert!(joined.contains(label), "{label}: {joined}");
+    }
+    assert!(joined.contains('▼'), "edges route: {joined}");
+}
+
+/// A skip-level LR edge routes through the column gutters instead of
+/// piercing the intermediate column's box.
+#[test]
+fn lr_skip_edges_route_through_the_gutters() {
+    let src = "graph LR\n A --> B\n B --> C\n A --> C";
+    let lines = render_diagram(src, 60).expect("skip edge renders");
+    let joined = lines.join("\n");
+    for label in ["A", "B", "C"] {
+        assert!(joined.contains(label), "{label}: {joined}");
+    }
+    // The skip edge turns twice in the lanes (two extra corner rows on
+    // top of the adjacent elbows' single turn row).
+    let turn_rows = lines
+        .iter()
+        .filter(|l| l.contains('┐') || l.contains('┘'))
+        .count();
+    assert!(turn_rows >= 2, "routed around B: {lines:?}");
+}
+
+/// An LR edge label wider than its run truncates into the run instead
+/// of disappearing.
+#[test]
+fn lr_labels_truncate_instead_of_dropping() {
+    let label = format!("label-{}", "x".repeat(30));
+    let src = format!("graph LR\n A -->|{label}| B");
+    let lines = render_diagram(&src, 60).expect("long label renders");
+    let joined = lines.join("\n");
+    assert!(joined.contains("label-"), "label prefix survives: {joined}");
+    assert!(joined.contains('…'), "truncation marker: {joined}");
+}
+
 /// Subgraph members render inside a titled frame.
 #[test]
 fn subgraphs_render_as_titled_frames() {

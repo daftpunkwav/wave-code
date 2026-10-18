@@ -66,18 +66,54 @@ fn box_geometry(labels: &[Vec<String>]) -> (Vec<usize>, Vec<usize>) {
     (box_w, box_h)
 }
 
-/// Sequential placement inside each band, 3-space gutters between
-/// boxes. Returns the x origin of each box and the total canvas width.
-fn place_band_nodes(bands: &[Vec<usize>], box_w: &[usize]) -> (Vec<usize>, usize) {
-    let mut x = vec![0usize; box_w.len()];
-    let mut total_width = 0usize;
-    for band in bands {
-        let mut cursor = 0usize;
-        for &index in band {
+/// Order each band by the mean center of its predecessors' boxes
+/// (barycenter; unconnected nodes keep their relative order at the
+/// end), then center every band in the canvas — the widest band sets
+/// the width. Returns the x origin of each box and the total canvas
+/// width.
+fn place_band_nodes(
+    bands: &mut [Vec<usize>],
+    box_w: &[usize],
+    edges: &[GraphEdge],
+) -> (Vec<usize>, usize) {
+    let count = box_w.len();
+    let mut x = vec![0usize; count];
+    // Widths are placement-independent, so the canvas width is known
+    // before any band is placed and every band can center in it.
+    let band_width = |band: &[usize]| -> usize {
+        let inner: usize = band.iter().map(|&n| box_w[n]).sum();
+        inner + 3 * band.len().saturating_sub(1)
+    };
+    let total_width = bands.iter().map(|b| band_width(b)).max().unwrap_or(0);
+    let mut band_of = vec![0usize; count];
+    for (depth, band) in bands.iter().enumerate() {
+        for &n in band {
+            band_of[n] = depth;
+        }
+    }
+    for depth in 0..bands.len() {
+        // Barycenter ordering, top-down: each band sorts by the mean
+        // center of its already-placed predecessors, which untangles
+        // most crossing clusters before anything is drawn.
+        if depth > 0 {
+            let mut sum = vec![0u64; count];
+            let mut deg = vec![0u32; count];
+            for edge in edges {
+                if band_of[edge.to] == depth && band_of[edge.from] < depth {
+                    sum[edge.to] += (x[edge.from] + box_w[edge.from] / 2) as u64;
+                    deg[edge.to] += 1;
+                }
+            }
+            bands[depth].sort_by_key(|&n| match deg[n] {
+                0 => u64::MAX,
+                _ => (sum[n] * 1000) / u64::from(deg[n]),
+            });
+        }
+        let mut cursor = (total_width - band_width(&bands[depth])) / 2;
+        for &index in &bands[depth] {
             x[index] = cursor;
             cursor += box_w[index] + 3;
         }
-        total_width = total_width.max(cursor.saturating_sub(3));
     }
     (x, total_width)
 }
@@ -117,12 +153,13 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         return None;
     }
     let layer = assign_layers(&d.edges, count)?;
-    let bands = band_members(&layer);
+    let mut bands = band_members(&layer);
     let max_layer = bands.len() - 1;
-    // Box geometry: label lines stacked in the box, sequential
-    // placement inside each band, 3-space gutters between boxes.
+    // Box geometry: label lines stacked in the box, barycenter-ordered
+    // and centered placement inside each band, 3-space gutters between
+    // boxes.
     let (box_w, box_h) = box_geometry(&d.labels);
-    let (mut x, mut total_width) = place_band_nodes(&bands, &box_w);
+    let (mut x, mut total_width) = place_band_nodes(&mut bands, &box_w, &d.edges);
     if total_width > columns {
         return None;
     }
@@ -464,7 +501,7 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         return None;
     }
     let layer = assign_layers(&d.edges, count)?;
-    let cols = band_members(&layer);
+    let mut cols = band_members(&layer);
     let max_layer = layer.iter().copied().max().unwrap_or(0);
 
     let (box_w, box_h) = box_geometry(&d.labels);
@@ -499,16 +536,46 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             total_width += gutters[depth];
         }
     }
-    let mut total_height = 0usize;
     let mut y = vec![0usize; count];
-    for band in &cols {
-        let mut cursor = 0usize;
-        for &index in band {
-            y[index] = cursor;
-            cursor += box_h[index] + 2;
+    let column_height = |column: &[usize]| -> usize {
+        let inner: usize = column.iter().map(|&n| box_h[n]).sum();
+        inner + 2 * column.len().saturating_sub(1)
+    };
+    let total_height = {
+        let tallest = cols.iter().map(|c| column_height(c)).max().unwrap_or(0);
+        // Barycenter ordering, left-to-right: each column sorts by the
+        // mean row-center of its already-placed predecessors, then
+        // centers vertically in the canvas — the tallest column sets
+        // the height.
+        let mut column_of = vec![0usize; count];
+        for (depth, column) in cols.iter().enumerate() {
+            for &n in column {
+                column_of[n] = depth;
+            }
         }
-        total_height = total_height.max(cursor.saturating_sub(2));
-    }
+        for depth in 0..cols.len() {
+            if depth > 0 {
+                let mut sum = vec![0u64; count];
+                let mut deg = vec![0u32; count];
+                for edge in &d.edges {
+                    if column_of[edge.to] == depth && column_of[edge.from] < depth {
+                        sum[edge.to] += (y[edge.from] + box_h[edge.from] / 2) as u64;
+                        deg[edge.to] += 1;
+                    }
+                }
+                cols[depth].sort_by_key(|&n| match deg[n] {
+                    0 => u64::MAX,
+                    _ => (sum[n] * 1000) / u64::from(deg[n]),
+                });
+            }
+            let mut cursor = (tallest - column_height(&cols[depth])) / 2;
+            for &index in &cols[depth] {
+                y[index] = cursor;
+                cursor += box_h[index] + 2;
+            }
+        }
+        tallest
+    };
     if total_width > columns || total_height > 120 || total_height == 0 {
         return None;
     }
@@ -516,6 +583,9 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         .map(|_| RowCanvas::new(total_width))
         .collect();
 
+    // The vertical routing lane through each gutter: between the two
+    // columns, clear of every box.
+    let lane = |gap: usize| col_x[gap] + col_w[gap] + gutters[gap] / 2;
     for edge in &d.edges {
         let (fl, tl) = (layer[edge.from], layer[edge.to]);
         if tl == fl {
@@ -527,18 +597,70 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         let dst_left = col_x[tl];
         let vfill = edge.style.vertical();
         let hfill = edge.style.horizontal();
-        if from_row == to_row || tl > fl + 1 {
+        let label = edge.label.as_deref();
+        if from_row == to_row {
             // Straight run into the target's left edge.
             let head_col = dst_left.saturating_sub(1);
-            draw_horizontal(
-                &mut rows[from_row],
-                src_right,
-                head_col,
-                edge.label.as_deref(),
-                hfill,
-            );
+            let placed = draw_horizontal(&mut rows[from_row], src_right, head_col, label, hfill);
+            if !placed && let Some(text) = label {
+                // Label wider than the run: truncate into it instead
+                // of dropping it.
+                let room = head_col.saturating_sub(src_right + 2);
+                if room >= 3 {
+                    rows[from_row].put(src_right + 1, super::truncate_width(text, room));
+                }
+            }
             if head_col < total_width {
                 rows[from_row].put(head_col, "▶");
+            }
+            continue;
+        }
+        if tl > fl + 1 {
+            // A skip-level edge routes through the inter-column
+            // gutters: a straight run would pierce every intermediate
+            // box, and boxes paint last, so the line would read as
+            // connecting the wrong box. Cross on a row no intermediate
+            // box occupies, nearest to the source exit; wall-to-wall
+            // columns fall back to the straight run.
+            let crossing = (0..total_height)
+                .filter(|&r| r != from_row && r != to_row)
+                .min_by_key(|&r| (r as isize - from_row as isize).unsigned_abs())
+                .filter(|&r| {
+                    (fl + 1..tl).all(|k| cols[k].iter().all(|&n| r < y[n] || r >= y[n] + box_h[n]))
+                });
+            let head_col = dst_left.saturating_sub(1);
+            let (start_lane, end_lane) = (lane(fl), lane(tl - 1));
+            if let Some(r) = crossing {
+                for col in src_right..start_lane {
+                    rows[from_row].put(col, hfill);
+                }
+                rows[from_row].put(start_lane, if r > from_row { "┐" } else { "┘" });
+                let (top, bottom) = (r.min(from_row), r.max(from_row));
+                for row in &mut rows[top + 1..bottom] {
+                    row.put(start_lane, vfill);
+                }
+                rows[r].put(start_lane, if r > from_row { "└" } else { "┌" });
+                let placed = draw_horizontal(&mut rows[r], start_lane + 1, end_lane, label, hfill);
+                if !placed && let Some(text) = label {
+                    let room = end_lane.saturating_sub(start_lane + 3);
+                    if room >= 3 {
+                        rows[r].put(start_lane + 1, super::truncate_width(text, room));
+                    }
+                }
+                rows[r].put(end_lane, if to_row > r { "┐" } else { "┘" });
+                let (top, bottom) = (to_row.min(r), to_row.max(r));
+                for row in &mut rows[top + 1..bottom] {
+                    row.put(end_lane, vfill);
+                }
+                rows[to_row].put(end_lane, if to_row > r { "└" } else { "┌" });
+                for col in end_lane + 1..head_col {
+                    rows[to_row].put(col, hfill);
+                }
+            } else {
+                draw_horizontal(&mut rows[from_row], src_right, head_col, label, hfill);
+                if head_col < total_width {
+                    rows[from_row].put(head_col, "▶");
+                }
             }
             continue;
         }
@@ -554,13 +676,7 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         }
         rows[to_row].put(gx, if to_row > from_row { "└" } else { "┌" });
         let head_col = dst_left.saturating_sub(1);
-        draw_horizontal(
-            &mut rows[to_row],
-            gx + 1,
-            head_col,
-            edge.label.as_deref(),
-            hfill,
-        );
+        draw_horizontal(&mut rows[to_row], gx + 1, head_col, label, hfill);
         if head_col < total_width {
             rows[to_row].put(head_col, "▶");
         }

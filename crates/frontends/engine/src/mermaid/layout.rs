@@ -271,13 +271,13 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             if gap + 1 < tl {
                 // Pass-through: a straight vertical through every gap row.
                 for row in &mut rows[gap_start..gap_start + height] {
-                    row.put(from_center, vfill);
+                    row.put_if_clear(from_center, vfill);
                 }
                 continue;
             }
             if from_center == to_center {
                 for row in &mut rows[gap_start..gap_start + height - 1] {
-                    row.put(from_center, vfill);
+                    row.put_if_clear(from_center, vfill);
                 }
                 rows[gap_start + height - 1].put(to_center, head);
                 // A straight vertical has no horizontal run to carry
@@ -317,7 +317,7 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             elbow_slot[gap] += 1;
             let elbow = gap_start + slot.min(height.saturating_sub(2));
             for row in &mut rows[gap_start..elbow] {
-                row.put(from_center, vfill);
+                row.put_if_clear(from_center, vfill);
             }
             // Stroke-correct corners: right turn (└,┐), left turn (┘,┌).
             let (corner_from, corner_to) = if from_center < to_center {
@@ -345,7 +345,7 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
                 rows[gap_start + height - 2].put(right + 2, text.clone());
             }
             for row in &mut rows[elbow + 1..gap_start + height - 1] {
-                row.put(to_center, vfill);
+                row.put_if_clear(to_center, vfill);
             }
             rows[gap_start + height - 1].put(to_center, head);
         }
@@ -734,6 +734,26 @@ impl RowCanvas {
         let end = col + span;
         self.placements
             .retain(|(c, t)| c + width::width(t) <= col || *c >= end);
+        self.placements.push((col, text));
+    }
+
+    /// Place `text` only where no glyph stands. Two edges leaving a box
+    /// at the same column share one trunk: the fill of the second must
+    /// not clobber the first edge's corner glyph standing in its path.
+    pub(super) fn put_if_clear(&mut self, col: usize, text: impl Into<String>) {
+        let text = text.into();
+        let span = width::width(&text);
+        if span == 0 || col >= self.width {
+            return;
+        }
+        let end = col + span;
+        if self
+            .placements
+            .iter()
+            .any(|(c, t)| !(c + width::width(t) <= col || *c >= end))
+        {
+            return;
+        }
         self.placements.push((col, text));
     }
 

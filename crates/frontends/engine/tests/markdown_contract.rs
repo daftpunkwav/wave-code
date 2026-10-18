@@ -36,8 +36,9 @@ fn render_contract_shape_and_cache() {
     assert_eq!(plain(&first), plain(&wider)[..first.len()]);
 }
 
-/// Exactly one blank line separates blocks — never two, and the
-/// output neither starts nor ends blank.
+/// Exactly one blank line separates blocks — never more, and the
+/// output neither starts nor ends blank. A heading takes exactly one
+/// extra blank above that (the section break).
 #[test]
 fn blocks_separate_with_exactly_one_blank_line() {
     let mut md = renderer();
@@ -52,12 +53,21 @@ fn blocks_separate_with_exactly_one_blank_line() {
         !lines.last().is_some_and(|l| l.is_empty()),
         "no trailing blank"
     );
-    for pair in lines.windows(2) {
+    let heading = lines
+        .iter()
+        .position(|l| l == "Heading")
+        .expect("heading renders");
+    for (index, pair) in lines.windows(2).enumerate() {
+        let is_break = index + 1 == heading - 1;
         assert!(
-            !(pair[0].is_empty() && pair[1].is_empty()),
-            "double blank: {lines:?}"
+            is_break || !(pair[0].is_empty() && pair[1].is_empty()),
+            "double blank outside the heading break: {lines:?}"
         );
     }
+    assert!(
+        heading >= 2 && lines[heading - 1].is_empty() && lines[heading - 2].is_empty(),
+        "heading carries its section break: {lines:?}"
+    );
 }
 
 /// Fence markers never leak, and every code row sits inside a frame

@@ -129,14 +129,41 @@ fn client(token: &str) -> reqwest::Client {
         .unwrap()
 }
 
+/// Loopback URL of the server under test. Every request in this file
+/// is built from it: the app server binds the loopback interface only,
+/// so no test traffic leaves the machine.
+fn server_url(port: u16, path: &str) -> String {
+    format!("http://127.0.0.1:{port}{path}")
+}
+
+/// Create one session and return its resource URL
+/// (`http://127.0.0.1:<port>/sessions/<id>`); panics on anything but
+/// `201`. Callers address the session through that URL instead of
+/// carrying its id around.
+async fn create_session_url(http: &reqwest::Client, port: u16) -> String {
+    let response = http
+        .post(server_url(port, "/sessions"))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(created["permission_mode"], "auto");
+    let path = format!(
+        "/sessions/{}",
+        created["session_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no session_id in {created}"))
+    );
+    server_url(port, &path)
+}
+
 /// Open the events endpoint and await its headers; call before
 /// prompting so the subscription cannot miss early events.
-async fn open_events(client: &reqwest::Client, port: u16, session_id: &str) -> reqwest::Response {
-    let response = client
-        .get(format!(
-            // Reviewed: loopback-only test client posting a synthetic session id.
-            "http://127.0.0.1:{port}/sessions/{session_id}/events"
-        ))
+async fn open_events(http: &reqwest::Client, session_url: &str) -> reqwest::Response {
+    let response = http
+        .get(format!("{session_url}/events"))
         .send()
         .await
         .unwrap();
@@ -181,7 +208,7 @@ async fn healthz_is_open_and_other_routes_require_the_token() {
     let anonymous = reqwest::Client::new();
     assert_eq!(
         anonymous
-            .get(format!("http://127.0.0.1:{port}/healthz"))
+            .get(server_url(port, "/healthz"))
             .send()
             .await
             .unwrap()
@@ -190,7 +217,7 @@ async fn healthz_is_open_and_other_routes_require_the_token() {
     );
     assert_eq!(
         anonymous
-            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .get(server_url(port, "/sessions"))
             .send()
             .await
             .unwrap()
@@ -200,7 +227,7 @@ async fn healthz_is_open_and_other_routes_require_the_token() {
     let authorized = client(&token);
     assert_eq!(
         authorized
-            .get(format!("http://127.0.0.1:{port}/sessions"))
+            .get(server_url(port, "/sessions"))
             .send()
             .await
             .unwrap()
@@ -241,7 +268,7 @@ async fn non_loopback_host_headers_are_refused() {
     let (token, port, done) = start(vec![]).await;
     let http = client(&token);
     let rebound = http
-        .get(format!("http://127.0.0.1:{port}/sessions"))
+        .get(server_url(port, "/sessions"))
         .header("Host", "evil.example.com")
         .send()
         .await
@@ -264,31 +291,14 @@ async fn session_lifecycle_streams_prompt_events_over_sse() {
     let (token, port, done) = start(vec![script]).await;
     let http = client(&token);
 
-    let created: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{port}/sessions"))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    println!("created: {created}");
-    let session_id = created["session_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no session_id in {created}"))
-        .to_string();
-    assert_eq!(created["permission_mode"], "auto");
+    let session_url = create_session_url(&http, port).await;
 
     // Subscribe BEFORE prompting so no event is missed: headers
     // must be back before the prompt can race the subscription.
-    let response = open_events(&http, port, &session_id).await;
+    let response = open_events(&http, &session_url).await;
     let events_task = tokio::spawn(collect_events(response, 8));
     let prompt_status = http
-        .post(format!(
-            // Reviewed: loopback-only test client posting a synthetic session id.
-            "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
-        ))
+        .post(format!("{session_url}/prompt"))
         .json(&serde_json::json!({"text": "say hello"}))
         .send()
         .await
@@ -314,10 +324,10 @@ async fn session_lifecycle_streams_prompt_events_over_sse() {
 async fn malformed_prompt_images_answer_400() {
     let (token, port, done) = start(vec![]).await;
     let http = client(&token);
-    let session_id = create_session_ok(&http, port).await;
+    let session_url = create_session_url(&http, port).await;
     let post = |body: serde_json::Value| {
         let http = &http;
-        let url = format!("http://127.0.0.1:{port}/sessions/{session_id}/prompt");
+        let url = format!("{session_url}/prompt");
         async move { http.post(url).json(&body).send().await.unwrap() }
     };
     let bad = post(serde_json::json!({
@@ -368,28 +378,16 @@ async fn approval_requests_answer_over_http() {
     let (token, port, done) = start(vec![script]).await;
     let http = client(&token);
 
-    let created: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{port}/sessions"))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let session_id = created["session_id"].as_str().unwrap().to_string();
+    let session_url = create_session_url(&http, port).await;
 
-    let response = open_events(&http, port, &session_id).await;
+    let response = open_events(&http, &session_url).await;
     // Exactly the five pre-park events: turn_started, the text delta,
     // its completion, tool_call_begin, approval_requested. The stream
     // stays open while the turn parks, so an over-large count here
     // would stall on the deadline instead of returning.
     let events_task = tokio::spawn(collect_events(response, 5));
     let status = http
-        .post(format!(
-            // Reviewed: loopback-only test client posting a synthetic session id.
-            "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
-        ))
+        .post(format!("{session_url}/prompt"))
         .json(&serde_json::json!({"text": "run it"}))
         .send()
         .await
@@ -406,15 +404,12 @@ async fn approval_requests_answer_over_http() {
 
     // Subscribe before the decision. The events channel does not replay,
     // and a fast tool can finish before a subscriber that joins afterwards.
-    let follow = open_events(&http, port, &session_id).await;
+    let follow = open_events(&http, &session_url).await;
     let rest_task = tokio::spawn(collect_events(follow, 1));
 
     // Answer over HTTP; the parked tool resumes.
     let answered = http
-        .post(format!(
-            // Reviewed: loopback-only test client posting a synthetic session id.
-            "http://127.0.0.1:{port}/sessions/{session_id}/approvals/{call_id}"
-        ))
+        .post(format!("{session_url}/approvals/{call_id}"))
         .json(&serde_json::json!({"decision": "allow"}))
         .send()
         .await
@@ -540,20 +535,6 @@ async fn closed_session_answers_409_without_retry_after() {
     assert!(response.headers().get("Retry-After").is_none());
 }
 
-/// Create one session; panics on anything but `201`.
-async fn create_session_ok(http: &reqwest::Client, port: u16) -> String {
-    let created: serde_json::Value = http
-        .post(format!("http://127.0.0.1:{port}/sessions"))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    created["session_id"].as_str().unwrap().to_string()
-}
-
 /// The reap helper removes only the stale entries: a session whose
 /// activity stamp is older than the TTL goes, a fresh one stays.
 #[test]
@@ -593,21 +574,29 @@ async fn idle_sessions_are_reaped_after_the_ttl() {
     let ttl = Duration::from_millis(400);
     let (token, port, done) = start_with(vec![], Some(ttl), None).await;
     let http = client(&token);
-    let session_id = create_session_ok(&http, port).await;
+    let session_url = create_session_url(&http, port).await;
     let listed: serde_json::Value = http
-        .get(format!("http://127.0.0.1:{port}/sessions"))
+        .get(server_url(port, "/sessions"))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(listed["sessions"], serde_json::json!([session_id]));
+    let listed_sessions = listed["sessions"]
+        .as_array()
+        .expect("sessions must be an array");
+    assert_eq!(listed_sessions.len(), 1);
+    assert_eq!(
+        listed_sessions[0].as_str(),
+        session_url.rsplit('/').next(),
+        "the created session is the only listed one"
+    );
 
     // Past TTL + one reap tick the session is gone for clients.
     tokio::time::sleep(ttl + Duration::from_millis(400)).await;
     let listed: serde_json::Value = http
-        .get(format!("http://127.0.0.1:{port}/sessions"))
+        .get(server_url(port, "/sessions"))
         .send()
         .await
         .unwrap()
@@ -620,10 +609,7 @@ async fn idle_sessions_are_reaped_after_the_ttl() {
         "the idle session must be reaped"
     );
     let prompted = http
-        .post(format!(
-            // Reviewed: loopback-only test client posting a synthetic session id.
-            "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
-        ))
+        .post(format!("{session_url}/prompt"))
         .json(&serde_json::json!({"text": "anyone there?"}))
         .send()
         .await
@@ -640,16 +626,13 @@ async fn recently_active_sessions_survive_the_reaper() {
     let ttl = Duration::from_millis(400);
     let (token, port, done) = start_with(vec![], Some(ttl), None).await;
     let http = client(&token);
-    let session_id = create_session_ok(&http, port).await;
+    let session_url = create_session_url(&http, port).await;
     // Each prompt re-touches the session; the window spans several
     // TTLs, so only the touch (not creation) keeps it alive.
     for _ in 0..4 {
         tokio::time::sleep(ttl / 3).await;
         let prompted = http
-            .post(format!(
-                // Reviewed: loopback-only test client posting a synthetic session id.
-                "http://127.0.0.1:{port}/sessions/{session_id}/prompt"
-            ))
+            .post(format!("{session_url}/prompt"))
             .json(&serde_json::json!({"text": "still here"}))
             .send()
             .await
@@ -661,22 +644,26 @@ async fn recently_active_sessions_survive_the_reaper() {
         );
     }
     let listed: serde_json::Value = http
-        .get(format!("http://127.0.0.1:{port}/sessions"))
+        .get(server_url(port, "/sessions"))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
+    let listed_sessions = listed["sessions"]
+        .as_array()
+        .expect("sessions must be an array");
+    assert_eq!(listed_sessions.len(), 1);
     assert_eq!(
-        listed["sessions"],
-        serde_json::json!([session_id]),
+        listed_sessions[0].as_str(),
+        session_url.rsplit('/').next(),
         "activity across several TTLs keeps the session"
     );
     // Activity stops: the reap takes over.
     tokio::time::sleep(ttl + Duration::from_millis(400)).await;
     let listed: serde_json::Value = http
-        .get(format!("http://127.0.0.1:{port}/sessions"))
+        .get(server_url(port, "/sessions"))
         .send()
         .await
         .unwrap()
@@ -693,9 +680,9 @@ async fn recently_active_sessions_survive_the_reaper() {
 async fn session_creation_past_the_cap_answers_503() {
     let (token, port, done) = start_with(vec![], None, Some(1)).await;
     let http = client(&token);
-    let first = create_session_ok(&http, port).await;
+    let first = create_session_url(&http, port).await;
     let refused = http
-        .post(format!("http://127.0.0.1:{port}/sessions"))
+        .post(server_url(port, "/sessions"))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -705,13 +692,9 @@ async fn session_creation_past_the_cap_answers_503() {
         StatusCode::SERVICE_UNAVAILABLE,
         "the cap must refuse, not evict"
     );
-    let deleted = http
-        .delete(format!("http://127.0.0.1:{port}/sessions/{first}"))
-        .send()
-        .await
-        .unwrap();
+    let deleted = http.delete(first.as_str()).send().await.unwrap();
     assert_eq!(deleted.status(), StatusCode::OK);
-    let replacement = create_session_ok(&http, port).await;
+    let replacement = create_session_url(&http, port).await;
     assert_ne!(first, replacement);
     let _ = done;
 }

@@ -91,7 +91,7 @@ fn place_band_nodes(
             band_of[n] = depth;
         }
     }
-    for depth in 0..bands.len() {
+    for (depth, band) in bands.iter_mut().enumerate() {
         // Barycenter ordering, top-down: each band sorts by the mean
         // center of its already-placed predecessors, which untangles
         // most crossing clusters before anything is drawn.
@@ -104,13 +104,13 @@ fn place_band_nodes(
                     deg[edge.to] += 1;
                 }
             }
-            bands[depth].sort_by_key(|&n| match deg[n] {
+            band.sort_by_key(|&n| match deg[n] {
                 0 => u64::MAX,
                 _ => (sum[n] * 1000) / u64::from(deg[n]),
             });
         }
-        let mut cursor = (total_width - band_width(&bands[depth])) / 2;
-        for &index in &bands[depth] {
+        let mut cursor = (total_width - band_width(band)) / 2;
+        for &index in band.iter() {
             x[index] = cursor;
             cursor += box_w[index] + 3;
         }
@@ -553,7 +553,7 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
                 column_of[n] = depth;
             }
         }
-        for depth in 0..cols.len() {
+        for (depth, column) in cols.iter_mut().enumerate() {
             if depth > 0 {
                 let mut sum = vec![0u64; count];
                 let mut deg = vec![0u32; count];
@@ -563,13 +563,13 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
                         deg[edge.to] += 1;
                     }
                 }
-                cols[depth].sort_by_key(|&n| match deg[n] {
+                column.sort_by_key(|&n| match deg[n] {
                     0 => u64::MAX,
                     _ => (sum[n] * 1000) / u64::from(deg[n]),
                 });
             }
-            let mut cursor = (tallest - column_height(&cols[depth])) / 2;
-            for &index in &cols[depth] {
+            let mut cursor = (tallest - column_height(column)) / 2;
+            for &index in column.iter() {
                 y[index] = cursor;
                 cursor += box_h[index] + 2;
             }

@@ -1,7 +1,7 @@
 //! The layered band layout (TD) and the column layout (LR) for the
 //! shared graph IR, drawn on a per-row canvas.
 
-use super::graph::{Diagram, Direction, GraphEdge};
+use super::graph::{BOX_RULE, Diagram, Direction, GraphEdge};
 use crate::width;
 
 // ---------------------------------------------------------------------------
@@ -145,6 +145,26 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             return None;
         }
     }
+    // Straight-edge labels annotate beside the lifeline and often need
+    // more room than the widest band provides: grow the canvas (bounded
+    // by the terminal budget) instead of truncating them away.
+    let mut labeled_width = total_width;
+    for edge in &d.edges {
+        let (fl, tl) = (layer[edge.from], layer[edge.to]);
+        if tl == fl || fl + 1 < tl {
+            continue; // only terminating straight edges place labels
+        }
+        if x[edge.from] + box_w[edge.from] / 2 == x[edge.to] + box_w[edge.to] / 2
+            && let Some(text) = &edge.label
+        {
+            let start = x[edge.to] + box_w[edge.to] / 2 + 2;
+            labeled_width = labeled_width.max(start + width::width(text) + 1);
+        }
+    }
+    if labeled_width > columns {
+        return None;
+    }
+    total_width = labeled_width;
     let mut rows: Vec<RowCanvas> = Vec::new();
     let mut band_top = vec![0usize; max_layer + 1];
     for depth in 0..=max_layer {
@@ -162,8 +182,42 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
     let band_box_top = |depth: usize| band_top[depth] + band_lead;
     let gap_start_of = |gap: usize| band_top[gap] + band_lead + band_h[gap];
 
+    // The lifelines crossing each gap, ascending: a label placed
+    // beside a straight vertical stops before the next one, so two
+    // lanes never overwrite each other's annotations.
+    let mut gap_verticals: Vec<Vec<usize>> = vec![Vec::new(); max_layer];
+    for edge in &d.edges {
+        let (fl, tl) = (layer[edge.from], layer[edge.to]);
+        if tl == fl {
+            continue;
+        }
+        for gap in fl..tl {
+            gap_verticals[gap].push(x[edge.from] + box_w[edge.from] / 2);
+            gap_verticals[gap].push(x[edge.to] + box_w[edge.to] / 2);
+        }
+    }
+    for verts in &mut gap_verticals {
+        verts.sort_unstable();
+        verts.dedup();
+    }
+    let room_after = |verts: &[usize], col: usize| -> usize {
+        match verts.iter().find(|&&v| v > col) {
+            Some(&next) => next.saturating_sub(col + 1),
+            None => total_width.saturating_sub(col + 1),
+        }
+    };
+    let room_before = |verts: &[usize], col: usize| -> usize {
+        match verts.iter().rev().find(|&&v| v < col) {
+            Some(&prev) => col.saturating_sub(prev + 1),
+            None => col,
+        }
+    };
+
     // Edges route down the band gaps.
     let mut elbow_slot = vec![0usize; max_layer];
+    // Straight (vertically aligned) edges stack their annotations one
+    // row above the previous, so two labels never overlap on a row.
+    let mut straight_labels = vec![0usize; max_layer];
     for edge in &d.edges {
         let (fl, tl) = (layer[edge.from], layer[edge.to]);
         if tl == fl {
@@ -189,6 +243,37 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
                     row.put(from_center, vfill);
                 }
                 rows[gap_start + height - 1].put(to_center, head);
+                // A straight vertical has no horizontal run to carry
+                // the label: annotate beside the lifeline instead of
+                // dropping it (vertically aligned boxes are common in
+                // ER diagrams). Labels stack one row per edge and stop
+                // short of the neighboring lifeline — the right side
+                // first, the left as the fallback.
+                if let Some(text) = &edge.label {
+                    let stacked = straight_labels[gap].min(height.saturating_sub(3));
+                    straight_labels[gap] += 1;
+                    let label_row = gap_start + height - 2 - stacked;
+                    let verts = &gap_verticals[gap];
+                    let label_w = width::width(text);
+                    const MIN_ROOM: usize = 3;
+                    let right_start = to_center + 2;
+                    let right_room = room_after(verts, right_start);
+                    let left_end = to_center.saturating_sub(2);
+                    let left_room = room_before(verts, left_end);
+                    let (col, room) = if label_w <= right_room {
+                        (right_start, label_w)
+                    } else if label_w <= left_room {
+                        (left_end + 1 - label_w, label_w)
+                    } else if right_room >= left_room && right_room >= MIN_ROOM {
+                        (right_start, right_room)
+                    } else if left_room >= MIN_ROOM {
+                        let fit = label_w.min(left_room);
+                        (left_end + 1 - fit, fit)
+                    } else {
+                        (right_start, right_room.min(label_w).max(MIN_ROOM))
+                    };
+                    rows[label_row].put(col, super::truncate_width(text, room));
+                }
                 continue;
             }
             let slot = elbow_slot[gap];
@@ -254,12 +339,18 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         for (row_index, row) in rows[top + 1..top + 1 + body_rows].iter_mut().enumerate() {
             for &index in band {
                 if let Some(line) = d.labels[index].get(row_index) {
-                    let pad = box_w[index] - 2 - width::width(line);
-                    let left = pad / 2;
-                    row.put(
-                        x[index],
-                        format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
-                    );
+                    if line == BOX_RULE {
+                        // The title/members separator spans the box.
+                        let inner = box_w[index].saturating_sub(2);
+                        row.put(x[index], format!("│{}│", "─".repeat(inner)));
+                    } else {
+                        let pad = box_w[index] - 2 - width::width(line);
+                        let left = pad / 2;
+                        row.put(
+                            x[index],
+                            format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
+                        );
+                    }
                 }
             }
         }
@@ -482,12 +573,18 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             rows[by].put(bx, format!("┌{}┐", "─".repeat(bw - 2)));
             for (row_index, row) in rows[by + 1..by + bh - 1].iter_mut().enumerate() {
                 if let Some(line) = d.labels[index].get(row_index) {
-                    let pad = bw - 2 - width::width(line);
-                    let left = pad / 2;
-                    row.put(
-                        bx,
-                        format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
-                    );
+                    if line == BOX_RULE {
+                        // The title/members separator spans the box.
+                        let inner = bw.saturating_sub(2);
+                        row.put(bx, format!("│{}│", "─".repeat(inner)));
+                    } else {
+                        let pad = bw - 2 - width::width(line);
+                        let left = pad / 2;
+                        row.put(
+                            bx,
+                            format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
+                        );
+                    }
                 }
             }
             rows[by + bh - 1].put(bx, format!("└{}┘", "─".repeat(bw - 2)));

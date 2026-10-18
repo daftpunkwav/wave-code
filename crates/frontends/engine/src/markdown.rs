@@ -13,7 +13,10 @@
 //!
 //! Vertical rhythm: every block ensures exactly one blank line between
 //! itself and the previous block (none at the top of the document), so
-//! blocks never cram together and two blank lines never appear.
+//! blocks never cram together and two blank lines never appear. A
+//! heading takes one extra blank above that (the section break): space
+//! above, tight below. List items hang: continuation lines align under
+//! the item text instead of the marker.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -119,6 +122,16 @@ struct InlineState {
 /// blocks never cram together and two blank lines never appear.
 fn ensure_blank(out: &mut Vec<String>) {
     if out.last().is_some_and(|line| !line.is_empty()) {
+        out.push(String::new());
+    }
+}
+
+/// Heading separation: one extra blank above the single-blank rhythm
+/// so sections scan apart in long replies (space above, tight below).
+/// The document's first block stays flush.
+fn ensure_heading_break(out: &mut Vec<String>) {
+    ensure_blank(out);
+    if out.len() >= 2 && !out[out.len() - 2].is_empty() {
         out.push(String::new());
     }
 }
@@ -355,24 +368,39 @@ impl Markdown {
 
     /// Wrap and emit the styled inline buffer as output lines: one line
     /// per wrap, prefixed with the quote bar while inside a block quote.
+    /// While a list item is open the wrap narrows by the item's hanging
+    /// indent and continuation lines align under the item text instead
+    /// of the marker.
     fn flush_inline(
         &self,
         inline: &mut String,
         out: &mut Vec<String>,
         in_quote: bool,
         columns: usize,
+        hangs: &[usize],
     ) {
         if inline.is_empty() {
             return;
         }
+        let hang = hangs.last().copied().unwrap_or(0);
         let prefix = if in_quote { "│ " } else { "" };
-        for line in width::wrap_line(inline, columns.saturating_sub(prefix.width())) {
+        // Painted so the user-message background band carries through
+        // the continuation indent (plain spaces would punch a hole in
+        // the band at every wrap).
+        let indent = self.style.text.paint(&" ".repeat(hang));
+        for (index, line) in width::wrap_line(inline, columns.saturating_sub(prefix.width() + hang))
+            .into_iter()
+            .enumerate()
+        {
+            let lead = if index > 0 { indent.as_str() } else { "" };
             if in_quote {
                 // Each span already carries the quote look (compose
                 // layers it per span); only the bar prefix needs its
                 // own paint here — an outer paint would be cut at the
                 // first inner reset.
-                out.push(format!("{}{}", self.style.quote.paint(prefix), line));
+                out.push(format!("{lead}{}{line}", self.style.quote.paint(prefix)));
+            } else if index > 0 {
+                out.push(format!("{lead}{line}"));
             } else {
                 out.push(line);
             }
@@ -393,7 +421,7 @@ impl Markdown {
         if inline.is_empty() {
             return;
         }
-        ensure_blank(out);
+        ensure_heading_break(out);
         let text = std::mem::take(inline);
         let style = self.style.heading.bold();
         // Headings wrap like any other block: an overlong heading left
@@ -538,15 +566,17 @@ impl Markdown {
         out: &mut Vec<String>,
         in_quote: &mut bool,
         columns: usize,
+        hangs: &[usize],
     ) {
-        self.flush_inline(inline, out, *in_quote, columns);
+        self.flush_inline(inline, out, *in_quote, columns, hangs);
         ensure_blank(out);
         *in_quote = true;
     }
 
     /// Append one list item marker to the inline buffer: the indent
     /// for the item's nesting depth plus the ordered number or bullet.
-    fn push_item_marker(&self, inline: &mut String, list_stack: &mut [Option<u64>]) {
+    /// Returns the hanging-indent width continuation lines align to.
+    fn push_item_marker(&self, inline: &mut String, list_stack: &mut [Option<u64>]) -> usize {
         let depth = list_stack.len().saturating_sub(1);
         let marker = list_marker(list_stack.last_mut());
         inline.push_str(&"  ".repeat(depth));
@@ -554,6 +584,7 @@ impl Markdown {
         // terminal's default foreground, which a recolored (light)
         // background leaves unreadable.
         inline.push_str(&self.style.text.paint(&marker));
+        depth * 2 + width::width(&marker)
     }
 
     fn render_uncached(&mut self, text: &str, columns: usize) -> Vec<String> {
@@ -564,6 +595,9 @@ impl Markdown {
         let mut inline = String::new();
         let mut state = InlineState::default();
         let mut list_stack: Vec<Option<u64>> = Vec::new();
+        // Hanging indents of open list items, innermost last: wrap
+        // width and continuation alignment while an item is open.
+        let mut hangs: Vec<usize> = Vec::new();
         let mut heading_level: Option<HeadingLevel> = None;
         let mut in_quote = false;
         let mut in_code = false;
@@ -578,7 +612,7 @@ impl Markdown {
             match event {
                 Event::Start(tag) => match tag {
                     Tag::Heading { level, .. } => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                         heading_level = Some(level);
                     }
                     Tag::Paragraph => ensure_blank(&mut out),
@@ -591,14 +625,21 @@ impl Markdown {
                     }
                     Tag::List(start) => start_list(&mut list_stack, start, &mut out),
                     Tag::Item => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        self.push_item_marker(&mut inline, &mut list_stack);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
+                        let hang = self.push_item_marker(&mut inline, &mut list_stack);
+                        hangs.push(hang);
                     }
                     Tag::BlockQuote(_) => {
-                        self.open_block_quote(&mut inline, &mut out, &mut in_quote, columns);
+                        self.open_block_quote(
+                            &mut inline,
+                            &mut out,
+                            &mut in_quote,
+                            columns,
+                            &hangs,
+                        );
                     }
                     Tag::CodeBlock(kind) => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                         ensure_blank(&mut out);
                         code_lang = fenced_lang(kind);
                         in_code = true;
@@ -608,7 +649,7 @@ impl Markdown {
                         inline.push_str(&self.style.code.paint(&format!("[{label}]: ")));
                     }
                     Tag::Table(alignments) => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                         ensure_blank(&mut out);
                         table_rows = Vec::new();
                         table_aligns = alignments;
@@ -627,7 +668,7 @@ impl Markdown {
                         self.flush_heading(&mut inline, level, columns, &mut out);
                     }
                     TagEnd::Paragraph => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                     }
                     TagEnd::Emphasis => state.italic = false,
                     TagEnd::Strong => state.bold = false,
@@ -638,11 +679,14 @@ impl Markdown {
                     }
                     TagEnd::List(_) => {
                         list_stack.pop();
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                     }
-                    TagEnd::Item => self.flush_inline(&mut inline, &mut out, in_quote, columns),
+                    TagEnd::Item => {
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
+                        hangs.pop();
+                    }
                     TagEnd::BlockQuote(_) => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                         in_quote = false;
                     }
                     TagEnd::CodeBlock => {
@@ -651,10 +695,10 @@ impl Markdown {
                         self.render_code_block(&mut inline, lang, columns, &mut out);
                     }
                     TagEnd::FootnoteDefinition => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                     }
                     TagEnd::Table => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                         render_table(&table_rows, &table_aligns, columns, &self.style, &mut out);
                     }
                     TagEnd::TableHead | TagEnd::TableRow => {
@@ -689,9 +733,11 @@ impl Markdown {
                     inline.push_str(&self.style.code.paint(code.as_ref()));
                 }
                 Event::SoftBreak => inline.push(' '),
-                Event::HardBreak => self.flush_inline(&mut inline, &mut out, in_quote, columns),
+                Event::HardBreak => {
+                    self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs)
+                }
                 Event::Rule => {
-                    self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                    self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                     ensure_blank(&mut out);
                     out.push(self.style.rule.paint("─".repeat(columns.min(80)).as_str()));
                 }
@@ -705,7 +751,7 @@ impl Markdown {
                     inline.push_str(&self.style.text.paint(&converted));
                 }
                 Event::DisplayMath(math) => {
-                    self.flush_inline(&mut inline, &mut out, in_quote, columns);
+                    self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
                     self.push_display_math(math.as_ref(), columns, &mut out);
                 }
                 Event::TaskListMarker(checked) => {
@@ -722,7 +768,7 @@ impl Markdown {
                 }
             }
         }
-        self.flush_inline(&mut inline, &mut out, in_quote, columns);
+        self.flush_inline(&mut inline, &mut out, in_quote, columns, &hangs);
         // Trailing blank lines never render.
         while out.last().is_some_and(|l| l.is_empty()) {
             out.pop();

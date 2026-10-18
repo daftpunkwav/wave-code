@@ -824,10 +824,12 @@ fn bold_lines_inside_a_tilde_fence_are_left_alone() {
 //
 // The screenshot complaint: a list followed by a section heading
 // rendered with zero blank line. Every block must separate from
-// the previous one with exactly one blank line (none at the top).
+// the previous one with exactly one blank line (none at the top);
+// a heading takes one extra blank above that so sections scan apart.
 
 /// Assert exactly one blank line separates blocks: no two
-/// consecutive blanks anywhere, and no leading blank.
+/// consecutive blanks anywhere, and no leading blank. A heading
+/// documents its own extra break and is not fed here.
 fn assert_clean_rhythm(lines: &[String]) {
     assert!(
         lines.first().is_some_and(|l| !l.is_empty()),
@@ -839,6 +841,25 @@ fn assert_clean_rhythm(lines: &[String]) {
             "double blank line: {lines:?}"
         );
     }
+}
+
+/// Assert the heading rhythm: exactly two blanks before a heading
+/// (the section break), at most one after it.
+fn assert_heading_breaks(plain: &[String], heading: &str) {
+    let at = plain
+        .iter()
+        .position(|l| l == heading)
+        .unwrap_or_else(|| panic!("heading {heading:?} missing: {plain:?}"));
+    assert!(
+        at >= 2 && plain[at - 1].is_empty() && plain[at - 2].is_empty(),
+        "two blanks before the heading: {plain:?}"
+    );
+    let doubles_below =
+        at + 2 < plain.len() && plain[at + 1].is_empty() && plain[at + 2].is_empty();
+    assert!(
+        !doubles_below,
+        "at most one blank after the heading: {plain:?}"
+    );
 }
 
 #[test]
@@ -855,19 +876,20 @@ ls -la
 ";
     let lines = md.render(text, 60);
     let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
-    assert_clean_rhythm(&plain);
+    assert_heading_breaks(&plain, "Shell 与代码执行");
     assert_eq!(plain[0], "• ls - 列出目录内容");
-    assert_eq!(plain[1], "", "blank before heading after list");
-    assert_eq!(plain[2], "Shell 与代码执行");
-    assert_eq!(plain[3], "", "blank after heading before list");
-    assert_eq!(plain[4], "• grep - 搜索文本");
-    assert_eq!(plain[5], "", "blank between list and fence");
+    assert_eq!(plain[1], "", "section break before heading after list");
+    assert_eq!(plain[2], "");
+    assert_eq!(plain[3], "Shell 与代码执行");
+    assert_eq!(plain[4], "", "blank after heading before list");
+    assert_eq!(plain[5], "• grep - 搜索文本");
+    assert_eq!(plain[6], "", "blank between list and fence");
     assert!(
-        plain[6].starts_with("╭─ bash "),
+        plain[7].starts_with("╭─ bash "),
         "frame after the blank: {plain:?}"
     );
-    assert!(plain[7].starts_with("│ ls -la"));
-    assert!(plain[8].starts_with("╰"));
+    assert!(plain[8].starts_with("│ ls -la"));
+    assert!(plain[9].starts_with("╰"));
 }
 
 #[test]
@@ -881,11 +903,11 @@ fn list_then_paragraph_gets_a_blank_line() {
 }
 
 #[test]
-fn paragraph_then_heading_has_exactly_one_blank() {
+fn paragraph_then_heading_gets_a_section_break() {
     let mut md = renderer();
     let lines = md.render("hello\n## Title", 40);
     let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
-    assert_eq!(plain, vec!["hello", "", "Title"]);
+    assert_eq!(plain, vec!["hello", "", "", "Title"]);
 }
 
 #[test]
@@ -894,6 +916,38 @@ fn heading_then_paragraph_has_exactly_one_blank() {
     let lines = md.render("## Title\nhello", 40);
     let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
     assert_eq!(plain, vec!["Title", "", "hello"]);
+}
+
+/// A heading opening the document stays flush: no leading blanks.
+#[test]
+fn leading_heading_stays_flush() {
+    let mut md = renderer();
+    let lines = md.render("## Title\nhello", 40);
+    let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+    assert_eq!(plain[0], "Title", "no leading break: {plain:?}");
+}
+
+/// Wrapped list items hang: continuation lines align under the item
+/// text, not under the marker.
+#[test]
+fn list_items_hang_their_continuation_lines() {
+    let mut md = renderer();
+    let lines = md.render("- one two three four five six seven eight", 20);
+    let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+    assert_eq!(plain[0], "• one two three fo", "first row: {plain:?}");
+    assert_eq!(plain[1], "  ur five six seven", "hanging row: {plain:?}");
+    assert_eq!(plain[2], "  eight", "hanging row: {plain:?}");
+}
+
+/// Ordered items hang by their wider marker: continuation lines align
+/// under the text column ("1. " = three columns).
+#[test]
+fn ordered_items_hang_by_their_marker_width() {
+    let mut md = renderer();
+    let lines = md.render("1. one two three four five six", 20);
+    let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+    assert_eq!(plain[0], "1. one two three", "first row: {plain:?}");
+    assert_eq!(plain[1], "   four five six", "hanging row: {plain:?}");
 }
 
 #[test]

@@ -151,7 +151,9 @@ impl Component for Thinking {
         {
             return Arc::clone(lines);
         }
-        let body_width = columns.saturating_sub(6);
+        // The preview prefix ("  └ ") occupies four columns; reserving
+        // more would wrap every line two columns early.
+        let body_width = columns.saturating_sub(4);
         let italic_dim = theme.style(Token::TextDim).italic();
         let mut out = Vec::new();
         if self.live {
@@ -276,7 +278,7 @@ mod tests {
         let mut block = Thinking::live(ExpandedFlag::new());
         block.push(&body);
         let lines = block.render(60);
-        let body_width = 60usize.saturating_sub(6);
+        let body_width = 60usize.saturating_sub(4);
         let full: Vec<String> = body
             .split('\n')
             .flat_map(|segment| width::wrap_line(segment, body_width))

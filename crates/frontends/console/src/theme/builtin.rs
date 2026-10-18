@@ -328,7 +328,7 @@ mod tests {
         );
         assert_eq!(
             palette.get(Token::TextMuted),
-            tui_engine::color::Color::rgb(0x75, 0x80, 0x8B)
+            tui_engine::color::Color::rgb(0x87, 0x92, 0x9E)
         );
         assert_eq!(
             palette.get(Token::Border),
@@ -424,7 +424,7 @@ mod tests {
         );
         assert_eq!(
             palette.get(Token::TextMuted),
-            tui_engine::color::Color::rgb(0x6E, 0x76, 0x81)
+            tui_engine::color::Color::rgb(0x65, 0x6D, 0x76)
         );
         assert_eq!(
             palette.get(Token::Border),

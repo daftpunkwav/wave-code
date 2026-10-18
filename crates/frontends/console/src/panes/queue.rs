@@ -34,6 +34,9 @@ pub fn render(queued: &[String], columns: usize, now: Instant) -> Vec<String> {
         Token::TextDim,
         "  ↑ to edit · will send after current task · ctrl-s to steer immediately",
     ));
+    // One blank line keeps the pane off the editor frame below: every
+    // transcript component ends with the same spacer.
+    out.push(String::new());
     out
 }
 
@@ -57,10 +60,11 @@ mod tests {
             Instant::now(),
         );
         let plain: Vec<String> = lines.iter().map(|l| width::strip_ansi(l)).collect();
-        assert_eq!(plain.len(), 4, "rule + 2 items + hint");
+        assert_eq!(plain.len(), 5, "rule + 2 items + hint + spacer");
         assert!(plain[1].contains("❯ first") || plain[1].contains("› first"));
         assert!(plain[2].contains("second"));
         assert!(plain[3].contains("ctrl-s to steer"));
+        assert!(plain[4].is_empty(), "spacer above the editor");
     }
 
     #[test]

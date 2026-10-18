@@ -15,6 +15,9 @@
 //! itself and the previous block (none at the top of the document), so
 //! blocks never cram together and two blank lines never appear.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
 
@@ -49,6 +52,8 @@ pub trait FenceRenderer {
     /// Render the body of the fence tagged `lang` within `columns`
     /// display columns (the frame's inner budget); `None` falls through
     /// to the next renderer — diff handling, then the highlighter.
+    /// Returned lines are plain text: the caller paints them with the
+    /// active text style.
     fn render_fence(&self, lang: &str, code: &str, columns: usize) -> Option<Vec<String>>;
 }
 
@@ -162,6 +167,59 @@ impl MarkdownStyle {
     }
 }
 
+/// Bounded entries in the highlight cache: enough to hold every code
+/// block of a large reply, small enough that the cached ANSI output
+/// stays a rounding error next to the message text itself.
+const HIGHLIGHT_CACHE_ENTRIES: usize = 64;
+
+/// LRU over highlighted code blocks, keyed by (language, code).
+///
+/// Streamed drafts re-render every block on each delta flush, but all
+/// blocks except the growing tail are byte-identical between flushes,
+/// so the cache turns a flush's cost into one highlight of the newest
+/// block instead of a rehighlight of the whole message. Keying on the
+/// full text (not a hash) keeps correctness free of collision logic;
+/// blocks are bounded by the highlighter's own size cutoff.
+#[derive(Default)]
+struct HighlightCache {
+    entries: HashMap<(Option<String>, String), Arc<Vec<String>>>,
+    order: VecDeque<(Option<String>, String)>,
+}
+
+impl HighlightCache {
+    /// The cached block, moved to the most-recently-used end.
+    fn lookup(&mut self, lang: Option<&str>, code: &str) -> Option<Arc<Vec<String>>> {
+        let key = (lang.map(str::to_string), code.to_string());
+        if !self.entries.contains_key(&key) {
+            return None;
+        }
+        self.order.retain(|cached| cached != &key);
+        let lines = self.entries.get(&key).map(Arc::clone);
+        self.order.push_back(key);
+        lines
+    }
+
+    /// Insert a highlighted block, evicting the least-recently-used
+    /// entry past the bound.
+    fn insert(&mut self, lang: Option<&str>, code: &str, lines: Arc<Vec<String>>) {
+        let key = (lang.map(str::to_string), code.to_string());
+        if self.entries.insert(key.clone(), lines).is_none() {
+            self.order.push_back(key);
+        }
+        while self.order.len() > HIGHLIGHT_CACHE_ENTRIES {
+            let evicted = self.order.pop_front();
+            if let Some(key) = evicted {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
 /// A markdown renderer with a per-(text, width) render cache.
 pub struct Markdown {
     style: MarkdownStyle,
@@ -170,6 +228,7 @@ pub struct Markdown {
     /// set carries the engine-builtin mermaid diagrams.
     fences: Vec<Box<dyn FenceRenderer>>,
     cache: Option<(String, usize, Segment)>,
+    highlight_cache: HighlightCache,
 }
 
 impl Markdown {
@@ -182,6 +241,7 @@ impl Markdown {
             highlighter,
             fences: vec![Box::new(crate::mermaid::MermaidFences)],
             cache: None,
+            highlight_cache: HighlightCache::default(),
         }
     }
 
@@ -258,9 +318,12 @@ impl Markdown {
     /// Swap the syntax highlighter (theme switches rebuild it: the
     /// syntax theme bakes into highlighted code at construction, and a
     /// stale highlighter repaints old code blocks in the old palette).
+    /// The highlight cache holds output baked by the previous
+    /// highlighter and must go with it.
     pub fn set_highlighter(&mut self, highlighter: Box<dyn SyntaxHighlighter>) {
         self.highlighter = highlighter;
         self.cache = None;
+        self.highlight_cache.clear();
     }
 
     /// Paint a ```diff fence: whole lines ride the diff colors —
@@ -358,7 +421,7 @@ impl Markdown {
     /// it through the fence renderers (the mermaid seam), diff
     /// coloring, or the syntax highlighter, and frame the result.
     fn render_code_block(
-        &self,
+        &mut self,
         inline: &mut String,
         lang: Option<String>,
         columns: usize,
@@ -380,10 +443,18 @@ impl Markdown {
         // Diff fences get dedicated +- and hunk coloring instead of
         // generic syntax highlighting.
         let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
-        let body = match diagram {
-            Some(body) => body,
-            None if is_diff => self.diff_lines(&code),
-            None => self.highlighter.highlight(&code, lang.as_deref()),
+        let body: Arc<Vec<String>> = match diagram {
+            Some(ref body) => Arc::new(body.clone()),
+            None if is_diff => Arc::new(self.diff_lines(&code)),
+            None => match self.highlight_cache.lookup(lang.as_deref(), &code) {
+                Some(lines) => lines,
+                None => {
+                    let lines = Arc::new(self.highlighter.highlight(&code, lang.as_deref()));
+                    self.highlight_cache
+                        .insert(lang.as_deref(), &code, Arc::clone(&lines));
+                    lines
+                }
+            },
         };
         // The frame hugs its content (plus the tag) and only stretches
         // to the width cap on wide rows — a full-width frame starves
@@ -403,7 +474,7 @@ impl Markdown {
             .saturating_add(4)
             .min(frame_width(columns));
         out.push(self.frame_top(lang.as_deref(), total));
-        for line in &body {
+        for line in body.iter() {
             out.push(self.frame_row(line, total));
         }
         out.push(self.frame_bottom(total));
@@ -472,7 +543,7 @@ impl Markdown {
         inline.push_str(&self.style.text.paint(&marker));
     }
 
-    fn render_uncached(&self, text: &str, columns: usize) -> Vec<String> {
+    fn render_uncached(&mut self, text: &str, columns: usize) -> Vec<String> {
         let text = preprocess(text);
         let options = parser_options();
         let parser = Parser::new_ext(&text, options);

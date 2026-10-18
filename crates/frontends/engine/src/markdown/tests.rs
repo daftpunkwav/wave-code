@@ -6,6 +6,89 @@ fn renderer() -> Markdown {
     Markdown::new(MarkdownStyle::default(), Box::new(PlainHighlighter))
 }
 
+/// A highlighter that counts invocations: the streaming contract is
+/// that byte-identical blocks highlight once.
+struct CountingHighlighter {
+    calls: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl SyntaxHighlighter for CountingHighlighter {
+    fn highlight(&self, code: &str, _lang: Option<&str>) -> Vec<String> {
+        self.calls.set(self.calls.get() + 1);
+        code.lines().map(|l| l.to_string()).collect()
+    }
+}
+
+/// A renderer wired to a shared call counter.
+fn counting_renderer() -> (Markdown, std::rc::Rc<std::cell::Cell<usize>>) {
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let md = Markdown::new(
+        MarkdownStyle::default(),
+        Box::new(CountingHighlighter {
+            calls: std::rc::Rc::clone(&calls),
+        }),
+    );
+    (md, calls)
+}
+
+/// A streamed draft re-renders the whole message on every flush, but
+/// only the growing tail block actually changed: earlier blocks must
+/// come from the highlight cache instead of re-running the highlighter.
+#[test]
+fn streaming_flushes_highlight_only_the_new_tail_block() {
+    let (mut md, calls) = counting_renderer();
+    let prefix = "para\n```rs\nfn a() {}\n```\n";
+    md.render(prefix, 40);
+    md.render(prefix, 40);
+    let lines = md.render(prefix, 40);
+    assert!(
+        lines.iter().any(|l| strip_ansi(l).contains("fn a() {}")),
+        "cached body intact: {lines:?}"
+    );
+    assert_eq!(calls.get(), 1, "re-renders reuse the cached block");
+    // A growing draft appends a second block; the first stays cached.
+    let grown = format!("{prefix}```rs\nfn b() {{}}\n```");
+    md.render(&grown, 40);
+    assert_eq!(calls.get(), 2, "one highlight per distinct block");
+    // A different document re-parses block by block; both blocks ride
+    // the cache.
+    let edited = format!("{prefix}```rs\nfn b() {{}}\n```\ntrailer\n");
+    md.render(&edited, 40);
+    assert_eq!(calls.get(), 2, "shared blocks hit across documents");
+}
+
+/// The cache is bounded and least-recently-used: past the bound the
+/// oldest untouched entry goes, a recently touched entry survives.
+#[test]
+fn highlight_cache_is_bounded_lru() {
+    let mut cache = HighlightCache::default();
+    let entry = |n: usize| Arc::new(vec![n.to_string()]);
+    for n in 0..HIGHLIGHT_CACHE_ENTRIES {
+        cache.insert(Some("rs"), &n.to_string(), entry(n));
+    }
+    // Touch entry 0 so it outlives the next insertion.
+    assert!(cache.lookup(Some("rs"), "0").is_some());
+    cache.insert(
+        Some("rs"),
+        &HIGHLIGHT_CACHE_ENTRIES.to_string(),
+        entry(HIGHLIGHT_CACHE_ENTRIES),
+    );
+    assert!(cache.lookup(Some("rs"), "0").is_some(), "recent survives");
+    assert!(cache.lookup(Some("rs"), "1").is_none(), "lru evicted");
+}
+
+/// A highlighter swap (theme switch) invalidates the cache: cached
+/// output is baked in the old palette.
+#[test]
+fn highlighter_swap_drops_the_cache() {
+    let (mut md, calls) = counting_renderer();
+    md.render("```rs\nfn a() {}\n```", 40);
+    assert_eq!(calls.get(), 1);
+    md.set_highlighter(Box::new(PlainHighlighter));
+    md.render("```rs\nfn a() {}\n```", 40);
+    assert_eq!(calls.get(), 1, "the new highlighter ran once");
+}
+
 /// One entry per display column: wide glyphs repeat into both of
 /// their cells, so plain indexing matches what a terminal shows.
 fn display_columns(line: &str) -> Vec<char> {

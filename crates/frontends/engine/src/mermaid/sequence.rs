@@ -62,7 +62,7 @@ pub(super) fn parse_sequence(source: &str) -> Option<Sequence> {
     let mut items = Vec::new();
     // Register an implicit participant (Mermaid creates participants
     // from messages and notes on first use).
-    let mut intern =
+    let intern =
         |ids: &mut HashMap<String, usize>, names: &mut Vec<String>, id: &str| -> Option<usize> {
             if let Some(&index) = ids.get(id) {
                 return Some(index);
@@ -109,16 +109,17 @@ pub(super) fn parse_sequence(source: &str) -> Option<Sequence> {
             "auton" | "autonumber" | "activate" | "deactivate" => {}
             "note" => {
                 let rest = line["note".len()..].trim();
-                let (side, targets) = if let Some(rest) = rest.strip_prefix("over") {
-                    (NoteSide::Over, rest.trim())
-                } else if let Some(rest) = rest.strip_prefix("left of") {
-                    (NoteSide::Left, rest.trim())
-                } else if let Some(rest) = rest.strip_prefix("right of") {
-                    (NoteSide::Right, rest.trim())
+                let lower = rest.to_ascii_lowercase();
+                let (side, head) = if lower.starts_with("over") {
+                    (NoteSide::Over, &rest["over".len()..])
+                } else if lower.starts_with("left of") {
+                    (NoteSide::Left, &rest["left of".len()..])
+                } else if lower.starts_with("right of") {
+                    (NoteSide::Right, &rest["right of".len()..])
                 } else {
                     return None;
                 };
-                let (target_list, text) = targets.split_once(':')?;
+                let (target_list, text) = head.trim().split_once(':')?;
                 let text = text.trim().to_string();
                 if text.is_empty() {
                     return None;

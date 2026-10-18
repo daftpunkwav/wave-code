@@ -21,8 +21,10 @@ pub const USER_BULLET: &str = "❯ ";
 /// The assistant message bullet: a white dot.
 pub const ASSISTANT_BULLET: &str = "● ";
 /// Half-period of the streaming dot's blink (on for one phase, off for
-/// the next — a steady, regular pulse while the turn streams).
-pub const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(530);
+/// the next — a steady, regular pulse while the turn streams). A 500 ms
+/// half-period lands exactly on the render loop's 100 ms tick, so the
+/// blink never jitters between 500 and 600 ms.
+pub const STREAM_FRAME_INTERVAL: Duration = Duration::from_millis(500);
 
 /// The streaming bullet for `elapsed`: the dot alternating with a
 /// blank cell on a fixed cadence.

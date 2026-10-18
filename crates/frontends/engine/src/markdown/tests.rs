@@ -22,7 +22,7 @@ impl SyntaxHighlighter for CountingHighlighter {
 /// A renderer wired to a shared call counter.
 fn counting_renderer() -> (Markdown, std::rc::Rc<std::cell::Cell<usize>>) {
     let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-    let mut md = Markdown::new(
+    let md = Markdown::new(
         MarkdownStyle::default(),
         Box::new(CountingHighlighter {
             calls: std::rc::Rc::clone(&calls),
@@ -120,12 +120,10 @@ fn diagram_rows_carry_the_text_style() {
 fn wide_diagrams_use_the_full_body_width() {
     // Three 34-column boxes plus gutters need ~108 columns: past the
     // 80-column code-frame cap, inside a 120-column body budget.
-    let src = format!(
-        "```mermaid\nflowchart LR\n A[{a}] --> B[{b}] --> C[{c}]\n```",
-        a = format!("start-{}", "x".repeat(24)),
-        b = format!("middle-{}", "y".repeat(23)),
-        c = format!("final-{}", "z".repeat(24)),
-    );
+    let a = format!("start-{}", "x".repeat(24));
+    let b = format!("middle-{}", "y".repeat(23));
+    let c = format!("final-{}", "z".repeat(24));
+    let src = format!("```mermaid\nflowchart LR\n A[{a}] --> B[{b}] --> C[{c}]\n```");
     let mut md = renderer();
     // At code-frame width the diagram cannot fit and falls back to the
     // source view (the raw fence text, no box drawing).

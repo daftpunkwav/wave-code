@@ -586,8 +586,7 @@ fn gantt_bars_offset_by_their_start_dates() {
         lines
             .iter()
             .find(|l| l.contains(name))
-            .map(|l| l.find('\u{2588}'))
-            .flatten()
+            .and_then(|l| l.find('\u{2588}'))
             .expect("a bar row")
     };
     assert!(

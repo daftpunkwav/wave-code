@@ -434,7 +434,10 @@ impl Markdown {
         let code = sanitize_terminal(&taken).into_owned();
         // Fence renderers get first pass at the body (the mermaid
         // seam); then diff fences; the rest rides the highlighter.
-        let body_budget = frame_width(columns).saturating_sub(4);
+        // Diagrams own their fit contract, so they draw on the full
+        // body width: the code-frame width cap would strand wide
+        // diagrams on narrow frames no matter how wide the terminal is.
+        let body_budget = columns.saturating_sub(4);
         let diagram = lang.as_deref().and_then(|lang| {
             self.fences
                 .iter()
@@ -444,7 +447,15 @@ impl Markdown {
         // generic syntax highlighting.
         let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
         let body: Arc<Vec<String>> = match diagram {
-            Some(ref body) => Arc::new(body.clone()),
+            // Diagram bodies are plain geometry: paint them with the
+            // text style so they track the theme (unpainted spans
+            // inherit the terminal default, which a recolored terminal
+            // background leaves unreadable).
+            Some(ref body) => Arc::new(
+                body.iter()
+                    .map(|line| self.style.text.paint(line))
+                    .collect(),
+            ),
             None if is_diff => Arc::new(self.diff_lines(&code)),
             None => match self.highlight_cache.lookup(lang.as_deref(), &code) {
                 Some(lines) => lines,
@@ -458,7 +469,12 @@ impl Markdown {
         };
         // The frame hugs its content (plus the tag) and only stretches
         // to the width cap on wide rows — a full-width frame starves
-        // the right side.
+        // the right side. Diagrams keep the uncapped width: their fit
+        // contract already bounds every row to the budget above.
+        let frame_cap = match diagram {
+            Some(_) => columns,
+            None => frame_width(columns),
+        };
         let content = body
             .iter()
             .map(|line| width::width(line))
@@ -469,10 +485,7 @@ impl Markdown {
             .and_then(lang_tag)
             .map(|tag| width::width(&tag) + 6)
             .unwrap_or(0);
-        let total = content
-            .max(tag_width)
-            .saturating_add(4)
-            .min(frame_width(columns));
+        let total = content.max(tag_width).saturating_add(4).min(frame_cap);
         out.push(self.frame_top(lang.as_deref(), total));
         for line in body.iter() {
             out.push(self.frame_row(line, total));

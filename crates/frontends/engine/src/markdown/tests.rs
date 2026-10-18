@@ -22,7 +22,7 @@ impl SyntaxHighlighter for CountingHighlighter {
 /// A renderer wired to a shared call counter.
 fn counting_renderer() -> (Markdown, std::rc::Rc<std::cell::Cell<usize>>) {
     let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-    let md = Markdown::new(
+    let mut md = Markdown::new(
         MarkdownStyle::default(),
         Box::new(CountingHighlighter {
             calls: std::rc::Rc::clone(&calls),
@@ -87,6 +87,79 @@ fn highlighter_swap_drops_the_cache() {
     md.set_highlighter(Box::new(PlainHighlighter));
     md.render("```rs\nfn a() {}\n```", 40);
     assert_eq!(calls.get(), 1, "the new highlighter ran once");
+}
+
+/// Diagram bodies are painted with the text style: unpainted spans
+/// inherit the terminal default, which a recolored terminal background
+/// leaves unreadable.
+#[test]
+fn diagram_rows_carry_the_text_style() {
+    let ink = Style::new().fg(Color::rgb(1, 2, 3));
+    let mut md = Markdown::new(
+        MarkdownStyle {
+            text: ink,
+            ..MarkdownStyle::default()
+        },
+        Box::new(PlainHighlighter),
+    );
+    let lines = md.render("```mermaid\nflowchart TD\n a --> b\n```", 60);
+    let diagram_row = lines
+        .iter()
+        .find(|l| strip_ansi(l).contains('┌'))
+        .expect("a diagram frame row");
+    assert!(
+        diagram_row.contains("\x1b[38;2;1;2;3m"),
+        "diagram row painted with the text token: {diagram_row:?}"
+    );
+}
+
+/// Diagrams draw on the full terminal width: the code-frame width cap
+/// would strand a wide diagram on a narrow frame no matter how wide
+/// the terminal is.
+#[test]
+fn wide_diagrams_use_the_full_body_width() {
+    // Three 34-column boxes plus gutters need ~108 columns: past the
+    // 80-column code-frame cap, inside a 120-column body budget.
+    let src = format!(
+        "```mermaid\nflowchart LR\n A[{a}] --> B[{b}] --> C[{c}]\n```",
+        a = format!("start-{}", "x".repeat(24)),
+        b = format!("middle-{}", "y".repeat(23)),
+        c = format!("final-{}", "z".repeat(24)),
+    );
+    let mut md = renderer();
+    // At code-frame width the diagram cannot fit and falls back to the
+    // source view (the raw fence text, no box drawing).
+    let narrow = md.render(&src, 80);
+    assert!(
+        !narrow.iter().any(|l| strip_ansi(l).contains('┌')),
+        "wide diagram falls back at frame width: {narrow:?}"
+    );
+    // The same diagram renders once the terminal is wide enough.
+    let wide = md.render(&src, 120);
+    assert!(
+        wide.iter().any(|l| strip_ansi(l).contains('┌')),
+        "wide diagram renders on a wide terminal: {wide:?}"
+    );
+    assert!(
+        wide.iter().any(|l| strip_ansi(l).contains('▶')),
+        "side arrows present: {wide:?}"
+    );
+}
+
+/// The code-frame width cap still holds for highlighted code: wide
+/// terminals get modest frames.
+#[test]
+fn code_frames_still_cap_at_eighty_columns() {
+    let mut md = renderer();
+    let lines = md.render("```rs\nfn a() {}\n```\n", 130);
+    let frame = lines
+        .iter()
+        .find(|l| strip_ansi(l).contains('╭'))
+        .expect("a frame top");
+    assert!(
+        width::width(&strip_ansi(frame)) <= 80,
+        "code frame capped: {frame:?}"
+    );
 }
 
 /// One entry per display column: wide glyphs repeat into both of

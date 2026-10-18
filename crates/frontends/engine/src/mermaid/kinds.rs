@@ -101,13 +101,12 @@ pub(super) fn parse_class_diagram(source: &str) -> Option<Diagram> {
                     parse_class_relation(line, &mut diagram, &mut ids)?
                 {
                     diagram.edge(from, to, label, style);
-                } else if let Some(index) = open {
+                } else {
                     // Bare member row (`int age`, `quack()`): Mermaid
                     // accepts members without a visibility prefix inside
-                    // an open class block.
-                    push_member(&mut diagram, index, line, MEMBER_CAP, &mut hidden);
-                } else {
-                    return None;
+                    // an open class block; without an open block the
+                    // line is unsupported.
+                    push_member(&mut diagram, open?, line, MEMBER_CAP, &mut hidden);
                 }
             }
         }

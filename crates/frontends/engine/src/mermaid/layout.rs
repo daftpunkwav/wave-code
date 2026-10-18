@@ -191,9 +191,9 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         if tl == fl {
             continue;
         }
-        for gap in fl..tl {
-            gap_verticals[gap].push(x[edge.from] + box_w[edge.from] / 2);
-            gap_verticals[gap].push(x[edge.to] + box_w[edge.to] / 2);
+        for verts in &mut gap_verticals[fl..tl] {
+            verts.push(x[edge.from] + box_w[edge.from] / 2);
+            verts.push(x[edge.to] + box_w[edge.to] / 2);
         }
     }
     for verts in &mut gap_verticals {

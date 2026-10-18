@@ -321,8 +321,15 @@ pub(super) fn layout_sequence(s: &Sequence, columns: usize) -> Option<Vec<String
                     return None; // no room to draw the box
                 }
                 let inner = box_right - box_left - 1;
-                let mut top = String::from("┌ ");
-                top.push_str(&truncate_width(text, inner.saturating_sub(4)));
+                // The text centers on the top rule between a dash and
+                // a space on each side.
+                let shown = truncate_width(text, inner.saturating_sub(4));
+                let side = (inner.saturating_sub(2) - width::width(&shown)) / 2;
+                let mut top = String::from("┌");
+                top.push_str(&"─".repeat(side));
+                top.push(' ');
+                top.push_str(&shown);
+                top.push(' ');
                 while width::width(&top) < box_right - box_left {
                     top.push('─');
                 }

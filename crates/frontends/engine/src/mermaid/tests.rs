@@ -451,6 +451,42 @@ fn quadrant_charts_render_grid_and_points() {
     assert!(lines.iter().all(|l| width::width(l) <= 80), "{lines:?}");
 }
 
+/// Points sharing one cell spread onto neighboring cells instead of
+/// overwriting each other: three coincident points draw three glyphs.
+#[test]
+fn overlapping_quadrant_points_stay_visible() {
+    let src = "quadrantChart\n    x-axis a --> b\n    y-axis c --> d\n    \"P1\": [0.5, 0.5]\n    \"P2\": [0.5, 0.5]\n    \"P3\": [0.5, 0.5]";
+    let lines = render_diagram(src, 80).expect("coincident points render");
+    let dots = lines
+        .iter()
+        .take_while(|l| !l.starts_with("y:") && !l.starts_with("x:"))
+        .map(|l| l.matches('●').count())
+        .sum::<usize>();
+    assert_eq!(dots, 3, "three visible glyphs: {lines:?}");
+}
+
+/// A legend wider than the terminal wraps instead of falling back to
+/// the source view, and every wrapped row fits the budget.
+#[test]
+fn quadrant_legends_wrap_instead_of_falling_back() {
+    let mut src = String::from("quadrantChart\n    x-axis a --> b\n    y-axis c --> d\n");
+    for n in 0..6 {
+        src.push_str(&format!(
+            "    \"point-with-a-long-name-{n}\": [0.{n}, 0.9]\n"
+        ));
+    }
+    let lines = render_diagram(&src, 60).expect("wrapped legend renders");
+    let legend: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.contains("point-with-a-long-name"))
+        .collect();
+    assert!(legend.len() >= 2, "legend split across rows: {lines:?}");
+    assert!(
+        lines.iter().all(|l| width::width(l) <= 60),
+        "every row fits: {lines:?}"
+    );
+}
+
 #[test]
 fn xycharts_render_scaled_bar_rows() {
     let src = "xychart-beta\n    title \"销量\"\n    x-axis [1月, 2月, 3月]\n    y-axis \"销量\" 0 --> 50\n    bar [10, 30, 20]";
@@ -538,6 +574,26 @@ fn gantt_leap_year_dates_render() {
     let lines = render_diagram(src, 80).expect("leap date renders");
     let joined = lines.join("\n");
     assert!(joined.contains("03-01"), "end after the leap day: {joined}");
+}
+
+/// Bars sit at their offset from the earliest start: two same-length
+/// tasks with staggered dates draw their bars at staggered positions.
+#[test]
+fn gantt_bars_offset_by_their_start_dates() {
+    let src = "gantt\n    t1 :a, 2026-01-01, 2d\n    t2 :b, 2026-01-10, 2d";
+    let lines = render_diagram(src, 80).expect("staggered gantt renders");
+    let bar_col = |name: &str| {
+        lines
+            .iter()
+            .find(|l| l.contains(name))
+            .map(|l| l.find('\u{2588}'))
+            .flatten()
+            .expect("a bar row")
+    };
+    assert!(
+        bar_col("t2") > bar_col("t1"),
+        "later start sits further right: {lines:?}"
+    );
 }
 
 /// Absurd dates and durations fall back to the source view instead

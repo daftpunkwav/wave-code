@@ -321,7 +321,9 @@ pub(super) fn parse_quadrant(source: &str) -> Option<Quadrant> {
 }
 
 /// Lay a quadrant chart out: a 36×12 grid, the cross at the middle,
-/// quadrant labels in the corners, points as `●`, a legend below.
+/// quadrant labels in the corners, points as `●` (overlapping points
+/// probe neighboring cells so they stay individually visible), a
+/// legend below that wraps when one row cannot hold every point.
 pub(super) fn layout_quadrant(q: &Quadrant, columns: usize) -> Option<Vec<String>> {
     const W: usize = 36;
     const H: usize = 12;
@@ -342,8 +344,10 @@ pub(super) fn layout_quadrant(q: &Quadrant, columns: usize) -> Option<Vec<String
             }
         }
     }
-    // Quadrant labels: 1 top-right, 2 top-left, 3 bottom-left, 4 bottom-right.
-    let place = |row: &mut RowCanvas, text: &str, right: bool| {
+    // Quadrant labels: 1 top-right, 2 top-left, 3 bottom-left, 4
+    // bottom-right. Their cells join the occupied set, so points never
+    // overwrite a label.
+    let place_label = |row: &mut RowCanvas, text: &str, right: bool| {
         if text.is_empty() {
             return;
         }
@@ -351,25 +355,85 @@ pub(super) fn layout_quadrant(q: &Quadrant, columns: usize) -> Option<Vec<String
         let col = if right { W.saturating_sub(w + 1) } else { 1 };
         row.put(col, text.to_string());
     };
-    place(&mut rows[1], &q.quadrants[1], false);
-    place(&mut rows[1], &q.quadrants[0], true);
-    place(&mut rows[H - 1], &q.quadrants[2], false);
-    place(&mut rows[H - 1], &q.quadrants[3], true);
+    let mut occupied: Vec<(usize, usize)> = Vec::new();
+    let mut label_at = |text: &str, right: bool, row: usize| {
+        if text.is_empty() {
+            return;
+        }
+        let w = width::width(text);
+        let col = if right { W.saturating_sub(w + 1) } else { 1 };
+        for cell in col..col + w {
+            occupied.push((row, cell));
+        }
+    };
+    label_at(&q.quadrants[1], false, 1);
+    label_at(&q.quadrants[0], true, 1);
+    label_at(&q.quadrants[2], false, H - 1);
+    label_at(&q.quadrants[3], true, H - 1);
+    place_label(&mut rows[1], &q.quadrants[1], false);
+    place_label(&mut rows[1], &q.quadrants[0], true);
+    place_label(&mut rows[H - 1], &q.quadrants[2], false);
+    place_label(&mut rows[H - 1], &q.quadrants[3], true);
+    // Probe order: exact spot first, then a ring of neighbors, so a
+    // clump of points spreads instead of collapsing into one glyph.
+    const PROBES: [(isize, isize); 17] = [
+        (0, 0),
+        (1, 0),
+        (-1, 0),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (-1, -1),
+        (1, 1),
+        (-1, 1),
+        (2, 0),
+        (-2, 0),
+        (0, -2),
+        (0, 2),
+        (3, 0),
+        (-3, 0),
+        (0, -3),
+        (0, 3),
+    ];
     for (_name, x, y) in &q.points {
-        let col = (1.0 + x * (W as f64 - 3.0)).round() as usize;
-        let row = (1.0 + (1.0 - y) * (H as f64 - 3.0)).round() as usize;
-        let col = col.clamp(1, W - 2);
-        let row = row.clamp(1, H - 2);
-        rows[row].put(col, "●");
+        let col = (1.0 + x * (W as f64 - 3.0)).round() as isize;
+        let row = (1.0 + (1.0 - y) * (H as f64 - 3.0)).round() as isize;
+        let spot = PROBES.iter().find_map(|(dr, dc)| {
+            let r = row + dr;
+            let c = col + dc;
+            let free = (0..H as isize).contains(&r)
+                && (0..W as isize).contains(&c)
+                && !occupied.contains(&(r as usize, c as usize));
+            free.then_some((r as usize, c as usize))
+        });
+        let Some((r, c)) = spot else {
+            continue; // grid full: the legend still names every point
+        };
+        occupied.push((r, c));
+        rows[r].put(c, "●");
     }
-    let legend = q
+    // Legend: `● name` entries wrapped across as many rows as the
+    // width demands, so large charts no longer fall back whole.
+    let items = q
         .points
         .iter()
         .map(|(name, _, _)| format!("● {name}"))
-        .collect::<Vec<_>>()
-        .join("  ");
-    if width::width(&legend) + 2 > columns {
-        return None;
+        .collect::<Vec<_>>();
+    let mut legend: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for item in items {
+        let grown =
+            width::width(&current) + width::width(&item) + usize::from(!current.is_empty()) * 2;
+        if !current.is_empty() && grown + 2 > columns {
+            legend.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push_str("  ");
+        }
+        current.push_str(&item);
+    }
+    if !current.is_empty() {
+        legend.push(current);
     }
     let mut lines: Vec<String> = Vec::new();
     if let Some(title) = &q.title {
@@ -384,7 +448,7 @@ pub(super) fn layout_quadrant(q: &Quadrant, columns: usize) -> Option<Vec<String
     if !q.x_axis.is_empty() {
         lines.push(format!("x: {}", q.x_axis));
     }
-    lines.push(legend);
+    lines.extend(legend);
     Some(lines)
 }
 
@@ -627,8 +691,10 @@ fn days_from_civil(date: &str) -> Option<i64> {
     Some(era * 146097 + doe - 719468)
 }
 
-/// Render a gantt chart: title row plus one bar row per task. Bars are
-/// scaled against the longest task; dates render MM-DD.
+/// Render a gantt chart: title row plus one bar row per task. The
+/// timeline starts at the earliest task start; each bar sits at its
+/// offset from that origin and scales against the full span, so
+/// offset schedules read as offset rows.
 pub(super) fn layout_gantt(g: &Gantt, columns: usize) -> Option<Vec<String>> {
     let max_name = g
         .tasks
@@ -637,8 +703,9 @@ pub(super) fn layout_gantt(g: &Gantt, columns: usize) -> Option<Vec<String>> {
         .max()?
         .max(4);
     let bar_max = 24usize;
-    let max_days = g.tasks.iter().map(|(_, _, d)| *d).max()?;
-    if max_days <= 0 || max_name + bar_max + 18 > columns {
+    let origin = g.tasks.iter().map(|(_, start, _)| *start).min()?;
+    let span = g.tasks.iter().map(|(_, start, days)| start + days).max()? - origin;
+    if span <= 0 || max_name + bar_max + 18 > columns {
         return None;
     }
     let mut lines = Vec::new();
@@ -646,13 +713,15 @@ pub(super) fn layout_gantt(g: &Gantt, columns: usize) -> Option<Vec<String>> {
         lines.push(title.clone());
     }
     for (name, start, days) in &g.tasks {
-        let bar_len = ((*days as f64 / max_days as f64) * bar_max as f64).round() as usize;
+        let bar_len = ((*days as f64 / span as f64) * bar_max as f64).round() as usize;
+        let offset = (((start - origin) as f64 / span as f64) * bar_max as f64).round() as usize;
         let bar = "\u{2588}".repeat(bar_len.max(1));
         let end = civil_from_days(start + days);
         // Pad to the display width: char-count padding would misalign
         // wide (CJK) task names.
         let pad = " ".repeat(max_name - width::width(name));
-        lines.push(format!("{name}{pad} {bar} {}", &end[5..]));
+        let lead = " ".repeat(offset);
+        lines.push(format!("{name}{pad} {lead}{bar} {}", &end[5..]));
     }
     Some(lines)
 }

@@ -106,7 +106,7 @@ fn place_band_nodes(
 /// order at the end. `pos`/`size` are the cross-axis origins and box
 /// extents already placed.
 fn order_by_barycenter(
-    band: &mut Vec<usize>,
+    band: &mut [usize],
     group_of: &[usize],
     depth: usize,
     edges: &[GraphEdge],

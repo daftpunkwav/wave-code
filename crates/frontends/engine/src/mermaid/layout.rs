@@ -495,7 +495,7 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
     }
     let mut y = vec![0usize; count];
     let total_height = {
-        let tallest = cols.iter().map(|c| extent(c, box_h, 2)).max().unwrap_or(0);
+        let tallest = cols.iter().map(|c| extent(c, &box_h, 2)).max().unwrap_or(0);
         // Barycenter ordering, left-to-right: each column sorts by the
         // mean row-center of its already-placed predecessors, then
         // centers vertically in the canvas — the tallest column sets

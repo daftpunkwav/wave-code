@@ -76,21 +76,11 @@ fn place_band_nodes(
     box_w: &[usize],
     edges: &[GraphEdge],
 ) -> (Vec<usize>, usize) {
-    let count = box_w.len();
-    let mut x = vec![0usize; count];
-    // Widths are placement-independent, so the canvas width is known
+    let mut x = vec![0usize; box_w.len()];
+    // Extents are placement-independent, so the canvas width is known
     // before any band is placed and every band can center in it.
-    let band_width = |band: &[usize]| -> usize {
-        let inner: usize = band.iter().map(|&n| box_w[n]).sum();
-        inner + 3 * band.len().saturating_sub(1)
-    };
-    let total_width = bands.iter().map(|b| band_width(b)).max().unwrap_or(0);
-    let mut band_of = vec![0usize; count];
-    for (depth, band) in bands.iter().enumerate() {
-        for &n in band {
-            band_of[n] = depth;
-        }
-    }
+    let total_width = bands.iter().map(|b| extent(b, box_w, 3)).max().unwrap_or(0);
+    let band_of = group_index(bands, box_w.len());
     for (depth, band) in bands.iter_mut().enumerate() {
         if depth > 0 {
             order_by_barycenter(band, &band_of, depth, edges, &x, box_w);
@@ -98,6 +88,24 @@ fn place_band_nodes(
         place_centered(band, box_w, total_width, &mut x, 3);
     }
     (x, total_width)
+}
+
+/// The group (band or column) holding each node.
+fn group_index(groups: &[Vec<usize>], count: usize) -> Vec<usize> {
+    let mut index = vec![0usize; count];
+    for (depth, group) in groups.iter().enumerate() {
+        for &n in group {
+            index[n] = depth;
+        }
+    }
+    index
+}
+
+/// The display extent of one band (or column): box sizes plus
+/// `gap`-space gutters between them.
+fn extent(band: &[usize], size: &[usize], gap: usize) -> usize {
+    let inner: usize = band.iter().map(|&n| size[n]).sum();
+    inner + gap * band.len().saturating_sub(1)
 }
 
 /// Sort one band (or column) by the mean center of its already-placed
@@ -130,9 +138,7 @@ fn order_by_barycenter(
 /// Place one band (or column) centered in the canvas, `gap`-space
 /// gutters between boxes, recording each box's origin.
 fn place_centered(band: &[usize], size: &[usize], total: usize, pos: &mut [usize], gap: usize) {
-    let extent: usize =
-        band.iter().map(|&n| size[n]).sum::<usize>() + gap * band.len().saturating_sub(1);
-    let mut cursor = (total - extent) / 2;
+    let mut cursor = (total - extent(band, size, gap)) / 2;
     for &index in band {
         pos[index] = cursor;
         cursor += size[index] + gap;
@@ -488,12 +494,8 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         }
     }
     let mut y = vec![0usize; count];
-    let column_height = |column: &[usize]| -> usize {
-        let inner: usize = column.iter().map(|&n| box_h[n]).sum();
-        inner + 2 * column.len().saturating_sub(1)
-    };
     let total_height = {
-        let tallest = cols.iter().map(|c| column_height(c)).max().unwrap_or(0);
+        let tallest = cols.iter().map(|c| extent(c, box_h, 2)).max().unwrap_or(0);
         // Barycenter ordering, left-to-right: each column sorts by the
         // mean row-center of its already-placed predecessors, then
         // centers vertically in the canvas — the tallest column sets

@@ -396,29 +396,61 @@ pub(super) fn layout_quadrant(q: &Quadrant, columns: usize) -> Option<Vec<String
         (0, 3),
     ];
     for (_name, x, y) in &q.points {
-        let col = (1.0 + x * (W as f64 - 3.0)).round() as isize;
-        let row = (1.0 + (1.0 - y) * (H as f64 - 3.0)).round() as isize;
-        let spot = PROBES.iter().find_map(|(dr, dc)| {
-            let r = row + dr;
-            let c = col + dc;
-            let free = (0..H as isize).contains(&r)
-                && (0..W as isize).contains(&c)
-                && !occupied.contains(&(r as usize, c as usize));
-            free.then_some((r as usize, c as usize))
-        });
-        let Some((r, c)) = spot else {
+        let Some((r, c)) = probe_free_spot(x, y, W, H, &PROBES, &occupied) else {
             continue; // grid full: the legend still names every point
         };
         occupied.push((r, c));
         rows[r].put(c, "●");
     }
-    // Legend: `● name` entries wrapped across as many rows as the
-    // width demands, so large charts no longer fall back whole.
-    let items = q
-        .points
-        .iter()
-        .map(|(name, _, _)| format!("● {name}"))
-        .collect::<Vec<_>>();
+    let legend = wrap_legend(
+        q.points
+            .iter()
+            .map(|(name, _, _)| format!("● {name}"))
+            .collect(),
+        columns,
+    );
+    let mut lines: Vec<String> = Vec::new();
+    if let Some(title) = &q.title {
+        lines.push(title.clone());
+    }
+    for row in &rows {
+        lines.push(row.render());
+    }
+    if !q.y_axis.is_empty() {
+        lines.push(format!("y: {}", q.y_axis));
+    }
+    if !q.x_axis.is_empty() {
+        lines.push(format!("x: {}", q.x_axis));
+    }
+    lines.extend(legend);
+    Some(lines)
+}
+
+/// Map a point's normalized coordinates onto the grid and probe for
+/// the first free cell (the exact spot, then a ring of neighbors).
+fn probe_free_spot(
+    x: &f64,
+    y: &f64,
+    width: usize,
+    height: usize,
+    probes: &[(isize, isize)],
+    occupied: &[(usize, usize)],
+) -> Option<(usize, usize)> {
+    let col = (1.0 + x * (width as f64 - 3.0)).round() as isize;
+    let row = (1.0 + (1.0 - y) * (height as f64 - 3.0)).round() as isize;
+    probes.iter().find_map(|(dr, dc)| {
+        let r = row + dr;
+        let c = col + dc;
+        let free = (0..height as isize).contains(&r)
+            && (0..width as isize).contains(&c)
+            && !occupied.contains(&(r as usize, c as usize));
+        free.then_some((r as usize, c as usize))
+    })
+}
+
+/// Wrap `● name` legend entries across as many rows as the width
+/// demands, so large charts no longer fall back whole.
+fn wrap_legend(items: Vec<String>, columns: usize) -> Vec<String> {
     let mut legend: Vec<String> = Vec::new();
     let mut current = String::new();
     for item in items {
@@ -435,21 +467,7 @@ pub(super) fn layout_quadrant(q: &Quadrant, columns: usize) -> Option<Vec<String
     if !current.is_empty() {
         legend.push(current);
     }
-    let mut lines: Vec<String> = Vec::new();
-    if let Some(title) = &q.title {
-        lines.push(title.clone());
-    }
-    for row in &rows {
-        lines.push(row.render());
-    }
-    if !q.y_axis.is_empty() {
-        lines.push(format!("y: {}", q.y_axis));
-    }
-    if !q.x_axis.is_empty() {
-        lines.push(format!("x: {}", q.x_axis));
-    }
-    lines.extend(legend);
-    Some(lines)
+    legend
 }
 
 /// An xychart: one numeric series over categorical x values, rendered

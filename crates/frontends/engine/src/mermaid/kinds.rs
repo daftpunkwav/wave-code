@@ -238,23 +238,7 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
             flush_hidden_members(&mut diagram, open, hidden);
             hidden = 0;
             open = None;
-            let (rels, label) = match line.split_once(':') {
-                Some((rels, label)) => (rels, Some(label.trim().to_string())),
-                None => (line, None),
-            };
-            let tokens = split_quoted(rels, char::is_whitespace);
-            let rel_pos = tokens
-                .iter()
-                .position(|t| t.contains("--") || t.contains(".."))?;
-            if rel_pos == 0 || rel_pos + 1 >= tokens.len() {
-                return None;
-            }
-            let ent1 = tokens[..rel_pos].join(" ");
-            let ent2 = tokens[rel_pos + 1..].join(" ");
-            if ent1.is_empty() || ent2.is_empty() {
-                return None;
-            }
-            let marker = &tokens[rel_pos];
+            let (ent1, ent2, marker, label) = parse_er_relationship(line)?;
             let style = if marker.contains("..") {
                 EdgeStyle::Dotted
             } else {
@@ -264,7 +248,7 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
             // label: the relationship's multiplicity is its most
             // load-bearing information, so it leads the label and
             // survives edge-label truncation on narrow lanes.
-            let label = match cardinalities(marker) {
+            let label = match cardinalities(&marker) {
                 Some((near, far)) => Some(match label {
                     Some(verb) => format!("{near}→{far} {verb}"),
                     None => format!("{near}→{far}"),
@@ -331,6 +315,29 @@ fn cardinalities(marker: &str) -> Option<(String, String)> {
         return None;
     }
     Some((decode(left)?.to_string(), decode(right)?.to_string()))
+}
+
+/// Parse one relationship line into `(ent1, ent2, marker, label)`: the
+/// marker rides a standalone token, quoted spans survive the entity
+/// names, and the text after `:` is the relationship verb.
+fn parse_er_relationship(line: &str) -> Option<(String, String, String, Option<String>)> {
+    let (rels, label) = match line.split_once(':') {
+        Some((rels, label)) => (rels, Some(label.trim().to_string())),
+        None => (line, None),
+    };
+    let tokens = split_quoted(rels, char::is_whitespace);
+    let rel_pos = tokens
+        .iter()
+        .position(|t| t.contains("--") || t.contains(".."))?;
+    if rel_pos == 0 || rel_pos + 1 >= tokens.len() {
+        return None;
+    }
+    let ent1 = tokens[..rel_pos].join(" ");
+    let ent2 = tokens[rel_pos + 1..].join(" ");
+    if ent1.is_empty() || ent2.is_empty() {
+        return None;
+    }
+    Some((ent1, ent2, tokens[rel_pos].clone(), label))
 }
 
 /// Split `s` on `sep` runs outside double quotes; parts are trimmed

@@ -264,11 +264,7 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
         if let Some(name) = line.strip_suffix('{') {
             flush_hidden_members(&mut diagram, open, hidden);
             hidden = 0;
-            let name = name.trim().trim_matches('"').trim();
-            if name.is_empty() {
-                return None;
-            }
-            open = Some(diagram.node(&mut ids, name, vec![name.to_string()])?);
+            open = Some(register_er_entity(name, &mut diagram, &mut ids)?);
             continue;
         }
         if line == "}" {
@@ -281,11 +277,7 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
         match open {
             Some(index) => push_member(&mut diagram, index, line, MEMBER_CAP, &mut hidden),
             None => {
-                let name = line.trim_matches('"').trim();
-                if name.is_empty() {
-                    return None;
-                }
-                diagram.node(&mut ids, name, vec![name.to_string()])?;
+                register_er_entity(line, &mut diagram, &mut ids)?;
             }
         }
     }
@@ -315,6 +307,20 @@ fn cardinalities(marker: &str) -> Option<(String, String)> {
         return None;
     }
     Some((decode(left)?.to_string(), decode(right)?.to_string()))
+}
+
+/// Register one ER entity: quoted display names trim, and an empty
+/// name fails the parse.
+fn register_er_entity(
+    name: &str,
+    diagram: &mut Diagram,
+    ids: &mut HashMap<String, usize>,
+) -> Option<usize> {
+    let name = name.trim().trim_matches('"').trim();
+    if name.is_empty() {
+        return None;
+    }
+    diagram.node(ids, name, vec![name.to_string()])
 }
 
 /// Parse one relationship line into `(ent1, ent2, marker, label)`: the

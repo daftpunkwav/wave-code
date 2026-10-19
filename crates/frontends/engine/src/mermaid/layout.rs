@@ -92,30 +92,51 @@ fn place_band_nodes(
         }
     }
     for (depth, band) in bands.iter_mut().enumerate() {
-        // Barycenter ordering, top-down: each band sorts by the mean
-        // center of its already-placed predecessors, which untangles
-        // most crossing clusters before anything is drawn.
         if depth > 0 {
-            let mut sum = vec![0u64; count];
-            let mut deg = vec![0u32; count];
-            for edge in edges {
-                if band_of[edge.to] == depth && band_of[edge.from] < depth {
-                    sum[edge.to] += (x[edge.from] + box_w[edge.from] / 2) as u64;
-                    deg[edge.to] += 1;
-                }
-            }
-            band.sort_by_key(|&n| match deg[n] {
-                0 => u64::MAX,
-                _ => (sum[n] * 1000) / u64::from(deg[n]),
-            });
+            order_by_barycenter(band, &band_of, depth, edges, &x, box_w);
         }
-        let mut cursor = (total_width - band_width(band)) / 2;
-        for &index in band.iter() {
-            x[index] = cursor;
-            cursor += box_w[index] + 3;
-        }
+        place_centered(band, box_w, total_width, &mut x, 3);
     }
     (x, total_width)
+}
+
+/// Sort one band (or column) by the mean center of its already-placed
+/// predecessors (barycenter), which untangles most edge crossings
+/// before anything is drawn; unconnected nodes keep their relative
+/// order at the end. `pos`/`size` are the cross-axis origins and box
+/// extents already placed.
+fn order_by_barycenter(
+    band: &mut Vec<usize>,
+    group_of: &[usize],
+    depth: usize,
+    edges: &[GraphEdge],
+    pos: &[usize],
+    size: &[usize],
+) {
+    let mut sum = vec![0u64; size.len()];
+    let mut deg = vec![0u32; size.len()];
+    for edge in edges {
+        if group_of[edge.to] == depth && group_of[edge.from] < depth {
+            sum[edge.to] += (pos[edge.from] + size[edge.from] / 2) as u64;
+            deg[edge.to] += 1;
+        }
+    }
+    band.sort_by_key(|&n| match deg[n] {
+        0 => u64::MAX,
+        _ => (sum[n] * 1000) / u64::from(deg[n]),
+    });
+}
+
+/// Place one band (or column) centered in the canvas, `gap`-space
+/// gutters between boxes, recording each box's origin.
+fn place_centered(band: &[usize], size: &[usize], total: usize, pos: &mut [usize], gap: usize) {
+    let extent: usize =
+        band.iter().map(|&n| size[n]).sum::<usize>() + gap * band.len().saturating_sub(1);
+    let mut cursor = (total - extent) / 2;
+    for &index in band {
+        pos[index] = cursor;
+        cursor += size[index] + gap;
+    }
 }
 
 /// The tallest box in each band sets the band's height (3 when empty).
@@ -485,24 +506,9 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         }
         for (depth, column) in cols.iter_mut().enumerate() {
             if depth > 0 {
-                let mut sum = vec![0u64; count];
-                let mut deg = vec![0u32; count];
-                for edge in &d.edges {
-                    if column_of[edge.to] == depth && column_of[edge.from] < depth {
-                        sum[edge.to] += (y[edge.from] + box_h[edge.from] / 2) as u64;
-                        deg[edge.to] += 1;
-                    }
-                }
-                column.sort_by_key(|&n| match deg[n] {
-                    0 => u64::MAX,
-                    _ => (sum[n] * 1000) / u64::from(deg[n]),
-                });
+                order_by_barycenter(column, &column_of, depth, &d.edges, &y, &box_h);
             }
-            let mut cursor = (tallest - column_height(column)) / 2;
-            for &index in column.iter() {
-                y[index] = cursor;
-                cursor += box_h[index] + 2;
-            }
+            place_centered(column, &box_h, tallest, &mut y, 2);
         }
         tallest
     };

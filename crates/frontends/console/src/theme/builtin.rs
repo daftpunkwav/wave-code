@@ -171,7 +171,7 @@ mod tests {
 
     /// The readability contract: every text ramp step clears WCAG
     /// contrast against its own theme background — body ≥ 7:1, dim
-    /// ≥ 4.5:1, muted ≥ 3.5:1 — so no theme ships unreadable text.
+    /// ≥ 4.5:1, muted ≥ 4.5:1 — so no theme ships unreadable text.
     #[test]
     fn text_ramp_is_contrast_locked_against_the_background() {
         for theme in themes() {
@@ -186,8 +186,8 @@ mod tests {
                 "dim text below 4.5:1: {palette:?}"
             );
             assert!(
-                contrast(palette.text_muted, bg) >= 3.5,
-                "muted text below 3.5:1: {palette:?}"
+                contrast(palette.text_muted, bg) >= 4.5,
+                "muted text below 4.5:1: {palette:?}"
             );
         }
     }

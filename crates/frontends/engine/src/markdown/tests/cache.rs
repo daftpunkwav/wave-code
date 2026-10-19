@@ -74,15 +74,20 @@ fn highlight_cache_is_bounded_lru() {
 }
 
 /// A highlighter swap (theme switch) invalidates the cache: cached
-/// output is baked in the old palette.
+/// output is baked in the old palette, so the swapped-in highlighter
+/// runs once even for a block the previous one already highlighted.
 #[test]
 fn highlighter_swap_drops_the_cache() {
     let (mut md, calls) = counting_renderer();
     md.render("```rs\nfn a() {}\n```", 40);
     assert_eq!(calls.get(), 1);
-    md.set_highlighter(Box::new(PlainHighlighter));
+    let swapped = std::rc::Rc::new(std::cell::Cell::new(0));
+    md.set_highlighter(Box::new(CountingHighlighter {
+        calls: std::rc::Rc::clone(&swapped),
+    }));
     md.render("```rs\nfn a() {}\n```", 40);
-    assert_eq!(calls.get(), 1, "the new highlighter ran once");
+    assert_eq!(calls.get(), 1, "the old highlighter did not run again");
+    assert_eq!(swapped.get(), 1, "the new highlighter ran once");
 }
 
 #[test]

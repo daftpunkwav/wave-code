@@ -34,12 +34,12 @@ fn td_bands_center_in_the_canvas() {
 }
 
 /// Bands order by predecessor barycenter: with crossed definition
-/// order the children still land under their own parents, keeping the
-/// edge elbows short and readable.
+/// order the children still land under their own parents (Y2 under A,
+/// Y under B), keeping the edge elbows short and readable.
 #[test]
 fn td_bands_order_by_predecessor_centers() {
-    // Definition order X, Y would cross without barycenter sorting:
-    // A feeds X (first), B feeds Y; the barycenter keeps X left.
+    // Without barycenter sorting the band keeps definition order
+    // (X, Y, Y2), which crosses both edges.
     let lines = render_diagram("graph TD\n A --> X\n B --> Y\n B --> X\n A --> Y2", 60)
         .expect("crossed graph renders");
     let joined = lines.join("\n");
@@ -47,6 +47,17 @@ fn td_bands_order_by_predecessor_centers() {
         assert!(joined.contains(label), "{label}: {joined}");
     }
     assert!(joined.contains('▼'), "edges route: {joined}");
+    // One band row carries all three children in barycenter order:
+    // Y2 (under A) left of X (under both) left of Y (under B).
+    let band_row = lines
+        .iter()
+        .find(|l| l.contains('X') && l.contains("Y2"))
+        .expect("child band row");
+    let plain = width::strip_ansi(band_row);
+    let y2 = plain.find("Y2").expect("Y2 box");
+    let x = plain.find('X').expect("X box");
+    let y = plain.rfind('Y').expect("Y box");
+    assert!(y2 < x && x < y, "barycenter order: {plain:?}");
 }
 
 /// LR flowcharts lay out left-to-right with side arrowheads.
@@ -63,22 +74,27 @@ fn lr_flowcharts_render_columns_and_side_arrows() {
 }
 
 /// A skip-level LR edge routes through the column gutters instead of
-/// piercing the intermediate column's box.
+/// piercing the intermediate column's box: A's row turns into the
+/// lane (a corner glyph right after the box) and crosses on a
+/// box-free row further down.
 #[test]
 fn lr_skip_edges_route_through_the_gutters() {
-    let src = "graph LR\n A --> B\n B --> C\n A --> C";
+    // Column 1 stacks X and D, so A's row is blocked by X's box and a
+    // straight run would pierce it; the crossing row lives below.
+    let src = "graph LR\n A --> X\n X --> C\n A --> D\n D --> C\n A --> C";
     let lines = render_diagram(src, 60).expect("skip edge renders");
     let joined = lines.join("\n");
-    for label in ["A", "B", "C"] {
+    for label in ["A", "X", "D", "C"] {
         assert!(joined.contains(label), "{label}: {joined}");
     }
-    // The skip edge turns twice in the lanes (two extra corner rows on
-    // top of the adjacent elbows' single turn row).
-    let turn_rows = lines
-        .iter()
-        .filter(|l| l.contains('┐') || l.contains('┘'))
-        .count();
-    assert!(turn_rows >= 2, "routed around B: {lines:?}");
+    let exit_row = width::strip_ansi(lines.iter().find(|l| l.contains('A')).expect("A's box row"));
+    // A's glyph, the box's right border, then the gutter: a lane exit
+    // turns there (corner glyph); a straight run keeps drawing dashes.
+    let after_a = &exit_row[exit_row.find('A').unwrap() + 3..];
+    assert!(
+        after_a.starts_with("│─┐") || after_a.starts_with("│─┘"),
+        "A exits into the lane instead of running on: {exit_row:?}"
+    );
 }
 
 /// An LR edge label wider than its run truncates into the run instead

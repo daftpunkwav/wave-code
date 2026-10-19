@@ -638,7 +638,20 @@ impl DocumentState {
                 );
                 self.heading_level = Some(level);
             }
-            Tag::Paragraph => ensure_blank(&mut self.out),
+            Tag::Paragraph => {
+                ensure_blank(&mut self.out);
+                // A later paragraph inside a list item starts under the
+                // item text, like the wrapped lines of the marker line
+                // (its buffer opens empty, so without this prefix the
+                // paragraph's first line would hang left of its own
+                // continuation lines).
+                if self.inline.is_empty()
+                    && let Some(&hang) = self.hangs.last()
+                {
+                    let indent = md.style.text.paint(&" ".repeat(hang));
+                    self.inline.push_str(&indent);
+                }
+            }
             Tag::Emphasis => self.state.italic = true,
             Tag::Strong => self.state.bold = true,
             Tag::Strikethrough => self.state.strike = true,

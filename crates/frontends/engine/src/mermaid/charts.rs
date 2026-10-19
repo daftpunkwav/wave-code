@@ -731,9 +731,14 @@ pub(super) fn layout_gantt(g: &Gantt, columns: usize) -> Option<Vec<String>> {
         lines.push(title.clone());
     }
     for (name, start, days) in &g.tasks {
-        let bar_len = ((*days as f64 / span as f64) * bar_max as f64).round() as usize;
         let offset = (((start - origin) as f64 / span as f64) * bar_max as f64).round() as usize;
-        let bar = "\u{2588}".repeat(bar_len.max(1));
+        // Clamp the rounded bar to the remaining timeline width: separate
+        // rounding can push offset + bar one cell past `bar_max`, which
+        // would draw the bar ending after a task that ends on the same
+        // date.
+        let bar_len = ((*days as f64 / span as f64) * bar_max as f64).round() as usize;
+        let bar_len = bar_len.min(bar_max - offset).max(1);
+        let bar = "\u{2588}".repeat(bar_len);
         let end = civil_from_days(start + days);
         // Pad to the display width: char-count padding would misalign
         // wide (CJK) task names.

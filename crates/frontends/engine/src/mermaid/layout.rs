@@ -303,7 +303,7 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             } else {
                 let slot = elbow_slot[gap];
                 elbow_slot[gap] += 1;
-                elbow_td(&mut rows, &route, slot);
+                elbow_td(&mut rows, &route, slot, total_width);
             }
         }
     }
@@ -538,23 +538,22 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             vfill: edge.style.vertical(),
             hfill: edge.style.horizontal(),
         };
-        if route.from_row == route.to_row {
-            straight_lr(&mut rows[route.from_row], &route, total_width);
-            continue;
-        }
         if tl > fl + 1 {
             // A skip-level edge routes through the inter-column
             // gutters: a straight run would pierce every intermediate
             // box, and boxes paint last, so the line would read as
-            // connecting the wrong box. Cross on a row no intermediate
-            // box occupies, nearest to the source exit; wall-to-wall
-            // columns fall back to the straight run.
+            // connecting the wrong box — even when the endpoints share
+            // a row, which centering makes the common shape. Cross on
+            // a row no intermediate box occupies, nearest to the source
+            // exit (the box-free filter runs first, or it would only
+            // vet the single nearest row); wall-to-wall columns fall
+            // back to the straight run.
+            let box_free = |r: usize| {
+                (fl + 1..tl).all(|k| cols[k].iter().all(|&n| r < y[n] || r >= y[n] + box_h[n]))
+            };
             let crossing = (0..total_height)
-                .filter(|&r| r != route.from_row && r != route.to_row)
-                .min_by_key(|&r| (r as isize - route.from_row as isize).unsigned_abs())
-                .filter(|&r| {
-                    (fl + 1..tl).all(|k| cols[k].iter().all(|&n| r < y[n] || r >= y[n] + box_h[n]))
-                });
+                .filter(|&r| r != route.from_row && r != route.to_row && box_free(r))
+                .min_by_key(|&r| (r as isize - route.from_row as isize).unsigned_abs());
             skip_lr(
                 &mut rows,
                 &route,
@@ -563,6 +562,10 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
                 crossing,
                 total_width,
             );
+            continue;
+        }
+        if route.from_row == route.to_row {
+            straight_lr(&mut rows[route.from_row], &route, total_width);
             continue;
         }
         // Adjacent columns, different rows: elbow in the gutter.
@@ -811,7 +814,7 @@ fn straight_td(
 /// One elbow in the gap: trunk down, stroke-correct corners, a label
 /// on the horizontal run (or an annotation beside the arrowhead when
 /// the span is too narrow), trunk to the arrowhead.
-fn elbow_td(rows: &mut [RowCanvas], route: &TdRouting<'_>, slot: usize) {
+fn elbow_td(rows: &mut [RowCanvas], route: &TdRouting<'_>, slot: usize, total_width: usize) {
     let elbow = route.gap_start + slot.min(route.height.saturating_sub(2));
     for row in &mut rows[route.gap_start..elbow] {
         row.put_if_clear(route.from_center, route.vfill);
@@ -832,9 +835,14 @@ fn elbow_td(rows: &mut [RowCanvas], route: &TdRouting<'_>, slot: usize) {
     if !draw_horizontal(&mut rows[elbow], left + 1, right, route.label, route.hfill)
         && let Some(text) = route.label
     {
-        // Span too narrow for the label: annotate beside the
-        // arrowhead instead of dropping it.
-        rows[route.gap_start + route.height - 2].put(right + 2, text.to_string());
+        // Span too narrow for the label: annotate beside the arrowhead
+        // instead of dropping it, truncated to the canvas edge (the
+        // canvas-width growth above covers straight edges only).
+        let room = total_width.saturating_sub(right + 3);
+        if room >= 3 {
+            rows[route.gap_start + route.height - 2]
+                .put(right + 2, super::truncate_width(text, room));
+        }
     }
     for row in &mut rows[elbow + 1..route.gap_start + route.height - 1] {
         row.put_if_clear(route.to_center, route.vfill);

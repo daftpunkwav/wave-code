@@ -339,10 +339,9 @@ pub(super) fn layout_sequence(s: &Sequence, columns: usize) -> Option<Vec<String
                 lifeline(&mut label_row, Some((box_left, box_right)));
                 lifeline(&mut bottom_row, Some((box_left, box_right)));
                 label_row.put(box_left, top);
-                bottom_row.put(
-                    box_left,
-                    format!("└{}┘", "─".repeat(inner.saturating_sub(1))),
-                );
+                // The box spans box_left..=box_right: the bottom border
+                // carries `inner` dashes so both rows share one width.
+                bottom_row.put(box_left, format!("└{}┘", "─".repeat(inner)));
                 lines.push(label_row.render());
                 lines.push(bottom_row.render());
             }

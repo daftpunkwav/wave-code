@@ -13,7 +13,13 @@
 //!
 //! Vertical rhythm: every block ensures exactly one blank line between
 //! itself and the previous block (none at the top of the document), so
-//! blocks never cram together and two blank lines never appear.
+//! blocks never cram together and two blank lines never appear. A
+//! heading takes one extra blank above that (the section break): space
+//! above, tight below. List items hang: continuation lines align under
+//! the item text instead of the marker.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthStr;
@@ -49,6 +55,8 @@ pub trait FenceRenderer {
     /// Render the body of the fence tagged `lang` within `columns`
     /// display columns (the frame's inner budget); `None` falls through
     /// to the next renderer — diff handling, then the highlighter.
+    /// Returned lines are plain text: the caller paints them with the
+    /// active text style.
     fn render_fence(&self, lang: &str, code: &str, columns: usize) -> Option<Vec<String>>;
 }
 
@@ -118,6 +126,16 @@ fn ensure_blank(out: &mut Vec<String>) {
     }
 }
 
+/// Heading separation: one extra blank above the single-blank rhythm
+/// so sections scan apart in long replies (space above, tight below).
+/// The document's first block stays flush.
+fn ensure_heading_break(out: &mut Vec<String>) {
+    ensure_blank(out);
+    if out.len() >= 2 && !out[out.len() - 2].is_empty() {
+        out.push(String::new());
+    }
+}
+
 /// The render width of code block frame rules: full width on narrow
 /// terminals, capped so wide terminals get modest frames.
 fn frame_width(columns: usize) -> usize {
@@ -162,6 +180,59 @@ impl MarkdownStyle {
     }
 }
 
+/// Bounded entries in the highlight cache: enough to hold every code
+/// block of a large reply, small enough that the cached ANSI output
+/// stays a rounding error next to the message text itself.
+const HIGHLIGHT_CACHE_ENTRIES: usize = 64;
+
+/// LRU over highlighted code blocks, keyed by (language, code).
+///
+/// Streamed drafts re-render every block on each delta flush, but all
+/// blocks except the growing tail are byte-identical between flushes,
+/// so the cache turns a flush's cost into one highlight of the newest
+/// block instead of a rehighlight of the whole message. Keying on the
+/// full text (not a hash) keeps correctness free of collision logic;
+/// blocks are bounded by the highlighter's own size cutoff.
+#[derive(Default)]
+struct HighlightCache {
+    entries: HashMap<(Option<String>, String), Arc<Vec<String>>>,
+    order: VecDeque<(Option<String>, String)>,
+}
+
+impl HighlightCache {
+    /// The cached block, moved to the most-recently-used end.
+    fn lookup(&mut self, lang: Option<&str>, code: &str) -> Option<Arc<Vec<String>>> {
+        let key = (lang.map(str::to_string), code.to_string());
+        if !self.entries.contains_key(&key) {
+            return None;
+        }
+        self.order.retain(|cached| cached != &key);
+        let lines = self.entries.get(&key).map(Arc::clone);
+        self.order.push_back(key);
+        lines
+    }
+
+    /// Insert a highlighted block, evicting the least-recently-used
+    /// entry past the bound.
+    fn insert(&mut self, lang: Option<&str>, code: &str, lines: Arc<Vec<String>>) {
+        let key = (lang.map(str::to_string), code.to_string());
+        if self.entries.insert(key.clone(), lines).is_none() {
+            self.order.push_back(key);
+        }
+        while self.order.len() > HIGHLIGHT_CACHE_ENTRIES {
+            let evicted = self.order.pop_front();
+            if let Some(key) = evicted {
+                self.entries.remove(&key);
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+}
+
 /// A markdown renderer with a per-(text, width) render cache.
 pub struct Markdown {
     style: MarkdownStyle,
@@ -170,6 +241,7 @@ pub struct Markdown {
     /// set carries the engine-builtin mermaid diagrams.
     fences: Vec<Box<dyn FenceRenderer>>,
     cache: Option<(String, usize, Segment)>,
+    highlight_cache: HighlightCache,
 }
 
 impl Markdown {
@@ -182,6 +254,7 @@ impl Markdown {
             highlighter,
             fences: vec![Box::new(crate::mermaid::MermaidFences)],
             cache: None,
+            highlight_cache: HighlightCache::default(),
         }
     }
 
@@ -258,9 +331,12 @@ impl Markdown {
     /// Swap the syntax highlighter (theme switches rebuild it: the
     /// syntax theme bakes into highlighted code at construction, and a
     /// stale highlighter repaints old code blocks in the old palette).
+    /// The highlight cache holds output baked by the previous
+    /// highlighter and must go with it.
     pub fn set_highlighter(&mut self, highlighter: Box<dyn SyntaxHighlighter>) {
         self.highlighter = highlighter;
         self.cache = None;
+        self.highlight_cache.clear();
     }
 
     /// Paint a ```diff fence: whole lines ride the diff colors —
@@ -292,24 +368,39 @@ impl Markdown {
 
     /// Wrap and emit the styled inline buffer as output lines: one line
     /// per wrap, prefixed with the quote bar while inside a block quote.
+    /// While a list item is open the wrap narrows by the item's hanging
+    /// indent and continuation lines align under the item text instead
+    /// of the marker.
     fn flush_inline(
         &self,
         inline: &mut String,
         out: &mut Vec<String>,
         in_quote: bool,
         columns: usize,
+        hangs: &[usize],
     ) {
         if inline.is_empty() {
             return;
         }
+        let hang = hangs.last().copied().unwrap_or(0);
         let prefix = if in_quote { "│ " } else { "" };
-        for line in width::wrap_line(inline, columns.saturating_sub(prefix.width())) {
+        // Painted so the user-message background band carries through
+        // the continuation indent (plain spaces would punch a hole in
+        // the band at every wrap).
+        let indent = self.style.text.paint(&" ".repeat(hang));
+        for (index, line) in width::wrap_line(inline, columns.saturating_sub(prefix.width() + hang))
+            .into_iter()
+            .enumerate()
+        {
+            let lead = if index > 0 { indent.as_str() } else { "" };
             if in_quote {
                 // Each span already carries the quote look (compose
                 // layers it per span); only the bar prefix needs its
                 // own paint here — an outer paint would be cut at the
                 // first inner reset.
-                out.push(format!("{}{}", self.style.quote.paint(prefix), line));
+                out.push(format!("{lead}{}{line}", self.style.quote.paint(prefix)));
+            } else if index > 0 {
+                out.push(format!("{lead}{line}"));
             } else {
                 out.push(line);
             }
@@ -330,7 +421,7 @@ impl Markdown {
         if inline.is_empty() {
             return;
         }
-        ensure_blank(out);
+        ensure_heading_break(out);
         let text = std::mem::take(inline);
         let style = self.style.heading.bold();
         // Headings wrap like any other block: an overlong heading left
@@ -358,7 +449,7 @@ impl Markdown {
     /// it through the fence renderers (the mermaid seam), diff
     /// coloring, or the syntax highlighter, and frame the result.
     fn render_code_block(
-        &self,
+        &mut self,
         inline: &mut String,
         lang: Option<String>,
         columns: usize,
@@ -371,7 +462,10 @@ impl Markdown {
         let code = sanitize_terminal(&taken).into_owned();
         // Fence renderers get first pass at the body (the mermaid
         // seam); then diff fences; the rest rides the highlighter.
-        let body_budget = frame_width(columns).saturating_sub(4);
+        // Diagrams own their fit contract, so they draw on the full
+        // body width: the code-frame width cap would strand wide
+        // diagrams on narrow frames no matter how wide the terminal is.
+        let body_budget = columns.saturating_sub(4);
         let diagram = lang.as_deref().and_then(|lang| {
             self.fences
                 .iter()
@@ -380,14 +474,35 @@ impl Markdown {
         // Diff fences get dedicated +- and hunk coloring instead of
         // generic syntax highlighting.
         let is_diff = matches!(lang.as_deref(), Some("diff") | Some("patch"));
-        let body = match diagram {
-            Some(body) => body,
-            None if is_diff => self.diff_lines(&code),
-            None => self.highlighter.highlight(&code, lang.as_deref()),
+        let body: Arc<Vec<String>> = match diagram {
+            // Diagram bodies are plain geometry: paint them with the
+            // text style so they track the theme (unpainted spans
+            // inherit the terminal default, which a recolored terminal
+            // background leaves unreadable).
+            Some(ref body) => Arc::new(
+                body.iter()
+                    .map(|line| self.style.text.paint(line))
+                    .collect(),
+            ),
+            None if is_diff => Arc::new(self.diff_lines(&code)),
+            None => match self.highlight_cache.lookup(lang.as_deref(), &code) {
+                Some(lines) => lines,
+                None => {
+                    let lines = Arc::new(self.highlighter.highlight(&code, lang.as_deref()));
+                    self.highlight_cache
+                        .insert(lang.as_deref(), &code, Arc::clone(&lines));
+                    lines
+                }
+            },
         };
         // The frame hugs its content (plus the tag) and only stretches
         // to the width cap on wide rows — a full-width frame starves
-        // the right side.
+        // the right side. Diagrams keep the uncapped width: their fit
+        // contract already bounds every row to the budget above.
+        let frame_cap = match diagram {
+            Some(_) => columns,
+            None => frame_width(columns),
+        };
         let content = body
             .iter()
             .map(|line| width::width(line))
@@ -398,12 +513,9 @@ impl Markdown {
             .and_then(lang_tag)
             .map(|tag| width::width(&tag) + 6)
             .unwrap_or(0);
-        let total = content
-            .max(tag_width)
-            .saturating_add(4)
-            .min(frame_width(columns));
+        let total = content.max(tag_width).saturating_add(4).min(frame_cap);
         out.push(self.frame_top(lang.as_deref(), total));
-        for line in &body {
+        for line in body.iter() {
             out.push(self.frame_row(line, total));
         }
         out.push(self.frame_bottom(total));
@@ -454,15 +566,17 @@ impl Markdown {
         out: &mut Vec<String>,
         in_quote: &mut bool,
         columns: usize,
+        hangs: &[usize],
     ) {
-        self.flush_inline(inline, out, *in_quote, columns);
+        self.flush_inline(inline, out, *in_quote, columns, hangs);
         ensure_blank(out);
         *in_quote = true;
     }
 
     /// Append one list item marker to the inline buffer: the indent
     /// for the item's nesting depth plus the ordered number or bullet.
-    fn push_item_marker(&self, inline: &mut String, list_stack: &mut [Option<u64>]) {
+    /// Returns the hanging-indent width continuation lines align to.
+    fn push_item_marker(&self, inline: &mut String, list_stack: &mut [Option<u64>]) -> usize {
         let depth = list_stack.len().saturating_sub(1);
         let marker = list_marker(list_stack.last_mut());
         inline.push_str(&"  ".repeat(depth));
@@ -470,180 +584,330 @@ impl Markdown {
         // terminal's default foreground, which a recolored (light)
         // background leaves unreadable.
         inline.push_str(&self.style.text.paint(&marker));
+        depth * 2 + width::width(&marker)
     }
 
-    fn render_uncached(&self, text: &str, columns: usize) -> Vec<String> {
+    fn render_uncached(&mut self, text: &str, columns: usize) -> Vec<String> {
         let text = preprocess(text);
-        let options = parser_options();
-        let parser = Parser::new_ext(&text, options);
-        let mut out: Vec<String> = Vec::new();
-        let mut inline = String::new();
-        let mut state = InlineState::default();
-        let mut list_stack: Vec<Option<u64>> = Vec::new();
-        let mut heading_level: Option<HeadingLevel> = None;
-        let mut in_quote = false;
-        let mut in_code = false;
-        let mut code_lang: Option<String> = None;
-        // Table collection: cells accumulate the styled inline buffer,
-        // rows accumulate on row end, the table renders on table end.
-        let mut table_rows: Vec<Vec<String>> = Vec::new();
-        let mut table_row: Vec<String> = Vec::new();
-        let mut table_aligns: Vec<pulldown_cmark::Alignment> = Vec::new();
-
+        let parser = Parser::new_ext(&text, parser_options());
+        let mut doc = DocumentState::default();
         for event in parser {
             match event {
-                Event::Start(tag) => match tag {
-                    Tag::Heading { level, .. } => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        heading_level = Some(level);
-                    }
-                    Tag::Paragraph => ensure_blank(&mut out),
-                    Tag::Emphasis => state.italic = true,
-                    Tag::Strong => state.bold = true,
-                    Tag::Strikethrough => state.strike = true,
-                    Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
-                        state.link = true;
-                        state.link_url = Some(dest_url.to_string());
-                    }
-                    Tag::List(start) => start_list(&mut list_stack, start, &mut out),
-                    Tag::Item => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        self.push_item_marker(&mut inline, &mut list_stack);
-                    }
-                    Tag::BlockQuote(_) => {
-                        self.open_block_quote(&mut inline, &mut out, &mut in_quote, columns);
-                    }
-                    Tag::CodeBlock(kind) => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        ensure_blank(&mut out);
-                        code_lang = fenced_lang(kind);
-                        in_code = true;
-                    }
-                    Tag::FootnoteDefinition(label) => {
-                        ensure_blank(&mut out);
-                        inline.push_str(&self.style.code.paint(&format!("[{label}]: ")));
-                    }
-                    Tag::Table(alignments) => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        ensure_blank(&mut out);
-                        table_rows = Vec::new();
-                        table_aligns = alignments;
-                    }
-                    Tag::TableHead | Tag::TableRow => table_row = Vec::new(),
-                    Tag::TableCell => inline = String::new(),
-                    _ => {}
-                },
-                Event::End(tag_end) => match tag_end {
-                    TagEnd::Heading(_) => {
-                        // Take the level unconditionally: an empty heading
-                        // (`##` alone) emits no text, and a level left
-                        // parked here would push every later span onto
-                        // the raw unstyled path.
-                        let level = heading_level.take();
-                        self.flush_heading(&mut inline, level, columns, &mut out);
-                    }
-                    TagEnd::Paragraph => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                    }
-                    TagEnd::Emphasis => state.italic = false,
-                    TagEnd::Strong => state.bold = false,
-                    TagEnd::Strikethrough => state.strike = false,
-                    TagEnd::Link | TagEnd::Image => {
-                        state.link = false;
-                        state.link_url = None;
-                    }
-                    TagEnd::List(_) => {
-                        list_stack.pop();
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                    }
-                    TagEnd::Item => self.flush_inline(&mut inline, &mut out, in_quote, columns),
-                    TagEnd::BlockQuote(_) => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        in_quote = false;
-                    }
-                    TagEnd::CodeBlock => {
-                        in_code = false;
-                        let lang = code_lang.take();
-                        self.render_code_block(&mut inline, lang, columns, &mut out);
-                    }
-                    TagEnd::FootnoteDefinition => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                    }
-                    TagEnd::Table => {
-                        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                        render_table(&table_rows, &table_aligns, columns, &self.style, &mut out);
-                    }
-                    TagEnd::TableHead | TagEnd::TableRow => {
-                        table_rows.push(std::mem::take(&mut table_row));
-                    }
-                    TagEnd::TableCell => table_row.push(std::mem::take(&mut inline)),
-                    _ => {}
-                },
-                Event::Text(text_event) => {
-                    // Code block and heading content stays raw: code is
-                    // painted by the highlighter, and heading text is
-                    // painted once at the heading end — a pre-painted
-                    // buffer would double-paint and its inner reset
-                    // would cancel the outer style.
-                    if in_code || heading_level.is_some() {
-                        inline.push_str(text_event.as_ref());
-                        continue;
-                    }
-                    self.push_styled_text(&mut inline, &state, in_quote, text_event.as_ref());
-                }
-                Event::Code(code) => {
-                    // Inside a heading the span rides raw with the rest
-                    // of the heading text: painting here would drop an
-                    // inner reset mid-heading that cuts the heading
-                    // style short (the heading paints once at its end).
-                    if heading_level.is_some() {
-                        inline.push_str(code.as_ref());
-                        continue;
-                    }
-                    // Color alone marks the span; visible quotes would leak
-                    // into the transcript as content the model never wrote.
-                    inline.push_str(&self.style.code.paint(code.as_ref()));
-                }
-                Event::SoftBreak => inline.push(' '),
-                Event::HardBreak => self.flush_inline(&mut inline, &mut out, in_quote, columns),
-                Event::Rule => {
-                    self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                    ensure_blank(&mut out);
-                    out.push(self.style.rule.paint("─".repeat(columns.min(80)).as_str()));
-                }
-                Event::Html(html) | Event::InlineHtml(html) => {
-                    // Pass-through HTML renders as literal text; paint it
-                    // so it never inherits the terminal default color.
-                    inline.push_str(&self.style.text.paint(html.as_ref()));
-                }
-                Event::InlineMath(math) => {
-                    let converted = crate::math::render(math.as_ref());
-                    inline.push_str(&self.style.text.paint(&converted));
-                }
-                Event::DisplayMath(math) => {
-                    self.flush_inline(&mut inline, &mut out, in_quote, columns);
-                    self.push_display_math(math.as_ref(), columns, &mut out);
-                }
-                Event::TaskListMarker(checked) => {
-                    // Lands right after the item bullet, before the text.
-                    // Painted like every other marker: unpainted text
-                    // inherits the terminal default foreground, which a
-                    // recolored (light) background leaves unreadable.
-                    inline.push_str(&self.style.text.paint(if checked { "[x] " } else { "[ ] " }));
-                }
-                Event::FootnoteReference(name) => {
-                    // Footnote markers render as bracketed references;
-                    // the definition renders at its own site below.
-                    inline.push_str(&self.style.code.paint(&format!("[{name}]")));
-                }
+                Event::Start(tag) => doc.start_tag(self, tag, columns),
+                Event::End(tag_end) => doc.end_tag(self, tag_end, columns),
+                other => doc.inline_event(self, other, columns),
             }
         }
-        self.flush_inline(&mut inline, &mut out, in_quote, columns);
-        // Trailing blank lines never render.
-        while out.last().is_some_and(|l| l.is_empty()) {
-            out.pop();
+        doc.finish(self, columns)
+    }
+}
+
+/// Per-document render state: the inline buffer, open-tag bookkeeping,
+/// and table collection behind [`Markdown::render_uncached`].
+#[derive(Default)]
+struct DocumentState {
+    out: Vec<String>,
+    inline: String,
+    state: InlineState,
+    list_stack: Vec<Option<u64>>,
+    /// Hanging indents of open list items, innermost last: wrap width
+    /// and continuation alignment while an item is open.
+    hangs: Vec<usize>,
+    heading_level: Option<HeadingLevel>,
+    in_quote: bool,
+    in_code: bool,
+    code_lang: Option<String>,
+    /// Table collection: cells accumulate the styled inline buffer,
+    /// rows accumulate on row end, the table renders on table end.
+    table_rows: Vec<Vec<String>>,
+    table_row: Vec<String>,
+    table_aligns: Vec<pulldown_cmark::Alignment>,
+}
+
+impl DocumentState {
+    /// Open one block-level tag.
+    fn start_tag(&mut self, md: &Markdown, tag: Tag, columns: usize) {
+        match tag {
+            Tag::Heading { level, .. } => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                self.heading_level = Some(level);
+            }
+            Tag::Paragraph => {
+                ensure_blank(&mut self.out);
+                // A later paragraph inside a list item starts under the
+                // item text, like the wrapped lines of the marker line
+                // (its buffer opens empty, so without this prefix the
+                // paragraph's first line would hang left of its own
+                // continuation lines).
+                if self.inline.is_empty()
+                    && let Some(&hang) = self.hangs.last()
+                {
+                    let indent = md.style.text.paint(&" ".repeat(hang));
+                    self.inline.push_str(&indent);
+                }
+            }
+            Tag::Emphasis => self.state.italic = true,
+            Tag::Strong => self.state.bold = true,
+            Tag::Strikethrough => self.state.strike = true,
+            Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
+                self.state.link = true;
+                self.state.link_url = Some(dest_url.to_string());
+            }
+            Tag::List(start) => start_list(&mut self.list_stack, start, &mut self.out),
+            Tag::Item => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                let hang = md.push_item_marker(&mut self.inline, &mut self.list_stack);
+                self.hangs.push(hang);
+            }
+            Tag::BlockQuote(_) => {
+                md.open_block_quote(
+                    &mut self.inline,
+                    &mut self.out,
+                    &mut self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+            }
+            Tag::CodeBlock(kind) => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                ensure_blank(&mut self.out);
+                self.code_lang = fenced_lang(kind);
+                self.in_code = true;
+            }
+            Tag::FootnoteDefinition(label) => {
+                ensure_blank(&mut self.out);
+                self.inline
+                    .push_str(&md.style.code.paint(&format!("[{label}]: ")));
+            }
+            Tag::Table(alignments) => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                ensure_blank(&mut self.out);
+                self.table_rows = Vec::new();
+                self.table_aligns = alignments;
+            }
+            Tag::TableHead | Tag::TableRow => self.table_row = Vec::new(),
+            Tag::TableCell => self.inline = String::new(),
+            _ => {}
         }
-        out
+    }
+
+    /// Close one block-level tag.
+    fn end_tag(&mut self, md: &mut Markdown, tag_end: TagEnd, columns: usize) {
+        match tag_end {
+            TagEnd::Heading(_) => {
+                // Take the level unconditionally: an empty heading
+                // (`##` alone) emits no text, and a level left
+                // parked here would push every later span onto
+                // the raw unstyled path.
+                let level = self.heading_level.take();
+                md.flush_heading(&mut self.inline, level, columns, &mut self.out);
+            }
+            TagEnd::Paragraph => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+            }
+            TagEnd::Emphasis => self.state.italic = false,
+            TagEnd::Strong => self.state.bold = false,
+            TagEnd::Strikethrough => self.state.strike = false,
+            TagEnd::Link | TagEnd::Image => {
+                self.state.link = false;
+                self.state.link_url = None;
+            }
+            TagEnd::List(_) => {
+                self.list_stack.pop();
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+            }
+            TagEnd::Item => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                self.hangs.pop();
+            }
+            TagEnd::BlockQuote(_) => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                self.in_quote = false;
+            }
+            TagEnd::CodeBlock => {
+                self.in_code = false;
+                let lang = self.code_lang.take();
+                md.render_code_block(&mut self.inline, lang, columns, &mut self.out);
+            }
+            TagEnd::FootnoteDefinition => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+            }
+            TagEnd::Table => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                render_table(
+                    &self.table_rows,
+                    &self.table_aligns,
+                    columns,
+                    &md.style,
+                    &mut self.out,
+                );
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                self.table_rows.push(std::mem::take(&mut self.table_row));
+            }
+            TagEnd::TableCell => self.table_row.push(std::mem::take(&mut self.inline)),
+            _ => {}
+        }
+    }
+
+    /// Handle one inline (non-block) event.
+    fn inline_event(&mut self, md: &Markdown, event: Event, columns: usize) {
+        match event {
+            Event::Text(text) => {
+                // Code block and heading content stays raw: code is
+                // painted by the highlighter, and heading text is
+                // painted once at the heading end — a pre-painted
+                // buffer would double-paint and its inner reset
+                // would cancel the outer style.
+                if self.in_code || self.heading_level.is_some() {
+                    self.inline.push_str(text.as_ref());
+                    return;
+                }
+                md.push_styled_text(&mut self.inline, &self.state, self.in_quote, text.as_ref());
+            }
+            Event::Code(code) => {
+                // Inside a heading the span rides raw with the rest
+                // of the heading text: painting here would drop an
+                // inner reset mid-heading that cuts the heading
+                // style short (the heading paints once at its end).
+                if self.heading_level.is_some() {
+                    self.inline.push_str(code.as_ref());
+                    return;
+                }
+                // Color alone marks the span; visible quotes would leak
+                // into the transcript as content the model never wrote.
+                self.inline.push_str(&md.style.code.paint(code.as_ref()));
+            }
+            Event::SoftBreak => self.inline.push(' '),
+            Event::HardBreak => md.flush_inline(
+                &mut self.inline,
+                &mut self.out,
+                self.in_quote,
+                columns,
+                &self.hangs,
+            ),
+            Event::Rule => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                ensure_blank(&mut self.out);
+                let rule = "─".repeat(columns.min(80));
+                self.out.push(md.style.rule.paint(&rule));
+            }
+            Event::Html(html) | Event::InlineHtml(html) => {
+                // Pass-through HTML renders as literal text; paint it
+                // so it never inherits the terminal default color.
+                self.inline.push_str(&md.style.text.paint(html.as_ref()));
+            }
+            Event::InlineMath(math) => {
+                let converted = crate::math::render(math.as_ref());
+                self.inline.push_str(&md.style.text.paint(&converted));
+            }
+            Event::DisplayMath(math) => {
+                md.flush_inline(
+                    &mut self.inline,
+                    &mut self.out,
+                    self.in_quote,
+                    columns,
+                    &self.hangs,
+                );
+                md.push_display_math(math.as_ref(), columns, &mut self.out);
+            }
+            Event::TaskListMarker(checked) => {
+                // Lands right after the item bullet, before the text.
+                // Painted like every other marker: unpainted text
+                // inherits the terminal default foreground, which a
+                // recolored (light) background leaves unreadable.
+                let marker = if checked { "[x] " } else { "[ ] " };
+                self.inline.push_str(&md.style.text.paint(marker));
+            }
+            Event::FootnoteReference(name) => {
+                // Footnote markers render as bracketed references;
+                // the definition renders at its own site below.
+                let marker = format!("[{name}]");
+                self.inline.push_str(&md.style.code.paint(&marker));
+            }
+            _ => {}
+        }
+    }
+
+    /// Flush the tail and drop trailing blanks: the finished document.
+    fn finish(mut self, md: &Markdown, columns: usize) -> Vec<String> {
+        md.flush_inline(
+            &mut self.inline,
+            &mut self.out,
+            self.in_quote,
+            columns,
+            &self.hangs,
+        );
+        while self.out.last().is_some_and(|l| l.is_empty()) {
+            self.out.pop();
+        }
+        self.out
     }
 }
 

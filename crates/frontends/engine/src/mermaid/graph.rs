@@ -65,6 +65,11 @@ pub(super) struct GraphEdge {
     pub(super) style: EdgeStyle,
 }
 
+/// Sentinel label line rendering as a full-width rule inside a box:
+/// the classic title/members separator of a class or entity box.
+/// Zero display width, so it never widens the box it rides in.
+pub(super) const BOX_RULE: &str = "\u{0}";
+
 /// Upper bound on nodes in one diagram: the band/column layouts refuse
 /// more, so refusing at creation keeps parsing (and per-group member
 /// dedup) bounded on oversized sources.

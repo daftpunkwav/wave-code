@@ -1,7 +1,7 @@
 //! The layered band layout (TD) and the column layout (LR) for the
 //! shared graph IR, drawn on a per-row canvas.
 
-use super::graph::{Diagram, Direction, GraphEdge};
+use super::graph::{BOX_RULE, Diagram, Direction, GraphEdge};
 use crate::width;
 
 // ---------------------------------------------------------------------------
@@ -66,20 +66,83 @@ fn box_geometry(labels: &[Vec<String>]) -> (Vec<usize>, Vec<usize>) {
     (box_w, box_h)
 }
 
-/// Sequential placement inside each band, 3-space gutters between
-/// boxes. Returns the x origin of each box and the total canvas width.
-fn place_band_nodes(bands: &[Vec<usize>], box_w: &[usize]) -> (Vec<usize>, usize) {
+/// Order each band by the mean center of its predecessors' boxes
+/// (barycenter; unconnected nodes keep their relative order at the
+/// end), then center every band in the canvas — the widest band sets
+/// the width. Returns the x origin of each box and the total canvas
+/// width.
+fn place_band_nodes(
+    bands: &mut [Vec<usize>],
+    box_w: &[usize],
+    edges: &[GraphEdge],
+) -> (Vec<usize>, usize) {
     let mut x = vec![0usize; box_w.len()];
-    let mut total_width = 0usize;
-    for band in bands {
-        let mut cursor = 0usize;
-        for &index in band {
-            x[index] = cursor;
-            cursor += box_w[index] + 3;
+    // Extents are placement-independent, so the canvas width is known
+    // before any band is placed and every band can center in it.
+    let total_width = bands.iter().map(|b| extent(b, box_w, 3)).max().unwrap_or(0);
+    let band_of = group_index(bands, box_w.len());
+    for (depth, band) in bands.iter_mut().enumerate() {
+        if depth > 0 {
+            order_by_barycenter(band, &band_of, depth, edges, &x, box_w);
         }
-        total_width = total_width.max(cursor.saturating_sub(3));
+        place_centered(band, box_w, total_width, &mut x, 3);
     }
     (x, total_width)
+}
+
+/// The group (band or column) holding each node.
+fn group_index(groups: &[Vec<usize>], count: usize) -> Vec<usize> {
+    let mut index = vec![0usize; count];
+    for (depth, group) in groups.iter().enumerate() {
+        for &n in group {
+            index[n] = depth;
+        }
+    }
+    index
+}
+
+/// The display extent of one band (or column): box sizes plus
+/// `gap`-space gutters between them.
+fn extent(band: &[usize], size: &[usize], gap: usize) -> usize {
+    let inner: usize = band.iter().map(|&n| size[n]).sum();
+    inner + gap * band.len().saturating_sub(1)
+}
+
+/// Sort one band (or column) by the mean center of its already-placed
+/// predecessors (barycenter), which untangles most edge crossings
+/// before anything is drawn; unconnected nodes keep their relative
+/// order at the end. `pos`/`size` are the cross-axis origins and box
+/// extents already placed.
+fn order_by_barycenter(
+    band: &mut [usize],
+    group_of: &[usize],
+    depth: usize,
+    edges: &[GraphEdge],
+    pos: &[usize],
+    size: &[usize],
+) {
+    let mut sum = vec![0u64; size.len()];
+    let mut deg = vec![0u32; size.len()];
+    for edge in edges {
+        if group_of[edge.to] == depth && group_of[edge.from] < depth {
+            sum[edge.to] += (pos[edge.from] + size[edge.from] / 2) as u64;
+            deg[edge.to] += 1;
+        }
+    }
+    band.sort_by_key(|&n| match deg[n] {
+        0 => u64::MAX,
+        _ => (sum[n] * 1000) / u64::from(deg[n]),
+    });
+}
+
+/// Place one band (or column) centered in the canvas, `gap`-space
+/// gutters between boxes, recording each box's origin.
+fn place_centered(band: &[usize], size: &[usize], total: usize, pos: &mut [usize], gap: usize) {
+    let mut cursor = (total - extent(band, size, gap)) / 2;
+    for &index in band {
+        pos[index] = cursor;
+        cursor += size[index] + gap;
+    }
 }
 
 /// The tallest box in each band sets the band's height (3 when empty).
@@ -117,12 +180,13 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         return None;
     }
     let layer = assign_layers(&d.edges, count)?;
-    let bands = band_members(&layer);
+    let mut bands = band_members(&layer);
     let max_layer = bands.len() - 1;
-    // Box geometry: label lines stacked in the box, sequential
-    // placement inside each band, 3-space gutters between boxes.
+    // Box geometry: label lines stacked in the box, barycenter-ordered
+    // and centered placement inside each band, 3-space gutters between
+    // boxes.
     let (box_w, box_h) = box_geometry(&d.labels);
-    let (mut x, mut total_width) = place_band_nodes(&bands, &box_w);
+    let (mut x, mut total_width) = place_band_nodes(&mut bands, &box_w, &d.edges);
     if total_width > columns {
         return None;
     }
@@ -145,6 +209,26 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             return None;
         }
     }
+    // Straight-edge labels annotate beside the lifeline and often need
+    // more room than the widest band provides: grow the canvas (bounded
+    // by the terminal budget) instead of truncating them away.
+    let mut labeled_width = total_width;
+    for edge in &d.edges {
+        let (fl, tl) = (layer[edge.from], layer[edge.to]);
+        if tl == fl || fl + 1 < tl {
+            continue; // only terminating straight edges place labels
+        }
+        if x[edge.from] + box_w[edge.from] / 2 == x[edge.to] + box_w[edge.to] / 2
+            && let Some(text) = &edge.label
+        {
+            let start = x[edge.to] + box_w[edge.to] / 2 + 2;
+            labeled_width = labeled_width.max(start + width::width(text) + 1);
+        }
+    }
+    if labeled_width > columns {
+        return None;
+    }
+    total_width = labeled_width;
     let mut rows: Vec<RowCanvas> = Vec::new();
     let mut band_top = vec![0usize; max_layer + 1];
     for depth in 0..=max_layer {
@@ -162,70 +246,65 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
     let band_box_top = |depth: usize| band_top[depth] + band_lead;
     let gap_start_of = |gap: usize| band_top[gap] + band_lead + band_h[gap];
 
+    // The lifelines crossing each gap, ascending: a label placed
+    // beside a straight vertical stops before the next one, so two
+    // lanes never overwrite each other's annotations.
+    let mut gap_verticals: Vec<Vec<usize>> = vec![Vec::new(); max_layer];
+    for edge in &d.edges {
+        let (fl, tl) = (layer[edge.from], layer[edge.to]);
+        if tl == fl {
+            continue;
+        }
+        for verts in &mut gap_verticals[fl..tl] {
+            verts.push(x[edge.from] + box_w[edge.from] / 2);
+            verts.push(x[edge.to] + box_w[edge.to] / 2);
+        }
+    }
+    for verts in &mut gap_verticals {
+        verts.sort_unstable();
+        verts.dedup();
+    }
     // Edges route down the band gaps.
     let mut elbow_slot = vec![0usize; max_layer];
+    // Straight (vertically aligned) edges stack their annotations one
+    // row above the previous, so two labels never overlap on a row.
+    let mut straight_labels = vec![0usize; max_layer];
     for edge in &d.edges {
         let (fl, tl) = (layer[edge.from], layer[edge.to]);
         if tl == fl {
             continue; // same-layer edges do not route
         }
-        let from_center = x[edge.from] + box_w[edge.from] / 2;
-        let to_center = x[edge.to] + box_w[edge.to] / 2;
-        let vfill = edge.style.vertical();
-        let head = edge.style.head();
-        let hfill = edge.style.horizontal();
+        let route = TdRouting {
+            from_center: x[edge.from] + box_w[edge.from] / 2,
+            to_center: x[edge.to] + box_w[edge.to] / 2,
+            gap_start: 0,
+            height: 0,
+            label: edge.label.as_deref(),
+            vfill: edge.style.vertical(),
+            hfill: edge.style.horizontal(),
+            head: edge.style.head(),
+        };
         for gap in fl..tl {
-            let gap_start = gap_start_of(gap);
-            let height = gap_height[gap];
+            let route = TdRouting {
+                gap_start: gap_start_of(gap),
+                height: gap_height[gap],
+                ..route
+            };
             if gap + 1 < tl {
-                // Pass-through: a straight vertical through every gap row.
-                for row in &mut rows[gap_start..gap_start + height] {
-                    row.put(from_center, vfill);
-                }
-                continue;
-            }
-            if from_center == to_center {
-                for row in &mut rows[gap_start..gap_start + height - 1] {
-                    row.put(from_center, vfill);
-                }
-                rows[gap_start + height - 1].put(to_center, head);
-                continue;
-            }
-            let slot = elbow_slot[gap];
-            elbow_slot[gap] += 1;
-            let elbow = gap_start + slot.min(height.saturating_sub(2));
-            for row in &mut rows[gap_start..elbow] {
-                row.put(from_center, vfill);
-            }
-            // Stroke-correct corners: right turn (└,┐), left turn (┘,┌).
-            let (corner_from, corner_to) = if from_center < to_center {
-                ("└", "┐")
+                pass_through_td(&mut rows, &route);
+            } else if route.from_center == route.to_center {
+                straight_td(
+                    &mut rows,
+                    &route,
+                    &gap_verticals[gap],
+                    &mut straight_labels[gap],
+                    total_width,
+                );
             } else {
-                ("┘", "┌")
-            };
-            rows[elbow].put(from_center, corner_from);
-            rows[elbow].put(to_center, corner_to);
-            let (left, right) = if from_center < to_center {
-                (from_center, to_center)
-            } else {
-                (to_center, from_center)
-            };
-            if !draw_horizontal(
-                &mut rows[elbow],
-                left + 1,
-                right,
-                edge.label.as_deref(),
-                hfill,
-            ) && let Some(text) = &edge.label
-            {
-                // Span too narrow for the label: annotate beside the
-                // arrowhead instead of dropping it.
-                rows[gap_start + height - 2].put(right + 2, text.clone());
+                let slot = elbow_slot[gap];
+                elbow_slot[gap] += 1;
+                elbow_td(&mut rows, &route, slot, total_width);
             }
-            for row in &mut rows[elbow + 1..gap_start + height - 1] {
-                row.put(to_center, vfill);
-            }
-            rows[gap_start + height - 1].put(to_center, head);
         }
     }
 
@@ -254,12 +333,18 @@ fn layout_td(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         for (row_index, row) in rows[top + 1..top + 1 + body_rows].iter_mut().enumerate() {
             for &index in band {
                 if let Some(line) = d.labels[index].get(row_index) {
-                    let pad = box_w[index] - 2 - width::width(line);
-                    let left = pad / 2;
-                    row.put(
-                        x[index],
-                        format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
-                    );
+                    if line == BOX_RULE {
+                        // The title/members separator spans the box.
+                        let inner = box_w[index].saturating_sub(2);
+                        row.put(x[index], format!("│{}│", "─".repeat(inner)));
+                    } else {
+                        let pad = box_w[index] - 2 - width::width(line);
+                        let left = pad / 2;
+                        row.put(
+                            x[index],
+                            format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
+                        );
+                    }
                 }
             }
         }
@@ -373,7 +458,7 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         return None;
     }
     let layer = assign_layers(&d.edges, count)?;
-    let cols = band_members(&layer);
+    let mut cols = band_members(&layer);
     let max_layer = layer.iter().copied().max().unwrap_or(0);
 
     let (box_w, box_h) = box_geometry(&d.labels);
@@ -408,16 +493,27 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             total_width += gutters[depth];
         }
     }
-    let mut total_height = 0usize;
     let mut y = vec![0usize; count];
-    for band in &cols {
-        let mut cursor = 0usize;
-        for &index in band {
-            y[index] = cursor;
-            cursor += box_h[index] + 2;
+    let total_height = {
+        let tallest = cols.iter().map(|c| extent(c, &box_h, 2)).max().unwrap_or(0);
+        // Barycenter ordering, left-to-right: each column sorts by the
+        // mean row-center of its already-placed predecessors, then
+        // centers vertically in the canvas — the tallest column sets
+        // the height.
+        let mut column_of = vec![0usize; count];
+        for (depth, column) in cols.iter().enumerate() {
+            for &n in column {
+                column_of[n] = depth;
+            }
         }
-        total_height = total_height.max(cursor.saturating_sub(2));
-    }
+        for (depth, column) in cols.iter_mut().enumerate() {
+            if depth > 0 {
+                order_by_barycenter(column, &column_of, depth, &d.edges, &y, &box_h);
+            }
+            place_centered(column, &box_h, tallest, &mut y, 2);
+        }
+        tallest
+    };
     if total_width > columns || total_height > 120 || total_height == 0 {
         return None;
     }
@@ -425,54 +521,56 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
         .map(|_| RowCanvas::new(total_width))
         .collect();
 
+    // The vertical routing lane through each gutter: between the two
+    // columns, clear of every box.
+    let lane = |gap: usize| col_x[gap] + col_w[gap] + gutters[gap] / 2;
     for edge in &d.edges {
         let (fl, tl) = (layer[edge.from], layer[edge.to]);
         if tl == fl {
             continue;
         }
-        let from_row = y[edge.from] + box_h[edge.from] / 2;
-        let to_row = y[edge.to] + box_h[edge.to] / 2;
-        let src_right = col_x[fl] + box_w[edge.from];
-        let dst_left = col_x[tl];
-        let vfill = edge.style.vertical();
-        let hfill = edge.style.horizontal();
-        if from_row == to_row || tl > fl + 1 {
-            // Straight run into the target's left edge.
-            let head_col = dst_left.saturating_sub(1);
-            draw_horizontal(
-                &mut rows[from_row],
-                src_right,
-                head_col,
-                edge.label.as_deref(),
-                hfill,
+        let route = LrRouting {
+            from_row: y[edge.from] + box_h[edge.from] / 2,
+            to_row: y[edge.to] + box_h[edge.to] / 2,
+            src_right: col_x[fl] + box_w[edge.from],
+            dst_left: col_x[tl],
+            label: edge.label.as_deref(),
+            vfill: edge.style.vertical(),
+            hfill: edge.style.horizontal(),
+        };
+        if tl > fl + 1 {
+            // A skip-level edge routes through the inter-column
+            // gutters: a straight run would pierce every intermediate
+            // box, and boxes paint last, so the line would read as
+            // connecting the wrong box — even when the endpoints share
+            // a row, which centering makes the common shape. Cross on
+            // a row no intermediate box occupies, nearest to the source
+            // exit (the box-free filter runs first, or it would only
+            // vet the single nearest row); wall-to-wall columns fall
+            // back to the straight run.
+            let box_free = |r: usize| {
+                (fl + 1..tl).all(|k| cols[k].iter().all(|&n| r < y[n] || r >= y[n] + box_h[n]))
+            };
+            let crossing = (0..total_height)
+                .filter(|&r| r != route.from_row && r != route.to_row && box_free(r))
+                .min_by_key(|&r| (r as isize - route.from_row as isize).unsigned_abs());
+            skip_lr(
+                &mut rows,
+                &route,
+                lane(fl),
+                lane(tl - 1),
+                crossing,
+                total_width,
             );
-            if head_col < total_width {
-                rows[from_row].put(head_col, "▶");
-            }
+            continue;
+        }
+        if route.from_row == route.to_row {
+            straight_lr(&mut rows[route.from_row], &route, total_width);
             continue;
         }
         // Adjacent columns, different rows: elbow in the gutter.
         let gx = col_x[fl] + col_w[fl] + 1;
-        for col in src_right..gx {
-            rows[from_row].put(col, hfill);
-        }
-        rows[from_row].put(gx, if to_row > from_row { "┐" } else { "┘" });
-        let (top, bottom) = (from_row.min(to_row), from_row.max(to_row));
-        for row in &mut rows[top + 1..bottom] {
-            row.put(gx, vfill);
-        }
-        rows[to_row].put(gx, if to_row > from_row { "└" } else { "┌" });
-        let head_col = dst_left.saturating_sub(1);
-        draw_horizontal(
-            &mut rows[to_row],
-            gx + 1,
-            head_col,
-            edge.label.as_deref(),
-            hfill,
-        );
-        if head_col < total_width {
-            rows[to_row].put(head_col, "▶");
-        }
+        elbow_lr(&mut rows, &route, gx, total_width);
     }
 
     // Boxes paint last.
@@ -482,18 +580,274 @@ fn layout_lr(d: &Diagram, columns: usize) -> Option<Vec<String>> {
             rows[by].put(bx, format!("┌{}┐", "─".repeat(bw - 2)));
             for (row_index, row) in rows[by + 1..by + bh - 1].iter_mut().enumerate() {
                 if let Some(line) = d.labels[index].get(row_index) {
-                    let pad = bw - 2 - width::width(line);
-                    let left = pad / 2;
-                    row.put(
-                        bx,
-                        format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
-                    );
+                    if line == BOX_RULE {
+                        // The title/members separator spans the box.
+                        let inner = bw.saturating_sub(2);
+                        row.put(bx, format!("│{}│", "─".repeat(inner)));
+                    } else {
+                        let pad = bw - 2 - width::width(line);
+                        let left = pad / 2;
+                        row.put(
+                            bx,
+                            format!("│{}{line}{}│", " ".repeat(left), " ".repeat(pad - left)),
+                        );
+                    }
                 }
             }
             rows[by + bh - 1].put(bx, format!("└{}┘", "─".repeat(bw - 2)));
         }
     }
     Some(rows.iter().map(RowCanvas::render).collect())
+}
+
+/// What one edge reads while routing itself left-to-right.
+struct LrRouting<'a> {
+    from_row: usize,
+    to_row: usize,
+    src_right: usize,
+    dst_left: usize,
+    label: Option<&'a str>,
+    vfill: &'static str,
+    hfill: &'static str,
+}
+
+/// Straight same-row run into the target's left edge; a label wider
+/// than the run truncates into it instead of disappearing.
+fn straight_lr(row: &mut RowCanvas, route: &LrRouting<'_>, total_width: usize) {
+    let head_col = route.dst_left.saturating_sub(1);
+    let placed = draw_horizontal(row, route.src_right, head_col, route.label, route.hfill);
+    if !placed && let Some(text) = route.label {
+        let room = head_col.saturating_sub(route.src_right + 2);
+        if room >= 3 {
+            row.put(route.src_right + 1, super::truncate_width(text, room));
+        }
+    }
+    if head_col < total_width {
+        row.put(head_col, "▶");
+    }
+}
+
+/// A skip-level edge crosses the intermediate columns on a box-free
+/// row and descends through the gutter lanes: lane turn, vertical,
+/// labelled crossing run, lane turn, approach into the target. When no
+/// box-free row exists the straight (clipped) run is the fallback.
+fn skip_lr(
+    rows: &mut [RowCanvas],
+    route: &LrRouting<'_>,
+    start_lane: usize,
+    end_lane: usize,
+    crossing: Option<usize>,
+    total_width: usize,
+) {
+    let head_col = route.dst_left.saturating_sub(1);
+    let Some(r) = crossing else {
+        draw_horizontal(
+            &mut rows[route.from_row],
+            route.src_right,
+            head_col,
+            route.label,
+            route.hfill,
+        );
+        if head_col < total_width {
+            rows[route.from_row].put(head_col, "▶");
+        }
+        return;
+    };
+    for col in route.src_right..start_lane {
+        rows[route.from_row].put(col, route.hfill);
+    }
+    rows[route.from_row].put(start_lane, if r > route.from_row { "┐" } else { "┘" });
+    let (top, bottom) = (r.min(route.from_row), r.max(route.from_row));
+    for row in &mut rows[top + 1..bottom] {
+        row.put(start_lane, route.vfill);
+    }
+    rows[r].put(start_lane, if r > route.from_row { "└" } else { "┌" });
+    let placed = draw_horizontal(
+        &mut rows[r],
+        start_lane + 1,
+        end_lane,
+        route.label,
+        route.hfill,
+    );
+    if !placed && let Some(text) = route.label {
+        let room = end_lane.saturating_sub(start_lane + 3);
+        if room >= 3 {
+            rows[r].put(start_lane + 1, super::truncate_width(text, room));
+        }
+    }
+    rows[r].put(end_lane, if route.to_row > r { "┐" } else { "┘" });
+    let (top, bottom) = (route.to_row.min(r), route.to_row.max(r));
+    for row in &mut rows[top + 1..bottom] {
+        row.put(end_lane, route.vfill);
+    }
+    rows[route.to_row].put(end_lane, if route.to_row > r { "└" } else { "┌" });
+    for col in end_lane + 1..head_col {
+        rows[route.to_row].put(col, route.hfill);
+    }
+    if head_col < total_width {
+        rows[route.to_row].put(head_col, "▶");
+    }
+}
+
+/// Adjacent columns, different rows: one elbow in the gutter.
+fn elbow_lr(rows: &mut [RowCanvas], route: &LrRouting<'_>, gx: usize, total_width: usize) {
+    for col in route.src_right..gx {
+        rows[route.from_row].put(col, route.hfill);
+    }
+    rows[route.from_row].put(
+        gx,
+        if route.to_row > route.from_row {
+            "┐"
+        } else {
+            "┘"
+        },
+    );
+    let (top, bottom) = (
+        route.from_row.min(route.to_row),
+        route.from_row.max(route.to_row),
+    );
+    for row in &mut rows[top + 1..bottom] {
+        row.put(gx, route.vfill);
+    }
+    rows[route.to_row].put(
+        gx,
+        if route.to_row > route.from_row {
+            "└"
+        } else {
+            "┌"
+        },
+    );
+    let head_col = route.dst_left.saturating_sub(1);
+    draw_horizontal(
+        &mut rows[route.to_row],
+        gx + 1,
+        head_col,
+        route.label,
+        route.hfill,
+    );
+    if head_col < total_width {
+        rows[route.to_row].put(head_col, "▶");
+    }
+}
+
+/// What one edge reads while routing itself down a single TD gap.
+struct TdRouting<'a> {
+    from_center: usize,
+    to_center: usize,
+    gap_start: usize,
+    height: usize,
+    label: Option<&'a str>,
+    vfill: &'static str,
+    hfill: &'static str,
+    head: &'static str,
+}
+
+/// Display columns free to the right of `col` before the next lifeline
+/// (or the canvas edge).
+fn room_after(verts: &[usize], col: usize, total_width: usize) -> usize {
+    match verts.iter().find(|&&v| v > col) {
+        Some(&next) => next.saturating_sub(col + 1),
+        None => total_width.saturating_sub(col + 1),
+    }
+}
+
+/// Display columns free to the left of `col` after the previous
+/// lifeline.
+fn room_before(verts: &[usize], col: usize) -> usize {
+    match verts.iter().rev().find(|&&v| v < col) {
+        Some(&prev) => col.saturating_sub(prev + 1),
+        None => col,
+    }
+}
+
+/// Pass-through: a straight vertical through every gap row.
+fn pass_through_td(rows: &mut [RowCanvas], route: &TdRouting<'_>) {
+    for row in &mut rows[route.gap_start..route.gap_start + route.height] {
+        row.put_if_clear(route.from_center, route.vfill);
+    }
+}
+
+/// A straight vertical has no horizontal run to carry the label:
+/// annotate beside the lifeline instead of dropping it (vertically
+/// aligned boxes are common in ER diagrams). Labels stack one row per
+/// edge and stop short of the neighboring lifeline — the right side
+/// first, the left as the fallback.
+fn straight_td(
+    rows: &mut [RowCanvas],
+    route: &TdRouting<'_>,
+    verts: &[usize],
+    stacked: &mut usize,
+    total_width: usize,
+) {
+    let head_row = route.gap_start + route.height - 1;
+    for row in &mut rows[route.gap_start..head_row] {
+        row.put_if_clear(route.from_center, route.vfill);
+    }
+    rows[head_row].put(route.to_center, route.head);
+    let Some(text) = route.label else {
+        return;
+    };
+    let row_offset = (*stacked).min(route.height.saturating_sub(3));
+    *stacked += 1;
+    let label_row = &mut rows[route.gap_start + route.height - 2 - row_offset];
+    let label_w = width::width(text);
+    const MIN_ROOM: usize = 3;
+    let right_start = route.to_center + 2;
+    let right_room = room_after(verts, right_start, total_width);
+    let left_end = route.to_center.saturating_sub(2);
+    let left_room = room_before(verts, left_end);
+    let (col, room) = if label_w <= right_room {
+        (right_start, label_w)
+    } else if label_w <= left_room {
+        (left_end + 1 - label_w, label_w)
+    } else if right_room >= left_room && right_room >= MIN_ROOM {
+        (right_start, right_room)
+    } else if left_room >= MIN_ROOM {
+        let fit = label_w.min(left_room);
+        (left_end + 1 - fit, fit)
+    } else {
+        (right_start, right_room.min(label_w).max(MIN_ROOM))
+    };
+    label_row.put(col, super::truncate_width(text, room));
+}
+
+/// One elbow in the gap: trunk down, stroke-correct corners, a label
+/// on the horizontal run (or an annotation beside the arrowhead when
+/// the span is too narrow), trunk to the arrowhead.
+fn elbow_td(rows: &mut [RowCanvas], route: &TdRouting<'_>, slot: usize, total_width: usize) {
+    let elbow = route.gap_start + slot.min(route.height.saturating_sub(2));
+    for row in &mut rows[route.gap_start..elbow] {
+        row.put_if_clear(route.from_center, route.vfill);
+    }
+    // Stroke-correct corners: right turn (└,┐), left turn (┘,┌).
+    let (corner_from, corner_to) = if route.from_center < route.to_center {
+        ("└", "┐")
+    } else {
+        ("┘", "┌")
+    };
+    rows[elbow].put(route.from_center, corner_from);
+    rows[elbow].put(route.to_center, corner_to);
+    let (left, right) = if route.from_center < route.to_center {
+        (route.from_center, route.to_center)
+    } else {
+        (route.to_center, route.from_center)
+    };
+    if !draw_horizontal(&mut rows[elbow], left + 1, right, route.label, route.hfill)
+        && let Some(text) = route.label
+    {
+        // Span too narrow for the label: annotate beside the arrowhead
+        // instead of dropping it, truncated to the canvas edge (the
+        // canvas-width growth above covers straight edges only).
+        let room = total_width.saturating_sub(right + 3);
+        if room >= 3 {
+            rows[route.gap_start + route.height - 2]
+                .put(right + 2, super::truncate_width(text, room));
+        }
+    }
+    for row in &mut rows[elbow + 1..route.gap_start + route.height - 1] {
+        row.put_if_clear(route.to_center, route.vfill);
+    }
+    rows[route.gap_start + route.height - 1].put(route.to_center, route.head);
 }
 
 /// One display row: cells placed at exact display columns, last write
@@ -521,6 +875,26 @@ impl RowCanvas {
         let end = col + span;
         self.placements
             .retain(|(c, t)| c + width::width(t) <= col || *c >= end);
+        self.placements.push((col, text));
+    }
+
+    /// Place `text` only where no glyph stands. Two edges leaving a box
+    /// at the same column share one trunk: the fill of the second must
+    /// not clobber the first edge's corner glyph standing in its path.
+    pub(super) fn put_if_clear(&mut self, col: usize, text: impl Into<String>) {
+        let text = text.into();
+        let span = width::width(&text);
+        if span == 0 || col >= self.width {
+            return;
+        }
+        let end = col + span;
+        if self
+            .placements
+            .iter()
+            .any(|(c, t)| !(c + width::width(t) <= col || *c >= end))
+        {
+            return;
+        }
         self.placements.push((col, text));
     }
 

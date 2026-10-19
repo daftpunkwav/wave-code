@@ -243,8 +243,8 @@ footer row 2             (transient exit hint ... context: N% (used/max))
 - **无紫罗兰灰**：在每个中性坡道 token（text、dim、muted、
   border、neutral、diff gutter）上绿色保持不低于红色，通道递进保持均匀——蓝色超出绿色的量不超过绿超出红的步长——因此灰读作灰，绝不发紫。dark 调色板是真正的石墨坡道；deepwave 的 slate
   （均匀、偏蓝的递进）仍然被允许。
-- **对比度锁定的墨色**：每档坡道相对自己主题的 `background` token 满足 WCAG 对比度——正文 ≥ 7:1、dim ≥ 4.5:1、muted
-  ≥ 3.5:1——且输入条带保持该背景之上安静而可见的一档。
+- **对比度锁定的墨色**：每档坡道相对自己主题的 `background` token 满足 WCAG 对比度——正文 ≥ 7:1、dim 与 muted
+  ≥ 4.5:1——且输入条带保持该背景之上安静而可见的一档。
 
 `background` token 同样是功能性的：light 主题把它的纸面 + 墨色 + 光标色应用到终端本身（OSC 11 背景、
 OSC 10 前景、OSC 12 光标——尽力而为），从而在深色终端宿主上保持可读可用——否则那些终端近似纯白的默认
@@ -275,15 +275,18 @@ OSC 10 前景、OSC 12 光标——尽力而为），从而在深色终端宿主
 
 ## Markdown 渲染约定
 
-渲染器（`tui-engine/src/markdown.rs`）在块之间保持一个空行、绝不到两个：每个块（标题、段落、列表、
-fence、引用、表格、分隔线）确保与之前的内容隔开，而不是推入尾部空行——因此列表后跟标题不再挤在一起，流式输出期间仍为空的中部文档标题也不会留下幻影空行。
-紧凑列表项保持紧凑；松散列表（空行分隔）项按其源间隔渲染。
+渲染器（`tui-engine/src/markdown.rs`）在块之间保持一个空行、绝不到两个：每个块（段落、列表、
+fence、引用、表格、分隔线）确保与之前的内容隔开，而不是推入尾部空行——因此列表后跟章节不再挤在一起，流式输出期间仍为空的中部文档标题也不会留下幻影空行。标题额外多一个前置空行
+（章节分隔：上松下紧）；文档开头的标题保持顶格。列表项悬挂：换行续行对齐到项文本而非
+标记，缩进走文本样式，因此用户消息的背景带在换行处不破。紧凑列表项保持紧凑；松散列表
+（空行分隔）项按其源间隔渲染。
 
 Fenced 代码块渲染为暗色圆角框——顶部 `╭─ lang ───`
 （仅当 fence 携带语言标签时显示，白名单为语言名字符，因此 fence 信息无法注入转义
 序列）、每行高亮文本前一条暗色 `│ ` 竖条、底部 `╰────`。字面的 ``` 标记从不渲染。框紧贴内容
 （外加标签）并在宽终端上限制在 80 列；高亮文本本身不在 fence 样式内重新换行，因为
-内部 ANSI 重置会把它取消。
+内部 ANSI 重置会把它取消。高亮结果来自按（语言，代码）键控的 LRU，因此流式草稿每次
+flush 只重新高亮增长中的尾块，而不是每个块。
 
 ### Fenced 块渲染器与行内修整
 
@@ -293,9 +296,14 @@ Fence 在语法高亮器之前咨询可插拔渲染器
 - ```mermaid fence 渲染为 box-drawing 图（默认开启；
   console 中 Ctrl+M 切换源视图）。一个共享图引擎（节点 + 带样式边 + subgraph 框、分层带或列布局）承载 `graph`/`flowchart`（TD/TB/LR、subgraph
   分组、节点形状折叠为盒子）、经 flowchart 适配器的 `stateDiagram(-v2)`、`classDiagram`、`erDiagram`、
-  `requirementDiagram` 与 `C4*` 家族。有自己几何的类别：`sequenceDiagram` 泳道、`gitGraph` 分支时间线、
+  `requirementDiagram` 与 `C4*` 家族。有自己几何的类别：`sequenceDiagram` 泳道（跨泳道或挂边的
+  盒装 note；激活簿记仅是表现层）、`gitGraph` 分支时间线、
   `mindmap`/`timeline` 树，以及 `pie`、`journey`、
-  `quadrantChart` 与 `xychart-beta` 的图表行。任何不支持的
+  `quadrantChart`（重合点散布到相邻格；图例可换行）与 `xychart-beta` 的图表行。图表以完整
+  body 预算作图而非代码框宽度上限，行走主题文本样式。共享引擎内：TD 带按前驱重心排序并
+  在画布内居中（LR 列同理），class/entity/requirement 盒在标题下画分隔线并把溢出成员折叠为
+  显式尾行，ER 边把 crow's-foot 基数带进标签，直线边在泳道旁注标签，gantt 条按最早开始时间
+  偏移。任何不支持的
   （`block-beta`、`sankey-beta`）或超出列预算的，
   返回空，fence 回退为普通源视图。
 - ```diff / ```patch fence 骑专用行样式：新增

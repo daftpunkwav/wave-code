@@ -3,9 +3,38 @@
 
 use std::collections::HashMap;
 
-use super::graph::{Diagram, Direction, EdgeStyle};
+use super::graph::{BOX_RULE, Diagram, Direction, EdgeStyle};
 use super::starts_with_keyword;
 use super::truncate_width;
+
+/// Member rows shown in one box before the overflow tail row: class
+/// members, ER attributes, and requirement fields all ride this bound
+/// so one huge block cannot stretch a box past the terminal height.
+const MEMBER_CAP: usize = 15;
+
+/// Append a member row to the open box: the first member lands under
+/// a full-width rule (the title/members separator), rows past `cap`
+/// count into `hidden`, and [`flush_hidden_members`] appends the tail.
+fn push_member(diagram: &mut Diagram, open: usize, line: &str, cap: usize, hidden: &mut usize) {
+    let rows = &mut diagram.labels[open];
+    if rows.len() == 1 {
+        rows.push(BOX_RULE.to_string());
+    }
+    if rows.len() < cap + 2 {
+        rows.push(line.to_string());
+    } else {
+        *hidden += 1;
+    }
+}
+
+/// Append the overflow tail when a box closes.
+fn flush_hidden_members(diagram: &mut Diagram, open: Option<usize>, hidden: usize) {
+    if hidden > 0
+        && let Some(index) = open
+    {
+        diagram.labels[index].push(format!("… (+{hidden} more)"));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // classDiagram — class boxes with member rows over the shared engine
@@ -22,6 +51,7 @@ pub(super) fn parse_class_diagram(source: &str) -> Option<Diagram> {
     let mut diagram = Diagram::new(Direction::TD);
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut open: Option<usize> = None;
+    let mut hidden = 0usize;
     for raw in source.lines() {
         let line = raw
             .trim()
@@ -39,6 +69,8 @@ pub(super) fn parse_class_diagram(source: &str) -> Option<Diagram> {
         match keyword.as_str() {
             "classdiagram" => {}
             "class" | "interface" | "enumeration" => {
+                flush_hidden_members(&mut diagram, open, hidden);
+                hidden = 0;
                 let rest = line[keyword.len()..].trim();
                 let (head, block) = match rest.strip_suffix('{') {
                     Some(head) => (head.trim(), true),
@@ -53,39 +85,33 @@ pub(super) fn parse_class_diagram(source: &str) -> Option<Diagram> {
                     open = None;
                 }
             }
-            "}" => open = None,
+            "}" => {
+                flush_hidden_members(&mut diagram, open, hidden);
+                hidden = 0;
+                open = None;
+            }
             "note" | "direction" | "classdef" | "cssclass" | "cssclasses" | "style" | "click"
             | "namespace" => {}
             _ => {
                 let member = open.is_some()
                     && (line.starts_with(['+', '-', '#', '~']) || line.starts_with("<<"));
                 if member {
-                    if let Some(index) = open {
-                        let rows = &mut diagram.labels[index];
-                        if rows.len() < 16 {
-                            rows.push(line.to_string());
-                        }
-                    }
+                    push_member(&mut diagram, open?, line, MEMBER_CAP, &mut hidden);
                 } else if let Some((from, to, label, style)) =
                     parse_class_relation(line, &mut diagram, &mut ids)?
                 {
                     diagram.edge(from, to, label, style);
-                } else if open.is_some() {
+                } else {
                     // Bare member row (`int age`, `quack()`): Mermaid
                     // accepts members without a visibility prefix inside
-                    // an open class block.
-                    if let Some(index) = open {
-                        let rows = &mut diagram.labels[index];
-                        if rows.len() < 16 {
-                            rows.push(line.to_string());
-                        }
-                    }
-                } else {
-                    return None;
+                    // an open class block; without an open block the
+                    // line is unsupported.
+                    push_member(&mut diagram, open?, line, MEMBER_CAP, &mut hidden);
                 }
             }
         }
     }
+    flush_hidden_members(&mut diagram, open, hidden);
     if diagram.labels.is_empty() {
         return None;
     }
@@ -194,6 +220,7 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
     let mut diagram = Diagram::new(Direction::TD);
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut open: Option<usize> = None;
+    let mut hidden = 0usize;
     for raw in source.lines() {
         let line = raw
             .trim()
@@ -208,27 +235,25 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
         }
         // Relationship line: the marker rides a standalone token.
         if line.contains("--") || line.contains("..") {
+            flush_hidden_members(&mut diagram, open, hidden);
+            hidden = 0;
             open = None;
-            let (rels, label) = match line.split_once(':') {
-                Some((rels, label)) => (rels, Some(label.trim().to_string())),
-                None => (line, None),
-            };
-            let tokens = split_quoted(rels, char::is_whitespace);
-            let rel_pos = tokens
-                .iter()
-                .position(|t| t.contains("--") || t.contains(".."))?;
-            if rel_pos == 0 || rel_pos + 1 >= tokens.len() {
-                return None;
-            }
-            let ent1 = tokens[..rel_pos].join(" ");
-            let ent2 = tokens[rel_pos + 1..].join(" ");
-            if ent1.is_empty() || ent2.is_empty() {
-                return None;
-            }
-            let style = if tokens[rel_pos].contains("..") {
+            let (ent1, ent2, marker, label) = parse_er_relationship(line)?;
+            let style = if marker.contains("..") {
                 EdgeStyle::Dotted
             } else {
                 EdgeStyle::Solid
+            };
+            // The cardinality heads (`||--o{`) decode into the edge
+            // label: the relationship's multiplicity is its most
+            // load-bearing information, so it leads the label and
+            // survives edge-label truncation on narrow lanes.
+            let label = match cardinalities(&marker) {
+                Some((near, far)) => Some(match label {
+                    Some(verb) => format!("{near}→{far} {verb}"),
+                    None => format!("{near}→{far}"),
+                }),
+                None => label,
             };
             let from = diagram.node(&mut ids, &ent1, vec![ent1.clone()])?;
             let to = diagram.node(&mut ids, &ent2, vec![ent2.clone()])?;
@@ -237,38 +262,88 @@ pub(super) fn parse_er_diagram(source: &str) -> Option<Diagram> {
         }
         // Entity block open / close.
         if let Some(name) = line.strip_suffix('{') {
-            let name = name.trim().trim_matches('"').trim();
-            if name.is_empty() {
-                return None;
-            }
-            open = Some(diagram.node(&mut ids, name, vec![name.to_string()])?);
+            flush_hidden_members(&mut diagram, open, hidden);
+            hidden = 0;
+            open = Some(register_er_entity(name, &mut diagram, &mut ids)?);
             continue;
         }
         if line == "}" {
+            flush_hidden_members(&mut diagram, open, hidden);
+            hidden = 0;
             open = None;
             continue;
         }
         // Attribute row of the open entity block (or a bare entity).
         match open {
-            Some(index) => {
-                let rows = &mut diagram.labels[index];
-                if rows.len() < 16 {
-                    rows.push(line.to_string());
-                }
-            }
+            Some(index) => push_member(&mut diagram, index, line, MEMBER_CAP, &mut hidden),
             None => {
-                let name = line.trim_matches('"').trim();
-                if name.is_empty() {
-                    return None;
-                }
-                diagram.node(&mut ids, name, vec![name.to_string()])?;
+                register_er_entity(line, &mut diagram, &mut ids)?;
             }
         }
     }
+    flush_hidden_members(&mut diagram, open, hidden);
     if diagram.labels.is_empty() {
         return None;
     }
     Some(diagram)
+}
+
+/// Decode the two cardinality heads of an ER marker (`||--o{`) into
+/// display strings. `None` when either head is unrecognizable — a bare
+/// `--`/`..` marker has no heads and keeps the plain label.
+fn cardinalities(marker: &str) -> Option<(String, String)> {
+    let decode = |head: &str| match head {
+        "||" => Some("1"),
+        "|o" | "o|" => Some("0..1"),
+        "}o" | "o{" => Some("0..*"),
+        "}|" | "|{" => Some("1..*"),
+        _ => None,
+    };
+    let run = marker.find(['-', '.'])?;
+    let (left, rest) = marker.split_at(run);
+    let tail = rest.find(|c| c != '-' && c != '.').unwrap_or(rest.len());
+    let right = &rest[tail..];
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    Some((decode(left)?.to_string(), decode(right)?.to_string()))
+}
+
+/// Register one ER entity: quoted display names trim, and an empty
+/// name fails the parse.
+fn register_er_entity(
+    name: &str,
+    diagram: &mut Diagram,
+    ids: &mut HashMap<String, usize>,
+) -> Option<usize> {
+    let name = name.trim().trim_matches('"').trim();
+    if name.is_empty() {
+        return None;
+    }
+    diagram.node(ids, name, vec![name.to_string()])
+}
+
+/// Parse one relationship line into `(ent1, ent2, marker, label)`: the
+/// marker rides a standalone token, quoted spans survive the entity
+/// names, and the text after `:` is the relationship verb.
+fn parse_er_relationship(line: &str) -> Option<(String, String, String, Option<String>)> {
+    let (rels, label) = match line.split_once(':') {
+        Some((rels, label)) => (rels, Some(label.trim().to_string())),
+        None => (line, None),
+    };
+    let tokens = split_quoted(rels, char::is_whitespace);
+    let rel_pos = tokens
+        .iter()
+        .position(|t| t.contains("--") || t.contains(".."))?;
+    if rel_pos == 0 || rel_pos + 1 >= tokens.len() {
+        return None;
+    }
+    let ent1 = tokens[..rel_pos].join(" ");
+    let ent2 = tokens[rel_pos + 1..].join(" ");
+    if ent1.is_empty() || ent2.is_empty() {
+        return None;
+    }
+    Some((ent1, ent2, tokens[rel_pos].clone(), label))
 }
 
 /// Split `s` on `sep` runs outside double quotes; parts are trimmed
@@ -382,9 +457,12 @@ fn parse_call_args(rest: &str) -> Option<Vec<String>> {
 /// still fits a terminal row.
 pub(super) fn parse_requirement_diagram(source: &str) -> Option<Diagram> {
     const FIELD_MAX: usize = 40;
+    /// Requirement boxes carry fewer field rows than class boxes.
+    const FIELD_CAP: usize = 8;
     let mut diagram = Diagram::new(Direction::TD);
     let mut ids: HashMap<String, usize> = HashMap::new();
     let mut open: Option<usize> = None;
+    let mut hidden = 0usize;
     for raw in source.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with("%%") {
@@ -410,6 +488,8 @@ pub(super) fn parse_requirement_diagram(source: &str) -> Option<Diagram> {
                 | "element"
         ) && let Some(head) = line.strip_suffix('{')
         {
+            flush_hidden_members(&mut diagram, open, hidden);
+            hidden = 0;
             let name = head[keyword.len()..].trim().trim_matches('"').trim();
             if name.is_empty() {
                 return None;
@@ -418,16 +498,15 @@ pub(super) fn parse_requirement_diagram(source: &str) -> Option<Diagram> {
             continue;
         }
         if line == "}" {
+            flush_hidden_members(&mut diagram, open, hidden);
+            hidden = 0;
             open = None;
             continue;
         }
         if let Some(index) = open {
             if line.split_once(':').is_some() {
                 let row = truncate_width(line, FIELD_MAX);
-                let rows = &mut diagram.labels[index];
-                if rows.len() < 8 {
-                    rows.push(row);
-                }
+                push_member(&mut diagram, index, &row, FIELD_CAP, &mut hidden);
             }
             continue;
         }
@@ -452,6 +531,7 @@ pub(super) fn parse_requirement_diagram(source: &str) -> Option<Diagram> {
         }
         return None;
     }
+    flush_hidden_members(&mut diagram, open, hidden);
     if diagram.labels.is_empty() {
         return None;
     }

@@ -403,8 +403,8 @@ into what the old lavender ramp was:
   purple. The dark palette is a true graphite ramp; deepwave's slate
   (an even, blue-leaning progression) remains allowed.
 - **Contrast-locked ink**: every ramp step clears WCAG contrast against
-  its own theme `background` token — body ≥ 7:1, dim ≥ 4.5:1, muted
-  ≥ 3.5:1 — and the input band stays a quiet, visible step of that
+  its own theme `background` token — body ≥ 7:1, dim and muted
+  ≥ 4.5:1 — and the input band stays a quiet, visible step of that
   background.
 
 The `background` token is also functional: the light theme applies its
@@ -449,13 +449,18 @@ so rows drawn under the previous palette cannot survive.
 ## Markdown rendering conventions
 
 The renderer (`tui-engine/src/markdown.rs`) keeps one blank line
-between blocks and never two: every block (heading, paragraph, list,
-fence, quote, table, rule) ensures separation from whatever came
-before, instead of pushing trailing blanks — so a list followed by a
-heading can no longer cram together, and a mid-document heading that
-is still empty during streaming never leaves a phantom blank line.
-Tight list items stay tight; loose-list (blank-separated) items render
-with their source separation.
+between blocks and never two: every block (paragraph, list, fence,
+quote, table, rule) ensures separation from whatever came before,
+instead of pushing trailing blanks — so a list followed by a section
+can no longer cram together, and a mid-document heading that is still
+empty during streaming never leaves a phantom blank line. A heading
+takes one extra blank above that (the section break: space above,
+tight below); a document-leading heading stays flush. List items
+hang: wrapped continuation lines align under the item text rather
+than the marker, and the indent rides the text style so the
+user-message background band survives the wrap. Tight list items stay
+tight; loose-list (blank-separated) items render with their source
+separation.
 
 Fenced code blocks render as a dim rounded frame — `╭─ lang ───` on
 top (language tag only when the fence carries one, whitelisted to
@@ -464,7 +469,9 @@ sequences), a dim `│ ` bar before each highlighted line, `╰────` at
 the bottom. The literal ``` markers never render. The frame hugs its
 content (plus the tag) and caps at 80 columns on wide terminals; the
 highlighted text itself is not re-wrapped in the fence style, since
-the inner ANSI resets would cancel it.
+the inner ANSI resets would cancel it. Highlighted blocks come from an
+LRU keyed by (language, code), so a streamed draft re-highlights only
+its growing tail block per flush instead of every block.
 
 ### Fenced-block renderers and inline fixups
 
@@ -479,11 +486,22 @@ Fences consult pluggable renderers before the syntax highlighter (the
   groups, node shapes collapse onto boxes), `stateDiagram(-v2)` through
   a flowchart adapter, `classDiagram`, `erDiagram`,
   `requirementDiagram`, and the `C4*` family. Kinds with their own
-  geometry: `sequenceDiagram` lanes, `gitGraph` branch timeline,
-  `mindmap`/`timeline` trees, and the chart rows of `pie`, `journey`,
-  `quadrantChart`, and `xychart-beta`. Anything unsupported
-  (`block-beta`, `sankey-beta`), or wider than the columns budget,
-  returns nothing and the fence falls back to the plain source view.
+  geometry: `sequenceDiagram` lanes (boxed notes over or beside the
+  lanes; activation bookkeeping is presentation-only), `gitGraph`
+  branch timeline, `mindmap`/`timeline` trees, and the chart rows of
+  `pie`, `journey`, `quadrantChart` (coincident points spread onto
+  neighboring cells; the legend wraps), and `xychart-beta`. The
+  diagrams draw on the full body budget rather than the code-frame
+  width cap, and their rows ride the theme text style. Within the
+  shared engine: TD bands order by predecessor barycenter and center
+  in the canvas (LR columns likewise), class/entity/requirement boxes
+  draw a rule under their title and collapse member overflow into an
+  explicit tail row, ER edges carry their crow's-foot cardinalities in
+  the label, straight edges annotate labels beside the lifeline, and
+  gantt bars sit at their offset from the earliest start. Anything
+  unsupported (`block-beta`, `sankey-beta`), or wider than the columns
+  budget, returns nothing and the fence falls back to the plain source
+  view.
 - ```diff / ```patch fences ride dedicated line styles: additions
   green, removals red, file headers and `@@` hunks in the metadata
   tone, context plain.

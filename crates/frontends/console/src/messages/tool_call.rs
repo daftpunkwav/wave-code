@@ -128,8 +128,9 @@ pub fn verb(name: &str, state: ToolState) -> String {
 /// The running-tool dot pulses a saw amplitude in one cell: climbs,
 /// drops back, climbs again — machine work in a single glyph.
 const RUN_FRAMES: [&str; 4] = ["▁", "▃", "▅", "▇"];
-/// Frame interval of the running-tool animation in milliseconds.
-const RUN_FRAME_INTERVAL: u128 = 130;
+/// Frame interval of the running-tool animation in milliseconds: one
+/// frame per render tick, so the ramp never stalls or skips.
+const RUN_FRAME_INTERVAL: u128 = 100;
 
 /// The saw-ramp frame for `elapsed`.
 fn run_frame(elapsed: std::time::Duration) -> &'static str {

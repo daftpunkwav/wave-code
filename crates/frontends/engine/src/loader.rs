@@ -11,20 +11,24 @@ use std::time::Instant;
 use crate::color::Style;
 use crate::component::{Component, Segment};
 
-/// Sine ripple frames: amplitude swells and recedes (80 ms).
+/// Sine ripple frames: amplitude swells and recedes. The interval sits
+/// on the console's 100 ms render tick, so the wave advances exactly
+/// one frame per tick (an 80 ms cadence would skip frames on the tick
+/// grid and stutter).
 pub const SINE_FRAMES: [&str; 12] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "▆", "▅", "▄", "▃", "▂"];
 /// Sine spinner frame interval in milliseconds.
-pub const SINE_INTERVAL_MS: u64 = 80;
+pub const SINE_INTERVAL_MS: u64 = 100;
 
 /// Saw ramp frames: climbs then drops back sharp (100 ms).
 pub const SAW_FRAMES: [&str; 4] = ["▁", "▃", "▅", "▇"];
 /// Saw spinner frame interval in milliseconds.
 pub const SAW_INTERVAL_MS: u64 = 100;
 
-/// Triangle frames: symmetric up-down sweep (80 ms).
+/// Triangle frames: symmetric up-down sweep, one frame per 100 ms
+/// render tick (see [`SINE_INTERVAL_MS`]).
 pub const TRIANGLE_FRAMES: [&str; 6] = ["▁", "▃", "▅", "▇", "▅", "▃"];
 /// Triangle spinner frame interval in milliseconds.
-pub const TRIANGLE_INTERVAL_MS: u64 = 80;
+pub const TRIANGLE_INTERVAL_MS: u64 = 100;
 
 /// The spinner glyph set to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,7 +125,7 @@ mod tests {
         let mut loader = Loader::new(SpinnerStyle::Sine, "working", Style::new(), Style::new());
         let first = loader.current_frame();
         assert_eq!(strip_ansi(&loader.render(80)[0]), "▁ working");
-        std::thread::sleep(std::time::Duration::from_millis(90));
+        std::thread::sleep(std::time::Duration::from_millis(SINE_INTERVAL_MS + 40));
         assert_ne!(loader.current_frame(), first);
     }
 

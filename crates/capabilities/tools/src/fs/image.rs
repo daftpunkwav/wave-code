@@ -22,22 +22,31 @@ use serde_json::{Value, json};
 use super::{req_str, resolve_path};
 use crate::{Result, Tool, ToolCtx, ToolOutput};
 
-/// Maximum image file bytes (mirrors the llm attachment cap; no downscaling).
-const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+/// Maximum image file bytes: the provider attachment cap, so a file the
+/// provider would reject is refused here first (no downscaling).
+const MAX_IMAGE_BYTES: u64 = wavecode_llm::IMAGE_MAX_BYTES as u64;
 
 /// Sniff the image MIME from magic bytes; `None` means not a supported image.
+///
+/// The byte patterns only decide *which* known type the file is; the
+/// accepted set itself is the provider's allowlist
+/// ([`wavecode_llm::IMAGE_ALLOWED_MIMES`]), so the two cannot drift
+/// apart.
 pub fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
-        Some("image/png")
+    let mime = if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        "image/png"
     } else if bytes.len() >= 3 && &bytes[..3] == b"\xFF\xD8\xFF" {
-        Some("image/jpeg")
+        "image/jpeg"
     } else if bytes.len() >= 6 && (&bytes[..6] == b"GIF87a" || &bytes[..6] == b"GIF89a") {
-        Some("image/gif")
+        "image/gif"
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
+        "image/webp"
     } else {
-        None
-    }
+        return None;
+    };
+    wavecode_llm::IMAGE_ALLOWED_MIMES
+        .contains(&mime)
+        .then_some(mime)
 }
 
 /// Read an image file as an attachment (read-only).
@@ -101,9 +110,10 @@ impl Tool for ReadImage {
         if meta.len() > MAX_IMAGE_BYTES {
             return Ok(ToolOutput {
                 content: format!(
-                    "image too large ({} bytes), max {} bytes (5MB cap, no downscaling)",
+                    "image too large ({} bytes), max {} bytes ({} MB cap, no downscaling)",
                     meta.len(),
-                    MAX_IMAGE_BYTES
+                    MAX_IMAGE_BYTES,
+                    wavecode_llm::IMAGE_MAX_BYTES / (1024 * 1024)
                 ),
                 is_error: true,
             });
@@ -154,6 +164,27 @@ mod tests {
         );
         assert_eq!(sniff_mime(b"hello text"), None);
         assert_eq!(sniff_mime(b""), None);
+    }
+
+    /// The size cap and the accepted types are the provider's policy,
+    /// not a second copy of it: a file the provider would accept must
+    /// not be refused here, and a type the provider rejects must never
+    /// be offered here.
+    #[test]
+    fn the_image_policy_is_the_provider_policy() {
+        assert_eq!(MAX_IMAGE_BYTES, wavecode_llm::IMAGE_MAX_BYTES as u64);
+        for magic in [
+            b"\x89PNG\r\n\x1a\n".as_slice(),
+            b"\xFF\xD8\xFF".as_slice(),
+            b"GIF89a".as_slice(),
+            b"RIFF\x00\x00\x00\x00WEBP".as_slice(),
+        ] {
+            let mime = sniff_mime(magic).expect("a known image type");
+            assert!(
+                wavecode_llm::IMAGE_ALLOWED_MIMES.contains(&mime),
+                "{mime} is not an allowed attachment type"
+            );
+        }
     }
 
     #[tokio::test]

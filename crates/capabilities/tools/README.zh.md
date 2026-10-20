@@ -12,7 +12,7 @@
 | `src/script.rs` | `python` / `node`：以内联方式非交互执行脚本，解释器按 PATH 探测，cwd 隔离，超时钳制，失败语义与 shell 一致 |
 | `src/lsp.rs` | 极简 stdio LSP 客户端加 `lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`（每次调用显式给 `server_command`，或经惰性启动、跨调用复用的注册表后端）与 `lsp_diagnostics`（渲染记录下来的 `publishDiagnostics` 推送）；不捆绑任何服务器 |
 | `src/web_fetch.rs` | `web_fetch`：仅 http/https，手工跟随重定向（最多 5 跳），流式大小上限（默认 256 KB / 硬上限 1 MB）加 `[truncated]` 标记，HTML 渲染为 Markdown（`raw=true` 可关闭） |
-| `src/websearch.rs` | `web_search`：可插拔的 `SearchBackend`；默认的 `DuckDuckGoBackend` 抓取免密钥的 HTML 端点，解析失败作为业务错误上抛 |
+| `src/web_search.rs` | `web_search`：可插拔的 `SearchBackend`；默认的 `DuckDuckGoBackend` 抓取免密钥的 HTML 端点，解析失败作为业务错误上抛 |
 | `src/html.rs` | 服务于 `web_fetch` 的宽松单遍 HTML -> Markdown 转换器：结构性标记转 Markdown，script/style 丢弃，畸形输入退化为纯文本、绝不失败 |
 | `src/spill_tool.rs` | `spill`：经 context crate 的 `SpillStore` 只读读回 `spill://` URI（spill 存放在 `cwd` 之外，`read` 够不到） |
 | `src/todo_tool.rs` | `todowrite`：全量重写语义的会话任务列表；`TodoStore` 句柄存于会话配置、装配时注入 |

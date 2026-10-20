@@ -13,6 +13,7 @@ English | [中文](README.zh.md)
 | `src/model_adapter.rs` | `ModelAdapter`: `ModelGateway` over `wavecode-llm`, folding provider streams into response blocks |
 | `src/gate_adapter.rs` | `GateApprovalSource` + `HeadlessDeny`: parks approval/question waits on `safety-gate` with timeout |
 | `src/compactor.rs` | `ContextCompactor`: `Compactor` over `wavecode-context`, appending journal and task-list footers |
+| `src/compaction_tool.rs` | `CompactContextTool`: the model-facing `compact_context` tool; it queues a request on the runner's compaction slot and answers without promising a grant |
 | `src/evicting_gateway.rs` | `EvictingGateway`: gateway decorator running the shared cache-preserving tool-result eviction pass |
 | `src/prune_adapter.rs` | `PruningExecutor`: executor decorator spilling oversized tool outputs to the side-store |
 | `src/rate_limit.rs` | `RateLimitedModel`: token-bucket throttle in front of a chat model |
@@ -28,6 +29,7 @@ English | [中文](README.zh.md)
 | `src/status_queries.rs` | `SessionStatus`: implements `operations_actor::StatusQueries` over the plan/goal/snapshot stores |
 | `src/snapshot_tools.rs` | Snapshot (read-only) and restore (approval-gated) tools over the checkpoint store |
 | `src/plugin_inventory.rs` | `PluginSummary`: plugin-pack discovery mapped to frontend display rows |
+| `src/agents_instructions.rs` | `AgentsInstructionsExecutor`: on-demand nested `AGENTS.md` discovery — the deeper directories a tool touches are offered to the loop on demand |
 | `src/environment.rs` | `describe`: the system prompt's factual host/cwd/date paragraph |
 | `tests/workspace_layers.rs` | Mechanical layer check reading the real dependency graph via `cargo metadata` |
 | `tests/cache_prefix_stability.rs` | Regression guards for the provider prompt-cache prefix under eviction |

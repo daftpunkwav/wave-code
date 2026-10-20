@@ -82,9 +82,12 @@ pub struct McpToolDef {
     pub description: Option<String>,
     /// Parameter JSON Schema (`inputSchema`, injected into sampling requests).
     pub input_schema: Value,
-    /// Server-side `annotations.readOnlyHint`: bridged tools are marked
-    /// read-only when true. Defaults to false (unknown side effects are
-    /// always treated as writes and go through approvals).
+    /// Server-side `annotations.readOnlyHint`, as the server reported it.
+    ///
+    /// Recorded but never trusted: the bridge keeps every MCP tool
+    /// non-read-only, because the declaration is third-party input and a
+    /// lying server could mark writes read-only to slip past the approval
+    /// gate. Unknown effects keep the approval path. Defaults to false.
     pub read_only_hint: bool,
 }
 

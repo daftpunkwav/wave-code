@@ -3,7 +3,8 @@
 //! Shape: the [`Tool`] trait, the [`Registry`] registry, built-in file tools
 //! (`read` / `write` / `edit` / `view` / `present`), search tools
 //! (`grep` / `glob`), command tools (`shell` / `python` / `node`),
-//! LSP tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`),
+//! LSP tools (`lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references`
+//! / `lsp_diagnostics`),
 //! web tools (`web_fetch` / `web_search`), the spill reader (`spill`), and the
 //! session task-list tool (`todowrite`, deepagents-style planning), the
 //! child-task delegation tools (`task`, `task_output`, `task_stop`,

@@ -325,11 +325,11 @@ renders as the base.
 - MCP: stdio servers configured under `[mcp_servers.<name>]` (`command` plus
   optional `args`/`env`) and streamable-HTTP servers (`url`, optional OAuth
   client credentials) connect at startup with `initialize` + `tools/list`
-  and bridge each tool as `mcp__<server>__<tool>` (honoring
-  `annotations.readOnlyHint`; capability-gated `read_resource` /
+  and bridge each tool as `mcp__<server>__<tool>` (never inheriting the
+  server's `annotations.readOnlyHint`; capability-gated `read_resource` /
   `get_prompt` discovery tools bridge too). Unreachable servers degrade to
-  warnings, never failed startups. Prompts-to-skills conversion is future
-  work.
+  warnings, never failed startups. MCP prompts reach the model through the
+  `get_prompt` discovery tool; they are not converted into skills.
 
 ## SDK
 

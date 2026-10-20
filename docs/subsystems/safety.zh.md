@@ -42,7 +42,7 @@ Allow 有两个来源，deny 有两个。被扩大的权限只会出自人手：
 
 两条边界防止持久化的一半变成无意间的权限放大：
 
-- **仅用户级。** 计划中的项目层（工作目录内的 `.wavecode/config.toml`）对这些表保持未接线：agent 能写那个文件，因此 repo 范围的 allow 表会让会话给自己发放未来的豁免。
+- **仅用户级。** 项目层（工作目录内的 `.wavecode/config.toml`）对这些表保持未接线：agent 能写那个文件，因此 repo 范围的 allow 表会让会话给自己发放未来的豁免。
 - **Grant 是字面量。** `add_grant` 拒绝任何携带 `*` 或 `?` 的条目。派生规则在其被批准的会话内按*字面*比较；把它存下来、下次加载时再当配置条目解析，会把被批准的文本无声地升级为通配 allow 面。恰好含 glob 字符的被批准命令在当次会话剩余时间内仍然豁免（带 `tracing::warn!`），想要通配的人自己去配置文件里写。
 
 条目逐条校验（每行一次 `Rule::parse`）：一条无效只损失它自己，并作为启动发现（startup finding）浮出，绝不是被丢弃的表——因为 allow 行里的一个拼写错误丢掉整张 deny 表会无声地放大权限。一个刻意的非对称：持久化的 `File(...)` grant 重新加载为非精确规则，因此它永远不会豁免敏感凭据询问（上文第 2 步要求*精确*规则）——批准一次读 `.env` 买不来永久许可，下个会话询问照旧。`wavecode doctor` 汇报 grant 与规则（`permissions: …`），还会标记被 deny 规则可证明遮蔽的 allow 规则（`Rule::is_covered_by`，保守：可能漏报死规则，绝不凭空捏造），`wavecode grants list|remove <i>|clear` 读取并撤销 grant 表（撤销以先写后改名的方式重写文件，崩溃不可能让它截断成"无 grant"）。`PolicyAdapter`（`crates/operations/bootstrap/src/policy_adapter.rs`）把裁决映射到 runner 接缝，属性来自注册表。

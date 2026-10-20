@@ -10,6 +10,8 @@
 | `src/mcp.rs` | `McpServerRaw`——原始 `[mcp_servers.<name>]` 条目：stdio（`command`/`args`/`env`）与 http（`url`/`headers`）字段，外加可选的 OAuth client-credentials 字段 |
 | `src/model_catalog.rs` | `ModelCatalog`/`ModelSpec`/`ApiKind`/`ReasoningSpec`/`ModalitiesSpec`——`~/.wavecode/models.json` 目录，经 `ModelCatalog::merge_into` 合入 `Config` |
 | `src/permissions.rs` | `PermissionsConfig`——原始的 `[permissions]` allow/deny 字符串条目 |
+| `src/atomic_file.rs` | crate 内的崩溃安全、仅属主可写的暂存写入，由模型目录与 wave 拒绝列表共用 |
+| `src/denylist.rs` | `wave` 模式的命令拒绝列表（`~/.wavecode/wave-denylist.json`），采用 sandbox 的 `Bash(pattern)` 规则语法 |
 
 本层只做解析，不持有语义。条目的有效性由上层校验——hook 事件点与
 MCP 二选一在组装期检查，权限规则语法则归 sandbox crate 所有（它是

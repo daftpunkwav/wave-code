@@ -13,6 +13,7 @@
 | `src/model_adapter.rs` | `ModelAdapter`：以 `wavecode-llm` 实现 `ModelGateway`，把 provider 流折叠为响应块 |
 | `src/gate_adapter.rs` | `GateApprovalSource` + `HeadlessDeny`：带超时地把审批/提问等待停在 `safety-gate` 上 |
 | `src/compactor.rs` | `ContextCompactor`：以 `wavecode-context` 实现 `Compactor`，追加日志与任务列表脚注 |
+| `src/compaction_tool.rs` | `CompactContextTool`：面向模型的 `compact_context` 工具；它把请求排入 runner 的压缩槽，并如实回答而不承诺放行 |
 | `src/evicting_gateway.rs` | `EvictingGateway`：gateway 装饰器，执行共享的保缓存工具结果淘汰 |
 | `src/prune_adapter.rs` | `PruningExecutor`：executor 装饰器，把超长工具输出溢写到旁路存储 |
 | `src/rate_limit.rs` | `RateLimitedModel`：聊天模型前的令牌桶限流 |
@@ -28,6 +29,7 @@
 | `src/status_queries.rs` | `SessionStatus`：基于 plan/goal/snapshot store 实现 `operations_actor::StatusQueries` |
 | `src/snapshot_tools.rs` | checkpoint store 之上的快照（只读）与恢复（需审批）工具 |
 | `src/plugin_inventory.rs` | `PluginSummary`：把插件包发现映射为前端展示行 |
+| `src/agents_instructions.rs` | `AgentsInstructionsExecutor`：按需的嵌套 `AGENTS.md` 发现——工具触达的那些更深层目录会按需提供给 loop |
 | `src/environment.rs` | `describe`：系统提示词中的事实性 host/cwd/date 段落 |
 | `tests/workspace_layers.rs` | 通过 `cargo metadata` 读取真实依赖图并机械执行分层规则 |
 | `tests/cache_prefix_stability.rs` | 在淘汰路径下守护 provider 提示词缓存前缀的回归 |

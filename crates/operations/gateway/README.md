@@ -6,6 +6,7 @@ English | [中文](README.zh.md)
 |---|---|
 | `Cargo.toml` | Crate manifest; sessions enter through `operations-actor` only (the composition root is a dev-dependency for tests) |
 | `src/lib.rs` | Crate root; declares the servers and the test-only stubs module |
+| `src/jsonrpc.rs` | Shared JSON-RPC 2.0 framing for the two stdio servers: the envelope helpers and the bounded NDJSON line reader (`acp.rs` and `mcp_serve.rs` both speak it, so shapes and limits cannot drift) |
 | `src/acp.rs` | ACP server: JSON-RPC 2.0 over stdio — `initialize`, `session/new` (one headless session per id), `session/prompt` streaming `session/update`, `session/cancel` |
 | `src/app_server.rs` | Local app server: REST + SSE over loopback HTTP with bearer-token auth and Host-header rebinding guard; one pump task per session feeds a broadcast channel |
 | `src/mcp_serve.rs` | MCP server: NDJSON JSON-RPC over stdio — `initialize`, `tools/list`, `tools/call` through a caller-supplied `ToolExecutor`, `ping` |

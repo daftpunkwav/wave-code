@@ -5,7 +5,7 @@ English | [中文](README.zh.md)
 | Item | Role |
 |---|---|
 | `Cargo.toml` | crate manifest; `infrastructure-base` (timestamp formatting), `serde`, `serde_json` |
-| `src/lib.rs` | `Conversation` (append-only history, frozen `Arc` snapshots, `Usage` carry) behind the `HistorySink` durability seam; `Block`/`HistoryEntry` shapes; `check_budget` levels; `estimate_tokens`; `normalize_history`/`find_pairing_violations`/`close_open_calls` |
+| `src/lib.rs` | `Conversation` (append-only history, frozen `Arc` snapshots, `Usage` carry) behind the `HistorySink` durability seam; `Block`/`HistoryEntry` shapes; `check_budget` levels; `estimate_tokens` / `estimate_entry_tokens` (the entry-level count over `CharSplit`); `normalize_history`/`find_pairing_violations`/`close_open_calls` |
 
 All mutations flow through one write entry (`push`/`push_blocks`/
 `replace`), and the sink is notified on every committed change, so no

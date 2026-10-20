@@ -93,7 +93,7 @@ id = "fix-config-timeout"
 prompt = """README.md states the requirement the client config has to meet."""
 fixture = "workspace"
 tags = ["basic", "edit"]
-agent_timeout = 900            # optional wall cap for the turn
+agent_timeout = 900            # optional wall cap for the turn, in seconds
 
 [[assertion]]
 kind = "file_contains"         # also: file_equals, file_not_contains,

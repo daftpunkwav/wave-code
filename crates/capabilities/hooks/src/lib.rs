@@ -491,10 +491,10 @@ enum ExecOutcome {
 /// Run one command hook: platform shell + stdin payload JSON + timeout kill.
 ///
 /// The hook spawns as its own process group (same convention as the shell
-/// tool and the job service), and the timeout path kills the shell through
-/// its own handle first and then tree-kills by pid
-/// ([`infrastructure_base::kill_tree`]) so grandchildren die with the shell;
-/// `kill_on_drop` stays as the reap backstop for the other drop paths.
+/// tool and the job service), and the timeout path tree-kills by pid
+/// ([`infrastructure_base::kill_tree`]) before killing the shell itself,
+/// so grandchildren die with the shell; `kill_on_drop` stays as the reap
+/// backstop for the other drop paths.
 async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>) -> ExecOutcome {
     let payload = serde_json::json!({
         "event": point.as_str(),
@@ -518,11 +518,11 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         Err(e) => return ExecOutcome::SpawnFailed(e.to_string()),
     };
     // Split the pipe handles out so the wait below borrows the child instead
-    // of consuming it: the timeout path then still owns the child. It kills
-    // through the handle first, which pins the pid to this child until the
-    // tree kill has run (an unreaped zombie on Unix, an open process handle
-    // on Windows) — a tree kill on a pid the OS already handed to an
-    // unrelated process would be far worse than no kill.
+    // of consuming it: the timeout path then still owns the child, and an
+    // unreaped child (a zombie on Unix, an open process handle on Windows)
+    // keeps its pid reserved until the tree kill has run — a tree kill on a
+    // pid the OS already handed to an unrelated process would be far worse
+    // than no kill.
     let mut stdin = child.stdin.take();
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
@@ -569,15 +569,10 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
     .await;
     match waited {
         Err(_) => {
-            // Timeout: kill the direct child through its own handle, then
-            // take the whole tree with it by the still-pinned pid, and reap
-            // so nothing lingers. start_kill is best-effort: a child that
-            // exited in the timeout window has nothing to kill, and the
-            // tree kill below still runs.
-            let _ = child.start_kill();
-            if let Some(pid) = child.id() {
-                infrastructure_base::kill_tree(pid);
-            }
+            // Timeout: take the whole tree with it (the shell and every
+            // descendant it spawned), then kill the shell itself, and reap
+            // so nothing lingers.
+            kill_hook_tree(&mut child).await;
             let _ = child.wait().await;
             ExecOutcome::Timeout
         }
@@ -594,6 +589,31 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
             }
         }
     }
+}
+
+/// Kill a timed-out hook's shell together with every descendant it spawned.
+///
+/// The tree kill comes first: `taskkill /T` walks the tree from a live
+/// parent, so a shell that died first leaves its descendants behind —
+/// measured on Windows, `taskkill /T` after the parent is gone reports
+/// nothing and terminates nothing. A descendant that outlived the hook
+/// would keep running with nobody left to stop it, holding the pipes it
+/// inherited. The shell's own kill follows and is then a no-op, because
+/// the tree kill already took the shell with it.
+///
+/// The shell stays owned by the caller across the tree kill, so an
+/// unreaped child (a zombie on Unix, an open process handle on Windows)
+/// keeps its pid reserved — a tree kill on a pid the OS already handed to
+/// an unrelated process would be far worse than no kill.
+///
+/// The tree kill waits for the whole tree to die (hundreds of milliseconds
+/// on Windows), so it runs on the blocking pool: a runtime worker must not
+/// be parked for that wait.
+async fn kill_hook_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        infrastructure_base::kill_tree_blocking(pid).await;
+    }
+    let _ = child.start_kill();
 }
 
 /// Cap one prompt hook's captured stdout: over-budget output is cut at a
@@ -891,57 +911,58 @@ mod tests {
         );
     }
 
-    /// The timeout tree kill still reaches grandchildren after the shell is
-    /// killed through its own handle first: a grandchild scheduled to write
-    /// a marker file well after the timeout must never get to run.
+    /// The timeout kill must take the shell's whole tree with it: the
+    /// descendants inherit the shell's output pipes, so one that outlived
+    /// the kill keeps the pipe open forever. `taskkill /T` walks the tree
+    /// from a live parent, so the tree kill has to run before the shell's
+    /// own kill — with the shell killed first, `taskkill /T` reports
+    /// nothing and the descendants survive.
+    ///
+    /// The observable is the pipe: while a descendant lives, the read
+    /// never reaches EOF; once the tree is gone, it does.
     #[tokio::test]
-    async fn timeout_tree_kill_covers_grandchildren() {
-        // nosemgrep: rust.lang.security.temp-dir.temp-dir
-        let marker = std::env::temp_dir().join(format!(
-            "wavecode-hook-tree-kill-{}-{}.marker",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        let _ = std::fs::remove_file(&marker);
-        // The grandchild writes the marker after ~2s; the hook shell itself
-        // sleeps far past the 300ms timeout. If the tree kill misses the
-        // grandchild, the marker appears while this test waits.
-        let hook_command = if cfg!(windows) {
-            // cmd temp paths carry no spaces; `start /b` keeps the grandchild
-            // in the shell's process tree for taskkill /T to reach.
-            format!(
-                "start /b cmd /c \"ping -n 3 127.0.0.1 >nul & type nul > {}\"& {}",
-                marker.display(),
-                sleep_cmd()
+    async fn the_timeout_kill_reaches_the_shells_descendants() {
+        use tokio::io::AsyncReadExt;
+        // A shell with two descendants that hold its stdout pipe open.
+        // The command carries no inner quotes: cmd's `/C` handling strips
+        // the outer pair and would mangle a quoted command.
+        let (program, flag, command) = if cfg!(windows) {
+            (
+                "cmd",
+                "/C",
+                "start /b ping -n 20 127.0.0.1 & ping -n 20 127.0.0.1",
             )
         } else {
-            format!(
-                r#"(sleep 2 && : > "{}") & {}"#,
-                marker.display(),
-                sleep_cmd()
-            )
+            ("sh", "-c", "sleep 20 & sleep 20 & wait")
         };
-        let e = engine(&[(
-            HookEventPoint::PreToolUse,
-            HookDef {
-                timeout_ms: 300,
-                ..def(&hook_command)
-            },
-        )]);
-        let report = e
-            .run(HookEventPoint::PreToolUse, &input(Some("shell")))
-            .await;
-        assert_eq!(report.warnings.len(), 1, "hook must time out");
-        // Outlive the grandchild's fire time before judging the marker.
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.arg(flag)
+            .arg(command)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = cmd.spawn().expect("the shell starts");
+        let mut pipe = child.stdout.take().expect("the shell pipes stdout");
+        // The reader finishes only when every write end is closed, so it
+        // finishing is the proof that the descendants are gone.
+        let reader = tokio::spawn(async move {
+            let mut sink = Vec::new();
+            let _ = pipe.read_to_end(&mut sink).await;
+        });
+        // Let the shell spawn its descendants.
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(
-            !marker.exists(),
-            "grandchild survived the timeout tree kill"
+            !reader.is_finished(),
+            "the descendants must hold the shell's pipe open"
         );
-        let _ = std::fs::remove_file(&marker);
+        kill_hook_tree(&mut child).await;
+        let closed = tokio::time::timeout(Duration::from_secs(10), reader).await;
+        assert!(
+            closed.is_ok(),
+            "a descendant outlived the timeout tree kill and still holds the pipe"
+        );
+        let _ = child.wait().await;
     }
 
     // —— once ——

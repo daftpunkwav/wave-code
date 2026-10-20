@@ -942,6 +942,9 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        // The same process-group setup the spawn path above uses: the
+        // tree kill signals the group, so the shell has to lead it.
+        infrastructure_base::lead_process_group(cmd.as_std_mut());
         let mut child = cmd.spawn().expect("the shell starts");
         let mut pipe = child.stdout.take().expect("the shell pipes stdout");
         // The reader finishes only when every write end is closed, so it

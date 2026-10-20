@@ -1237,6 +1237,20 @@ where
             .unwrap_or(self.cfg.context_window)
     }
 
+    /// The model the loop samples into right now.
+    ///
+    /// A `/model` switch changes the gateway's model under the loop's
+    /// feet, so the live identity is the only truthful one; the
+    /// assembly-frozen name is the fallback for gateways that report
+    /// none. The per-sample notes and the turn's `TurnStarted` event
+    /// both read it from here, so what the model is told and what the
+    /// metrics ledger attributes the turn to cannot drift apart.
+    fn serving_model(&self) -> String {
+        self.model
+            .current_model()
+            .unwrap_or_else(|| self.cfg.model_name.clone())
+    }
+
     /// Transient notes attached to one sample request, rebuilt every
     /// iteration and never stored — an instrument panel for the upcoming
     /// call, gone by the next one. Built dynamically from live state:
@@ -1257,10 +1271,7 @@ where
         denials: &[String],
     ) -> Vec<String> {
         let mut notes = Vec::new();
-        let model = self
-            .model
-            .current_model()
-            .unwrap_or_else(|| self.cfg.model_name.clone());
+        let model = self.serving_model();
         notes.push(wavecode_wire::wrap_system_reminder(&format!(
             "Model: {model} (context window: {window} tokens); today: {}",
             infrastructure_base::format_date(std::time::SystemTime::now())
@@ -1399,7 +1410,11 @@ where
             conv.push_blocks(Role::User, blocks);
         }
         emit_msg(EventMsg::TurnStarted {
-            model: self.cfg.model_name.clone(),
+            // The live model: a `/model` switch between turns moves the
+            // gateway's model, and the metrics ledger attributes the
+            // turn with this name, so the frozen assembly name would
+            // file the turn under the model that is no longer serving.
+            model: self.serving_model(),
         });
 
         let mut warned = false;
@@ -4372,6 +4387,10 @@ mod run_loop_tests {
                 _ => None,
             }
         }
+
+        fn current_model(&self) -> Option<String> {
+            Some(self.name.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        }
     }
 
     fn switchable_model() -> (SwitchableModel, std::sync::Arc<Mutex<usize>>) {
@@ -4383,6 +4402,50 @@ mod run_loop_tests {
             },
             samples,
         )
+    }
+
+    /// The turn's `TurnStarted` event names the model the turn actually
+    /// samples: after a `/model` switch the metrics ledger must file the
+    /// turn under the new model, not the one frozen at assembly.
+    #[tokio::test]
+    async fn turn_started_names_the_live_model_after_a_switch() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, _unused, approvals, plans, _) = default_parts();
+        let compactor = FakeCompactor {
+            fail: false,
+            calls: std::sync::Arc::new(Mutex::new(Vec::new())),
+            tail: Vec::new(),
+        };
+        let (model, _samples) = switchable_model();
+        let conv = &mut Conversation::new();
+        let driver = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            8,
+            fx.interrupt.clone(),
+        );
+        assert!(TurnDriver::set_model(&driver, "small-model"));
+        let events = fx.events.clone();
+        let outcome = driver
+            .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+                events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+            })
+            .await;
+        assert_eq!(outcome, StopReason::Completed);
+        let started = fx
+            .lock_events()
+            .iter()
+            .find_map(|e| match &e.msg {
+                EventMsg::TurnStarted { model } => Some(model.clone()),
+                _ => None,
+            })
+            .expect("the turn emits TurnStarted");
+        assert_eq!(started, "small-model");
     }
 
     /// Switching to a smaller-window model pre-shrinks the history at the

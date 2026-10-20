@@ -556,10 +556,16 @@ mod tests {
     use super::*;
 
     /// Long-running command per platform: no grandchildren, quick to kill.
+    ///
+    /// The Windows command idles rather than spins: the jobs run in
+    /// parallel, and a busy loop per job saturates the runner's cores,
+    /// which slows the kill the tests are waiting on. `ping` holds the
+    /// command open for half a minute without burning a core, and it
+    /// spawns no grandchildren either.
     #[cfg(unix)]
     const LONG_CMD: &str = "sleep 30";
     #[cfg(windows)]
-    const LONG_CMD: &str = "for /l %i in (1,1,1000000000) do @rem";
+    const LONG_CMD: &str = "ping -n 30 127.0.0.1";
 
     fn harness() -> (Arc<ChildRuntime>, JobService) {
         let runtime = Arc::new(ChildRuntime::new());
@@ -596,20 +602,22 @@ mod tests {
         }
     }
 
-    /// Poll `read` until the job finishes, failing the test on timeout.
+    /// Wait for the job to finish, failing the test on timeout.
+    ///
+    /// The wait rides the job's own completion signal rather than a
+    /// poll loop: a poll loop burns a core while the runner is already
+    /// busy, which is what pushes the job past its deadline.
     async fn poll_finished(service: &JobService, id: &str) -> JobSnapshot {
-        let deadline = std::time::Instant::now() + Duration::from_secs(15);
-        loop {
-            let snap = service.read(id).expect("job must stay tracked");
-            if snap.state == JobState::Finished {
-                return snap;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "job {id} did not finish in time"
-            );
-            tokio::task::yield_now().await;
-        }
+        let snap = service
+            .wait(id, 15_000)
+            .await
+            .expect("job must stay tracked");
+        assert_eq!(
+            snap.state,
+            JobState::Finished,
+            "job {id} did not finish in time"
+        );
+        snap
     }
 
     #[tokio::test]

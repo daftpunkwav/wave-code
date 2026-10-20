@@ -101,7 +101,15 @@ fn escape_len(bytes: &[u8], offset: usize) -> Option<usize> {
         }
         // Two-byte escapes (ESC 7, ESC ( B, ...): anything else following
         // ESC consumes one more byte.
-        _ => Some(2),
+        //
+        // Only an ASCII byte can be that second byte: a byte >= 0x80
+        // starts a multi-byte UTF-8 character, so pairing ESC with "one
+        // more byte" would cut that character in half (and panic on the
+        // non-char-boundary slice). ESC in front of such a character is
+        // not an escape sequence at all, so the ESC stands alone and the
+        // character keeps its own width.
+        _ if after < 0x80 => Some(2),
+        _ => None,
     }
 }
 
@@ -337,6 +345,46 @@ mod tests {
         let osc_st = b"\x1b]8;;\x1b\\";
         assert_eq!(escape_len(osc_st, 0), Some(osc_st.len()));
         assert_eq!(escape_len(b"\x1b[38;2", 0), None);
+    }
+
+    /// A stray ESC in front of a multi-byte character is not an escape
+    /// sequence: the byte after ESC starts a character, so the ESC cannot
+    /// be paired with "one more byte" without splitting that character.
+    /// The pair is not a valid escape, so the ESC stands alone.
+    #[test]
+    fn escape_len_refuses_to_pair_esc_with_a_multibyte_character() {
+        // "€" is three bytes: pairing ESC with "one byte" would cut it in
+        // half and panic on the non-char-boundary slice.
+        let euro = "\x1b€".as_bytes();
+        assert_eq!(escape_len(euro, 0), None);
+        // A CJK character behaves the same way.
+        let cjk = "\x1b中".as_bytes();
+        assert_eq!(escape_len(cjk, 0), None);
+        // A plain ASCII byte after ESC is still the two-byte escape.
+        assert_eq!(escape_len(b"\x1bx", 0), Some(2));
+    }
+
+    /// Regression: measuring a line that carries a stray ESC in front of a
+    /// multi-byte character must not panic. The ESC is not an escape
+    /// sequence here, so it stands alone and the character behind it keeps
+    /// its own text and columns.
+    #[test]
+    fn stray_escape_before_a_multibyte_character_does_not_panic() {
+        let line = "\x1b€";
+        let plain = strip_ansi(line);
+        assert!(plain.contains('€'), "the character survives: {plain:?}");
+        assert!(
+            !plain.contains('\u{FFFD}'),
+            "the character is not split: {plain:?}"
+        );
+        assert_eq!(
+            width(line),
+            width("\x1b") + width("€"),
+            "the stray ESC is measured as its own grapheme"
+        );
+        // Truncation and wrapping take the same path.
+        assert_eq!(truncate_to_width(line, 2), line);
+        assert_eq!(wrap_line(line, 8), vec![line.to_string()]);
     }
 
     #[test]

@@ -26,7 +26,6 @@
 
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
-use std::time::Duration;
 
 use crate::sse;
 use crate::{
@@ -54,7 +53,7 @@ impl OpenAIClient {
             base_url,
             api_key,
             model,
-            http: build_http_client()?,
+            http: crate::build_http_client()?,
             reasoning_effort: std::sync::RwLock::new(None),
         })
     }
@@ -82,21 +81,6 @@ impl OpenAIClient {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
-}
-
-/// Builds the HTTP client.
-///
-/// - Only `connect_timeout` is set (10s): it guards the connect phase; never set
-///   `Client::timeout` - that would cut off healthy long-lived SSE streams.
-/// - Redirects are disabled: the endpoint has no legitimate redirect semantics,
-///   and reqwest would otherwise carry the `Authorization` bearer token to a
-///   cross-origin target.
-fn build_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| LlmError::ClientInit(e.to_string()))
 }
 
 #[async_trait::async_trait]

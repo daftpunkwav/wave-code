@@ -396,9 +396,63 @@ pub(crate) fn parse_retry_after(
 /// Crate-wide unified Result alias.
 pub type Result<T> = std::result::Result<T, LlmError>;
 
+/// Build the HTTP client every provider adapter uses.
+///
+/// One place for the transport policy, so the three dialects cannot
+/// drift apart:
+/// - Only `connect_timeout` is set (10s): it guards the connect phase;
+///   never set `Client::timeout` — that would cut off healthy
+///   long-lived SSE streams. Read stalls are detected at the stream
+///   layer by the stall watchdog (no bytes within the idle threshold
+///   ends the stream with `Err`).
+/// - Redirects are disabled: no provider endpoint has a legitimate
+///   redirect semantics, and reqwest follows redirects by default,
+///   which would carry the `Authorization` / `x-api-key` header to a
+///   cross-origin target.
+///
+/// A construction failure (a TLS backend that will not initialize) is
+/// a configuration error, not a transport error: it becomes
+/// [`LlmError::ClientInit`], which the retry layer never retries.
+pub(crate) fn build_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| LlmError::ClientInit(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One construction point, one error class.
+    ///
+    /// The three provider adapters share [`build_http_client`], so a
+    /// client that cannot be built is classified the same way for all
+    /// of them: a configuration error the retry layer never retries
+    /// (a `Http` error would be retried as a connection failure, which
+    /// a broken TLS backend cannot fix).
+    ///
+    /// The observable is the retry decision: the transport class is
+    /// retried, the construction class is not, so the two cannot drift
+    /// into the same bucket.
+    #[test]
+    fn a_client_construction_failure_is_a_configuration_error() {
+        let policy = crate::retry::RetryPolicy::default();
+        let construction = LlmError::ClientInit("tls backend unavailable".to_string());
+        let transport = LlmError::Http("connection refused".to_string());
+        assert!(
+            policy.is_retryable(&transport),
+            "a transport failure is the retryable kind"
+        );
+        assert!(
+            !policy.is_retryable(&construction),
+            "a construction failure is a configuration error, not a transport failure"
+        );
+        // The shared builder every adapter uses is the one that
+        // produces that class.
+        assert!(build_http_client().is_ok());
+    }
 
     /// The public normalization contract: objects pass through untouched,
     /// null means "no arguments", and every other non-object payload is

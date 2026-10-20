@@ -16,7 +16,6 @@
 //! buffering and framing, then [`crate::SseParser`] parses each frame into [`crate::StreamEvent`].
 
 use std::borrow::Cow;
-use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 
@@ -95,7 +94,7 @@ impl AnthropicClient {
         Ok(Self {
             base_url,
             api_key,
-            http: build_http_client()?,
+            http: crate::build_http_client()?,
             prompt_caching: true,
             cache_ttl: CacheTtl::default(),
             thinking_budget: None,
@@ -130,22 +129,6 @@ impl AnthropicClient {
         self.cache_ttl = ttl;
         self
     }
-}
-
-/// Builds the HTTP client.
-///
-/// - Only `connect_timeout` is set (10s): it guards against hangs in the connect phase; never set
-///   `Client::timeout` - that would cut off healthy long-lived SSE streams. Read stalls are detected
-///   at the stream layer by [`stall_guard`] (no bytes within [`STREAM_IDLE_TIMEOUT`] ends the stream with Err).
-/// - Redirects are disabled: the Messages API endpoint has no legitimate redirect semantics,
-///   so a redirect is an error; reqwest follows redirects by default and would carry `x-api-key`
-///   to a cross-origin target (verified with a PoC), which must be ruled out.
-fn build_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| LlmError::ClientInit(e.to_string()))
 }
 
 #[async_trait::async_trait]
@@ -495,6 +478,7 @@ mod tests {
     use crate::{ChatRequest, ContentBlock, Message, Role, ToolSpec};
     use futures::StreamExt;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn try_new_constructs_client() {

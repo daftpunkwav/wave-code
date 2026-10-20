@@ -169,25 +169,24 @@ impl Tool for RalphRunTool {
         };
         let max_rounds = match input.get("max_rounds") {
             None | Some(serde_json::Value::Null) => DEFAULT_RALPH_ROUNDS,
-            Some(value) => match value.as_u64() {
-                Some(rounds) => rounds as u32,
-                None => {
-                    return Ok(ToolOutput {
-                        content: "invalid parameter 'max_rounds' (integer 1-10 required)"
-                            .to_string(),
-                        is_error: true,
-                    });
+            Some(value) => {
+                // A value beyond the u32 range is out of range, not a small
+                // number: the cast would turn 2^32 + 1 into 1 and slip
+                // through the range check.
+                let parsed = value.as_u64().and_then(|rounds| u32::try_from(rounds).ok());
+                match parsed {
+                    Some(rounds) if (1..=MAX_RALPH_ROUNDS).contains(&rounds) => rounds,
+                    _ => {
+                        return Ok(ToolOutput {
+                            content: format!(
+                                "invalid parameter 'max_rounds' (integer 1-{MAX_RALPH_ROUNDS} required)"
+                            ),
+                            is_error: true,
+                        });
+                    }
                 }
-            },
+            }
         };
-        if max_rounds == 0 || max_rounds > MAX_RALPH_ROUNDS {
-            return Ok(ToolOutput {
-                content: format!(
-                    "invalid parameter 'max_rounds' (integer 1-{MAX_RALPH_ROUNDS} required)"
-                ),
-                is_error: true,
-            });
-        }
         match crate::ralph_run(&objective, max_rounds, self.tasks.as_ref()).await {
             Ok(report) => Ok(ToolOutput {
                 content: serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string()),
@@ -419,6 +418,23 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&report.content).expect("json");
         assert_eq!(parsed["rounds"].as_array().expect("array").len(), 2);
         assert_eq!(parsed["completed"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn ralph_run_rejects_a_huge_round_budget() {
+        // 2^32 + 1 truncates to 1 when cast to u32, so a value outside the
+        // u32 range must be rejected by the range check, not silently
+        // turned into a one-round run.
+        let tool = RalphRunTool::new(tasks());
+        let output = tool
+            .execute(
+                serde_json::json!({"objective": "work", "max_rounds": 4_294_967_297u64}),
+                &ctx(),
+            )
+            .await
+            .unwrap();
+        assert!(output.is_error, "a huge budget must be rejected");
+        assert!(output.content.contains("max_rounds"), "{}", output.content);
     }
 
     #[tokio::test]

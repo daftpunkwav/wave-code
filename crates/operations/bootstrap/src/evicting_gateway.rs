@@ -17,9 +17,7 @@
 //! cache-preserving micro-compaction pass in `wavecode-context`.
 
 use runtime_runner::{ModelGateway, SampleDelta, SampleError, SampleRequest, SampleResponse};
-use state_store::{
-    Block, CONTEXT_OVERHEAD_TOKENS, HistoryEntry, Role as HistoryRole, estimate_tokens,
-};
+use state_store::{Block, CONTEXT_OVERHEAD_TOKENS, CharSplit, HistoryEntry, Role as HistoryRole};
 use wavecode_context::{EvictionConfig, evict_old_tool_results, should_evict_tool_results};
 use wavecode_llm::{ContentBlock, Message, Role};
 
@@ -51,14 +49,35 @@ impl<G> EvictingGateway<G> {
     /// Estimated request usage: the fallback char estimator over system
     /// and history text plus framing overhead — the same numbers the rest
     /// of the loop reasons with when no provider usage has arrived yet.
+    ///
+    /// The text is counted, never assembled: a long session carries
+    /// megabytes of history, and joining it (twice: once per entry and
+    /// once into the accumulator) was the gateway's largest per-sample
+    /// cost. The count is the one over the same joined text, so the
+    /// eviction threshold fires exactly where it did before.
     fn usage_estimate(request: &SampleRequest) -> u64 {
-        let mut text = String::with_capacity(1024);
-        text.push_str(&request.system);
+        Self::usage_split(request).tokens() + CONTEXT_OVERHEAD_TOKENS
+    }
+
+    /// The character split the usage estimate counts.
+    ///
+    /// The split is the character split of the joined text: the system
+    /// prompt, then every entry's text, separated by newlines. It is
+    /// kept as a split (and not only as a token figure) so the count
+    /// can be pinned exactly — a rounded token figure can hide a
+    /// missing separator behind the estimator's own rounding.
+    fn usage_split(request: &SampleRequest) -> CharSplit {
+        let mut split = CharSplit::default();
+        split.add(&request.system);
         for entry in &request.messages {
-            text.push('\n');
-            text.push_str(&entry.text());
+            // The joined text separates the entries with a newline; the
+            // chunks carry the separators between one entry's blocks.
+            split.add("\n");
+            for chunk in entry.text_chunks() {
+                split.add(&chunk);
+            }
         }
-        estimate_tokens(&text) + CONTEXT_OVERHEAD_TOKENS
+        split
     }
 
     /// Apply the eviction pass when the soft threshold is crossed. The
@@ -325,6 +344,63 @@ mod tests {
         let gateway = EvictingGateway::new(RecordingGateway::default());
         // The recording inner keeps the rejecting default.
         assert!(!gateway.set_model("other"));
+    }
+
+    /// The usage estimate counts the request's text instead of joining
+    /// it, and the count must be the one over the same joined text: the
+    /// eviction threshold fires where it did before.
+    ///
+    /// The fixture carries a multi-block entry on purpose: the blocks of
+    /// one entry are separated by a newline in the joined text, and the
+    /// count must carry that separator too. The character split is
+    /// compared, not the rounded token figure — a token figure can hide
+    /// a missing separator behind the estimator's own rounding.
+    #[test]
+    fn the_usage_estimate_matches_the_joined_text_estimate() {
+        let (call, result) = tool_pair("c1", "shell", "payload");
+        let multi_block = HistoryEntry {
+            role: HistoryRole::User,
+            blocks: vec![
+                Block::Text("lead".to_string()),
+                Block::ToolResult {
+                    call_id: "c1".to_string(),
+                    content: "second".to_string(),
+                    is_error: false,
+                    produced_at: None,
+                },
+            ],
+        };
+        let request = SampleRequest {
+            system: "system prompt 世界".to_string(),
+            messages: vec![
+                user_entry("hello"),
+                call,
+                result,
+                multi_block,
+                user_entry("tail"),
+            ],
+            tools: vec![],
+            output_cap: 0,
+            notes: Vec::new(),
+        };
+        // The joined text the estimate stands for: the system prompt,
+        // then every entry's text, separated by newlines.
+        let mut joined = request.system.clone();
+        for entry in &request.messages {
+            joined.push('\n');
+            joined.push_str(&entry.text());
+        }
+        let mut expected = CharSplit::default();
+        expected.add(&joined);
+        assert_eq!(
+            EvictingGateway::<RecordingGateway>::usage_split(&request),
+            expected,
+            "the counted text is not the joined text"
+        );
+        assert_eq!(
+            EvictingGateway::<RecordingGateway>::usage_estimate(&request),
+            state_store::estimate_tokens(&joined) + CONTEXT_OVERHEAD_TOKENS,
+        );
     }
 
     #[test]

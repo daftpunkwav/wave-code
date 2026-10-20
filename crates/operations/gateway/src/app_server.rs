@@ -59,6 +59,14 @@ use wavecode_wire::{Event, EventMsg, Op, Submission};
 /// this reaps — therefore closes within half an hour instead of never.
 pub const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// Correlation id for the frames the server raises on its own behalf (the
+/// subscriber-lag warning).
+///
+/// The wire's convention for events raised outside a submission: a
+/// reserved synthetic id, so a consumer never reads it as a caller
+/// submission id and never treats "no matching submission" as corruption.
+const SERVER_EVENT_ID: &str = "server-event";
+
 /// Cap on concurrently live sessions; creations beyond it answer 503.
 ///
 /// Refusal instead of eviction: evicting a session the reaper cannot
@@ -612,12 +620,12 @@ async fn shutdown(State(state): State<AppState>) -> axum::response::Response {
 /// turn. Clients re-subscribe for the next turn (events raised between
 /// two subscriptions are not replayed; subscribe before prompting to
 /// miss nothing, exactly like the tests below). A subscriber that falls
-/// behind the broadcast buffer receives a synthetic `{"type": "warning",
-/// "message": "..."}` frame naming the skipped count instead of the lost
-/// events. Payloads are serialized `wavecode_wire::Event` JSON: the
-/// snake_case `type` tags are locked by the wire crate's tag tests, and
-/// field evolution there is additive (new fields are optional and
-/// omitted when unset), so consumers may ignore unknown fields.
+/// behind the broadcast buffer receives a warning frame naming the
+/// skipped count instead of the lost events. Payloads are serialized
+/// `wavecode_wire::Event` JSON: the snake_case `type` tags are locked by
+/// the wire crate's tag tests, and field evolution there is additive
+/// (new fields are optional and omitted when unset), so consumers may
+/// ignore unknown fields.
 async fn stream_events(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -642,10 +650,7 @@ async fn stream_events(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let payload = serde_json::json!({
-                        "type": "warning",
-                        "message": format!("SSE subscriber lagged; {skipped} events skipped"),
-                    }).to_string();
+                    let payload = serde_json::to_string(&lag_warning(skipped)).unwrap_or_default();
                     yield Ok(SseEvent::default().data(payload));
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -663,6 +668,22 @@ async fn stream_events(
 }
 
 // ---- internals ----
+
+/// The frame a lagging SSE subscriber receives instead of the events it
+/// missed.
+///
+/// Shaped like every other frame on the stream — a `wavecode_wire::Event`
+/// with a correlation `id` and a payload — so a consumer that parses each
+/// `data:` payload as an `Event` never trips over the one frame the
+/// server raises itself.
+fn lag_warning(skipped: u64) -> Event {
+    Event {
+        id: SERVER_EVENT_ID.to_string(),
+        msg: EventMsg::Warning {
+            message: format!("SSE subscriber lagged; {skipped} events skipped"),
+        },
+    }
+}
 
 /// Spawn a session's pump task: exclusive session owner, forwarding
 /// events to subscribers and executing submission commands. Forwarded

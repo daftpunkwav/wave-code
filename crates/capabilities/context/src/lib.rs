@@ -725,6 +725,8 @@ fn text_tokens(text: &str) -> u64 {
 /// message that is already a stub saves nothing, which is what keeps the
 /// pass idempotent.
 fn eviction_saving(message: &Message, names: &HashMap<&str, &str>) -> u64 {
+    #[cfg(test)]
+    SAVINGS_MEASURED.with(|count| count.set(count.get() + 1));
     if message.role != Role::User {
         return 0;
     }
@@ -746,6 +748,20 @@ fn eviction_saving(message: &Message, names: &HashMap<&str, &str>) -> u64 {
         .sum()
 }
 
+// Messages whose eviction saving was measured on this thread (test
+// seam): the frontier measures the messages it walks, and the test pins
+// that it does not measure the whole evictable range.
+#[cfg(test)]
+thread_local! {
+    static SAVINGS_MEASURED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Messages whose eviction saving was measured on this thread so far.
+#[cfg(test)]
+fn savings_measured() -> usize {
+    SAVINGS_MEASURED.with(std::cell::Cell::get)
+}
+
 /// Exclusive index the eviction frontier stops at for this history.
 ///
 /// Two rules make the pass cache-safe:
@@ -755,6 +771,11 @@ fn eviction_saving(message: &Message, names: &HashMap<&str, &str>) -> u64 {
 /// - **move in batches**: the frontier advances a whole `batch_messages` group
 ///   at a time, so turns that merely append one message keep the request bytes
 ///   identical and the cached prefix alive.
+///
+/// The saving of a message is measured when the frontier reaches it, not
+/// for the whole evictable range up front: measuring the range scanned
+/// every tool payload in the history on every pass, and the pass runs on
+/// every sample once the history is over the soft threshold.
 fn eviction_frontier(
     history: &[Message],
     cfg: &EvictionConfig,
@@ -771,15 +792,12 @@ fn eviction_frontier(
         return start;
     }
     let step = cfg.batch_messages.max(1);
-    let savings: Vec<u64> = (start..end)
-        .map(|i| eviction_saving(&history[i], names))
-        .collect();
     let mut freed = 0u64;
     let mut frontier = start;
     while frontier < end {
         let group_end = (frontier + step).min(end);
         while frontier < group_end {
-            freed += savings[frontier - start];
+            freed += eviction_saving(&history[frontier], names);
             frontier += 1;
         }
         if freed >= needed {
@@ -1495,6 +1513,33 @@ Concurrent stock-deduction test; settlement ledger integration.";
         assert!(
             everything > 0,
             "fixture evicts nothing: comparison is vacuous"
+        );
+    }
+
+    /// The frontier measures the saving of the messages it walks, not of the
+    /// whole evictable range: the pass runs on every sample once the history
+    /// is over the soft threshold, and measuring the range up front scanned
+    /// every tool payload in the history each time.
+    #[test]
+    fn the_eviction_frontier_measures_only_the_messages_it_walks() {
+        let history: Vec<Message> = (0..20)
+            .map(|i| tool_result_with(&format!("t{i}"), &"a".repeat(500)))
+            .collect();
+        let total = estimate_tokens(&history, DEFAULT_CHARS_PER_TOKEN);
+        let cfg = EvictionConfig {
+            anchored_prefix: 0,
+            recent_window: 0,
+            batch_messages: 2,
+            // The demand is one token: the first group already frees more.
+            soft_threshold_tokens: total.saturating_sub(1),
+        };
+        let before = savings_measured();
+        let evicted = evict_old_tool_results(&history, &cfg);
+        let measured = savings_measured() - before;
+        assert_eq!(evicted.len(), history.len(), "the pass keeps every message");
+        assert!(
+            measured <= 2,
+            "the frontier measured {measured} messages for a two-message batch"
         );
     }
 

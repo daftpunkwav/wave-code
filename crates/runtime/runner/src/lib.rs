@@ -27,7 +27,7 @@ use futures::StreamExt;
 use infrastructure_base::InterruptHandle;
 use state_store::{
     BudgetLevel, CONTEXT_OVERHEAD_TOKENS, CompactTrigger, Conversation, HistoryEntry, Role, Usage,
-    check_budget, estimate_tokens,
+    check_budget, estimate_entry_tokens,
 };
 use wavecode_wire::{
     ApprovalKind as WireApprovalKind, Event, EventMsg, ToolCallPreview, ToolOutcome,
@@ -1672,7 +1672,7 @@ where
 
             let request = SampleRequest {
                 system: system.to_string(),
-                messages: project_images(&history_messages(conv), self.cfg.max_wire_images),
+                messages: sample_messages(conv, self.cfg.max_wire_images),
                 // Restricted runs never see denied tools: the model plans
                 // within its surface instead of hitting refusals.
                 tools: self
@@ -2014,7 +2014,7 @@ where
             .compactor
             // Compaction is rare (threshold-gated), so materializing the
             // full history here is fine; the per-sample path avoids the copy.
-            .compact(history_messages(conv).as_ref().clone(), trigger)
+            .compact(conv.with_entries(|entries| entries.to_vec()), trigger)
             .await
             .map_err(|e| e.to_string())?;
         // The new history is the summary entry plus whatever verbatim tail
@@ -2029,11 +2029,7 @@ where
         // The usage carry must describe the replacement, not the old
         // history: summary plus the retained tail's estimate, or the next
         // budget check would reason from a figure that no longer exists.
-        let tail_tokens: u64 = done
-            .tail
-            .iter()
-            .map(|entry| estimate_tokens(&entry.text()))
-            .sum();
+        let tail_tokens: u64 = done.tail.iter().map(estimate_entry_tokens).sum();
         conv.settle(Usage {
             input_tokens: done.summary_tokens + tail_tokens + CONTEXT_OVERHEAD_TOKENS,
             output_tokens: 0,
@@ -2782,11 +2778,15 @@ fn settle(
     });
 }
 
-/// Snapshot the conversation as model-facing messages. The snapshot rides
-/// an `Arc`, so this is one clone inside [`Conversation::snapshot`] and no
-/// second copy here.
-fn history_messages(conv: &Conversation) -> Arc<Vec<HistoryEntry>> {
-    conv.snapshot()
+/// The model-facing messages of one sample: the conversation's history with
+/// the image projection applied.
+///
+/// The projection reads the conversation in place. Taking a snapshot first
+/// would deep-copy the whole history a second time — the snapshot is dropped
+/// right after the projection, so that copy is pure waste on a path that
+/// runs once per sample.
+fn sample_messages(conv: &Conversation, keep: u32) -> Vec<HistoryEntry> {
+    conv.with_entries(|entries| project_images(entries, keep))
 }
 
 /// Keep only the newest `keep` images in a request projection; every older
@@ -2864,7 +2864,10 @@ impl EstimateCache {
                 self.tokens = 0;
             }
             for entry in &entries[self.entries..] {
-                self.tokens += estimate_tokens(&entry.text());
+                // The entry's text is counted, never built: a tool
+                // result's payload is the entry, and joining it copies
+                // the payload before the estimate even starts.
+                self.tokens += estimate_entry_tokens(entry);
             }
             self.entries = entries.len();
             self.tokens
@@ -2875,6 +2878,7 @@ impl EstimateCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use state_store::estimate_tokens;
 
     /// Growth is accounted incrementally (each entry once); a shrink
     /// resets so the post-compaction history is re-estimated whole.
@@ -6962,6 +6966,124 @@ mod run_loop_tests {
                 .filter(|kind| *kind == "tool_call_begin")
                 .count(),
             4
+        );
+    }
+}
+
+#[cfg(test)]
+mod sample_allocation_tests {
+    //! The per-sample copy budget of the model request.
+    //!
+    //! The sample request carries the whole conversation history, and the
+    //! loop samples once per tool round: a history copied twice per sample
+    //! is a history copied twice per round of a long turn.
+
+    use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Bytes allocated by the current thread. Thread-local on purpose:
+        /// the test harness runs tests in parallel, and a process-wide
+        /// counter would pick up the other threads' traffic.
+        static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Counting allocator: forwards to the system allocator and records the
+    /// bytes each thread asked for.
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            record(layout.size());
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record(new_size);
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    /// Record one allocation for the calling thread. `try_with` keeps the
+    /// allocator safe during thread teardown, where the thread-local may
+    /// already be gone.
+    fn record(size: usize) {
+        let _ = ALLOCATED_BYTES.try_with(|counter| counter.set(counter.get() + size));
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    /// Bytes allocated by the current thread so far.
+    fn allocated() -> usize {
+        ALLOCATED_BYTES.with(Cell::get)
+    }
+
+    /// The sample messages copy the conversation history once.
+    ///
+    /// The projection reads the conversation in place; taking a snapshot
+    /// first deep-copied the whole history and dropped the copy right
+    /// after the projection, so every sample paid for the history twice.
+    #[test]
+    fn the_sample_messages_copy_the_history_once() {
+        let body = "x".repeat(1_000_000);
+        let mut conv = Conversation::new();
+        conv.push(Role::User, body.as_str());
+
+        let before = allocated();
+        let messages = sample_messages(&conv, MAX_WIRE_IMAGES);
+        let after = allocated();
+
+        assert_eq!(messages.len(), 1, "the whole history rides the request");
+        assert!(
+            after - before < 1_500_000,
+            "the history was copied more than once ({} bytes for a 1 MB history)",
+            after - before
+        );
+    }
+
+    /// The image projection still replaces the dropped images: the copy
+    /// budget must not come from a projection that stops working.
+    #[test]
+    fn the_projection_still_drops_the_old_images() {
+        let mut conv = Conversation::new();
+        conv.push_blocks(
+            Role::User,
+            vec![
+                state_store::Block::Image {
+                    id: Some("old".to_string()),
+                    mime: "image/png".to_string(),
+                    base64: "aGk=".to_string(),
+                },
+                state_store::Block::Image {
+                    id: Some("new".to_string()),
+                    mime: "image/png".to_string(),
+                    base64: "aGk=".to_string(),
+                },
+            ],
+        );
+        let messages = sample_messages(&conv, 1);
+        let dropped = messages[0].blocks.iter().find_map(|block| match block {
+            state_store::Block::Text(text) => Some(text.as_str()),
+            _ => None,
+        });
+        assert!(
+            dropped.is_some_and(|text| text.contains("omitted from this request")),
+            "the older image is replaced by a placeholder: {messages:?}"
+        );
+        assert_eq!(
+            messages[0]
+                .blocks
+                .iter()
+                .filter(|block| matches!(block, state_store::Block::Image { .. }))
+                .count(),
+            1,
+            "the newest image survives"
         );
     }
 }

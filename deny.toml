@@ -5,15 +5,19 @@
 [advisories]
 version = 2
 yanked = "deny"
-# No safe upgrades exist; both are tracked leftovers, not forgotten:
-# - yaml-rust (RUSTSEC-2024-0320) rides syntect's parser. Move when a
-#   syntect release drops it. It is not the parser serde_yaml used: that
-#   chain went through unsafe-libyaml (RUSTSEC-2024-0449), which is why
-#   frontmatter parsing moved to serde-saphyr rather than relying on an
-#   ignore here.
-# - bincode (RUSTSEC-2025-0141) is a transitive guest, not our format.
+# One tracked leftover, not forgotten:
+# - bincode (RUSTSEC-2025-0141) is a transitive guest, not our format:
+#   syntect 5 reads its bundled syntax dumps through it, and syntect
+#   offers no dump format without it.
+#
+# The yaml-rust advisory (RUSTSEC-2024-0320) no longer applies: the
+# only path that pulled yaml-rust in was syntect's YAML grammar
+# loader, which stays off (the console reads the bundled binary dumps
+# and one bundled tmTheme, never a YAML grammar), so the crate is out
+# of the tree. Frontmatter parsing stays on serde-saphyr regardless of
+# that: the archived `serde_yaml` chain went through unsafe-libyaml
+# (RUSTSEC-2024-0449).
 ignore = [
-  "RUSTSEC-2024-0320",
   "RUSTSEC-2025-0141",
 ]
 
@@ -23,7 +27,6 @@ allow = [
   "MIT",
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
-  "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
   "Zlib",

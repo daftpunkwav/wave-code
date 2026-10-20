@@ -20,6 +20,31 @@ pub const STATUS_BULLET: &str = "● ";
 pub const USER_BULLET: &str = "❯ ";
 /// The assistant message bullet: a white dot.
 pub const ASSISTANT_BULLET: &str = "● ";
+
+/// Display width of a message body.
+///
+/// The width is measured once per text change, not once per frame: the
+/// render path re-renders the live draft on every tick, and measuring a
+/// long body means walking every grapheme of it.
+fn body_width(text: &str) -> usize {
+    #[cfg(test)]
+    BODY_MEASUREMENTS.with(|count| count.set(count.get() + 1));
+    width::width(text)
+}
+
+// Body measurements made on this thread. A test seam: the regression
+// test pins that frames reuse the measured width instead of measuring
+// the body again.
+#[cfg(test)]
+thread_local! {
+    static BODY_MEASUREMENTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Body measurements made on this thread so far.
+#[cfg(test)]
+fn body_measurements() -> usize {
+    BODY_MEASUREMENTS.with(std::cell::Cell::get)
+}
 /// Half-period of the streaming dot's blink (on for one phase, off for
 /// the next — a steady, regular pulse while the turn streams). A 500 ms
 /// half-period lands exactly on the render loop's 100 ms tick, so the
@@ -192,6 +217,13 @@ impl Component for UserMessage {
 pub struct AssistantMessage {
     markdown: Markdown,
     text: String,
+    /// Display width of `text`, measured when the text changes.
+    ///
+    /// The render cache compares against it, so the width is measured
+    /// once per text change instead of once per frame: the frame path
+    /// re-renders the live draft on every tick, and measuring a long
+    /// message means walking every grapheme of it.
+    text_width: usize,
     live: bool,
     started: Instant,
     lines: Option<(usize, usize, usize, Segment)>,
@@ -201,9 +233,12 @@ impl AssistantMessage {
     /// A completed assistant message. `highlighter` plugs syntax
     /// coloring into code blocks.
     pub fn new(text: impl Into<String>, highlighter: Box<dyn SyntaxHighlighter>) -> Self {
+        let text = text.into();
+        let text_width = body_width(&text);
         Self {
             markdown: Self::markdown(highlighter),
-            text: text.into(),
+            text,
+            text_width,
             live: false,
             started: Instant::now(),
             lines: None,
@@ -221,8 +256,13 @@ impl AssistantMessage {
     /// Refresh the streamed text in place: the render clock keeps
     /// running so the bullet animation survives delta flushes, and the
     /// caches drop so the next render parses the new buffer.
+    ///
+    /// The text is the only mutator of the message body, so the measured
+    /// width is refreshed here with it — the render path then compares
+    /// a stored number instead of re-measuring the whole body.
     pub fn update_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
+        self.text_width = body_width(&self.text);
         self.markdown.clear_cache();
         self.lines = None;
     }
@@ -275,7 +315,7 @@ impl Component for AssistantMessage {
         if let Some((cached_columns, cached_frame, cached_width, lines)) = &self.lines
             && *cached_columns == columns
             && *cached_frame == frame
-            && *cached_width == width::width(&self.text)
+            && *cached_width == self.text_width
         {
             return Arc::clone(lines);
         }
@@ -304,7 +344,7 @@ impl Component for AssistantMessage {
         }
         out.push(String::new());
         let lines = Arc::new(out);
-        self.lines = Some((columns, frame, width::width(&self.text), Arc::clone(&lines)));
+        self.lines = Some((columns, frame, self.text_width, Arc::clone(&lines)));
         lines
     }
 
@@ -343,6 +383,14 @@ pub enum Severity {
 pub struct StatusLine {
     text: String,
     severity: Severity,
+    /// Cached render, keyed by the frame width.
+    ///
+    /// A status line never changes after it is pushed, and the
+    /// transcript re-renders every entry on every frame: without the
+    /// cache each frame re-wrapped and re-painted every status line the
+    /// session had collected. A theme switch drops the cache (the
+    /// painted colors are baked into the lines).
+    lines: Option<(usize, Segment)>,
 }
 
 impl StatusLine {
@@ -351,6 +399,7 @@ impl StatusLine {
         Self {
             text: text.into(),
             severity: Severity::Info,
+            lines: None,
         }
     }
 
@@ -359,6 +408,7 @@ impl StatusLine {
         Self {
             text: text.into(),
             severity: Severity::Warning,
+            lines: None,
         }
     }
 
@@ -367,12 +417,18 @@ impl StatusLine {
         Self {
             text: text.into(),
             severity: Severity::Error,
+            lines: None,
         }
     }
 }
 
 impl Component for StatusLine {
     fn render(&mut self, columns: usize) -> Segment {
+        if let Some((cached_columns, lines)) = &self.lines
+            && *cached_columns == columns
+        {
+            return Arc::clone(lines);
+        }
         let theme = theme::current();
         let token = match self.severity {
             Severity::Info => Token::TextDim,
@@ -402,10 +458,14 @@ impl Component for StatusLine {
             }
         }
         out.push(String::new());
-        Arc::new(out)
+        let lines = Arc::new(out);
+        self.lines = Some((columns, Arc::clone(&lines)));
+        lines
     }
 
-    fn invalidate(&mut self) {}
+    fn invalidate(&mut self) {
+        self.lines = None;
+    }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
@@ -591,6 +651,90 @@ mod tests {
         let mut line = StatusLine::new("compacting");
         let lines = line.render(60);
         assert_eq!(strip_ansi(&lines[0]), "  ● compacting");
+    }
+
+    /// A status line never changes, and the transcript re-renders every
+    /// entry on every frame: the rendered lines must be reused instead of
+    /// re-wrapped and re-painted on each frame.
+    #[test]
+    fn status_line_reuses_its_rendered_lines() {
+        theme::set(theme::Theme::dark());
+        let mut line = StatusLine::new("compacting");
+        let first = line.render(60);
+        let second = line.render(60);
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &second),
+            "a repeated frame must reuse the rendered lines"
+        );
+        // Another width re-renders: the lines are width-bound.
+        let narrow = line.render(40);
+        assert!(!std::sync::Arc::ptr_eq(&first, &narrow));
+        // A theme switch drops the cache: the colors are baked into the
+        // rendered lines.
+        theme::set(theme::Theme::light());
+        line.invalidate();
+        let repainted = line.render(60);
+        assert!(
+            !std::sync::Arc::ptr_eq(&first, &repainted),
+            "a theme switch must repaint the line"
+        );
+        assert_ne!(first, repainted, "the light theme repaints the line");
+        theme::set(theme::Theme::dark());
+    }
+
+    /// The live draft re-renders on every frame. Its body must be
+    /// measured once per text change, not once per frame: measuring
+    /// means walking every grapheme of the whole body.
+    #[test]
+    fn the_body_is_measured_once_per_text_change_not_once_per_frame() {
+        theme::set(theme::Theme::dark());
+        let before = body_measurements();
+        let mut message = AssistantMessage::new(
+            "x".repeat(2048),
+            Box::new(tui_engine::markdown::PlainHighlighter),
+        );
+        assert_eq!(
+            body_measurements() - before,
+            1,
+            "the constructor measures the body once"
+        );
+        for _ in 0..10 {
+            message.render(60);
+        }
+        assert_eq!(
+            body_measurements() - before,
+            1,
+            "frames must reuse the measured width"
+        );
+        message.update_text("y".repeat(2048));
+        assert_eq!(
+            body_measurements() - before,
+            2,
+            "a text change measures the new body once"
+        );
+        message.render(60);
+        assert_eq!(
+            body_measurements() - before,
+            2,
+            "the frame after a change reuses the new width"
+        );
+    }
+
+    /// A body change that keeps the display width still re-renders: the
+    /// measured width is the cache key, so the change must be visible
+    /// through the render itself.
+    #[test]
+    fn a_same_width_body_change_still_re_renders() {
+        theme::set(theme::Theme::dark());
+        let mut message = AssistantMessage::new(
+            "first body",
+            Box::new(tui_engine::markdown::PlainHighlighter),
+        );
+        let first = message.render(60);
+        message.update_text("other body");
+        let second = message.render(60);
+        assert_ne!(first, second, "the new body must be rendered");
+        assert!(strip_ansi(&second[0]).contains("other body"), "{second:?}");
     }
 
     #[test]

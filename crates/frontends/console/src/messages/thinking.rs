@@ -74,7 +74,16 @@ pub struct Thinking {
     duration: Option<Duration>,
     expanded_flag: ExpandedFlag,
     spinner: Loader,
-    lines: Option<(usize, u64, String, bool, bool, Segment)>,
+    /// Cached render, keyed by width, animation frame, liveness, and
+    /// expansion.
+    ///
+    /// The text is not part of the key: every mutator of the text
+    /// ([`Thinking::push`], [`Thinking::set_text`]) drops the cache, so
+    /// a cached line array can never outlive the text it was rendered
+    /// from. Keeping the text out of the key matters because the live
+    /// block re-renders on every animation frame — a text copy in the
+    /// key would copy the whole reasoning buffer ten times a second.
+    lines: Option<(usize, u64, bool, bool, Segment)>,
 }
 
 impl Thinking {
@@ -105,9 +114,13 @@ impl Thinking {
     /// Replace the streamed text (the persisted live block mirrors the
     /// full buffer each frame). The render clock is untouched — the
     /// header duration and spinner keep advancing across flushes.
-    pub fn set_text(&mut self, text: String) {
+    ///
+    /// The text is borrowed, not taken: the render loop mirrors the
+    /// same buffer on every frame, and taking it would copy the whole
+    /// reasoning stream on every frame instead of only when it grew.
+    pub fn set_text(&mut self, text: &str) {
         if self.text != text {
-            self.text = text;
+            self.text = text.to_string();
             self.lines = None;
         }
     }
@@ -135,17 +148,10 @@ impl Component for Thinking {
         } else {
             0
         };
-        if let Some((
-            cached_columns,
-            cached_frame,
-            cached_text,
-            cached_live,
-            cached_expanded,
-            lines,
-        )) = &self.lines
+        if let Some((cached_columns, cached_frame, cached_live, cached_expanded, lines)) =
+            &self.lines
             && *cached_columns == columns
             && *cached_frame == frame
-            && *cached_text == self.text
             && *cached_live == self.live
             && *cached_expanded == expanded
         {
@@ -223,14 +229,7 @@ impl Component for Thinking {
         }
         out.push(String::new());
         let lines = Arc::new(out);
-        self.lines = Some((
-            columns,
-            frame,
-            self.text.clone(),
-            self.live,
-            expanded,
-            Arc::clone(&lines),
-        ));
+        self.lines = Some((columns, frame, self.live, expanded, Arc::clone(&lines)));
         lines
     }
 
@@ -338,7 +337,7 @@ mod tests {
         block.push("stale");
         let lines = block.render(60);
         assert!(strip_ansi(&lines[1]).contains("stale"), "{lines:?}");
-        block.set_text("fresh".to_string());
+        block.set_text("fresh");
         let lines = block.render(60);
         assert!(strip_ansi(&lines[1]).contains("fresh"), "{lines:?}");
         assert!(!strip_ansi(&lines[1]).contains("stale"), "{lines:?}");

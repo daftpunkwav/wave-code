@@ -8,7 +8,7 @@
 //! never configured the list — and never blocks startup.
 //!
 //! Like the model catalog, the file lives under the config layer's home
-//! directory and is written atomically through [`crate::atomic_file`].
+//! directory and is written atomically through `crate::atomic_file`.
 
 use std::path::{Path, PathBuf};
 

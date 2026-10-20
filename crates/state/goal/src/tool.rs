@@ -51,7 +51,7 @@ pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (GoalState, Op
 }
 
 /// Shared goal handle: the in-memory machine plus its resume file.
-/// The state mutex covers the CAS. [`Self::persist_lock`] is held across
+/// The state mutex covers the CAS. The `persist_lock` field is held across
 /// the mutation and the following disk write, so a slower persist cannot
 /// overwrite a newer snapshot that already reached disk.
 #[derive(Debug)]

@@ -503,6 +503,38 @@ async fn ctrl_c_cancels_shell_before_exiting() {
     assert!(ui.shell.is_none(), "shell cancelled by ctrl+c");
 }
 
+/// Esc must end the shell job even when a descendant outlives the
+/// tree kill and keeps the output pipe open.
+///
+/// `start /B` returns at once, so the shell is gone while the
+/// descendant it started keeps the inherited pipe. The tree kill
+/// cannot reach that descendant, so the pipes never reach EOF; the UI
+/// must still drop the job instead of keeping a live shell card
+/// forever.
+#[cfg(windows)]
+#[tokio::test]
+async fn esc_cancels_shell_with_a_detached_descendant() {
+    let mut ui = ui();
+    ui.user_submit("!start /B ping -n 30 127.0.0.1");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    ui.handle_key(KeyEvent::plain(Key::Esc));
+    for _ in 0..400 {
+        ui.poll_shell();
+        if ui.shell.is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(ui.shell.is_none(), "shell cancelled");
+    let frame = ui.frame(80, 24);
+    let joined: String = frame
+        .iter()
+        .map(|l| strip_ansi(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined.contains("terminated"), "{joined}");
+}
+
 #[test]
 fn bare_undo_opens_the_rewind_picker() {
     let mut ui = ui();

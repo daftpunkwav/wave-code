@@ -1,11 +1,30 @@
-//! Local shell-command execution for `!` REPL commands.
-//!
-//! A [`ShellJob`] spawns the command under the platform shell with
-//! piped output and pumps lines through a channel the UI drains
-//! non-blockingly; cancellation kills the child and is reported as a
-//! `Done(None)` event after the pipes drain.
+/*!
+ * @file ShellJob
+ * @description Local shell-command execution for `!` REPL commands.
+ *
+ * Responsibilities:
+ * - Spawn a command under the shared platform shell resolution with
+ *   piped output and pump its lines through a bounded channel the UI
+ *   drains non-blockingly.
+ * - Own the cancel path: kill the shell's whole tree, then report the
+ *   job's terminal `Done(None)` event.
+ *
+ * The cancel path must always report a terminal event: a descendant
+ * that outlives the tree kill keeps the output pipe open, and the job
+ * must not wait for that pipe forever.
+ *
+ * This module must not depend on: runtime, capability, or bootstrap
+ * crates; the tree kill and the shell resolution ride
+ * infrastructure-base.
+ */
+
+//! A [`ShellJob`] spawns the command under the shared platform shell
+//! resolution with piped output and pumps lines through a channel the
+//! UI drains non-blockingly; cancellation kills the child and is
+//! reported as a `Done(None)` event after the pipes drain.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Notify, mpsc};
@@ -26,10 +45,21 @@ pub enum ShellEvent {
 /// child instead of buffering an unbounded firehose in memory.
 const CHANNEL_CAP: usize = 1024;
 
+/// Grace period for a cancelled job's pipes to drain after the tree
+/// kill. The tree kill closes the shell's pipe ends, so EOF normally
+/// lands within milliseconds; a descendant that outlived the tree kill
+/// keeps them open, and the job must still report a terminal event.
+const CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(500);
+
 /// A spawned shell command.
 pub struct ShellJob {
     rx: mpsc::Receiver<ShellEvent>,
     kill: Arc<Notify>,
+    /// Signals that the cancel path's tree kill has landed. The pump
+    /// waits for it before killing the shell itself: `taskkill /T`
+    /// walks the tree from a live parent, so a shell that died first
+    /// leaves its descendants behind.
+    tree_killed: Arc<Notify>,
     /// Platform pid of the shell child, captured before it moves into
     /// the pump task. `cancel` tree-kills this pid: `taskkill /T` on
     /// Windows, and the process group on Unix (the child is spawned as
@@ -72,32 +102,42 @@ impl ShellJob {
         let (tx, rx) = mpsc::channel(CHANNEL_CAP);
         let kill = Arc::new(Notify::new());
         let killer = Arc::clone(&kill);
-        let pid = child.id();
+        let tree_killed = Arc::new(Notify::new());
+        let tree_killer = Arc::clone(&tree_killed);
+        let child_pid = child.id();
         tokio::spawn(async move {
             let mut out = BufReader::new(stdout).lines();
             let mut err = BufReader::new(stderr).lines();
             let mut killed = false;
             let mut out_open = true;
             let mut err_open = true;
+            // Deadline for the cancelled job's pipes to drain; the
+            // timer only runs once the cancel landed.
+            let mut drain_deadline = tokio::time::Instant::now();
+            let mut draining = false;
             while out_open || err_open {
                 tokio::select! {
                     biased;
                     _ = killer.notified(), if !killed => {
                         killed = true;
-                        #[cfg(not(windows))]
-                        {
-                            let _ = child.start_kill();
-                        }
-                        #[cfg(windows)]
-                        // `cancel` tree-kills the command (taskkill /T);
-                        // give it a moment to land, then hard-kill
-                        // cmd.exe itself as a fallback. Killing cmd
-                        // immediately would orphan its children, which
-                        // inherit the output pipes and keep them open.
-                        {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            let _ = child.start_kill();
-                        }
+                        // The shell's descendants inherit the output
+                        // pipes, so killing only the shell orphans them
+                        // and the pipes never reach EOF. `cancel` runs
+                        // the tree kill; wait for it to land before
+                        // killing the shell itself, because `taskkill /T`
+                        // walks the tree from a live parent and a shell
+                        // that died first leaves its descendants behind.
+                        tree_killer.notified().await;
+                        let _ = child.start_kill();
+                        drain_deadline = tokio::time::Instant::now() + CANCEL_DRAIN_GRACE;
+                        draining = true;
+                    }
+                    _ = tokio::time::sleep_until(drain_deadline), if draining => {
+                        // A descendant outlived the tree kill and still
+                        // holds the pipe open: stop waiting for EOF so
+                        // the job still reports a terminal event.
+                        out_open = false;
+                        err_open = false;
                     }
                     line = out.next_line(), if out_open => match line {
                         Ok(Some(line)) => {
@@ -128,7 +168,8 @@ impl ShellJob {
         Ok(Self {
             rx,
             kill,
-            pid,
+            tree_killed,
+            pid: child_pid,
             ended: false,
         })
     }
@@ -158,21 +199,23 @@ impl ShellJob {
     /// Kill the child; the remaining piped output still drains and the
     /// job ends with a `Done(None)` event.
     pub fn cancel(&self) {
-        // Wake the pump task so the job always reports `Done(None)`,
-        // however the child ends up dying.
+        // Wake the pump task so it reports the terminal event and
+        // orders its own kill after the tree kill below.
         self.kill.notify_one();
-        // `start_kill` terminates only the shell itself. Descendants
-        // inherit the output pipes and keep them open, so the tree goes
-        // through the shared helper (group signal on Unix, `taskkill /T`
-        // on Windows). Windows waits for `taskkill`; that wait stays off
-        // the UI thread. The pump still hard-kills the shell afterwards.
-        let Some(pid) = self.pid else {
-            return;
-        };
-        #[cfg(windows)]
-        std::thread::spawn(move || infrastructure_base::kill_tree(pid));
-        #[cfg(not(windows))]
-        infrastructure_base::kill_tree(pid);
+        // The tree kill covers the shell and every descendant it
+        // spawned: descendants inherit the output pipes, so killing
+        // only the shell orphans them and the pipes never reach EOF.
+        // It runs on a dedicated thread because `taskkill /T` waits for
+        // the whole tree to die, and the UI thread may not block on
+        // that wait. The signal tells the pump the tree kill landed.
+        let pid = self.pid;
+        let landed = Arc::clone(&self.tree_killed);
+        std::thread::spawn(move || {
+            if let Some(pid) = pid {
+                infrastructure_base::kill_tree(pid);
+            }
+            landed.notify_one();
+        });
     }
 }
 
@@ -288,6 +331,35 @@ mod tests {
         let mut job = spawn_with_default_shell(sleep).expect("spawn");
         // No settle sleep is needed: `spawn` already awaited the child
         // process, so cancel deterministically lands on a live job.
+        job.cancel();
+        let (_out, _err, code) = run_to_done(&mut job).await;
+        assert_eq!(code, Some(None), "cancelled job reports no exit code");
+    }
+
+    /// A cancelled job must report a terminal event even when a
+    /// descendant outlives the tree kill and keeps the output pipe
+    /// open.
+    ///
+    /// `start /B` returns at once, so the shell is gone while the
+    /// descendant it started keeps writing to the inherited pipe. The
+    /// tree kill walks the tree from a live parent, so it cannot reach
+    /// that descendant and the pipes never reach EOF; the job must
+    /// still end.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancel_reports_done_when_a_descendant_holds_the_pipe() {
+        let mut job = spawn_with_default_shell("start /B ping -n 30 127.0.0.1").expect("spawn");
+        // The descendant's output proves it holds the pipe the shell
+        // left behind.
+        let mut descendant_alive = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !descendant_alive && tokio::time::Instant::now() < deadline {
+            if let Some(ShellEvent::Out(_)) = job.try_recv() {
+                descendant_alive = true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(descendant_alive, "the descendant must hold the output pipe");
         job.cancel();
         let (_out, _err, code) = run_to_done(&mut job).await;
         assert_eq!(code, Some(None), "cancelled job reports no exit code");

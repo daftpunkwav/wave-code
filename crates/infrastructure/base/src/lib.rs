@@ -11,6 +11,8 @@
  *   assembly and the loop's midnight-rollover notice).
  * - Resolve the platform command-string shell once for every layer that
  *   spawns one (shell tool, PTY shell, hooks, jobs).
+ * - Own the process-tree kill every spawn path shares, plus the
+ *   off-worker variants that keep its blocking wait off a runtime worker.
  * - Own the crash-safe file-replace primitive shared by the durable stores.
  *
  * This module must not depend on: any other workspace crate.
@@ -162,8 +164,14 @@ pub fn lead_process_group(cmd: &mut std::process::Command) {
 /// caller still reaps the direct child itself (kill/await on its handle).
 ///
 /// On Windows this waits until `taskkill` exits, so the tree is gone when
-/// the call returns. A UI thread must move that wait off itself
-/// (`std::thread::spawn`); Unix `killpg` returns immediately.
+/// the call returns. That wait is hundreds of milliseconds (measured at
+/// roughly 400 ms on an idle host), so an async caller must not call this
+/// directly: it would park a runtime worker for the whole wait and stall
+/// every other task scheduled on it. Use [`kill_tree_blocking`] from an
+/// async caller, and [`kill_tree_detached`] from a synchronous caller that
+/// must not block. A caller that needs the kill to have landed before it
+/// continues — a spawn path that reaps the child right after — calls this
+/// directly and accepts the wait.
 pub fn kill_tree(pid: u32) {
     #[cfg(unix)]
     {
@@ -190,6 +198,44 @@ pub fn kill_tree(pid: u32) {
     }
     #[cfg(not(any(unix, windows)))]
     let _ = pid;
+}
+
+/// Kill a spawned process tree from an async task, off the runtime worker.
+///
+/// [`kill_tree`] blocks for the whole `taskkill` wait on Windows, so
+/// running it on a runtime worker parks that worker for hundreds of
+/// milliseconds and stalls every other task scheduled on it. This
+/// helper runs the same kill on the blocking pool instead. The caller
+/// waits for it, so the "tree kill first, then the direct child's own
+/// kill" order the spawn paths rely on is preserved.
+pub async fn kill_tree_blocking(pid: u32) {
+    on_blocking_pool(move || kill_tree(pid)).await;
+}
+
+/// Schedule a spawned process tree's kill from a synchronous caller.
+///
+/// The counterpart of [`kill_tree_blocking`] for a caller that cannot
+/// await (a cancellation request that only records the intent): the
+/// kill waits for the whole tree to die, so it must not run on the
+/// caller's thread — least of all on a runtime worker. The call
+/// returns as soon as the kill is scheduled; the spawned job's own
+/// driver observes the death and files the terminal state.
+pub fn kill_tree_detached(pid: u32) {
+    run_detached(move || kill_tree(pid));
+}
+
+/// Run `work` on the tokio blocking pool and wait for it to finish.
+async fn on_blocking_pool<F: FnOnce() + Send + 'static>(work: F) {
+    // The join result carries only a panic, and the tree kill is best
+    // effort by contract, so a failed task must not fail the caller.
+    let _ = tokio::task::spawn_blocking(work).await;
+}
+
+/// Run `work` on a dedicated thread and return immediately.
+fn run_detached<F: FnOnce() + Send + 'static>(work: F) {
+    // The handle is dropped on purpose: the thread keeps running, and
+    // the caller does not wait for it.
+    drop(std::thread::spawn(work));
 }
 
 /// Absolute path to the Windows tree-kill utility.
@@ -441,6 +487,99 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    /// The detached runner hands the work to its own thread, so the
+    /// caller's thread is never parked for the blocking operation (the
+    /// `taskkill` wait behind [`kill_tree`]).
+    #[test]
+    fn detached_work_runs_on_its_own_thread() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let caller = std::thread::current().id();
+        run_detached(move || {
+            let _ = tx.send(std::thread::current().id());
+        });
+        let ran_on = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the detached work ran");
+        assert_ne!(
+            ran_on, caller,
+            "the detached work ran on the caller's thread"
+        );
+    }
+
+    /// The blocking-pool runner must keep the runtime worker free: the
+    /// work runs on the blocking pool, so a task scheduled on the same
+    /// worker keeps making progress while it runs. A worker that ran
+    /// the work inline would starve every other task on it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_pool_work_leaves_the_runtime_worker_free() {
+        let progress = Arc::new(AtomicUsize::new(0));
+        let counter = progress.clone();
+        // The ticker shares the single worker with the task below.
+        let ticker = tokio::spawn(async move {
+            for _ in 0..400 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let ran_on = Arc::new(Mutex::new(None));
+        let (before, worker) = tokio::spawn({
+            let progress = progress.clone();
+            let ran_on = ran_on.clone();
+            async move {
+                let worker = std::thread::current().id();
+                // The snapshot is taken on the worker, immediately
+                // before the blocking work starts: no await point sits
+                // between the read and the park, so the ticker cannot
+                // slip a tick into the window.
+                let before = progress.load(Ordering::Relaxed);
+                on_blocking_pool({
+                    let ran_on = ran_on.clone();
+                    move || {
+                        *ran_on.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(std::thread::current().id());
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                })
+                .await;
+                (before, worker)
+            }
+        })
+        .await
+        .expect("the worker task finished");
+        let after = progress.load(Ordering::Relaxed);
+        ticker.abort();
+        assert_ne!(
+            ran_on.lock().unwrap_or_else(|e| e.into_inner()).as_ref(),
+            Some(&worker),
+            "the blocking work ran on the runtime worker"
+        );
+        assert!(
+            after > before,
+            "the runtime worker was parked while the blocking work ran"
+        );
+    }
+
+    /// The blocking-pool runner waits for its work: the spawn paths rely
+    /// on "tree kill first, then the direct child's own kill", so a
+    /// variant that returned before the kill landed would let the shell
+    /// die first and orphan the descendants that inherited its pipes.
+    #[tokio::test]
+    async fn blocking_pool_work_finishes_before_the_runner_returns() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        on_blocking_pool(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            flag.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "the runner returned before the work had finished"
+        );
+    }
 
     #[test]
     fn interrupt_handle_triggers_and_resets() {

@@ -327,7 +327,10 @@ pub(crate) async fn spawn_collect_bounded(
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
             if let Some(pid) = child.id() {
-                infrastructure_base::kill_tree(pid);
+                // The tree kill waits for the whole tree to die, so it
+                // runs on the blocking pool: a runtime worker must not
+                // be parked for that wait.
+                infrastructure_base::kill_tree_blocking(pid).await;
             }
             let _ = child.kill().await;
             None

@@ -33,7 +33,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use infrastructure_base::shell_invocation;
+use infrastructure_base::{kill_tree_blocking, kill_tree_detached, shell_invocation};
 use runtime_child::ChildRuntime;
 use tokio::io::AsyncReadExt;
 
@@ -359,6 +359,18 @@ impl JobService {
     /// Kills the whole process tree (never just the shell); already
     /// finished jobs accept trivially. The driver reaps the exit, marks
     /// the job cancelled, and files the completion notice.
+    ///
+    /// The tree kill waits for the whole tree to die (hundreds of
+    /// milliseconds on Windows), so it runs on its own thread: a
+    /// runtime worker must not be parked for that wait, and this method
+    /// is called from inside a turn. The call returns as soon as the
+    /// kill is scheduled; the driver observes the death and files the
+    /// terminal state.
+    ///
+    /// The job therefore keeps its per-owner capacity slot until the
+    /// driver reaps it, so a spawn right behind a cancel can still see
+    /// the cap reached. The capacity error is explicit and the killed
+    /// job frees its slot as soon as the tree is gone.
     pub fn cancel(&self, id: &str) -> bool {
         let slot = match self.lock_jobs().get(id).cloned() {
             Some(slot) => slot,
@@ -370,7 +382,7 @@ impl JobService {
         if slot.is_running()
             && let Some(pid) = *slot.pid.lock().unwrap_or_else(|e| e.into_inner())
         {
-            kill_tree(pid);
+            kill_tree_detached(pid);
         }
         true
     }
@@ -384,13 +396,6 @@ fn shell_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
     cmd.arg(flag).arg(command);
     cmd
-}
-
-/// Kill a job's whole process tree by leader pid: the shared
-/// [`infrastructure_base::kill_tree`] (jobs spawn as their own process
-/// group, the precondition that helper documents).
-fn kill_tree(pid: u32) {
-    infrastructure_base::kill_tree(pid)
 }
 
 /// Driver future: spawn, capture, reap, then file the shared notice.
@@ -430,7 +435,7 @@ async fn drive_job(
     // Cancel raced the spawn: kill immediately instead of running.
     if slot.cancelled.load(Ordering::SeqCst) {
         if let Some(pid) = child.id() {
-            kill_tree(pid);
+            kill_tree_blocking(pid).await;
         }
         let _ = child.kill().await;
         let _ = child.wait().await;
@@ -455,7 +460,7 @@ async fn drive_job(
                 // Run deadline: the only spawn-side kill in this crate;
                 // wait-timeouts never reach here and never kill.
                 if let Some(pid) = child.id() {
-                    kill_tree(pid);
+                    kill_tree_blocking(pid).await;
                 }
                 let _ = child.kill().await;
                 slot.timed_out.store(true, Ordering::SeqCst);
@@ -692,6 +697,31 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// A cancel must not park the caller's thread: the tree kill waits
+    /// for the whole tree to die, and that wait belongs to another
+    /// thread. The inline `taskkill` wait costs hundreds of
+    /// milliseconds on Windows (measured at roughly 400 ms on an idle
+    /// host), so a cancel that still ran it inline blows past this
+    /// bound. On Unix the group signal returns immediately, so the
+    /// bound is never approached there.
+    #[tokio::test]
+    async fn cancel_does_not_block_the_caller() {
+        let (_runtime, jobs) = harness();
+        let id = jobs.spawn(request("t", LONG_CMD)).unwrap();
+        // Let the process start so the kill targets a live pid.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let started = std::time::Instant::now();
+        assert!(jobs.cancel(&id));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "the cancel parked the caller for {elapsed:?}: the tree kill must not run inline"
+        );
+        // The kill still lands: the job ends cancelled.
+        let end = poll_finished(&jobs, &id).await;
+        assert!(end.cancelled);
     }
 
     #[tokio::test]

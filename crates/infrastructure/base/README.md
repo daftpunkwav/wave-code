@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 | Item | Role |
 |---|---|
-| `src/lib.rs` | Capacity and timeout constants (`EVENT_CHANNEL_CAP`, `CONTROL_CHANNEL_CAP`, `PENDING_QUEUE_CAP`, `SHUTDOWN_DRAIN`, `APPROVAL_POLL`, `HOOK_DEFAULT_TIMEOUT`), truncation budgets (`EVENT_TEXT_TRUNCATION`, `APPROVAL_DETAIL_TRUNCATION`), `InterruptHandle`, `truncate`, `shell_invocation`, `format_date`/`format_timestamp` |
+| `src/lib.rs` | Capacity and timeout constants (`EVENT_CHANNEL_CAP`, `CONTROL_CHANNEL_CAP`, `PENDING_QUEUE_CAP`, `SHUTDOWN_DRAIN`, `APPROVAL_POLL`, `HOOK_DEFAULT_TIMEOUT`), truncation budgets (`EVENT_TEXT_TRUNCATION`, `APPROVAL_DETAIL_TRUNCATION`), `InterruptHandle`, `truncate`, `shell_invocation`, `format_date`/`format_timestamp`, and the process-tree kill (`kill_tree` plus its off-worker variants `kill_tree_blocking` / `kill_tree_detached`) |
 
 Every capacity, timeout, and truncation budget lives here with its
 rationale, so no upper layer keeps its own copy of a magic number that
@@ -16,4 +16,7 @@ cancelled mid-operation, so no half-written state is left behind.
 every spawn path — shell tool, PTY shell, hooks, jobs — honors the
 same override. `format_date`/`format_timestamp` are the single UTC
 renderings (dependency-free civil-date math) shared by prompt assembly
-and event headers. The crate declares zero dependencies.
+and event headers. The tree kill waits for a whole process tree to
+die, so the crate also owns the off-worker variants that keep that
+wait off a runtime worker. The crate depends on `tokio` (the blocking
+pool) and, on Unix, `libc`.

@@ -119,14 +119,14 @@ pub struct CheckpointPolicy {
     /// Save a durable checkpoint before a model request starts a turn.
     pub checkpoint_before_model_request: bool,
     /// Save a durable checkpoint before a tool side effect executes.
-    pub before_tool_side_effect: bool,
+    pub checkpoint_before_tool_side_effect: bool,
 }
 
 impl Default for CheckpointPolicy {
     fn default() -> Self {
         Self {
             checkpoint_before_model_request: true,
-            before_tool_side_effect: true,
+            checkpoint_before_tool_side_effect: true,
         }
     }
 }
@@ -137,13 +137,13 @@ impl CheckpointPolicy {
     pub fn disabled() -> Self {
         Self {
             checkpoint_before_model_request: false,
-            before_tool_side_effect: false,
+            checkpoint_before_tool_side_effect: false,
         }
     }
 
     /// True when at least one hook point still checkpoints.
     pub fn anything_enabled(&self) -> bool {
-        self.checkpoint_before_model_request || self.before_tool_side_effect
+        self.checkpoint_before_model_request || self.checkpoint_before_tool_side_effect
     }
 }
 
@@ -330,11 +330,11 @@ mod durability_tests {
     fn policy_defaults_fail_closed() {
         let policy = CheckpointPolicy::default();
         assert!(policy.checkpoint_before_model_request);
-        assert!(policy.before_tool_side_effect);
+        assert!(policy.checkpoint_before_tool_side_effect);
         assert!(policy.anything_enabled());
         let off = CheckpointPolicy::disabled();
         assert!(!off.checkpoint_before_model_request);
-        assert!(!off.before_tool_side_effect);
+        assert!(!off.checkpoint_before_tool_side_effect);
         assert!(!off.anything_enabled());
     }
 

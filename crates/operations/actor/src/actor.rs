@@ -356,7 +356,7 @@ where
         // effect), so it honors the side-effect flag.
         checkpoint_pre_turn(
             &mut self.durability,
-            |policy| policy.before_tool_side_effect,
+            |policy| policy.checkpoint_before_tool_side_effect,
             turn_seq,
             &self.conv,
             &self.event_tx,
@@ -535,7 +535,7 @@ async fn end_session<D: TurnDriver>(driver: &D, conv: &Conversation) {
 /// bump `turn_seq`, render the pre-turn snapshot, and save the
 /// checkpoint when `checkpoint_on` asks. The flag is resolved by the
 /// caller because each operation maps to a different policy hook point
-/// (`checkpoint_before_model_request` vs `before_tool_side_effect`).
+/// (`checkpoint_before_model_request` vs `checkpoint_before_tool_side_effect`).
 /// Warnings carry the submission's own id; a durable failure is loud
 /// but never aborts the turn (see [`checkpoint_turn`]).
 ///

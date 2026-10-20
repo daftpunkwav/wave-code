@@ -96,9 +96,15 @@ fn lock(slot: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String
 }
 
 /// Run the command once: JSON snapshot in, first stdout line out.
+///
+/// The command runs through the shared platform shell resolution: the
+/// status line is one more command-string spawn, so the operator's
+/// `WAVECODE_SHELL` override must reach it the way it reaches the
+/// shell tool, the lifecycle hooks, the background jobs, and the
+/// console's `!` shell.
 async fn run_once(command: &str, snapshot: serde_json::Value) -> anyhow::Result<String> {
     use tokio::io::AsyncWriteExt;
-    let mut child = shell_command(command)
+    let mut child = infrastructure_base::shell_command(command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -116,20 +122,6 @@ async fn run_once(command: &str, snapshot: serde_json::Value) -> anyhow::Result<
         anyhow::bail!("empty status line");
     }
     Ok(line.into_owned())
-}
-
-/// Wrap the user command in the platform shell (it is a shell string,
-/// possibly with arguments and quoting).
-///
-/// The shell comes from the shared resolution: the status line is one
-/// more command-string spawn, so the operator's `WAVECODE_SHELL`
-/// override must reach it the way it reaches the shell tool, the
-/// lifecycle hooks, the background jobs, and the console's `!` shell.
-fn shell_command(command: &str) -> tokio::process::Command {
-    let (program, flag) = infrastructure_base::shell_invocation();
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.arg(flag).arg(command);
-    cmd
 }
 
 #[cfg(test)]

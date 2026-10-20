@@ -81,11 +81,8 @@ impl ShellJob {
     /// spawn command strings, so the operator's `WAVECODE_SHELL` override
     /// must reach all of them or none.
     pub fn spawn(command: &str) -> std::io::Result<Self> {
-        let (program, flag) = infrastructure_base::shell_invocation();
-        let mut cmd = tokio::process::Command::new(program);
-        cmd.arg(flag)
-            .arg(command)
-            .stdin(std::process::Stdio::null())
+        let mut cmd = infrastructure_base::shell_command(command);
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);

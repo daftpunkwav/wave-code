@@ -3338,9 +3338,7 @@ async fn edit_with_command(command: &str, path: &std::path::Path) -> anyhow::Res
     // command-string spawn, so the operator's `WAVECODE_SHELL` override
     // must reach it the way it reaches the shell tool, the lifecycle
     // hooks, the background jobs, and the console's `!` shell.
-    let (program, flag) = infrastructure_base::shell_invocation();
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.arg(flag).arg(&script);
+    let mut cmd = infrastructure_base::shell_command(&script);
     let status = cmd
         .status()
         .await

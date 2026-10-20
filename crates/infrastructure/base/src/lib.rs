@@ -122,6 +122,19 @@ pub fn shell_invocation() -> (String, &'static str) {
     }
 }
 
+/// Build the command that runs `command` as a command string.
+///
+/// One place turns the shared resolution into a spawn, so every
+/// command-string path picks the same program and the same flag style.
+/// The caller adds what its own path needs: the standard streams, the
+/// working directory, the process-group setup.
+pub fn shell_command(command: &str) -> tokio::process::Command {
+    let (program, flag) = shell_invocation();
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.arg(flag).arg(command);
+    cmd
+}
+
 /// Windows `CREATE_NEW_PROCESS_GROUP`. OR'd with flags already set on `cmd`
 /// (tokio and `std` both OR repeated `creation_flags` calls), so it composes
 /// with `CREATE_SUSPENDED`.

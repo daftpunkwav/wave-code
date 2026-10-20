@@ -851,7 +851,8 @@ impl ConsoleUi {
                 .streaming_thinking
                 .take()
                 .unwrap_or_else(|| Thinking::live(self.expanded.clone()));
-            block.set_text(std::mem::take(&mut self.streaming.thinking));
+            block.set_text(&self.streaming.thinking);
+            self.streaming.thinking.clear();
             block.finalize();
             self.transcript.push(Box::new(block));
         }
@@ -2623,7 +2624,7 @@ verify from the repository.";
                 self.streaming_thinking = Some(Thinking::live(self.expanded.clone()));
             }
             if let Some(block) = self.streaming_thinking.as_mut() {
-                block.set_text(self.streaming.thinking.clone());
+                block.set_text(&self.streaming.thinking);
                 lines.push(Component::render(block, inner));
             }
         } else {
@@ -3333,13 +3334,13 @@ verify from the repository.";
 /// drop policy covers the gap.
 async fn edit_with_command(command: &str, path: &std::path::Path) -> anyhow::Result<String> {
     let script = format!("{command} \"{}\"", path.display());
-    let mut cmd = tokio::process::Command::new(crate::controllers::shell::platform_shell());
-    if cfg!(windows) {
-        cmd.arg("/C");
-    } else {
-        cmd.arg("-c");
-    }
-    cmd.arg(&script);
+    // The shared platform shell resolution: the editor is one more
+    // command-string spawn, so the operator's `WAVECODE_SHELL` override
+    // must reach it the way it reaches the shell tool, the lifecycle
+    // hooks, the background jobs, and the console's `!` shell.
+    let (program, flag) = infrastructure_base::shell_invocation();
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.arg(flag).arg(&script);
     let status = cmd
         .status()
         .await

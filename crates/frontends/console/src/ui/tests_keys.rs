@@ -223,6 +223,41 @@ fn editor_command_resolution_prefers_the_setting() {
     );
 }
 
+/// The external editor runs under the shared platform shell resolution,
+/// so the `WAVECODE_SHELL` override reaches it the way it reaches the
+/// shell tool, the lifecycle hooks, the background jobs, and the
+/// console's `!` shell.
+///
+/// The override is set on a *child* copy of this test binary: the
+/// variable is process-global, so setting it in-process would make
+/// every parallel test that spawns a command fail for the wrong reason.
+#[test]
+fn the_external_editor_runs_under_the_shared_shell() {
+    let output = crate::run_isolated_with_shell_override(
+        "ui::tests_keys::external_editor_runs_the_override_program",
+    );
+    assert!(
+        output.status.success(),
+        "the override child must pass: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// The child half of [`the_external_editor_runs_under_the_shared_shell`]:
+/// it runs with `WAVECODE_SHELL` pointing at a program that does not
+/// exist, so the editor spawn fails instead of running the command —
+/// the console ran the program the shared resolution handed it.
+#[tokio::test]
+#[ignore = "child of the_external_editor_runs_under_the_shared_shell"]
+async fn external_editor_runs_the_override_program() {
+    assert!(
+        edit_with_command("echo", std::path::Path::new("draft.md"))
+            .await
+            .is_err(),
+        "the shared shell override must decide which program the editor spawns"
+    );
+}
+
 #[test]
 fn ctrl_c_cascade_arms_then_exits() {
     let mut ui = ui();

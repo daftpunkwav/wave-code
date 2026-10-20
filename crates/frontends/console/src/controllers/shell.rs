@@ -42,16 +42,19 @@ pub struct ShellJob {
 }
 
 impl ShellJob {
-    /// Spawn `command` under the platform shell (`cmd /C` on Windows,
-    /// `sh -c` elsewhere) with piped output and no stdin.
+    /// Spawn `command` under the shared platform shell resolution
+    /// (`cmd /C` on Windows, `sh -c` elsewhere, overridable through
+    /// `WAVECODE_SHELL`) with piped output and no stdin.
+    ///
+    /// The resolution is the shared one, not a local copy: the shell
+    /// tool, the lifecycle hooks, the background jobs, and this console
+    /// spawn command strings, so the operator's `WAVECODE_SHELL` override
+    /// must reach all of them or none.
     pub fn spawn(command: &str) -> std::io::Result<Self> {
-        let mut cmd = tokio::process::Command::new(platform_shell());
-        if cfg!(windows) {
-            cmd.arg("/C");
-        } else {
-            cmd.arg("-c");
-        }
-        cmd.arg(command)
+        let (program, flag) = infrastructure_base::shell_invocation();
+        let mut cmd = tokio::process::Command::new(program);
+        cmd.arg(flag)
+            .arg(command)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -173,18 +176,6 @@ impl ShellJob {
     }
 }
 
-/// The platform shell program: `%COMSPEC%` (default `cmd`) on Windows,
-/// `sh` elsewhere.
-pub(crate) fn platform_shell() -> String {
-    if cfg!(windows) {
-        std::env::var_os("COMSPEC")
-            .map(|shell| shell.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "cmd".to_string())
-    } else {
-        "sh".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,9 +202,65 @@ mod tests {
         (out, err, code)
     }
 
+    /// Spawn with `WAVECODE_SHELL` cleared, so the suite does not depend
+    /// on the developer's shell override. The resolved program and flag
+    /// are baked into the spawned command, so the variable is restored
+    /// as soon as the spawn returns.
+    fn spawn_with_default_shell(command: &str) -> std::io::Result<ShellJob> {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("WAVECODE_SHELL").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            std::env::remove_var("WAVECODE_SHELL");
+        }
+        let job = ShellJob::spawn(command);
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("WAVECODE_SHELL", v);
+            }
+        }
+        job
+    }
+
+    /// The `!` shell resolves its program through the shared
+    /// infrastructure helper, so the `WAVECODE_SHELL` override reaches
+    /// it the way it reaches the shell tool, the lifecycle hooks, and
+    /// the background jobs.
+    ///
+    /// The override is set on a *child* copy of this test binary: the
+    /// variable is process-global, so setting it in-process would make
+    /// every parallel test that spawns a command fail for the wrong
+    /// reason.
+    #[test]
+    fn the_shared_shell_override_reaches_the_repl_shell() {
+        let output = crate::run_isolated_with_shell_override(
+            "controllers::shell::tests::repl_shell_runs_the_override_program",
+        );
+        assert!(
+            output.status.success(),
+            "the override child must pass: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// The child half of
+    /// [`the_shared_shell_override_reaches_the_repl_shell`]: it runs with
+    /// `WAVECODE_SHELL` pointing at a program that does not exist, so
+    /// the spawn must fail — the console ran the program the shared
+    /// resolution handed it.
+    #[test]
+    #[ignore = "child of the_shared_shell_override_reaches_the_repl_shell"]
+    fn repl_shell_runs_the_override_program() {
+        assert!(
+            ShellJob::spawn("echo hello").is_err(),
+            "the shared shell override must decide which program the console spawns"
+        );
+    }
+
     #[tokio::test]
     async fn spawns_and_collects_output() {
-        let mut job = ShellJob::spawn("echo shell-job-ok").expect("spawn");
+        let mut job = spawn_with_default_shell("echo shell-job-ok").expect("spawn");
         let (out, _err, code) = run_to_done(&mut job).await;
         assert_eq!(code, Some(Some(0)));
         assert!(
@@ -225,7 +272,7 @@ mod tests {
     #[tokio::test]
     async fn reports_nonzero_exit() {
         // `cmd /C exit 3` and `sh -c 'exit 3'` both exit with 3.
-        let mut job = ShellJob::spawn("exit 3").expect("spawn");
+        let mut job = spawn_with_default_shell("exit 3").expect("spawn");
         let (_out, _err, code) = run_to_done(&mut job).await;
         assert_eq!(code, Some(Some(3)));
     }
@@ -238,7 +285,7 @@ mod tests {
         } else {
             "sleep 30"
         };
-        let mut job = ShellJob::spawn(sleep).expect("spawn");
+        let mut job = spawn_with_default_shell(sleep).expect("spawn");
         // No settle sleep is needed: `spawn` already awaited the child
         // process, so cancel deterministically lands on a live job.
         job.cancel();

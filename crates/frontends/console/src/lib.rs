@@ -43,6 +43,42 @@ pub use ui::{
     run_with_factory,
 };
 
+/// Serializes the tests that mutate a process-global environment
+/// variable: `set_var` / `remove_var` change process-wide state, so a
+/// test that changes one name must not run beside another that reads
+/// it. One lock for the whole crate: separate per-module mutexes would
+/// not exclude each other.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Re-run this test binary as a child process with `WAVECODE_SHELL`
+/// pointing at a program that does not exist, running only the named
+/// test.
+///
+/// The shell override is process-global, so a test that sets it
+/// in-process changes what every parallel test that spawns a command
+/// sees. The child process carries the override in its own environment
+/// and leaves this process untouched. The child must be an `#[ignore]`d
+/// test: the parent asks for it by name.
+#[cfg(test)]
+pub(crate) fn run_isolated_with_shell_override(test_name: &str) -> std::process::Output {
+    let exe = std::env::current_exe().expect("the test binary path");
+    let output = std::process::Command::new(exe)
+        .args(["--exact", test_name, "--ignored", "--nocapture"])
+        .env("WAVECODE_SHELL", "wavecode-definitely-missing-shell")
+        .output()
+        .expect("the override child must run");
+    // The child must have run the named test: a name that matches
+    // nothing exits successfully with nothing run, which would make the
+    // parent pass without proving anything.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("1 passed"),
+        "the override child must run exactly one test ({test_name}): {stdout}"
+    );
+    output
+}
+
 #[cfg(test)]
 mod dependency_matrix_locked {
     /// The console UI crosses to the session exclusively through the

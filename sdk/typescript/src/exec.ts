@@ -1,9 +1,18 @@
 /**
- * Spawn `wavecode exec --json` as a child process and expose the JSONL
- * event stream as a typed async iterator. With `approvals: true` the
- * session also answers parked approvals through the `answerApproval`
- * handle (the wire's stdin dialect); without it the run stays
- * fail-closed: approvals deny, exactly like plain exec.
+ * @file ExecSession
+ * @description Spawn `wavecode exec --json` and expose its JSONL event
+ *   stream as a typed async iterator.
+ *
+ * Responsibilities:
+ * - Spawn the child process and parse its JSONL stdout into typed events.
+ * - Answer parked approvals through the wire's stdin dialect.
+ * - Surface the child's exit code and whether the turn was interrupted.
+ *
+ * Constraints:
+ * - This module must not depend on the Rust workspace: it drives the
+ *   `wavecode` binary over its wire only.
+ * - Without `approvals: true` the run stays fail-closed: approvals deny,
+ *   exactly like plain exec.
  */
 
 import { spawn, type ChildProcessByStdio } from "node:child_process";
@@ -14,6 +23,7 @@ import type { ApprovalDecision, ExecEvent } from "./types.js";
 export { isMetaLine } from "./types.js";
 export type { ApprovalDecision, ExecEvent, MetaLine, WireEvent } from "./types.js";
 
+/** The run's prompt, binary, and surface options. */
 export interface ExecOptions {
   /** The user prompt for the single turn. */
   prompt: string;
@@ -42,6 +52,7 @@ export interface ExecOptions {
   env?: Record<string, string>;
 }
 
+/** How the child process ended. */
 export interface ExecResult {
   /** Process exit code (0 completed, 130 interrupted, 1 failed). */
   code: number;
@@ -49,6 +60,7 @@ export interface ExecResult {
   interrupted: boolean;
 }
 
+/** The live run: its event stream, its approval handle, and its exit. */
 export interface ExecSession {
   /** Async iterator over the meta line plus every wire event. */
   events: AsyncIterable<ExecEvent>;
@@ -56,6 +68,10 @@ export interface ExecSession {
    * Answer one parked approval (`approvals: true` only). The decision
    * maps onto the wire stdin dialect: `"allow"`, `"always"`, or
    * `{ deny: "reason" }` / `"deny"`.
+   *
+   * @throws When the run was started without `approvals: true` — that run
+   * is fail-closed and parks no decision for the caller to make — or when
+   * the decision is not one the wire dialect accepts.
    */
   // The parameter name documents the wire protocol; the base rule
   // cannot see that an interface member list is a type position.
@@ -91,6 +107,13 @@ function decisionToken(decision: ApprovalDecision): string {
   return reason ? `deny:${reason}` : "deny";
 }
 
+/**
+ * Spawn `wavecode exec --json` and expose its JSONL event stream.
+ *
+ * @param options - The prompt, binary, and surface options of the run.
+ * @returns The live session: its event iterator, its approval handle,
+ * and the promise that settles when the child exits.
+ */
 export function execSession(options: ExecOptions): ExecSession {
   const bin = options.bin ?? process.env.WAVECODE_BIN ?? "wavecode";
   const args = ["exec", "--json"];

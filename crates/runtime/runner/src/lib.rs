@@ -1175,16 +1175,27 @@ where
     /// window for this iteration (see [`Self::effective_window`]), so the
     /// line stays truthful after a `/model` switch.
     fn budget_line(&self, used: u64, window: u64, state: &TurnState, continuations: u8) -> String {
-        let ceiling = self
-            .cfg
-            .max_tool_rounds
-            .saturating_mul(state.round_rearms as u32 + 1);
+        let ceiling = self.round_ceiling(state);
         let round = state.tool_rounds;
         let rearms = state.round_rearms;
         format!(
             "Budget: {used} of {window} context tokens used; tool round {round} of {ceiling} (ceiling re-armed {rearms} of {}); goal continuation {continuations} of {}.",
             self.cfg.max_goal_rearms, self.cfg.max_goal_continuations
         )
+    }
+
+    /// The tool-round ceiling in force for this turn.
+    ///
+    /// One rule, two readers: the loop head stops the turn when the
+    /// round count reaches this ceiling, and the budget line tells the
+    /// model the same number. A goal re-arm multiplies the base
+    /// ceiling, so the two must never be computed separately — a
+    /// drifting copy would tell the model a ceiling the loop does not
+    /// enforce.
+    fn round_ceiling(&self, state: &TurnState) -> u32 {
+        self.cfg
+            .max_tool_rounds
+            .saturating_mul(state.round_rearms as u32 + 1)
     }
 
     /// Queue a steering message for `target`; empty texts are dropped
@@ -1505,10 +1516,7 @@ where
             // is the long-horizon case, and the alternative is a human typing
             // "continue" every 32 rounds. The re-arm count bounds it, and a
             // blocked / paused / completed goal re-arms nothing.
-            let ceiling = self
-                .cfg
-                .max_tool_rounds
-                .saturating_mul(state.round_rearms as u32 + 1);
+            let ceiling = self.round_ceiling(&state);
             if state.rounds_exhausted(ceiling) {
                 if self.goals.open() && state.round_rearms < self.cfg.max_goal_rearms {
                     state.round_rearms += 1;
@@ -6911,6 +6919,40 @@ mod run_loop_tests {
         assert!(
             counted(conv, "ceiling re-armed 1 of ") > 0,
             "no re-arm budget reached the model"
+        );
+    }
+
+    /// The budget line and the enforced ceiling are one rule: the model
+    /// is told the number the loop actually stops at, re-arms included.
+    #[test]
+    fn the_budget_line_reports_the_enforced_ceiling() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        let loop_ = build_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            3,
+            fx.interrupt.clone(),
+        );
+        let mut state = TurnState::new();
+        assert_eq!(loop_.round_ceiling(&state), 3);
+        assert!(
+            loop_
+                .budget_line(0, 100, &state, 0)
+                .contains("tool round 0 of 3")
+        );
+        // One re-arm doubles the ceiling, and the budget line follows.
+        state.round_rearms = 1;
+        assert_eq!(loop_.round_ceiling(&state), 6);
+        assert!(
+            loop_
+                .budget_line(0, 100, &state, 0)
+                .contains("tool round 0 of 6")
         );
     }
 

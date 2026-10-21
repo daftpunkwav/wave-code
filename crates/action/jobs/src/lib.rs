@@ -169,6 +169,10 @@ struct JobSlot {
     log: Mutex<Vec<u8>>,
     /// Leader pid for tree kills; `None` before a successful spawn.
     pid: Mutex<Option<u32>>,
+    /// Tree kills this slot scheduled (test seam): a repeated cancel
+    /// must not schedule a second one.
+    #[cfg(test)]
+    tree_kills: AtomicUsize,
     /// Wakeup for `wait` callers on terminal transitions.
     done: tokio::sync::Notify,
 }
@@ -248,6 +252,8 @@ impl JobService {
             foreground: AtomicBool::new(request.foreground),
             log: Mutex::new(Vec::new()),
             pid: Mutex::new(None),
+            #[cfg(test)]
+            tree_kills: AtomicUsize::new(0),
             done: tokio::sync::Notify::new(),
         });
         jobs.insert(id.clone(), slot.clone());
@@ -371,17 +377,25 @@ impl JobService {
     /// driver reaps it, so a spawn right behind a cancel can still see
     /// the cap reached. The capacity error is explicit and the killed
     /// job frees its slot as soon as the tree is gone.
+    ///
+    /// Only the first request schedules the tree kill. A repeated
+    /// cancel would target a pid the first kill may already have
+    /// released, and a reused pid belongs to somebody else by then.
     pub fn cancel(&self, id: &str) -> bool {
         let slot = match self.lock_jobs().get(id).cloned() {
             Some(slot) => slot,
             None => return false,
         };
-        slot.cancelled.store(true, Ordering::SeqCst);
+        if slot.cancelled.swap(true, Ordering::SeqCst) {
+            return true;
+        }
         // Narrow the pid-reuse window: only signal a job that still
         // looks alive; an exited pid may already belong to someone else.
         if slot.is_running()
             && let Some(pid) = *slot.pid.lock().unwrap_or_else(|e| e.into_inner())
         {
+            #[cfg(test)]
+            slot.tree_kills.fetch_add(1, Ordering::SeqCst);
             kill_tree_detached(pid);
         }
         true
@@ -718,6 +732,28 @@ mod tests {
             "the cancel parked the caller for {elapsed:?}: the tree kill must not run inline"
         );
         // The kill still lands: the job ends cancelled.
+        let end = poll_finished(&jobs, &id).await;
+        assert!(end.cancelled);
+    }
+
+    /// A repeated cancel must not schedule a second tree kill: the
+    /// first kill may already have released the pid, and a reused pid
+    /// belongs to somebody else by then.
+    #[tokio::test]
+    async fn a_second_cancel_does_not_schedule_a_second_tree_kill() {
+        let (_runtime, jobs) = harness();
+        let id = jobs.spawn(request("t", LONG_CMD)).unwrap();
+        // Let the process start so the kill targets a live pid.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(jobs.cancel(&id));
+        assert!(jobs.cancel(&id));
+        let kills = jobs
+            .lock_jobs()
+            .get(&id)
+            .expect("job must be tracked")
+            .tree_kills
+            .load(Ordering::SeqCst);
+        assert_eq!(kills, 1, "the second cancel scheduled another tree kill");
         let end = poll_finished(&jobs, &id).await;
         assert!(end.cancelled);
     }

@@ -33,7 +33,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use infrastructure_base::{kill_tree_blocking, kill_tree_detached, shell_command};
+use infrastructure_base::{kill_tree_blocking, shell_command};
 use runtime_child::ChildRuntime;
 use tokio::io::AsyncReadExt;
 
@@ -158,6 +158,14 @@ struct JobSlot {
     exit_code: Mutex<Option<i32>>,
     /// Stop requested via `cancel`, observed by the driver.
     cancelled: AtomicBool,
+    /// Wakes the driver when a cancel arrives.
+    ///
+    /// The driver owns the termination: it kills the tree and then
+    /// reaps the child, and the reap releases the pid. A kill that
+    /// starts after the reap can hit a process the system already
+    /// handed that pid to, so the two must not be split across
+    /// threads.
+    cancel_requested: tokio::sync::Notify,
     /// Run deadline fired, observed in the snapshot.
     timed_out: AtomicBool,
     /// Started as a foreground run whose result is delivered inline, so
@@ -169,8 +177,8 @@ struct JobSlot {
     log: Mutex<Vec<u8>>,
     /// Leader pid for tree kills; `None` before a successful spawn.
     pid: Mutex<Option<u32>>,
-    /// Tree kills this slot scheduled (test seam): a repeated cancel
-    /// must not schedule a second one.
+    /// Tree kills this slot performed (test seam): a job must be
+    /// terminated exactly once.
     #[cfg(test)]
     tree_kills: AtomicUsize,
     /// Wakeup for `wait` callers on terminal transitions.
@@ -248,6 +256,7 @@ impl JobService {
             state: Mutex::new(JobState::Running),
             exit_code: Mutex::new(None),
             cancelled: AtomicBool::new(false),
+            cancel_requested: tokio::sync::Notify::new(),
             timed_out: AtomicBool::new(false),
             foreground: AtomicBool::new(request.foreground),
             log: Mutex::new(Vec::new()),
@@ -362,25 +371,25 @@ impl JobService {
 
     /// Request cancellation; true when a tracked job accepted the signal.
     ///
-    /// Kills the whole process tree (never just the shell); already
+    /// The request is recorded and the driver is woken; the driver
+    /// kills the whole process tree and reaps the child. Already
     /// finished jobs accept trivially. The driver reaps the exit, marks
     /// the job cancelled, and files the completion notice.
     ///
-    /// The tree kill waits for the whole tree to die (hundreds of
-    /// milliseconds on Windows), so it runs on its own thread: a
-    /// runtime worker must not be parked for that wait, and this method
-    /// is called from inside a turn. The call returns as soon as the
-    /// kill is scheduled; the driver observes the death and files the
-    /// terminal state.
+    /// The driver owns the termination because the kill and the reap
+    /// must be ordered: the reap releases the pid, so a tree kill that
+    /// starts afterwards can hit a process the system already handed
+    /// that pid to. The call itself only records the intent and returns
+    /// at once, so a caller inside a turn is never parked.
     ///
     /// The job therefore keeps its per-owner capacity slot until the
     /// driver reaps it, so a spawn right behind a cancel can still see
     /// the cap reached. The capacity error is explicit and the killed
     /// job frees its slot as soon as the tree is gone.
     ///
-    /// Only the first request schedules the tree kill. A repeated
-    /// cancel would target a pid the first kill may already have
-    /// released, and a reused pid belongs to somebody else by then.
+    /// Only the first request reaches the driver. A repeated cancel
+    /// would schedule a second termination of a job the first one is
+    /// already tearing down.
     pub fn cancel(&self, id: &str) -> bool {
         let slot = match self.lock_jobs().get(id).cloned() {
             Some(slot) => slot,
@@ -389,15 +398,10 @@ impl JobService {
         if slot.cancelled.swap(true, Ordering::SeqCst) {
             return true;
         }
-        // Narrow the pid-reuse window: only signal a job that still
-        // looks alive; an exited pid may already belong to someone else.
-        if slot.is_running()
-            && let Some(pid) = *slot.pid.lock().unwrap_or_else(|e| e.into_inner())
-        {
-            #[cfg(test)]
-            slot.tree_kills.fetch_add(1, Ordering::SeqCst);
-            kill_tree_detached(pid);
-        }
+        // The driver waits for the child, so it learns about the
+        // cancel there and terminates the job the one way every
+        // termination path uses.
+        slot.cancel_requested.notify_one();
         true
     }
 }
@@ -436,13 +440,12 @@ async fn drive_job(
         }
     };
     *slot.pid.lock().unwrap_or_else(|e| e.into_inner()) = child.id();
-    // Cancel raced the spawn: kill immediately instead of running.
+    // Cancel raced the spawn: terminate the job the way every
+    // termination path does.
     if slot.cancelled.load(Ordering::SeqCst) {
-        if let Some(pid) = child.id() {
-            kill_tree_blocking(pid).await;
-        }
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        #[cfg(test)]
+        slot.tree_kills.fetch_add(1, Ordering::SeqCst);
+        let _ = kill_and_reap(&mut child).await;
         finish(&id, &slot, &notifications, None);
         return;
     }
@@ -453,37 +456,70 @@ async fn drive_job(
     if let Some(pipe) = child.stderr.take() {
         drains.push(tokio::spawn(drain_pipe(pipe, slot.clone())));
     }
-    let status: Option<std::process::ExitStatus> = match request.timeout_ms {
-        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), child.wait()).await {
-            Ok(Ok(status)) => Some(status),
-            Ok(Err(e)) => {
-                append_log(&slot, format!("failed waiting on shell: {e}\n").as_bytes());
-                None
-            }
-            Err(_) => {
-                // Run deadline: the only spawn-side kill in this crate;
-                // wait-timeouts never reach here and never kill.
-                if let Some(pid) = child.id() {
-                    kill_tree_blocking(pid).await;
-                }
-                let _ = child.kill().await;
-                slot.timed_out.store(true, Ordering::SeqCst);
-                child.wait().await.ok()
-            }
-        },
-        None => match child.wait().await {
-            Ok(status) => Some(status),
-            Err(e) => {
-                append_log(&slot, format!("failed waiting on shell: {e}\n").as_bytes());
-                None
-            }
-        },
+    // The driver is the only party that terminates the job: it kills
+    // the tree and then reaps the child, in that order, so no kill can
+    // outlive the reap and hit a pid the system already reused. A
+    // cancel wakes the driver through the slot's notification.
+    let status: Option<std::process::ExitStatus> = tokio::select! {
+        biased;
+        _ = slot.cancel_requested.notified() => {
+            #[cfg(test)]
+            slot.tree_kills.fetch_add(1, Ordering::SeqCst);
+            kill_and_reap(&mut child).await
+        }
+        result = wait_for_exit(&slot, &mut child, request.timeout_ms) => result,
     };
     // Join the drains before finishing so the snapshot log is complete.
     for drain in drains {
         let _ = drain.await;
     }
     finish(&id, &slot, &notifications, status.and_then(|s| s.code()));
+}
+
+/// Kill the job's process tree, then reap the child.
+///
+/// The tree kill lands before the reap on purpose: the reap releases
+/// the pid, and a kill that starts after it can hit a process the
+/// system already handed that pid to. Every termination path goes
+/// through this helper, so the order holds for all of them.
+async fn kill_and_reap(child: &mut tokio::process::Child) -> Option<std::process::ExitStatus> {
+    if let Some(pid) = child.id() {
+        kill_tree_blocking(pid).await;
+    }
+    let _ = child.kill().await;
+    child.wait().await.ok()
+}
+
+/// Wait for the child to exit, honouring the run deadline.
+///
+/// The deadline terminates the job the way a cancel does: the tree
+/// kill lands before the reap. A wait timeout never reaches here and
+/// never kills.
+async fn wait_for_exit(
+    slot: &Arc<JobSlot>,
+    child: &mut tokio::process::Child,
+    timeout_ms: Option<u64>,
+) -> Option<std::process::ExitStatus> {
+    match timeout_ms {
+        Some(ms) => match tokio::time::timeout(Duration::from_millis(ms), child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            Ok(Err(e)) => {
+                append_log(slot, format!("failed waiting on shell: {e}\n").as_bytes());
+                None
+            }
+            Err(_) => {
+                slot.timed_out.store(true, Ordering::SeqCst);
+                kill_and_reap(child).await
+            }
+        },
+        None => match child.wait().await {
+            Ok(status) => Some(status),
+            Err(e) => {
+                append_log(slot, format!("failed waiting on shell: {e}\n").as_bytes());
+                None
+            }
+        },
+    }
 }
 
 /// Record the terminal status, wake waiters, and file the shared notice —
@@ -764,29 +800,28 @@ mod tests {
         assert!(end.cancelled);
     }
 
-    /// A repeated cancel must not schedule a second tree kill: the
-    /// first kill may already have released the pid, and a reused pid
-    /// belongs to somebody else by then.
+    /// A cancelled job must be terminated exactly once: a second tree
+    /// kill would target a pid the first kill may already have
+    /// released, and a reused pid belongs to somebody else by then.
     #[tokio::test]
-    async fn a_second_cancel_does_not_schedule_a_second_tree_kill() {
+    async fn a_repeated_cancel_terminates_the_job_once() {
         let (_runtime, jobs) = harness();
         let id = jobs.spawn(request("t", LONG_CMD)).unwrap();
         // The tree kill targets the published pid, so wait for it: a
-        // cancel that lands before the spawn finished schedules no tree
-        // kill of its own, because the driver's race branch handles
-        // that case instead.
+        // cancel that lands before the spawn finished is handled by the
+        // driver's own race branch and terminates the job the same way.
         wait_for_pid(&jobs, &id).await;
         assert!(jobs.cancel(&id));
         assert!(jobs.cancel(&id));
+        let end = poll_finished(&jobs, &id).await;
+        assert!(end.cancelled);
         let kills = jobs
             .lock_jobs()
             .get(&id)
             .expect("job must be tracked")
             .tree_kills
             .load(Ordering::SeqCst);
-        assert_eq!(kills, 1, "the second cancel scheduled another tree kill");
-        let end = poll_finished(&jobs, &id).await;
-        assert!(end.cancelled);
+        assert_eq!(kills, 1, "the job must be terminated exactly once");
     }
 
     #[tokio::test]

@@ -173,8 +173,9 @@ export function execSession(options: ExecOptions): ExecSession {
   });
   // The promise is created before anyone can await it, so a spawn
   // failure would surface as an unhandled rejection for a caller that
-  // only reads the event stream.
-  exit.catch(() => {});
+  // only reads the event stream. The same failure reaches that caller
+  // as a final event, so the rejection itself is left unhandled here.
+  exit.catch(() => undefined);
   // The Readable type claims non-null, but child.stdout is null when
   // spawn fails (ENOENT); the error handler below surfaces that as a
   // final event and this guard keeps the readline setup from throwing.

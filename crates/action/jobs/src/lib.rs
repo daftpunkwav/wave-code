@@ -33,7 +33,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use infrastructure_base::{kill_tree_blocking, kill_tree_detached, shell_invocation};
+use infrastructure_base::{kill_tree_blocking, kill_tree_detached, shell_command};
 use runtime_child::ChildRuntime;
 use tokio::io::AsyncReadExt;
 
@@ -386,16 +386,6 @@ impl JobService {
         }
         true
     }
-}
-
-/// Platform shell for one command string (the shared `shell_invocation`
-/// resolution in infrastructure-base): `cmd /C` on Windows, `sh -c` on Unix,
-/// `WAVECODE_SHELL` override.
-fn shell_command(command: &str) -> tokio::process::Command {
-    let (program, flag) = shell_invocation();
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.arg(flag).arg(command);
-    cmd
 }
 
 /// Driver future: spawn, capture, reap, then file the shared notice.

@@ -43,7 +43,7 @@ export interface ExecOptions {
   /**
    * wavecode binary to run. Default: `$WAVECODE_BIN`, else `wavecode`
    * resolved from PATH (add `.exe` resolution happens via spawn on
-   * Windows PATHEXT through the shell-less lookup of the exact name —
+   * Windows PATHEXT through the shell-less lookup of the exact name 鈥?
    * prefer setting WAVECODE_BIN on Windows when the binary is not
    * named `wavecode.exe`).
    */
@@ -69,8 +69,8 @@ export interface ExecSession {
    * maps onto the wire stdin dialect: `"allow"`, `"always"`, or
    * `{ deny: "reason" }` / `"deny"`.
    *
-   * @throws When the run was started without `approvals: true` — that run
-   * is fail-closed and parks no decision for the caller to make — or when
+   * @throws When the run was started without `approvals: true` 鈥?that run
+   * is fail-closed and parks no decision for the caller to make 鈥?or when
    * the decision is not one the wire dialect accepts.
    */
   // The parameter name documents the wire protocol; the base rule
@@ -159,6 +159,22 @@ export function execSession(options: ExecOptions): ExecSession {
   };
 
   const stdout = child.stdout;
+  // The exit promise is created once, here: a `wait()` call made after
+  // the child already closed must still settle, and a promise built per
+  // call would wait for an event that has already fired.
+  const exit = new Promise<ExecResult>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolve({
+        code: code ?? 1,
+        interrupted: code === 130,
+      });
+    });
+  });
+  // The promise is created before anyone can await it, so a spawn
+  // failure would surface as an unhandled rejection for a caller that
+  // only reads the event stream.
+  exit.catch(() => {});
   // The Readable type claims non-null, but child.stdout is null when
   // spawn fails (ENOENT); the error handler below surfaces that as a
   // final event and this guard keeps the readline setup from throwing.
@@ -183,7 +199,7 @@ export function execSession(options: ExecOptions): ExecSession {
     });
   }
   child.on("error", (error) => {
-    // Spawn failure (ENOENT, …): surface as a final event, not a hang.
+    // Spawn failure (ENOENT, 鈥?: surface as a final event, not a hang.
     fail?.(error);
     fail = null;
     push({
@@ -229,21 +245,13 @@ export function execSession(options: ExecOptions): ExecSession {
     answerApproval(callId: string, decision: ApprovalDecision): void {
       if (!options.approvals) {
         throw new Error(
-          "answerApproval requires `approvals: true` — without it the run is fail-closed",
+          "answerApproval requires `approvals: true` 鈥?without it the run is fail-closed",
         );
       }
       child.stdin.write(`${callId} ${decisionToken(decision)}\n`);
     },
     wait(): Promise<ExecResult> {
-      return new Promise((resolve, reject) => {
-        child.on("error", reject);
-        child.on("close", (code) => {
-          resolve({
-            code: code ?? 1,
-            interrupted: code === 130,
-          });
-        });
-      });
+      return exit;
     },
     interrupt(): void {
       child.kill("SIGINT");

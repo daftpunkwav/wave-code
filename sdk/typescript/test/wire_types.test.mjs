@@ -131,7 +131,10 @@ test("the ToolOutcome union lists every dispatch exit", () => {
     "missing",
   ];
   for (const tag of outcomes) {
-    assert.match(types, new RegExp(`\\| "${tag}"`), `ToolOutcome misses "${tag}"`);
+    assert.ok(
+      types.includes(`| "${tag}"`),
+      `ToolOutcome misses "${tag}"`,
+    );
   }
 });
 

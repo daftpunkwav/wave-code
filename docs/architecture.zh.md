@@ -173,7 +173,7 @@ infrastructure channels + interrupts + limits、TTL/LRU 缓存、分层配置、
 2. `operations-actor` 按会话串行化提交，并驱动 `runtime-runner`。
 3. RunLoop 经注入的 `Model` trait（`wavecode-llm` 适配器）采样模型，决定工具调用，经 `Tool` 接缝执行它们，并从失败中恢复——受重试预算和来自 `state-store` 的上下文预算约束。
 4. 工具执行经过 `safety-gate` 的审批流；裁决由权限模式与工具的声明式属性（`is_read_only` / `is_destructive` / `kind`）合成，OS 级隔离来自 `wavecode-sandbox`。
-5. 每一步都发出 `wavecode-wire` 事件；前端把它们渲染为 stdout JSONL、TUI 行或 gateway 帧。
+5. 每一步都发出 `wavecode-wire` 事件；前端把它们渲染为 stdout JSONL、TUI 行或 gateway 帧。回合的开始事件写明本回合采样的模型——取实时值，因此回合之间的 `/model` 切换会如实反映在指标账本的按回合归因里。
 6. 历史变更追加到 `state-persistence` 的块级 write-ahead 日志（`<id>.history.jsonl`），`resume` 会重放它；完成的回合另外向 `<id>.jsonl` 追加一份文本快照，供选择器使用，也供日志存在之前的旧会话使用。
 
 ## 基准

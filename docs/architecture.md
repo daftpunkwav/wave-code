@@ -191,7 +191,7 @@ either wired, a documented reserved seed, or the composition root itself.
 2. `operations-actor` serializes submissions per session and drives `runtime-runner`.
 3. The RunLoop samples the model through the injected `Model` trait (`wavecode-llm` adapter), decides on tool calls, executes them through the `Tool` seam, and recovers from failures — bounded by retry budgets and context budgets from `state-store`.
 4. Tool executions pass the `safety-gate` approval flow; verdicts combine permission modes with the tool's declarative attributes (`is_read_only` / `is_destructive` / `kind`), and OS-level isolation comes from `wavecode-sandbox`.
-5. Every step emits `wavecode-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames.
+5. Every step emits `wavecode-wire` events; frontends render them as stdout JSONL, TUI rows, or gateway frames. The turn's start event names the model the turn sampled — the live one, so a `/model` switch between turns shows up in the per-turn attribution the metrics ledger keeps.
 6. History mutations append to `state-persistence`'s block-level write-ahead journal (`<id>.history.jsonl`), which `resume` replays; completed turns additionally append a text snapshot to `<id>.jsonl` for the picker and for sessions written before the journal existed.
 
 ## Benchmarks

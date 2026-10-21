@@ -43,10 +43,10 @@ export interface ExecOptions {
   /**
    * wavecode binary to run. Default: `$WAVECODE_BIN`, else `wavecode`
    * resolved from PATH. The lookup is shell-less: it tries the exact
-   * name, then the executable extensions the runtime knows (`.com`,
-   * `.exe`), and it never consults `PATHEXT` — a `.cmd` launcher is
-   * not found, so set WAVECODE_BIN on Windows when the binary is not
-   * named `wavecode.exe`).
+   * name, then the executable extensions the runtime knows — `.com`
+   * and `.exe`, never `PATHEXT`. A `.cmd` launcher is not among them,
+   * so set WAVECODE_BIN when the binary is named that way, or when
+   * its base name is not `wavecode`.
    */
   bin?: string;
   /** Extra environment for the child (merged over `process.env`). */

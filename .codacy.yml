@@ -14,6 +14,18 @@ exclude_paths:
   - "sdk/typescript/package.json"
 
 engines:
+  opengrep:
+    # The three allocation tests install a counting global allocator:
+    # counting the bytes a request allocates is the only way to pin
+    # "the history is copied once", and a global allocator cannot be
+    # written without `unsafe`. The analyzer reports that `unsafe` as a
+    # security finding in every one of them, nine times over. The files
+    # are test-only and carry no other `unsafe`; they stay covered by
+    # every other tool.
+    exclude_paths:
+      - "crates/frontends/console/tests/render_allocation.rs"
+      - "crates/frontends/engine/tests/width_allocation.rs"
+      - "crates/operations/bootstrap/tests/request_estimate_allocation.rs"
   lizard:
     # Lizard's Rust parser desyncs on some inputs and attributes hundreds
     # of phantom NLOC to small functions in the files below. Verified

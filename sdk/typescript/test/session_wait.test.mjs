@@ -14,6 +14,23 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execSession } from "../dist/index.js";
 
+/**
+ * Race a promise against a timeout, and clear the timer once the race
+ * settles: a pending timer keeps the event loop alive and holds the
+ * test process open for the whole timeout window.
+ */
+async function settleWithin(promise, ms) {
+  let timer;
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("wait() did not settle")), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 test("wait() settles after the event stream ended", async () => {
   // The SDK spawns `wavecode exec --json <prompt>`, so a script named
   // `exec` in the working directory stands in for the binary: node runs
@@ -35,12 +52,7 @@ test("wait() settles after the event stream ended", async () => {
 
     // The child has closed by now, so a promise built per call would
     // wait for an event that already fired and never settle.
-    const result = await Promise.race([
-      session.wait(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("wait() did not settle")), 5_000),
-      ),
-    ]);
+    const result = await settleWithin(session.wait(), 5_000);
     assert.equal(result.code, 0);
     assert.equal(result.interrupted, false);
   } finally {
@@ -57,12 +69,7 @@ test("wait() settles before the event stream ended too", async () => {
       bin: process.execPath,
       cwd: dir,
     });
-    const result = await Promise.race([
-      session.wait(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("wait() did not settle")), 5_000),
-      ),
-    ]);
+    const result = await settleWithin(session.wait(), 5_000);
     assert.equal(result.code, 0);
     assert.equal(result.interrupted, false);
   } finally {

@@ -145,10 +145,6 @@ export function execSession(options: ExecOptions): ExecSession {
   const eventsQueue: ExecEvent[] = [];
   let wake: (() => void) | null = null;
   let closed = false;
-  // The parameter name documents what a rejection receives; the base
-  // rule cannot see that this is a type position, not an unused binding.
-  // eslint-disable-next-line no-unused-vars -- type-position param name
-  let fail: ((error: Error) => void) | null = null;
 
   // This SDK file is not a Qwik component; the framework-scoped rule
   // misfires on a plain closure.
@@ -202,8 +198,9 @@ export function execSession(options: ExecOptions): ExecSession {
   }
   child.on("error", (error) => {
     // Spawn failure (ENOENT, —): surface as a final event, not a hang.
-    fail?.(error);
-    fail = null;
+    // The iterator is not rejected: a `for await` consumer must see
+    // this event and then the end of the stream. The exit promise
+    // still rejects for the callers of `wait()`.
     push({
       type: "error",
       message: `failed to spawn ${bin}: ${error.message}`,
@@ -232,9 +229,8 @@ export function execSession(options: ExecOptions): ExecSession {
             if (closed) {
               return { value: undefined, done: true };
             }
-            await new Promise<void>((resolve, reject) => {
+            await new Promise<void>((resolve) => {
               wake = resolve;
-              fail = reject;
             });
           }
         },

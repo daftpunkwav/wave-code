@@ -624,6 +624,34 @@ mod tests {
         snap
     }
 
+    /// Wait until the driver published the job's pid.
+    ///
+    /// The tree kill targets that pid, so a cancel issued before the
+    /// spawn finished schedules no kill of its own: the driver's race
+    /// branch covers that case instead. The wait is bounded, so a job
+    /// that never starts fails the test instead of hanging it.
+    async fn wait_for_pid(service: &JobService, id: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let published = {
+                let slot = service
+                    .lock_jobs()
+                    .get(id)
+                    .expect("job must be tracked")
+                    .clone();
+                *slot.pid.lock().unwrap_or_else(|e| e.into_inner())
+            };
+            if published.is_some() {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "job {id} never published its pid"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     #[tokio::test]
     async fn spawn_runs_echo_and_files_a_notice() {
         let (runtime, jobs) = harness();
@@ -743,8 +771,11 @@ mod tests {
     async fn a_second_cancel_does_not_schedule_a_second_tree_kill() {
         let (_runtime, jobs) = harness();
         let id = jobs.spawn(request("t", LONG_CMD)).unwrap();
-        // Let the process start so the kill targets a live pid.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // The tree kill targets the published pid, so wait for it: a
+        // cancel that lands before the spawn finished schedules no tree
+        // kill of its own, because the driver's race branch handles
+        // that case instead.
+        wait_for_pid(&jobs, &id).await;
         assert!(jobs.cancel(&id));
         assert!(jobs.cancel(&id));
         let kills = jobs

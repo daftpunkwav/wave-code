@@ -394,7 +394,15 @@ mod tests {
     /// belongs to somebody else by then.
     #[tokio::test]
     async fn a_second_cancel_does_not_start_a_second_tree_kill() {
-        let mut job = ShellJob::spawn("echo cancel-twice").expect("spawn");
+        // The child must still be alive when the cancels land: a
+        // short-lived command would leave the second tree kill without
+        // a live pid to hit.
+        let sleep = if cfg!(windows) {
+            "ping -n 30 127.0.0.1"
+        } else {
+            "sleep 30"
+        };
+        let mut job = spawn_with_default_shell(sleep).expect("spawn");
         job.cancel();
         job.cancel();
         assert_eq!(

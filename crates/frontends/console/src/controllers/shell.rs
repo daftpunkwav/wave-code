@@ -24,6 +24,9 @@
 //! reported as a `Done(None)` event after the pipes drain.
 
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -65,6 +68,17 @@ pub struct ShellJob {
     /// Windows, and the process group on Unix (the child is spawned as
     /// the group leader).
     pid: Option<u32>,
+    /// Set once a cancel has been requested.
+    ///
+    /// Esc and Ctrl+C both reach the same job, so `cancel` can be
+    /// called twice for one shell. The second tree kill would target a
+    /// pid the first one may already have released, and a reused pid
+    /// belongs to somebody else by then.
+    cancelled: AtomicBool,
+    /// The tree kills this job started (test seam): a second cancel
+    /// must not start a second one.
+    #[cfg(test)]
+    tree_kills: AtomicUsize,
     /// Set once the pump reported `Done` (or the channel closed), so
     /// `try_recv` stops reporting instead of feeding an endless stream
     /// of terminal events to the caller.
@@ -167,6 +181,9 @@ impl ShellJob {
             kill,
             tree_killed,
             pid: child_pid,
+            cancelled: AtomicBool::new(false),
+            #[cfg(test)]
+            tree_kills: AtomicUsize::new(0),
             ended: false,
         })
     }
@@ -195,7 +212,14 @@ impl ShellJob {
 
     /// Kill the child; the remaining piped output still drains and the
     /// job ends with a `Done(None)` event.
+    ///
+    /// Only the first call acts: Esc and Ctrl+C both reach this job, and
+    /// a second tree kill would target a pid the first one may already
+    /// have released.
     pub fn cancel(&self) {
+        if self.cancelled.swap(true, Ordering::SeqCst) {
+            return;
+        }
         // Wake the pump task so it reports the terminal event and
         // orders its own kill after the tree kill below.
         self.kill.notify_one();
@@ -207,6 +231,8 @@ impl ShellJob {
         // that wait. The signal tells the pump the tree kill landed.
         let pid = self.pid;
         let landed = Arc::clone(&self.tree_killed);
+        #[cfg(test)]
+        self.tree_kills.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
             if let Some(pid) = pid {
                 infrastructure_base::kill_tree(pid);
@@ -358,6 +384,24 @@ mod tests {
         }
         assert!(descendant_alive, "the descendant must hold the output pipe");
         job.cancel();
+        let (_out, _err, code) = run_to_done(&mut job).await;
+        assert_eq!(code, Some(None), "cancelled job reports no exit code");
+    }
+
+    /// Esc and Ctrl+C both reach the same job, so `cancel` can be
+    /// called twice for one shell. The second tree kill would target a
+    /// pid the first one may already have released, and a reused pid
+    /// belongs to somebody else by then.
+    #[tokio::test]
+    async fn a_second_cancel_does_not_start_a_second_tree_kill() {
+        let mut job = ShellJob::spawn("echo cancel-twice").expect("spawn");
+        job.cancel();
+        job.cancel();
+        assert_eq!(
+            job.tree_kills.load(Ordering::SeqCst),
+            1,
+            "the second cancel started another tree kill"
+        );
         let (_out, _err, code) = run_to_done(&mut job).await;
         assert_eq!(code, Some(None), "cancelled job reports no exit code");
     }

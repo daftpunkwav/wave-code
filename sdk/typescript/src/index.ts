@@ -1,8 +1,12 @@
 /**
- * @wavecode/sdk — drive the WaveCode coding agent from JavaScript.
+ * @file Index
+ * @description The package entry point: the SDK's public export surface.
  *
- * Minimal surface: `execSession` spawns `wavecode exec --json`, exposes
- * the typed event stream, and (opt-in) answers approvals.
+ * Responsibilities:
+ * - Re-export the session API and the wire types that API hands out.
+ *
+ * Constraints:
+ * - This module re-exports only: it holds no behaviour of its own.
  */
 
 export { execSession } from "./exec.js";
@@ -15,6 +19,7 @@ export type {
   ApprovalKind,
   ExecEvent,
   MetaLine,
+  ToolOutcome,
   WireEvent,
   WireEventPayload,
 } from "./types.js";

@@ -278,7 +278,7 @@ where
 /// Assemble the model-independent remainder: registries to live client.
 ///
 /// Must be called inside a tokio runtime (the actor task spawns here).
-/// Shares its body with [`assemble_session`]; the split is purely a
+/// Shares its body with [`super::assemble_session`]; the split is purely a
 /// seam for hermetic tests, never a behavior fork. Public only so the
 /// gateway's server tests can assemble sessions the production way.
 pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {

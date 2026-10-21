@@ -756,8 +756,17 @@ async fn explicit_server_spawns_confined_or_fails_closed() {
     unsafe {
         std::env::set_var("WAVECODE_SANDBOX_OS", "1");
     }
-    // nosemgrep: rust.lang.security.temp-dir.temp-dir
-    let spawned = ChildLsp::spawn("cat", &std::env::temp_dir(), &[]);
+    // The server program is spawned directly (no shell), so it must
+    // exist on the host: `cat` on Unix, `cmd` on Windows, where it
+    // waits for stdin just like `cat` does.
+    let program = if cfg!(windows) { "cmd" } else { "cat" };
+    // A directory of its own for the spawned server: the shared
+    // temporary directory is world-writable, so anything planted there
+    // is the server's working directory. The directory is declared
+    // before the server, so the server is killed before its directory
+    // is removed.
+    let workdir = tempfile::tempdir().expect("a working directory for the server");
+    let spawned = ChildLsp::spawn(program, workdir.path(), &[]);
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     unsafe {
         std::env::remove_var("WAVECODE_SANDBOX_OS");
@@ -767,7 +776,7 @@ async fn explicit_server_spawns_confined_or_fails_closed() {
     }
     if wavecode_sandbox::detect_backend().is_available() {
         // Confinement armed: the trivially well-behaved server still
-        // runs inside it. (`cat` with no stdin input simply waits.)
+        // runs inside it. (`cat`/`cmd` with no stdin input simply waits.)
         assert!(
             spawned.is_ok(),
             "confined spawn failed: {err}",

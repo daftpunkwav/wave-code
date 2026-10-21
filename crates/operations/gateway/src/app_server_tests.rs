@@ -237,6 +237,101 @@ async fn healthz_is_open_and_other_routes_require_the_token() {
     let _ = done;
 }
 
+/// Every frame on an SSE stream carries the wire `Event` shape — a
+/// correlation `id` plus the payload — including the one frame the
+/// server raises itself: a consumer that parses each `data:` payload as
+/// a `wavecode_wire::Event` must not trip over the subscriber-lag
+/// warning.
+#[test]
+fn lag_warning_frame_is_a_wire_event() {
+    let frame = serde_json::to_value(lag_warning(3)).unwrap();
+    let back: wavecode_wire::Event = serde_json::from_value(frame).unwrap();
+    assert_eq!(back.id, SERVER_EVENT_ID);
+    assert!(
+        matches!(&back.msg, EventMsg::Warning { message } if message.contains("3 events skipped")),
+        "{back:?}"
+    );
+}
+
+/// The lag frame the *stream* sends is a wire event too.
+///
+/// The helper-level check above only proves the helper builds one; it
+/// cannot fail when the stream stops sending it. The observable here is
+/// the stream: a subscriber that falls behind the broadcast buffer
+/// receives the warning frame, and every `data:` payload the client
+/// reads — the server-raised one included — must parse as an `Event`.
+#[tokio::test]
+async fn the_lag_frame_on_the_stream_parses_as_a_wire_event() {
+    let (commands, _pending) = tokio::sync::mpsc::channel(32);
+    let state = state_with_session("s-lag", commands);
+    // A tiny broadcast buffer: the events published below overflow it, so
+    // the subscriber falls behind and the stream raises the lag frame.
+    let (events, _receiver) = tokio::sync::broadcast::channel(2);
+    let sender = events.clone();
+    state
+        .sessions
+        .lock()
+        .await
+        .get_mut("s-lag")
+        .expect("the session exists")
+        .events = events;
+    // The handler subscribes before it returns, so the events published
+    // below land in the subscriber's buffer.
+    let response = stream_events(State(state), Path("s-lag".to_string())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for i in 0..4 {
+        sender
+            .send(Event {
+                id: format!("e{i}"),
+                msg: EventMsg::Warning {
+                    message: "filler".to_string(),
+                },
+            })
+            .expect("the broadcast accepts the event");
+    }
+    // The turn-completed event ends the stream, so the body can be
+    // collected without waiting for the session to close.
+    sender
+        .send(Event {
+            id: "e-done".to_string(),
+            msg: EventMsg::TurnCompleted { interrupted: false },
+        })
+        .expect("the broadcast accepts the event");
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("the SSE body reads");
+    let text = String::from_utf8_lossy(&body);
+    let payloads: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str(data).expect("every frame is JSON"))
+        .collect();
+    assert!(!payloads.is_empty(), "the stream carried frames: {text}");
+    for payload in &payloads {
+        serde_json::from_value::<wavecode_wire::Event>(payload.clone())
+            .expect("every frame on the stream is a wire event");
+    }
+    let server_frames: Vec<&serde_json::Value> = payloads
+        .iter()
+        .filter(|payload| payload["id"] == SERVER_EVENT_ID)
+        .collect();
+    assert_eq!(
+        server_frames.len(),
+        1,
+        "the stream carries exactly one server-raised frame: {payloads:?}"
+    );
+    assert!(
+        server_frames[0]["type"] == "warning",
+        "the server-raised frame is the lag warning: {server_frames:?}"
+    );
+    assert!(
+        server_frames[0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("events skipped")),
+        "the lag warning names the skipped count: {server_frames:?}"
+    );
+}
+
 /// An empty bearer token would make the guard accept a bare
 /// `Bearer ` header: the server refuses to start instead.
 #[tokio::test]

@@ -1,9 +1,18 @@
 /**
- * Spawn `wavecode exec --json` as a child process and expose the JSONL
- * event stream as a typed async iterator. With `approvals: true` the
- * session also answers parked approvals through the `answerApproval`
- * handle (the wire's stdin dialect); without it the run stays
- * fail-closed: approvals deny, exactly like plain exec.
+ * @file ExecSession
+ * @description Spawn `wavecode exec --json` and expose its JSONL event
+ *   stream as a typed async iterator.
+ *
+ * Responsibilities:
+ * - Spawn the child process and parse its JSONL stdout into typed events.
+ * - Answer parked approvals through the wire's stdin dialect.
+ * - Surface the child's exit code and whether the turn was interrupted.
+ *
+ * Constraints:
+ * - This module must not depend on the Rust workspace: it drives the
+ *   `wavecode` binary over its wire only.
+ * - Without `approvals: true` the run stays fail-closed: approvals deny,
+ *   exactly like plain exec.
  */
 
 import { spawn, type ChildProcessByStdio } from "node:child_process";
@@ -14,6 +23,7 @@ import type { ApprovalDecision, ExecEvent } from "./types.js";
 export { isMetaLine } from "./types.js";
 export type { ApprovalDecision, ExecEvent, MetaLine, WireEvent } from "./types.js";
 
+/** The run's prompt, binary, and surface options. */
 export interface ExecOptions {
   /** The user prompt for the single turn. */
   prompt: string;
@@ -32,16 +42,18 @@ export interface ExecOptions {
   configPath?: string;
   /**
    * wavecode binary to run. Default: `$WAVECODE_BIN`, else `wavecode`
-   * resolved from PATH (add `.exe` resolution happens via spawn on
-   * Windows PATHEXT through the shell-less lookup of the exact name —
-   * prefer setting WAVECODE_BIN on Windows when the binary is not
-   * named `wavecode.exe`).
+   * resolved from PATH. The lookup is shell-less: it tries the exact
+   * name, then the executable extensions the runtime knows — `.com`
+   * and `.exe`, never `PATHEXT`. A `.cmd` launcher is not among them,
+   * so set WAVECODE_BIN when the binary is named that way, or when
+   * its base name is not `wavecode`.
    */
   bin?: string;
   /** Extra environment for the child (merged over `process.env`). */
   env?: Record<string, string>;
 }
 
+/** How the child process ended. */
 export interface ExecResult {
   /** Process exit code (0 completed, 130 interrupted, 1 failed). */
   code: number;
@@ -49,6 +61,7 @@ export interface ExecResult {
   interrupted: boolean;
 }
 
+/** The live run: its event stream, its approval handle, and its exit. */
 export interface ExecSession {
   /** Async iterator over the meta line plus every wire event. */
   events: AsyncIterable<ExecEvent>;
@@ -56,6 +69,10 @@ export interface ExecSession {
    * Answer one parked approval (`approvals: true` only). The decision
    * maps onto the wire stdin dialect: `"allow"`, `"always"`, or
    * `{ deny: "reason" }` / `"deny"`.
+   *
+   * @throws When the run was started without `approvals: true` — that run
+   * is fail-closed and parks no decision for the caller to make — or when
+   * the decision is not one the wire dialect accepts.
    */
   // The parameter name documents the wire protocol; the base rule
   // cannot see that an interface member list is a type position.
@@ -91,6 +108,13 @@ function decisionToken(decision: ApprovalDecision): string {
   return reason ? `deny:${reason}` : "deny";
 }
 
+/**
+ * Spawn `wavecode exec --json` and expose its JSONL event stream.
+ *
+ * @param options - The prompt, binary, and surface options of the run.
+ * @returns The live session: its event iterator, its approval handle,
+ * and the promise that settles when the child exits.
+ */
 export function execSession(options: ExecOptions): ExecSession {
   const bin = options.bin ?? process.env.WAVECODE_BIN ?? "wavecode";
   const args = ["exec", "--json"];
@@ -121,10 +145,6 @@ export function execSession(options: ExecOptions): ExecSession {
   const eventsQueue: ExecEvent[] = [];
   let wake: (() => void) | null = null;
   let closed = false;
-  // The parameter name documents what a rejection receives; the base
-  // rule cannot see that this is a type position, not an unused binding.
-  // eslint-disable-next-line no-unused-vars -- type-position param name
-  let fail: ((error: Error) => void) | null = null;
 
   // This SDK file is not a Qwik component; the framework-scoped rule
   // misfires on a plain closure.
@@ -136,6 +156,23 @@ export function execSession(options: ExecOptions): ExecSession {
   };
 
   const stdout = child.stdout;
+  // The exit promise is created once, here: a `wait()` call made after
+  // the child already closed must still settle, and a promise built per
+  // call would wait for an event that has already fired.
+  const exit = new Promise<ExecResult>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code) => {
+      resolve({
+        code: code ?? 1,
+        interrupted: code === 130,
+      });
+    });
+  });
+  // The promise is created before anyone can await it, so a spawn
+  // failure would surface as an unhandled rejection for a caller that
+  // only reads the event stream. The same failure reaches that caller
+  // as a final event, so the rejection itself is left unhandled here.
+  exit.catch(() => undefined);
   // The Readable type claims non-null, but child.stdout is null when
   // spawn fails (ENOENT); the error handler below surfaces that as a
   // final event and this guard keeps the readline setup from throwing.
@@ -160,9 +197,10 @@ export function execSession(options: ExecOptions): ExecSession {
     });
   }
   child.on("error", (error) => {
-    // Spawn failure (ENOENT, …): surface as a final event, not a hang.
-    fail?.(error);
-    fail = null;
+    // Spawn failure (ENOENT, —): surface as a final event, not a hang.
+    // The iterator is not rejected: a `for await` consumer must see
+    // this event and then the end of the stream. The exit promise
+    // still rejects for the callers of `wait()`.
     push({
       type: "error",
       message: `failed to spawn ${bin}: ${error.message}`,
@@ -191,9 +229,8 @@ export function execSession(options: ExecOptions): ExecSession {
             if (closed) {
               return { value: undefined, done: true };
             }
-            await new Promise<void>((resolve, reject) => {
+            await new Promise<void>((resolve) => {
               wake = resolve;
-              fail = reject;
             });
           }
         },
@@ -212,15 +249,7 @@ export function execSession(options: ExecOptions): ExecSession {
       child.stdin.write(`${callId} ${decisionToken(decision)}\n`);
     },
     wait(): Promise<ExecResult> {
-      return new Promise((resolve, reject) => {
-        child.on("error", reject);
-        child.on("close", (code) => {
-          resolve({
-            code: code ?? 1,
-            interrupted: code === 130,
-          });
-        });
-      });
+      return exit;
     },
     interrupt(): void {
       child.kill("SIGINT");

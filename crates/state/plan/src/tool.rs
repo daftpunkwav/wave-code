@@ -42,7 +42,7 @@ pub fn load_for_session(home: Option<&Path>, session_id: &str) -> (PlanState, Op
 }
 
 /// Shared plan handle: the in-memory machine plus its resume file.
-/// [`Self::persist_lock`] covers the mutation and the disk write together,
+/// The `persist_lock` field covers the mutation and the disk write together,
 /// so an older snapshot cannot land after a newer one.
 #[derive(Debug)]
 pub struct PlanStore {

@@ -13,7 +13,8 @@
 //! OS-level sandboxing is orthogonal to permission modes: mechanism
 //! separated from policy. The platform backend is picked by probing in
 //! a fixed order (bwrap, landlock, seatbelt, Windows job object; see
-//! [`chain`]), and a missing backend degrades rather than fails.
+//! [`chain`]); confinement is opt-in per spawn, and a requested
+//! confinement that no backend can arm is refused rather than downgraded.
 //!
 //! ## Threat model: what this crate enforces (and what it does not)
 //!
@@ -39,10 +40,10 @@
 //! privileges — treat the policy gate as intent ruling, and the backend
 //! chain as the containment boundary only where it reports availability.
 //!
-//! Future seam: OS enforcement plugs in behind verdict execution without
-//! changing policy — the composition-root policy adapter consumes
-//! [`Verdict`] today, and a backend would enforce the same verdicts with
-//! OS primitives while [`Sandbox::decide`] keeps ruling on intent.
+//! Mechanism sits behind the verdict: the composition-root policy adapter
+//! consumes [`Verdict`], and a backend arms the spawn's confinement
+//! profile with OS primitives while [`Sandbox::decide`] keeps ruling on
+//! intent.
 
 use std::sync::{Arc, Mutex};
 

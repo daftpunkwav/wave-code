@@ -1,3 +1,13 @@
+/*! @file Width
+ * @description ANSI-aware measurement, truncation, and wrapping of terminal lines.
+ *
+ * Responsibilities:
+ * - Split a line into ANSI escape sequences and visible grapheme clusters
+ * - Measure visible cell width, strip escapes, truncate, and word-wrap
+ *
+ * This module must not depend on: any workspace crate, or an async runtime.
+ */
+
 //! ANSI-aware text measurement, truncation, and wrapping.
 //!
 //! Terminal UI lines carry embedded SGR/OSC sequences that occupy no
@@ -22,38 +32,66 @@ pub(crate) enum Token<'a> {
 /// Token iteration for components that must splice styled rows (cursor
 /// markers, horizontal windows).
 pub(crate) fn tokens(line: &str) -> impl Iterator<Item = Token<'_>> {
-    tokenize(line).into_iter()
+    Tokens::new(line)
 }
 
-/// Split `line` into escape tokens and visible graphemes, in order.
-fn tokenize(line: &str) -> Vec<Token<'_>> {
-    let bytes = line.as_bytes();
-    let mut tokens = Vec::new();
-    let mut rest = line;
-    let mut offset = 0;
-    while !rest.is_empty() {
-        if rest.starts_with('\x1b') {
-            if let Some(len) = escape_len(bytes, offset) {
-                tokens.push(Token::Escape(&rest[..len]));
-                rest = &rest[len..];
-                offset += len;
-                continue;
+/// Lazy scanner over one line: escape sequences and visible grapheme
+/// clusters, in order.
+///
+/// The scan is lazy on purpose. The render path measures or wraps a line
+/// for every frame row — and for every message body, on every frame — so
+/// collecting the tokens into a vector first meant one heap allocation
+/// (one entry per grapheme) per measurement. Walking the line in place
+/// keeps the same token sequence without the allocation.
+struct Tokens<'a> {
+    /// The whole line: escape lengths resolve against its bytes.
+    bytes: &'a [u8],
+    /// The not-yet-scanned tail of the line.
+    rest: &'a str,
+    /// Byte offset of `rest` inside the line.
+    offset: usize,
+}
+
+impl<'a> Tokens<'a> {
+    fn new(line: &'a str) -> Self {
+        Self {
+            bytes: line.as_bytes(),
+            rest: line,
+            offset: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for Tokens<'a> {
+    type Item = Token<'a>;
+
+    fn next(&mut self) -> Option<Token<'a>> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        if self.rest.starts_with('\x1b') {
+            if let Some(len) = escape_len(self.bytes, self.offset) {
+                let rest = self.rest;
+                let (head, tail) = rest.split_at(len);
+                self.rest = tail;
+                self.offset += len;
+                return Some(Token::Escape(head));
             }
             // Unterminated or lone ESC: surface it as a grapheme so a
             // stray escape can never swallow the rest of the line.
-            tokens.push(Token::Grapheme("\x1b"));
-            rest = &rest[1..];
-            offset += 1;
-            continue;
+            let rest = self.rest;
+            let (head, tail) = rest.split_at(1);
+            self.rest = tail;
+            self.offset += 1;
+            return Some(Token::Grapheme(head));
         }
-        let Some((_, grapheme)) = rest.grapheme_indices(true).next() else {
-            break;
-        };
-        tokens.push(Token::Grapheme(grapheme));
-        offset += grapheme.len();
-        rest = &rest[grapheme.len()..];
+        let rest = self.rest;
+        let (_, grapheme) = rest.grapheme_indices(true).next()?;
+        let len = grapheme.len();
+        self.rest = &rest[len..];
+        self.offset += len;
+        Some(Token::Grapheme(grapheme))
     }
-    tokens
 }
 
 /// Length of the escape sequence starting at `bytes[offset] == ESC`, or
@@ -101,7 +139,15 @@ fn escape_len(bytes: &[u8], offset: usize) -> Option<usize> {
         }
         // Two-byte escapes (ESC 7, ESC ( B, ...): anything else following
         // ESC consumes one more byte.
-        _ => Some(2),
+        //
+        // Only an ASCII byte can be that second byte: a byte >= 0x80
+        // starts a multi-byte UTF-8 character, so pairing ESC with "one
+        // more byte" would cut that character in half (and panic on the
+        // non-char-boundary slice). ESC in front of such a character is
+        // not an escape sequence at all, so the ESC stands alone and the
+        // character keeps its own width.
+        _ if after < 0x80 => Some(2),
+        _ => None,
     }
 }
 
@@ -171,9 +217,11 @@ impl SgrState {
 /// Visible cell width of a line, ignoring escape sequences. Zero-width
 /// graphemes (combining marks, ZWJ) contribute nothing; wide graphemes
 /// contribute their column count.
+///
+/// Allocation-free: the measurement walks the line in place, so the
+/// per-frame row measurements cost no allocator traffic.
 pub fn width(line: &str) -> usize {
-    tokenize(line)
-        .into_iter()
+    tokens(line)
         .map(|token| match token {
             Token::Escape(_) => 0,
             Token::Grapheme(g) => unicode_width::UnicodeWidthStr::width(g),
@@ -183,8 +231,7 @@ pub fn width(line: &str) -> usize {
 
 /// Remove all ANSI escape sequences, keeping visible text only.
 pub fn strip_ansi(line: &str) -> String {
-    tokenize(line)
-        .into_iter()
+    tokens(line)
         .filter_map(|token| match token {
             Token::Escape(_) => None,
             Token::Grapheme(g) => Some(g),
@@ -201,7 +248,7 @@ pub fn truncate_to_width(line: &str, max_width: usize) -> String {
     }
     let mut out = String::new();
     let mut used = 0;
-    for token in tokenize(line) {
+    for token in tokens(line) {
         match token {
             Token::Escape(seq) => out.push_str(seq),
             Token::Grapheme(g) => {
@@ -223,7 +270,7 @@ pub fn truncate_to_width(line: &str, max_width: usize) -> String {
 pub fn slice_by_column(line: &str, start: usize, len: usize) -> String {
     let mut out = String::new();
     let mut col = 0;
-    for token in tokenize(line) {
+    for token in tokens(line) {
         match token {
             Token::Escape(seq) => out.push_str(seq),
             Token::Grapheme(g) => {
@@ -271,7 +318,7 @@ pub fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     let mut used = 0;
     let mut state = SgrState::default();
 
-    for token in tokenize(line) {
+    for token in tokens(line) {
         match token {
             Token::Escape(seq) => {
                 state.apply(seq);
@@ -337,6 +384,46 @@ mod tests {
         let osc_st = b"\x1b]8;;\x1b\\";
         assert_eq!(escape_len(osc_st, 0), Some(osc_st.len()));
         assert_eq!(escape_len(b"\x1b[38;2", 0), None);
+    }
+
+    /// A stray ESC in front of a multi-byte character is not an escape
+    /// sequence: the byte after ESC starts a character, so the ESC cannot
+    /// be paired with "one more byte" without splitting that character.
+    /// The pair is not a valid escape, so the ESC stands alone.
+    #[test]
+    fn escape_len_refuses_to_pair_esc_with_a_multibyte_character() {
+        // "€" is three bytes: pairing ESC with "one byte" would cut it in
+        // half and panic on the non-char-boundary slice.
+        let euro = "\x1b€".as_bytes();
+        assert_eq!(escape_len(euro, 0), None);
+        // A CJK character behaves the same way.
+        let cjk = "\x1b中".as_bytes();
+        assert_eq!(escape_len(cjk, 0), None);
+        // A plain ASCII byte after ESC is still the two-byte escape.
+        assert_eq!(escape_len(b"\x1bx", 0), Some(2));
+    }
+
+    /// Regression: measuring a line that carries a stray ESC in front of a
+    /// multi-byte character must not panic. The ESC is not an escape
+    /// sequence here, so it stands alone and the character behind it keeps
+    /// its own text and columns.
+    #[test]
+    fn stray_escape_before_a_multibyte_character_does_not_panic() {
+        let line = "\x1b€";
+        let plain = strip_ansi(line);
+        assert!(plain.contains('€'), "the character survives: {plain:?}");
+        assert!(
+            !plain.contains('\u{FFFD}'),
+            "the character is not split: {plain:?}"
+        );
+        assert_eq!(
+            width(line),
+            width("\x1b") + width("€"),
+            "the stray ESC is measured as its own grapheme"
+        );
+        // Truncation and wrapping take the same path.
+        assert_eq!(truncate_to_width(line, 2), line);
+        assert_eq!(wrap_line(line, 8), vec![line.to_string()]);
     }
 
     #[test]

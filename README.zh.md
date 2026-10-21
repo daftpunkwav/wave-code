@@ -300,10 +300,11 @@ Windows job object 只约束进程生命周期与数量——没有文件系统�
 - MCP：配置在 `[mcp_servers.<name>]` 下的 stdio 服务器（`command`
   加可选 `args`/`env`）与 streamable-HTTP 服务器（`url`，可选 OAuth
   client 凭据）在启动时以 `initialize` + `tools/list` 连接，并把每个
-  工具桥接为 `mcp__<server>__<tool>`（遵守
+  工具桥接为 `mcp__<server>__<tool>`（从不采信服务端的
   `annotations.readOnlyHint`；受能力门控的 `read_resource` /
   `get_prompt` 发现工具同样桥接）。不可达的服务器降级为警告，绝不
-  导致启动失败。Prompts 到 skills 的转换是未来工作。
+  导致启动失败。MCP 的 prompt 经 `get_prompt` 发现工具到达模型，不会被
+  转换成 skill。
 
 ## SDK
 

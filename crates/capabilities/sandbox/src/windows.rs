@@ -65,8 +65,8 @@ const PENDING_TTL_MS: u64 = 10_000;
 /// `PROC_THREAD_ATTRIBUTE_LIST` on `std::process::Command`, and job
 /// assignment (`AssignProcessToJobObject`) strictly needs the child handle
 /// that only exists after spawn. `spawn_confined` therefore registers a
-/// pending job and returns an [`ArmedSpawn`](crate::os::ArmedSpawn) that
-/// owns the command. [`ArmedSpawn::spawn`](crate::os::ArmedSpawn::spawn)
+/// pending job and returns an [`ArmedSpawn`] that
+/// owns the command. [`ArmedSpawn::spawn`]
 /// creates the suspended child and commits that exact pid; the watcher
 /// assigns the job and resumes the child, or **terminates** it when
 /// assignment fails. Dropping the guard without spawning cancels that

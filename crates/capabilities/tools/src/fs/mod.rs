@@ -67,11 +67,16 @@ impl FileLedger {
     }
 }
 
-/// read output cap: 2000 lines / 50 KB.
+/// read output line cap: 2000 lines.
 const MAX_LINES: usize = 2000;
-const MAX_BYTES: usize = 50 * 1024;
+/// read output byte cap: 50 KB.
+///
+/// The byte cap and the input cap are shared with the search tools
+/// (`crate::search`), which bound the same two quantities for the same
+/// reasons: they are the file-tool limits, written once.
+pub(crate) const MAX_BYTES: usize = 50 * 1024;
 /// read hard input cap: files over 4 MB are rejected outright to avoid loading them fully into memory.
-const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
 /// write content cap: content over 10 MB is rejected outright.
 const MAX_WRITE_BYTES: usize = 10 * 1024 * 1024;
 

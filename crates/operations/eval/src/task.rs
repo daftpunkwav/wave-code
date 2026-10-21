@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-/// Default wall cap for one agent step (`TaskSpec::agent_timeout`).
+/// Default wall cap for one agent step (`TaskSpec::agent_timeout_secs`).
 pub const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 900;
 /// Default wall cap for one check command (`Assertion::Command`).
 pub const DEFAULT_CHECK_TIMEOUT_SECS: u64 = 120;
@@ -48,9 +48,12 @@ pub struct TaskSpec {
     /// after `fixture`.
     #[serde(default)]
     pub overlays: Vec<PathBuf>,
-    /// Wall cap for the agent step.
-    #[serde(default = "default_agent_timeout")]
-    pub agent_timeout: u64,
+    /// Wall cap for the agent step, in seconds.
+    ///
+    /// The manifest key stays `agent_timeout`; the unit lives in the Rust
+    /// name so a reader cannot mistake the value for milliseconds.
+    #[serde(rename = "agent_timeout", default = "default_agent_timeout_secs")]
+    pub agent_timeout_secs: u64,
     /// What must hold once the agent has run. An empty list scores as a
     /// failure: a task with no assertions judges nothing.
     pub assertion: Vec<Assertion>,
@@ -63,7 +66,7 @@ pub struct TaskSpec {
     pub base: PathBuf,
 }
 
-fn default_agent_timeout() -> u64 {
+fn default_agent_timeout_secs() -> u64 {
     DEFAULT_AGENT_TIMEOUT_SECS
 }
 
@@ -74,7 +77,7 @@ fn unknown_base() -> PathBuf {
 impl TaskSpec {
     /// Agent-step wall cap.
     pub fn agent_timeout_dur(&self) -> Duration {
-        Duration::from_secs(self.agent_timeout.max(1))
+        Duration::from_secs(self.agent_timeout_secs.max(1))
     }
 
     /// Fixture and overlay directories, resolved against the manifest's home.
@@ -692,7 +695,7 @@ mod tests {
             prompt: "do it".to_string(),
             fixture: None,
             overlays: Vec::new(),
-            agent_timeout: DEFAULT_AGENT_TIMEOUT_SECS,
+            agent_timeout_secs: DEFAULT_AGENT_TIMEOUT_SECS,
             assertion,
             tags: Vec::new(),
             base: PathBuf::from("."),
@@ -920,7 +923,7 @@ cwd = "app"
             spec.fixture,
             Some(PathBuf::from("fixtures").join("write-hello"))
         );
-        assert_eq!(spec.agent_timeout, DEFAULT_AGENT_TIMEOUT_SECS);
+        assert_eq!(spec.agent_timeout_secs, DEFAULT_AGENT_TIMEOUT_SECS);
         assert_eq!(spec.assertion.len(), 2);
         assert_eq!(spec.tags, vec!["basic".to_string()]);
         match &spec.assertion[1] {

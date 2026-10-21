@@ -11,9 +11,10 @@ The crate owns traits, data types, naming, and config; byte-level framing
 stays in `transport-mcp`, and the serving side (exposing the agent's own
 tools over MCP) lives in `operations-gateway`, with executor construction in
 the composition root. Bridged tools implement the shared `Tool` trait from
-`wavecode-tools` — the one capability-layer edge the bridge takes — and a
-server's `read_only_hint` maps onto it; unknown side effects are always
-treated as writes and go through approvals. The client speaks protocol
+`wavecode-tools` — the one capability-layer edge the bridge takes — and
+never inherit the server's `read_only_hint`: that declaration is
+third-party input, so every bridged tool stays non-read-only and keeps
+the approval path. The client speaks protocol
 `2024-11-05` with bounded pagination and bounded interleaved-message
 skipping; interactive browser/PKCE OAuth is out of scope — static headers or
 the client-credentials grant only.

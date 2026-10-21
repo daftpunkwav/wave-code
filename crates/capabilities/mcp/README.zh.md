@@ -11,6 +11,6 @@
 `transport-mcp`，服务端一侧（把本 agent 自己的工具经 MCP 暴露出去）位于
 `operations-gateway`，executor 的构造在组合根。被桥接的工具实现
 `wavecode-tools` 的共享 `Tool` trait——这是桥接层取用的唯一一条能力层依赖边——
-服务端给出的 `read_only_hint` 映射到该 trait；未知的副作用一律按写对待、
-走审批。客户端说 `2024-11-05` 协议，分页与乱序消息跳过均有上限；交互式
+且从不采信服务端自述的 `read_only_hint`：该声明属于第三方输入，因此被桥接的
+工具一律视为写操作，保留审批路径。客户端说 `2024-11-05` 协议，分页与乱序消息跳过均有上限；交互式
 browser/PKCE OAuth 不在范围内——只支持静态请求头或 client-credentials 授权。

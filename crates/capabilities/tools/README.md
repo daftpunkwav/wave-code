@@ -12,7 +12,7 @@ English | [中文](README.zh.md)
 | `src/script.rs` | `python` / `node`: inline scripts run non-interactively with a discovered interpreter, cwd confinement, a clamped timeout, and shell-mirroring failure semantics |
 | `src/lsp.rs` | A minimal stdio LSP client plus `lsp_symbols` / `lsp_definition` / `lsp_hover` / `lsp_references` (per-call `server_command`, or a lazily spawned registry-backed server reused across calls) and `lsp_diagnostics` (renders recorded `publishDiagnostics` pushes); no server is bundled |
 | `src/web_fetch.rs` | `web_fetch`: http/https only, manual redirects (max 5 hops), streamed size cap (256 KB default / 1 MB hard) with a `[truncated]` marker, HTML rendered to Markdown (`raw=true` opts out) |
-| `src/websearch.rs` | `web_search`: pluggable `SearchBackend`; the default `DuckDuckGoBackend` scrapes the keyless HTML endpoint, and parse failures surface as business errors |
+| `src/web_search.rs` | `web_search`: pluggable `SearchBackend`; the default `DuckDuckGoBackend` scrapes the keyless HTML endpoint, and parse failures surface as business errors |
 | `src/html.rs` | Lenient single-pass HTML -> Markdown converter for `web_fetch`: structural markup becomes Markdown, scripts/styles are dropped, malformed input degrades to plain text and never fails |
 | `src/spill_tool.rs` | `spill`: read-only readback of `spill://` URIs through the context crate's `SpillStore` (spills live outside `cwd`, so `read` cannot reach them) |
 | `src/todo_tool.rs` | `todowrite`: session task list with full-rewrite semantics; the `TodoStore` handle lives in the session config and is injected at assembly |

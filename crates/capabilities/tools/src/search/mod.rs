@@ -18,10 +18,10 @@ use crate::{Result, Tool, ToolCtx, ToolOutput, ToolsError, err_output, ok_output
 const MAX_MATCHES: usize = 500;
 /// grep per-line content byte cap (truncation falls back to a char boundary, matching read_file style).
 const MAX_LINE_BYTES: usize = 2000;
-/// grep total output byte cap (aligned with read_file's 50 KB).
-const MAX_OUTPUT_BYTES: usize = 50 * 1024;
-/// grep per-file size cap (aligned with read_file's 4 MB input guard).
-const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// grep total output byte cap: the file tools' output cap, written once.
+const MAX_OUTPUT_BYTES: usize = crate::fs::MAX_BYTES;
+/// grep per-file size cap: the file tools' input cap, written once.
+const MAX_FILE_BYTES: u64 = crate::fs::MAX_READ_BYTES;
 /// glob returned-path cap.
 const MAX_PATHS: usize = 1000;
 

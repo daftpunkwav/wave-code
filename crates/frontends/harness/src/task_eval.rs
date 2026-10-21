@@ -512,7 +512,7 @@ mod tests {
             prompt: "do it".to_string(),
             fixture: Some("workspace".into()),
             overlays: Vec::new(),
-            agent_timeout: operations_eval::DEFAULT_AGENT_TIMEOUT_SECS,
+            agent_timeout_secs: operations_eval::DEFAULT_AGENT_TIMEOUT_SECS,
             assertion,
             tags: vec!["unit".to_string()],
             base: base.join(id),

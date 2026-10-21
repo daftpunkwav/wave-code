@@ -50,7 +50,7 @@ Actor 从不引用这八个类型；它们驱动 `TurnDriver`（对每个 `RunLo
 
 固定顺序：**所有 `ToolCallBegin` 事件按声明顺序先发；所有 `ToolCallEnd` 事件在其后按声明顺序发。** 每个声明的调用恰好获得一个结果槽位，配对不可能破裂（末尾回退槽用内部错误填补不可能的空缺）。每个 `ToolCallEnd` 携带有界的输出预览（`ToolCallPreview`，上限 4 KiB，字符边界安全），前端无需完整转录正文即可渲染结果头部。
 
-`TurnStarted` 写明本回合采样的模型（`model: String`，driver 没有模型时为空），因为 `/model` 可以在会话中途切换模型，而按回合归因正是让指标表能回答"是这个工具弱，还是这个模型不擅长它"的关键。
+`TurnStarted` 写明本回合采样的模型——取实时值，因此回合之间的 `/model` 切换会被如实反映（`model: String`，driver 没有模型时为空）——因为 `/model` 可以在会话中途切换模型，而按回合归因正是让指标表能回答"是这个工具弱，还是这个模型不擅长它"的关键。
 
 每个 `ToolCallEnd` 还携带产生它的管线出口（`outcome: ToolOutcome`）与主体的墙钟成本（`duration_ms`）。`is_error` 表示一次调用没有成功；`outcome` 表示是谁停下了它——工具自身、策略、钩子、run 的工具面、审批提示处的用户，或一次中断。非 `Executed` 的出口一律上报 `duration_ms: 0`，因此拒绝永远不会被读成慢工具。`operations-observe` 把这些折叠为按工具的计数器（`Metrics::tools`）；出口分类是封闭的（`ToolOutcome` 覆盖 `execute_calls` 的每个分支），所以新增一个出口意味着新增一个变体，指标拆分无需进一步接线即随之生效。
 

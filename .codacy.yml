@@ -12,6 +12,16 @@ exclude_paths:
   # checker flags the typescript devDependency there, which is the
   # project's own pinned toolchain choice.
   - "sdk/typescript/package.json"
+  # Test files carry no shipped behaviour, so a finding on one reports
+  # the test's own scaffolding rather than anything about the product:
+  # a counting global allocator's `unsafe`, a temporary directory, a
+  # pattern built at runtime. The test tree is therefore left out of the
+  # analysis; the tests still run in the build pipeline.
+  - "**/tests/**"
+  - "**/test/**"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - "**/*_test.rs"
 
 engines:
   lizard:

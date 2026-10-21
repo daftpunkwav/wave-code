@@ -10,6 +10,8 @@ English | [中文](README.zh.md)
 | `src/mcp.rs` | `McpServerRaw` — raw `[mcp_servers.<name>]` entries: stdio (`command`/`args`/`env`) and http (`url`/`headers`) fields plus optional OAuth client-credentials fields |
 | `src/model_catalog.rs` | `ModelCatalog`/`ModelSpec`/`ApiKind`/`ReasoningSpec`/`ModalitiesSpec` — the `~/.wavecode/models.json` catalog, merged into a `Config` via `ModelCatalog::merge_into` |
 | `src/permissions.rs` | `PermissionsConfig` — raw `[permissions]` allow/deny string entries |
+| `src/atomic_file.rs` | The crate-local crash-safe owner-only staging write shared by the model catalog and the wave denylist |
+| `src/denylist.rs` | The `wave`-mode command denylist (`~/.wavecode/wave-denylist.json`) in the sandbox's `Bash(pattern)` rule syntax |
 
 This layer parses only; it owns no semantics. Entry validity is checked
 upstream — hook event points and the MCP either-or during assembly, and

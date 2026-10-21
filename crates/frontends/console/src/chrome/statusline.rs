@@ -96,9 +96,15 @@ fn lock(slot: &Mutex<Option<String>>) -> std::sync::MutexGuard<'_, Option<String
 }
 
 /// Run the command once: JSON snapshot in, first stdout line out.
+///
+/// The command runs through the shared platform shell resolution: the
+/// status line is one more command-string spawn, so the operator's
+/// `WAVECODE_SHELL` override must reach it the way it reaches the
+/// shell tool, the lifecycle hooks, the background jobs, and the
+/// console's `!` shell.
 async fn run_once(command: &str, snapshot: serde_json::Value) -> anyhow::Result<String> {
     use tokio::io::AsyncWriteExt;
-    let mut child = shell_command(command)
+    let mut child = infrastructure_base::shell_command(command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -118,23 +124,6 @@ async fn run_once(command: &str, snapshot: serde_json::Value) -> anyhow::Result<
     Ok(line.into_owned())
 }
 
-/// Wrap the user command in the platform shell (it is a shell string,
-/// possibly with arguments and quoting).
-fn shell_command(command: &str) -> tokio::process::Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = tokio::process::Command::new("cmd");
-        cmd.arg("/C").arg(command);
-        cmd
-    }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,9 +135,73 @@ mod tests {
         })
     }
 
+    /// Run the command with `WAVECODE_SHELL` cleared, so the suite does
+    /// not depend on the developer's shell override. The resolved
+    /// program and flag are baked into the spawned command, so the
+    /// variable is restored as soon as the run returns.
+    // Touches the process-global environment: held under the crate's
+    // ENV_LOCK so no parallel test observes the mutation.
+    #[allow(clippy::await_holding_lock)]
+    async fn run_with_default_shell(
+        command: &str,
+        snapshot: serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("WAVECODE_SHELL").ok();
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            std::env::remove_var("WAVECODE_SHELL");
+        }
+        let outcome = run_once(command, snapshot).await;
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            if let Some(v) = prior {
+                std::env::set_var("WAVECODE_SHELL", v);
+            }
+        }
+        outcome
+    }
+
+    /// The status line resolves its program through the shared
+    /// infrastructure helper, so the `WAVECODE_SHELL` override reaches
+    /// it the way it reaches the shell tool, the lifecycle hooks, the
+    /// background jobs, and the console's `!` shell.
+    ///
+    /// The override is set on a *child* copy of this test binary: the
+    /// variable is process-global, so setting it in-process would make
+    /// every parallel test that spawns a command fail for the wrong
+    /// reason.
+    #[test]
+    fn the_shared_shell_override_reaches_the_status_line() {
+        let output = crate::run_isolated_with_shell_override(
+            "chrome::statusline::tests::status_line_runs_the_override_program",
+        );
+        assert!(
+            output.status.success(),
+            "the override child must pass: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    /// The child half of
+    /// [`the_shared_shell_override_reaches_the_status_line`]: it runs
+    /// with `WAVECODE_SHELL` pointing at a program that does not exist,
+    /// so the spawn fails instead of producing a status line — the
+    /// console ran the program the shared resolution handed it.
+    #[tokio::test]
+    #[ignore = "child of the_shared_shell_override_reaches_the_status_line"]
+    async fn status_line_runs_the_override_program() {
+        assert!(
+            run_once("echo hello-status", snapshot()).await.is_err(),
+            "the shared shell override must decide which program the status line spawns"
+        );
+    }
+
     #[tokio::test]
     async fn first_stdout_line_becomes_the_status() {
-        let line = run_once("echo hello-status", snapshot()).await.unwrap();
+        let line = run_with_default_shell("echo hello-status", snapshot())
+            .await
+            .unwrap();
         assert_eq!(line, "hello-status");
     }
 
@@ -175,7 +228,7 @@ mod tests {
         let cmd = format!("type {}", file.display());
         #[cfg(not(windows))]
         let cmd = format!("cat '{}'", file.display());
-        let line = run_once(&cmd, snapshot()).await.unwrap();
+        let line = run_with_default_shell(&cmd, snapshot()).await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(line, "red-line");
     }
@@ -186,7 +239,7 @@ mod tests {
         let cmd = "exit 0";
         #[cfg(not(windows))]
         let cmd = "true";
-        assert!(run_once(cmd, snapshot()).await.is_err());
+        assert!(run_with_default_shell(cmd, snapshot()).await.is_err());
     }
 
     #[tokio::test]
@@ -196,7 +249,7 @@ mod tests {
         let cmd = "ping -n 30 127.0.0.1 > nul";
         #[cfg(not(windows))]
         let cmd = "sleep 30";
-        assert!(run_once(cmd, snapshot()).await.is_err());
+        assert!(run_with_default_shell(cmd, snapshot()).await.is_err());
         assert!(
             start.elapsed() < Duration::from_secs(5),
             "killed well before the command would exit"

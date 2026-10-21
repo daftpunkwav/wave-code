@@ -125,15 +125,35 @@ impl HistoryEntry {
     /// wire-round-trip state, not prose, and folding per-turn reasoning
     /// into estimates or resumed transcripts would inflate both.
     pub fn text(&self) -> String {
+        self.text_chunks().collect()
+    }
+
+    /// The entry's text in pieces, in the same order and with the same
+    /// content as [`HistoryEntry::text`].
+    ///
+    /// The pieces let a consumer measure or scan the text without
+    /// materializing it: the joined form copies every block, and for a
+    /// long tool result that is the whole payload. Text blocks are
+    /// borrowed; the tool and image views are rendered on the spot.
+    ///
+    /// The pieces concatenate to exactly [`HistoryEntry::text`]: the
+    /// newline that separates two blocks is part of the stream, so a
+    /// consumer that counts the pieces counts the text the joined view
+    /// holds. The separator rides as its own borrowed piece — no block
+    /// is copied to carry it.
+    pub fn text_chunks(&self) -> impl Iterator<Item = std::borrow::Cow<'_, str>> {
+        let mut separated = false;
         self.blocks
             .iter()
             .filter_map(|block| match block {
-                Block::Text(text) => Some(text.clone()),
+                Block::Text(text) => Some(std::borrow::Cow::Borrowed(text.as_str())),
                 Block::ToolUse {
                     call_id,
                     name,
                     input,
-                } => Some(format!("[{call_id}] call {name} {input}")),
+                } => Some(std::borrow::Cow::Owned(format!(
+                    "[{call_id}] call {name} {input}"
+                ))),
                 Block::ToolResult {
                     call_id,
                     content,
@@ -147,19 +167,25 @@ impl HistoryEntry {
                     let stamp = produced_at
                         .map(|secs| format!("[{}] ", infrastructure_base::format_timestamp(secs)))
                         .unwrap_or_default();
-                    Some(format!(
+                    Some(std::borrow::Cow::Owned(format!(
                         "{stamp}[{call_id}] {}: {content}",
                         if *is_error { "error" } else { "ok" }
-                    ))
+                    )))
                 }
-                Block::Image { id, mime, .. } => Some(match id {
+                Block::Image { id, mime, .. } => Some(std::borrow::Cow::Owned(match id {
                     Some(label) => format!("[image {mime}: {label}]"),
                     None => format!("[image {mime}]"),
-                }),
+                })),
                 Block::Thinking { .. } => None,
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .flat_map(move |piece| {
+                let separator = if std::mem::replace(&mut separated, true) {
+                    Some(std::borrow::Cow::Borrowed("\n"))
+                } else {
+                    None
+                };
+                separator.into_iter().chain(std::iter::once(piece))
+            })
     }
 
     /// Text of all text blocks, joined with newlines.
@@ -265,16 +291,72 @@ pub const CONTEXT_OVERHEAD_TOKENS: u64 = 2000;
 /// character division. Authoritative provider usage must always win over
 /// this function.
 pub fn estimate_tokens(text: &str) -> u64 {
-    let mut ascii = 0u64;
-    let mut non_ascii = 0u64;
-    for c in text.chars() {
-        if c.is_ascii() {
-            ascii += 1;
-        } else {
-            non_ascii += 1;
+    CharSplit::of(text).tokens()
+}
+
+/// The character split the token estimator works on: ASCII characters
+/// ride the ~4 chars/token ratio, every non-ASCII character counts as
+/// one token.
+///
+/// A request is many pieces, not one string. Counting the pieces and
+/// dividing once gives exactly the estimate of their concatenation,
+/// while dividing per piece would round differently — so the split is
+/// accumulated first and turned into tokens at the end.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CharSplit {
+    /// ASCII characters counted so far.
+    ascii: u64,
+    /// Non-ASCII characters counted so far.
+    non_ascii: u64,
+}
+
+impl CharSplit {
+    /// The split of one text.
+    pub fn of(text: &str) -> Self {
+        let mut split = Self::default();
+        split.add(text);
+        split
+    }
+
+    /// Add one text's characters to the split.
+    pub fn add(&mut self, text: &str) {
+        for c in text.chars() {
+            if c.is_ascii() {
+                self.ascii += 1;
+            } else {
+                self.non_ascii += 1;
+            }
         }
     }
-    ascii.div_ceil(4) + non_ascii
+
+    /// ASCII characters counted so far.
+    pub fn ascii(&self) -> u64 {
+        self.ascii
+    }
+
+    /// Non-ASCII characters counted so far.
+    pub fn non_ascii(&self) -> u64 {
+        self.non_ascii
+    }
+
+    /// The token estimate of everything counted so far.
+    pub fn tokens(&self) -> u64 {
+        self.ascii.div_ceil(4) + self.non_ascii
+    }
+}
+
+/// The token estimate of one history entry's text.
+///
+/// The count is the one over [`HistoryEntry::text`] — the blocks
+/// separated by a newline — but the joined text is never materialized:
+/// a tool result's payload is the whole entry, and joining it copies
+/// the payload before the estimate even starts.
+pub fn estimate_entry_tokens(entry: &HistoryEntry) -> u64 {
+    let mut split = CharSplit::default();
+    for chunk in entry.text_chunks() {
+        split.add(&chunk);
+    }
+    split.tokens()
 }
 
 /// Notification seam for every committed history mutation.
@@ -720,6 +802,75 @@ mod tests {
         };
         assert_eq!(entry.text(), "[2026-09-19 18:03 UTC] [c1] ok: ls out");
         assert_eq!(entry.prose(), "");
+    }
+
+    /// The chunked text view carries the same content as the joined one,
+    /// and text blocks are borrowed: a consumer that only measures the
+    /// text must not copy it.
+    ///
+    /// The pieces concatenate to the joined view — the newline between
+    /// two blocks rides the stream, so a consumer that counts the
+    /// pieces counts the text the joined view holds. The expected text
+    /// is spelled out: the joined view is built from the chunk stream,
+    /// so comparing the two would only prove that the stream agrees
+    /// with itself.
+    #[test]
+    fn text_chunks_match_the_joined_text_and_borrow_text_blocks() {
+        let entry = HistoryEntry {
+            role: Role::User,
+            blocks: vec![
+                Block::Text("head".to_string()),
+                Block::ToolUse {
+                    call_id: "c1".to_string(),
+                    name: "shell".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+                Block::Thinking {
+                    text: "hidden".to_string(),
+                    signature: None,
+                },
+                Block::Text("tail".to_string()),
+            ],
+        };
+        let expected = "head\n[c1] call shell {\"command\":\"ls\"}\ntail";
+        let chunks: Vec<String> = entry.text_chunks().map(|c| c.into_owned()).collect();
+        assert_eq!(
+            chunks.concat(),
+            expected,
+            "the pieces carry the joined view's content, separators included"
+        );
+        assert_eq!(entry.text(), expected);
+        assert!(
+            matches!(
+                entry.text_chunks().next(),
+                Some(std::borrow::Cow::Borrowed(_))
+            ),
+            "a text block is borrowed, not copied"
+        );
+    }
+
+    /// The entry's token estimate is the one over the joined text, and
+    /// the joined text is what the chunks concatenate to: a consumer
+    /// that counts the pieces must not drift from the joined view.
+    #[test]
+    fn the_entry_estimate_matches_the_joined_text_estimate() {
+        let entry = HistoryEntry {
+            role: Role::User,
+            blocks: vec![
+                Block::Text("head".to_string()),
+                Block::ToolResult {
+                    call_id: "c1".to_string(),
+                    content: "payload".to_string(),
+                    is_error: false,
+                    produced_at: None,
+                },
+                Block::Text("世界".to_string()),
+            ],
+        };
+        assert_eq!(
+            estimate_entry_tokens(&entry),
+            estimate_tokens(&entry.text())
+        );
     }
 
     /// A tool result persisted before the timestamp existed (no

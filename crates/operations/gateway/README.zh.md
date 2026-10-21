@@ -6,6 +6,7 @@
 |---|---|
 | `Cargo.toml` | crate 清单；会话只经 `operations-actor` 进入（组合根仅作为测试的 dev-dependency） |
 | `src/lib.rs` | crate 根；声明各服务端与仅供测试的 stubs 模块 |
+| `src/jsonrpc.rs` | 两个 stdio 服务端共享的 JSON-RPC 2.0 帧格式：信封辅助函数与有界的 NDJSON 行读取器（`acp.rs` 与 `mcp_serve.rs` 都用它，因此形状与上限不会各自分叉） |
 | `src/acp.rs` | ACP 服务端：stdio 上的 JSON-RPC 2.0——`initialize`、`session/new`（每个 id 组装一个 headless 会话）、`session/prompt` 流式 `session/update`、`session/cancel` |
 | `src/app_server.rs` | 本地 app 服务端：loopback HTTP 上的 REST + SSE，带 bearer-token 认证与 Host 头防 DNS 重绑定；每会话一个 pump 任务喂广播通道 |
 | `src/mcp_serve.rs` | MCP 服务端：stdio 上的 NDJSON JSON-RPC——`initialize`、`tools/list`、`tools/call`（经调用方提供的 `ToolExecutor`）、`ping` |

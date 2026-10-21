@@ -3,7 +3,7 @@
 //! and matching semantics belong to the sandbox crate, which is the single
 //! authority on verdicts (same raw-parse discipline as hooks and mcp_servers).
 //!
-//! User-level only, by design: the planned project layer
+//! User-level only, by design: the project layer
 //! (`.wavecode/config.toml` inside the working directory) stays unwired for
 //! these two tables, because the agent can write that file itself. A
 //! repo-scoped allow table would let a session grant its own future

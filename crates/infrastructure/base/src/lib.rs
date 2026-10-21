@@ -172,17 +172,18 @@ pub fn lead_process_group(cmd: &mut std::process::Command) {
 /// (Unix `Command::process_group(0)`; Windows `CREATE_NEW_PROCESS_GROUP`),
 /// so the Unix branch's group signal cannot land outside that spawn. The
 /// pid may have exited already — `killpg` reports ESRCH and `taskkill`
-/// fails — and both degrade to no-ops; the narrow pid-reuse window this
-/// leaves matches the accepted race in the job service's cancel path. The
-/// caller still reaps the direct child itself (kill/await on its handle).
+/// fails — and both degrade to no-ops. The caller still reaps the direct
+/// child itself (kill/await on its handle), and it must reap the child
+/// only after this kill has landed: the reap releases the pid, and a kill
+/// that starts afterwards can hit a process the system already handed
+/// that pid to.
 ///
 /// On Windows this waits until `taskkill` exits, so the tree is gone when
 /// the call returns. That wait is hundreds of milliseconds (measured at
 /// roughly 400 ms on an idle host), so an async caller must not call this
 /// directly: it would park a runtime worker for the whole wait and stall
 /// every other task scheduled on it. Use [`kill_tree_blocking`] from an
-/// async caller, and [`kill_tree_detached`] from a synchronous caller that
-/// must not block. A caller that needs the kill to have landed before it
+/// async caller. A caller that needs the kill to have landed before it
 /// continues — a spawn path that reaps the child right after — calls this
 /// directly and accepts the wait.
 pub fn kill_tree(pid: u32) {
@@ -225,30 +226,11 @@ pub async fn kill_tree_blocking(pid: u32) {
     on_blocking_pool(move || kill_tree(pid)).await;
 }
 
-/// Schedule a spawned process tree's kill from a synchronous caller.
-///
-/// The counterpart of [`kill_tree_blocking`] for a caller that cannot
-/// await (a cancellation request that only records the intent): the
-/// kill waits for the whole tree to die, so it must not run on the
-/// caller's thread — least of all on a runtime worker. The call
-/// returns as soon as the kill is scheduled; the spawned job's own
-/// driver observes the death and files the terminal state.
-pub fn kill_tree_detached(pid: u32) {
-    run_detached(move || kill_tree(pid));
-}
-
 /// Run `work` on the tokio blocking pool and wait for it to finish.
 async fn on_blocking_pool<F: FnOnce() + Send + 'static>(work: F) {
     // The join result carries only a panic, and the tree kill is best
     // effort by contract, so a failed task must not fail the caller.
     let _ = tokio::task::spawn_blocking(work).await;
-}
-
-/// Run `work` on a dedicated thread and return immediately.
-fn run_detached<F: FnOnce() + Send + 'static>(work: F) {
-    // The handle is dropped on purpose: the thread keeps running, and
-    // the caller does not wait for it.
-    drop(std::thread::spawn(work));
 }
 
 /// Absolute path to the Windows tree-kill utility.
@@ -501,25 +483,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
-
-    /// The detached runner hands the work to its own thread, so the
-    /// caller's thread is never parked for the blocking operation (the
-    /// `taskkill` wait behind [`kill_tree`]).
-    #[test]
-    fn detached_work_runs_on_its_own_thread() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let caller = std::thread::current().id();
-        run_detached(move || {
-            let _ = tx.send(std::thread::current().id());
-        });
-        let ran_on = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("the detached work ran");
-        assert_ne!(
-            ran_on, caller,
-            "the detached work ran on the caller's thread"
-        );
-    }
 
     /// The blocking-pool runner must keep the runtime worker free: the
     /// work runs on the blocking pool, so a task scheduled on the same

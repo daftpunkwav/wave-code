@@ -5,7 +5,7 @@
 | 条目 | 职责 |
 |---|---|
 | `Cargo.toml` | crate 清单；依赖 `infrastructure-base`（shell 解析）、`runtime-child`（共享完成通道）与 `wavecode-tools`（供 tools 模块使用） |
-| `src/lib.rs` | `JobService`：把 shell 命令作为受管作业派生，按 owner 限容（`MAX_JOBS_PER_OWNER`）、有界输出日志；`wait` 只做快照不杀进程，`cancel` 只记录请求——由该作业自己的驱动杀掉"已 spawn 且仍在运行"的作业的整棵进程树并回收子进程，顺序固定，因此回收永远不会先于树杀释放 pid；取消若在 spawn 之前到达，作业直接结束、根本不 spawn，取消一个已结束的作业则不改变任何事；每条终止路径都会向 `ChildRuntime` 队列投递通知——仍处 `foreground` 的运行除外（shell 工具内联等待、结果直接交付；运行被晋升时由 `mark_notified` 重新打开通知） |
+| `src/lib.rs` | `JobService`：把 shell 命令作为受管作业派生，按 owner 限容（`MAX_JOBS_PER_OWNER`）、有界输出日志；`wait` 只做快照不杀进程，`cancel` 只记录请求——由该作业自己的驱动杀掉"已 spawn 且仍在运行"的作业的整棵进程树并回收子进程，顺序固定，因此回收永远不会先于树杀释放 pid；驱动在**启动前检查点**观察到的取消会让作业不经 spawn 直接结束，与 spawn 竞态的取消仍可能拉起子进程、随后被杀并回收，而取消一个已结束的作业不改变任何事；每条终止路径都会向 `ChildRuntime` 队列投递通知——仍处 `foreground` 的运行除外（shell 工具内联等待、结果直接交付；运行被晋升时由 `mark_notified` 重新打开通知） |
 | `src/tools.rs` | 建立在该服务之上的可被模型调用的 `job_spawn` / `job_wait` / `job_cancel` / `job_output` 工具，以及 `ForegroundRuns`——shell 工具的 `RunHandoff` 接缝，把前台超时变成晋升 |
 
 作业是不再阻塞 turn 的长时间 shell 工作：`job_spawn` 立即返回

@@ -49,11 +49,12 @@ set, else `wavecode` from `PATH`. Build the CLI first (`cargo build --bin
 wavecode`) and point `WAVECODE_BIN` at `target/debug/wavecode` during
 development.
 
-The lookup is shell-less: it tries the exact name, then the executable
-extensions the runtime knows — `.com` and `.exe`, never `PATHEXT`. A `.cmd`
-launcher is not among them, and it needs a shell to run at all, so point
-`WAVECODE_BIN` at the executable behind it. Without the `bin` option, set
-`WAVECODE_BIN` whenever the binary's base name is not `wavecode`.
+On Windows the lookup is shell-less: it tries the exact name, then the
+executable extensions the runtime knows — `.com` and `.exe`, never
+`PATHEXT`. A `.cmd` launcher is not among them, and it needs a shell to
+run at all, so point `WAVECODE_BIN` at the executable behind it. Elsewhere
+the exact name is looked up on `PATH` as it is. Without the `bin` option,
+set `WAVECODE_BIN` whenever the binary's base name is not `wavecode`.
 
 ## Failure modes
 

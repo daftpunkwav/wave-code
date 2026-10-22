@@ -14,8 +14,8 @@
 可覆盖），shell tool、PTY shell、hooks、jobs 等所有 spawn 路径遵循
 同一覆盖，`shell_command` 则把该解析转成实际的 spawn。
 `format_date`/`format_timestamp` 是唯一的 UTC 渲染（无外部
-依赖的公历日期算法），prompt 组装与事件头共用。进程树 kill 要等整棵
-进程树死透，因此本 crate 同时提供把这段等待移出 runtime worker 的
-变体。回收子进程的调用方必须在树杀落地之后才回收：回收会释放 pid，
+依赖的公历日期算法），prompt 组装与事件头共用。在 Windows 上，进程树 kill
+要等整棵进程树死透，因此本 crate 同时提供把这段等待移出 runtime worker
+的变体。回收子进程的调用方必须在树杀落地之后才回收：回收会释放 pid，
 之后才启动的树杀可能命中已被系统分配该 pid 的其他进程。本 crate 依赖
 `tokio`（blocking pool），Unix 上另依赖 `libc`。

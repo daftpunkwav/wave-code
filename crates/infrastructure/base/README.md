@@ -17,10 +17,10 @@ every spawn path — shell tool, PTY shell, hooks, jobs — honors the
 same override, and `shell_command` turns that resolution into the
 spawn. `format_date`/`format_timestamp` are the single UTC
 renderings (dependency-free civil-date math) shared by prompt assembly
-and event headers. The tree kill waits for a whole process tree to
-die, so the crate also owns the off-worker variant that keeps that
-wait off a runtime worker. A caller that reaps the child must reap it
-only after the kill has landed: the reap releases the pid, and a kill
-that starts afterwards can hit a process the system already handed
+and event headers. On Windows the tree kill waits for a whole process
+tree to die, so the crate also owns the off-worker variant that keeps
+that wait off a runtime worker. A caller that reaps the child must reap
+it only after the kill has landed: the reap releases the pid, and a
+kill that starts afterwards can hit a process the system already handed
 that pid to. The crate depends on `tokio` (the blocking pool) and, on
 Unix, `libc`.

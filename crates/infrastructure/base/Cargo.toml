@@ -6,7 +6,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-# The off-worker tree-kill helpers run the blocking `taskkill` wait on
+# The off-worker tree-kill helper runs the blocking `taskkill` wait on
 # the tokio blocking pool, so the crate carries the runtime it needs to
 # hand the work over.
 tokio.workspace = true

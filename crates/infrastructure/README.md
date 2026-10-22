@@ -4,7 +4,7 @@ English | [中文](README.zh.md)
 
 | Item | Role |
 |---|---|
-| `base/` | `infrastructure-base` — OS runtime primitives: channel capacities, timeouts, truncation budgets, the cooperative `InterruptHandle`, shared calendar-date and shell resolution, the process-tree kill and its off-worker variants |
+| `base/` | `infrastructure-base` — OS runtime primitives: channel capacities, timeouts, truncation budgets, the cooperative `InterruptHandle`, shared calendar-date and shell resolution, the process-tree kill and its off-worker variant |
 | `ratelimit/` | `infrastructure-ratelimit` — `TokenBucket` rate limiting as pure arithmetic over caller-supplied time |
 
 These crates hold mechanisms, not policy: scattered magic numbers are

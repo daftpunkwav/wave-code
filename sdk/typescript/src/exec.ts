@@ -7,6 +7,8 @@
  * - Spawn the child process and parse its JSONL stdout into typed events.
  * - Answer parked approvals through the wire's stdin dialect.
  * - Surface the child's exit code and whether the turn was interrupted.
+ * - Surface a failed spawn as the final error event of the stream; the
+ *   event iterator is never rejected.
  *
  * Constraints:
  * - This module must not depend on the Rust workspace: it drives the
@@ -78,7 +80,13 @@ export interface ExecSession {
   // cannot see that an interface member list is a type position.
   // eslint-disable-next-line no-unused-vars -- documentation name, no body exists
   answerApproval(callId: string, decision: ApprovalDecision): void;
-  /** Resolve when the child exits; also the iterator end. */
+  /**
+   * Resolve when the child exits; also the iterator end.
+   *
+   * @throws When the spawn failed: the exit promise rejects with the
+   * spawn error, while the event stream carries the same failure as
+   * its final error event.
+   */
   wait(): Promise<ExecResult>;
   /** SIGINT-equivalent: interrupt the running turn. */
   interrupt(): void;

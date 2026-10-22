@@ -48,6 +48,19 @@ The SDK runs `$WAVECODE_BIN` if set, else `wavecode` from `PATH`. Build the
 CLI first (`cargo build --bin wavecode`) and point `WAVECODE_BIN` at
 `target/debug/wavecode` during development.
 
+The lookup is shell-less: it tries the exact name, then the executable
+extensions the runtime knows — `.com` and `.exe`, never `PATHEXT`. A `.cmd`
+launcher is not among them, so set `WAVECODE_BIN` when the binary is named
+that way, or when its base name is not `wavecode`.
+
+## Failure modes
+
+A session that cannot start — a missing binary, say — hands the failure to
+the consumer as the final `error` event of the stream, and the stream then
+ends. The iterator is not rejected, so a `for await` consumer sees that
+event and the end of the stream rather than an exception. `wait()` rejects
+with the spawn error for the callers that await the exit.
+
 ## Types
 
 `src/types.ts` mirrors the Rust `wavecode_wire::EventMsg` serialization

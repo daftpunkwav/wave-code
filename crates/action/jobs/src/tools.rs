@@ -5,7 +5,8 @@
  * Responsibilities:
  * - Spawn shell commands as background jobs that outlive the tool call.
  * - Wait with a timeout that snapshots without killing the job.
- * - Cancel a running job through the service tree-kill.
+ * - Cancel a running job: the request reaches the job's driver, which
+ *   kills the process tree and reaps the child.
  * - Report one job's status plus its truncated log tail.
  *
  * This module must not depend on: drivers, actors, or sessions. Tools read
@@ -260,7 +261,10 @@ impl Tool for JobWaitTool {
     }
 }
 
-/// `job_cancel`: kill one job's whole process tree by id.
+/// `job_cancel`: request the termination of one job's process tree by id.
+///
+/// The request is recorded and the job's driver performs the kill and
+/// the reap, so the call returns at once.
 ///
 /// Destructive (approval-gated): running work dies mid-flight. Finished
 /// jobs accept trivially; unknown ids stay explicit business errors.

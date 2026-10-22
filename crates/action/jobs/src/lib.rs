@@ -175,7 +175,10 @@ struct JobSlot {
     foreground: AtomicBool,
     /// Captured stdout/stderr bytes, head-dropped past the cap.
     log: Mutex<Vec<u8>>,
-    /// Leader pid for tree kills; `None` before a successful spawn.
+    /// Published pid of the spawned process (test seam): a test tells
+    /// the spawn apart from the pre-start stop by it, and the driver
+    /// reads the pid from the child handle itself.
+    #[cfg(test)]
     pid: Mutex<Option<u32>>,
     /// Tree kills this slot performed (test seam): a job must be
     /// terminated exactly once.
@@ -260,6 +263,7 @@ impl JobService {
             timed_out: AtomicBool::new(false),
             foreground: AtomicBool::new(request.foreground),
             log: Mutex::new(Vec::new()),
+            #[cfg(test)]
             pid: Mutex::new(None),
             #[cfg(test)]
             tree_kills: AtomicUsize::new(0),
@@ -439,7 +443,13 @@ async fn drive_job(
             return;
         }
     };
-    *slot.pid.lock().unwrap_or_else(|e| e.into_inner()) = child.id();
+    // Published for the tests that must tell the spawn apart from the
+    // pre-start stop; the driver itself reads the pid from the child
+    // handle when it kills the tree.
+    #[cfg(test)]
+    {
+        *slot.pid.lock().unwrap_or_else(|e| e.into_inner()) = child.id();
+    }
     // Cancel raced the spawn: terminate the job the way every
     // termination path does.
     if slot.cancelled.load(Ordering::SeqCst) {

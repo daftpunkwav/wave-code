@@ -50,8 +50,9 @@ CLI first (`cargo build --bin wavecode`) and point `WAVECODE_BIN` at
 
 The lookup is shell-less: it tries the exact name, then the executable
 extensions the runtime knows — `.com` and `.exe`, never `PATHEXT`. A `.cmd`
-launcher is not among them, so set `WAVECODE_BIN` when the binary is named
-that way, or when its base name is not `wavecode`.
+launcher is not among them, and it needs a shell to run at all, so point
+`WAVECODE_BIN` at the executable behind it. Set `WAVECODE_BIN` whenever the
+binary's base name is not `wavecode`.
 
 ## Failure modes
 

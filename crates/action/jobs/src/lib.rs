@@ -686,11 +686,12 @@ mod tests {
 
     /// Wait until the driver published the job's pid.
     ///
-    /// A cancel that lands before the spawn finished takes the
-    /// driver's pre-start path and ends the job without a tree kill,
-    /// so a test that counts the kills has to let the spawn happen
-    /// first. The wait is bounded, so a job that never starts fails the
-    /// test instead of hanging it.
+    /// A cancel that the driver observes at its pre-start check ends
+    /// the job without spawning anything, so no tree kill happens and
+    /// a test that counts the kills counts none. A cancel that lands
+    /// after that check spawns the child and terminates it, tree kill
+    /// included. The wait is bounded, so a job that never starts fails
+    /// the test instead of hanging it.
     async fn wait_for_pid(service: &JobService, id: &str) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -832,9 +833,9 @@ mod tests {
     async fn a_repeated_cancel_terminates_the_job_once() {
         let (_runtime, jobs) = harness();
         let id = jobs.spawn(request("t", LONG_CMD)).unwrap();
-        // Wait for the spawn before cancelling: a cancel that lands
-        // first takes the driver's pre-start path and ends the job
-        // without a tree kill, which this test does not count.
+        // Wait for the spawn before cancelling: a cancel that the
+        // driver observes at its pre-start check ends the job without
+        // a tree kill, and this test counts the kills.
         wait_for_pid(&jobs, &id).await;
         assert!(jobs.cancel(&id));
         assert!(jobs.cancel(&id));

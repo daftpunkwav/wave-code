@@ -44,9 +44,25 @@ await session.wait();
 
 ## Binary discovery
 
-The SDK runs `$WAVECODE_BIN` if set, else `wavecode` from `PATH`. Build the
-CLI first (`cargo build --bin wavecode`) and point `WAVECODE_BIN` at
-`target/debug/wavecode` during development.
+The SDK runs the binary named by the `bin` option, else `$WAVECODE_BIN` if
+set, else `wavecode` from `PATH`. Build the CLI first (`cargo build --bin
+wavecode`) and point `WAVECODE_BIN` at `target/debug/wavecode` during
+development.
+
+On Windows the lookup is shell-less: it tries the exact name, then the
+executable extensions the runtime knows — `.com` and `.exe`, never
+`PATHEXT`. A `.cmd` launcher is not among them, and it needs a shell to
+run at all, so point `WAVECODE_BIN` at the executable behind it. Elsewhere
+the exact name is looked up on `PATH` as it is. Without the `bin` option,
+set `WAVECODE_BIN` whenever the binary's base name is not `wavecode`.
+
+## Failure modes
+
+A session that cannot start — a missing binary, say — hands the failure to
+the consumer as the final `error` event of the stream, and the stream then
+ends. The iterator is not rejected, so a `for await` consumer sees that
+event and the end of the stream rather than an exception. `wait()` rejects
+with the spawn error for the callers that await the exit.
 
 ## Types
 

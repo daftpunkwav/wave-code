@@ -12,7 +12,8 @@
  * - Resolve the platform command-string shell once for every layer that
  *   spawns one (shell tool, PTY shell, hooks, jobs).
  * - Own the process-tree kill every spawn path shares, plus the
- *   off-worker variants that keep its blocking wait off a runtime worker.
+ *   off-worker variant that keeps a blocking tree kill (Windows) off a
+ *   runtime worker.
  * - Own the crash-safe file-replace primitive shared by the durable stores.
  *
  * This module must not depend on: any other workspace crate.

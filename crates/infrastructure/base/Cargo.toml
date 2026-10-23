@@ -6,9 +6,10 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-# The off-worker tree-kill helpers run the blocking `taskkill` wait on
-# the tokio blocking pool, so the crate carries the runtime it needs to
-# hand the work over.
+# The off-worker tree-kill helper hands the kill to the tokio blocking
+# pool: on Windows it waits for a whole tree to die, and that wait must
+# not park a runtime worker, so the crate carries the runtime it needs
+# to hand the work over.
 tokio.workspace = true
 # Process-group kill for `kill_tree` (Unix only; Windows routes through
 # `taskkill`, other platforms degrade to a no-op).

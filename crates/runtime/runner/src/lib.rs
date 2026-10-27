@@ -1526,7 +1526,7 @@ where
                             state.round_rearms, self.cfg.max_goal_rearms
                         ),
                     });
-                    let budget = self.budget_line(used, window, &state, 0);
+                    let budget = self.budget_line(used, window, &state, goal_continuations);
                     conv.push(Role::User, self.goals.reminder(&budget));
                     continue;
                 }
@@ -6919,6 +6919,72 @@ mod run_loop_tests {
         assert!(
             counted(conv, "ceiling re-armed 1 of ") > 0,
             "no re-arm budget reached the model"
+        );
+    }
+
+    /// A round-limit re-arm after a consumed goal continuation reports the
+    /// real continuation count: the budget line is the loop's own account
+    /// of what is left, and a fabricated "0" invites the model to open
+    /// work it cannot finish.
+    #[tokio::test]
+    async fn a_rearm_budget_line_reports_the_consumed_goal_continuations() {
+        let fx = Fixture::new();
+        let (exec, policy, hooks, model, approvals, plans, compactor) = default_parts();
+        // Sample 1 ends the turn with the goal open (one goal continuation
+        // is consumed); samples 2 and 3 exhaust the 2-round ceiling, so the
+        // re-arm reminder is written while a continuation is already spent.
+        model
+            .steps
+            .lock()
+            .unwrap()
+            .push_back(ModelStep::Answer(SampleResponse {
+                blocks: vec![SampleBlock::Text("progress?".to_string())],
+                input_tokens: Some(10),
+                output_tokens: Some(1),
+                truncated: false,
+                cache_read_tokens: 0,
+                cache_creation_tokens: 0,
+            }));
+        for round in 0..2 {
+            model.steps.lock().unwrap().push_back(call_step(
+                &format!("c{round}"),
+                "read_file",
+                serde_json::json!({ "path": format!("f{round}") }),
+            ));
+        }
+        let events = fx.events.clone();
+        let conv = &mut Conversation::new();
+        let outcome = build_tuned_loop(
+            exec,
+            policy,
+            hooks,
+            model,
+            approvals,
+            plans,
+            compactor,
+            2,
+            MAX_REPEAT_STREAK,
+            fx.interrupt.clone(),
+        )
+        .with_goals(std::sync::Arc::new(FakeGoal { open: true }))
+        .run_turn(&fx.ctx, conv, TurnInput::text("hi"), "sys", &|e| {
+            events.lock().unwrap_or_else(|e| e.into_inner()).push(e);
+        })
+        .await;
+        assert_eq!(outcome, StopReason::Completed);
+        // The re-arm reminder is the only GOAL-REMINDER carrying the
+        // re-arm annotation at 1, and (with one continuation already
+        // consumed) the only one that must carry "1 of": the steering
+        // reminder before it carries the annotation at 0, and the ones
+        // after it carry continuations 2..8.
+        assert!(
+            conv.with_entries(|entries| entries.iter().any(|entry| {
+                let text = entry.text();
+                text.contains("GOAL-REMINDER")
+                    && text.contains("ceiling re-armed 1 of")
+                    && text.contains("goal continuation 1 of ")
+            })),
+            "the re-arm reminder did not carry the consumed continuation count"
         );
     }
 

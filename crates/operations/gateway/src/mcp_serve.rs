@@ -84,12 +84,12 @@ where
     let mut reader = reader;
     let mut writer = writer;
     loop {
-        let line = match read_line_capped(&mut reader).await? {
-            IncomingLine::Eof => {
+        let line = match read_line_capped(&mut reader).await {
+            Ok(IncomingLine::Eof) => {
                 // EOF (or stdio close): clean shutdown, no sentinel needed.
                 return Ok(());
             }
-            IncomingLine::TooLong => {
+            Ok(IncomingLine::TooLong) => {
                 writer
                     .write_all(
                         error_response(
@@ -105,7 +105,28 @@ where
                 writer.flush().await?;
                 continue;
             }
-            IncomingLine::Line(line) => line,
+            Ok(IncomingLine::Line(line)) => line,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // A non-UTF-8 line is frame-level corruption: the bytes
+                // are fully consumed, so the frame gets a parse error and
+                // the server keeps serving — the same tier as malformed
+                // JSON, never a shutdown.
+                writer
+                    .write_all(
+                        error_response(
+                            serde_json::Value::Null,
+                            PARSE_ERROR,
+                            "invalid request: line is not UTF-8",
+                        )
+                        .to_string()
+                        .as_bytes(),
+                    )
+                    .await?;
+                writer.write_all(b"\n").await?;
+                writer.flush().await?;
+                continue;
+            }
+            Err(e) => return Err(e),
         };
         if line.trim().is_empty() {
             continue;
@@ -461,6 +482,30 @@ mod tests {
         assert_eq!(response["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(response["result"]["serverInfo"]["name"], SERVER_NAME);
         assert!(response.get("error").is_none());
+    }
+
+    /// Raw non-UTF-8 bytes are frame-level corruption, not a shutdown:
+    /// the frame draws a parse error and the server keeps serving, the
+    /// same tier as malformed JSON.
+    #[tokio::test]
+    async fn non_utf8_frames_fail_without_killing_the_server() {
+        let (mut client, _server) = TestClient::start().await;
+        use tokio::io::AsyncWriteExt as _;
+        client
+            .write
+            .write_all(b"\xff\xfe not utf8\n")
+            .await
+            .unwrap();
+        let line = client.read.next_line().await.unwrap().unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            reply.pointer("/error/code"),
+            Some(&serde_json::json!(PARSE_ERROR))
+        );
+        let init = client
+            .round_trip(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+            .await;
+        assert!(init.get("result").is_some());
     }
 
     #[tokio::test]

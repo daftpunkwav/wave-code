@@ -389,11 +389,11 @@ impl HookEngine {
                 continue;
             }
             match run_command(point, def, input).await {
-                ExecOutcome::Success(stdout) => {
+                ExecOutcome::Success { stdout, truncated } => {
                     // Command hooks ignore stdout; prompt hooks capture it
                     // (capped) as injected context.
                     if prompt {
-                        append_context(&mut report.context, &stdout);
+                        append_context(&mut report.context, &stdout, truncated);
                     }
                 }
                 ExecOutcome::Blocked(stderr) => {
@@ -476,8 +476,10 @@ fn matcher_matches(matcher: &str, tool: &str) -> bool {
 /// One execution's result (internal).
 enum ExecOutcome {
     /// Exit code 0: payload is the trimmed stdout (prompt hooks turn it into
-    /// injected context; command hooks ignore it).
-    Success(String),
+    /// injected context; command hooks ignore it) plus whether the capture
+    /// hit its budget — decided on the raw byte count, before the trim can
+    /// shave the marker-deciding bytes off.
+    Success { stdout: String, truncated: bool },
     /// Exit code 2: payload is the stderr (the model-facing block reason).
     Blocked(String),
     /// Other nonzero exit codes: payload is a stderr excerpt.
@@ -557,7 +559,7 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
             _ => child
                 .wait()
                 .await
-                .map(|status| (Vec::new(), Vec::new(), status)),
+                .map(|status| ((Vec::new(), false), (Vec::new(), false), status)),
         }
     })
     .await;
@@ -571,11 +573,14 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
             ExecOutcome::Timeout
         }
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
-        Ok(Ok((out, err, status))) => {
+        Ok(Ok(((out, out_truncated), (err, _), status))) => {
             let stdout = String::from_utf8_lossy(&out).trim().to_owned();
             let stderr = String::from_utf8_lossy(&err).trim().to_owned();
             match status.code() {
-                Some(0) => ExecOutcome::Success(stdout),
+                Some(0) => ExecOutcome::Success {
+                    stdout,
+                    truncated: out_truncated,
+                },
                 Some(2) => ExecOutcome::Blocked(stderr),
                 Some(code) => ExecOutcome::NonZero(code, stderr),
                 // Killed by a signal (no exit code): allow with a nonzero warning.
@@ -616,12 +621,13 @@ async fn kill_hook_tree(child: &mut tokio::process::Child) {
 /// Hooks are the per-tool-call hot path, so the capture must not be the
 /// one place a chatty child can grow memory without bound — the buffer
 /// stops at the cap and the drain keeps the child's writes from blocking
-/// on a full pipe (which would turn a fast producer into a timeout). The
-/// extra byte lets [`capture_context`] tell "exactly full" from "cut":
-/// its truncation marker only fires on a real overflow. A read error
-/// degrades to whatever was captured so far, matching the
+/// on a full pipe (which would turn a fast producer into a timeout).
+/// Returns the bytes plus whether the stream went past the budget,
+/// decided on the raw capture: the caller trims whitespace afterwards,
+/// which could otherwise shave off the very byte that reveals the cut.
+/// A read error degrades to whatever was captured so far, matching the
 /// `wait_with_output` contract.
-async fn read_capped<R>(reader: &mut R, cap: usize) -> Vec<u8>
+async fn read_capped<R>(reader: &mut R, cap: usize) -> (Vec<u8>, bool)
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -631,6 +637,7 @@ where
         .take(cap as u64 + 1)
         .read_to_end(&mut buf)
         .await;
+    let truncated = buf.len() > cap;
     let mut sink = [0u8; 8192];
     loop {
         match reader.read(&mut sink).await {
@@ -638,17 +645,21 @@ where
             Ok(_) => {}
         }
     }
-    buf
+    (buf, truncated)
 }
 
 /// Cap one prompt hook's captured stdout: over-budget output is cut at a
 /// char boundary (stdout is lossy-decoded UTF-8, so the byte cap can split a
 /// multi-byte character) with [`PROMPT_CONTEXT_TRUNCATED`] appended.
-fn capture_context(stdout: &str) -> String {
-    if stdout.len() <= PROMPT_CONTEXT_MAX_BYTES {
+///
+/// `truncated` comes from the capture itself (see [`read_capped`]): the
+/// trimmed text can sit at or under the budget while real output was cut,
+/// and only the flag knows.
+fn capture_context(stdout: &str, truncated: bool) -> String {
+    if !truncated && stdout.len() <= PROMPT_CONTEXT_MAX_BYTES {
         return stdout.to_owned();
     }
-    let mut end = PROMPT_CONTEXT_MAX_BYTES;
+    let mut end = stdout.len().min(PROMPT_CONTEXT_MAX_BYTES);
     while !stdout.is_char_boundary(end) {
         end -= 1;
     }
@@ -658,8 +669,8 @@ fn capture_context(stdout: &str) -> String {
 /// Append one prompt hook's captured stdout to the report context
 /// (newline-joined across hooks; empty output contributes nothing so a
 /// silent-but-successful hook never injects blank context).
-fn append_context(context: &mut String, stdout: &str) {
-    let captured = capture_context(stdout);
+fn append_context(context: &mut String, stdout: &str, truncated: bool) {
+    let captured = capture_context(stdout, truncated);
     if captured.is_empty() {
         return;
     }
@@ -807,6 +818,17 @@ mod tests {
             "powershell -NoProfile -Command [Console]::Out.Write('a' * 3000000)".to_owned()
         } else {
             "head -c 3000000 /dev/zero | tr '\\0' 'a'".to_owned()
+        }
+    }
+
+    /// Over-budget output made only of whitespace: the trim shaves every
+    /// byte the capture kept, so only the capture-side overflow flag can
+    /// still make the truncation visible.
+    fn bulk_whitespace_cmd() -> String {
+        if cfg!(windows) {
+            "powershell -NoProfile -Command [Console]::Out.Write(' ' * 70000)".to_owned()
+        } else {
+            "head -c 70000 /dev/zero | tr '\\0' ' '".to_owned()
         }
     }
 
@@ -1220,6 +1242,24 @@ mod tests {
         );
     }
 
+    /// Whitespace-only over-budget output must still be marked: the trim
+    /// removes every kept byte, so the marker rides on the capture-side
+    /// overflow flag, not on the trimmed length.
+    #[tokio::test]
+    async fn whitespace_only_overflow_still_marks_the_truncation() {
+        let e = HookEngine::new(HashMap::new());
+        e.register_prompt_hook(
+            HookEventPoint::UserPromptSubmit,
+            def(&bulk_whitespace_cmd()),
+        );
+        let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert!(
+            report.context.contains(PROMPT_CONTEXT_TRUNCATED),
+            "the truncation survives the trim: {report:?}"
+        );
+    }
+
     /// A failing prompt hook must not block its point: exit code 2 (the
     /// command flavor's block signal) degrades to a warning even on a
     /// blockable point, and no context is injected.
@@ -1273,10 +1313,10 @@ mod tests {
     #[test]
     fn prompt_context_capture_caps_and_marks_truncation() {
         let small = "within budget";
-        assert_eq!(capture_context(small), small);
+        assert_eq!(capture_context(small, false), small);
 
         let big = "a".repeat(PROMPT_CONTEXT_MAX_BYTES + 100);
-        let captured = capture_context(&big);
+        let captured = capture_context(&big, true);
         assert!(captured.ends_with(PROMPT_CONTEXT_TRUNCATED));
         assert_eq!(
             captured.len(),
@@ -1286,7 +1326,7 @@ mod tests {
         // Three-byte characters: 64 KiB is not a multiple of 3, so the raw
         // byte cap lands mid-character.
         let wide = "\u{65e5}".repeat(PROMPT_CONTEXT_MAX_BYTES / 3 + 10);
-        let captured = capture_context(&wide);
+        let captured = capture_context(&wide, true);
         assert!(captured.ends_with(PROMPT_CONTEXT_TRUNCATED));
         assert!(
             captured.len() < PROMPT_CONTEXT_MAX_BYTES + PROMPT_CONTEXT_TRUNCATED.len(),

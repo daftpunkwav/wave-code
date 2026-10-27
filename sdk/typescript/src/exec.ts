@@ -119,14 +119,19 @@ function decisionToken(decision: ApprovalDecision): string {
 }
 
 /**
- * Spawn `wavecode exec --json` and expose its JSONL event stream.
+ * Build the `wavecode exec --json` argv for one run.
  *
- * @param options - The prompt, binary, and surface options of the run.
- * @returns The live session: its event iterator, its approval handle,
- * and the promise that settles when the child exits.
+ * The prompt is untrusted caller text: it always rides after a `--`
+ * separator, so a leading `-` or `--flag=value` cannot be parsed as a
+ * CLI option (which would reject the run, or rewrite model,
+ * permission, or config choices). Kept as its own step so tests can
+ * pin the separator contract without spawning a binary; this helper is
+ * deliberately absent from the package export surface.
+ *
+ * @param options - The prompt and surface options of the run.
+ * @returns The argv following the binary path.
  */
-export function execSession(options: ExecOptions): ExecSession {
-  const bin = options.bin ?? process.env.WAVECODE_BIN ?? "wavecode";
+export function buildExecArgs(options: ExecOptions): string[] {
   const args = ["exec", "--json"];
   if (options.approvals) {
     args.push("--approvals");
@@ -140,7 +145,20 @@ export function execSession(options: ExecOptions): ExecSession {
   if (options.configPath) {
     args.push("--config", options.configPath);
   }
-  args.push(options.prompt);
+  args.push("--", options.prompt);
+  return args;
+}
+
+/**
+ * Spawn `wavecode exec --json` and expose its JSONL event stream.
+ *
+ * @param options - The prompt, binary, and surface options of the run.
+ * @returns The live session: its event iterator, its approval handle,
+ * and the promise that settles when the child exits.
+ */
+export function execSession(options: ExecOptions): ExecSession {
+  const bin = options.bin ?? process.env.WAVECODE_BIN ?? "wavecode";
+  const args = buildExecArgs(options);
 
   // stdout and stdin are pipes (event stream and approval answers);
   // stderr inherits so human-side progress stays visible by default.

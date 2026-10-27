@@ -463,35 +463,6 @@ impl Conversation {
     }
 }
 
-/// Merge adjacent entries from the same role.
-///
-/// Rationale: some providers reject consecutive same-role messages. The
-/// merged entry keeps every block in order, preserving tool pairing on
-/// the wire while text blocks still read as one message.
-pub fn normalize_history(entries: &[HistoryEntry]) -> Vec<HistoryEntry> {
-    let mut out: Vec<HistoryEntry> = Vec::with_capacity(entries.len());
-    for entry in entries {
-        match out.last_mut() {
-            Some(last) if last.role == entry.role => {
-                last.blocks.extend(entry.blocks.iter().cloned());
-            }
-            _ => out.push(entry.clone()),
-        }
-    }
-    out
-}
-
-/// Detect pairing violations: entries that would break role alternation.
-pub fn find_pairing_violations(entries: &[HistoryEntry]) -> Vec<usize> {
-    let mut bad = Vec::new();
-    for (i, window) in entries.windows(2).enumerate() {
-        if window[0].role == window[1].role {
-            bad.push(i + 1);
-        }
-    }
-    bad
-}
-
 /// Close every tool call that has no result, appending one error result per
 /// lost call; returns the repaired history and the affected call ids.
 ///
@@ -730,28 +701,6 @@ mod tests {
         conv.push(Role::Assistant, "hi");
         assert_eq!(snap.len(), 1);
         assert_eq!(conv.len(), 2);
-    }
-
-    #[test]
-    fn normalize_merges_adjacent_same_role_entries() {
-        let entries = vec![
-            HistoryEntry {
-                role: Role::User,
-                blocks: vec![Block::Text("a".to_string())],
-            },
-            HistoryEntry {
-                role: Role::User,
-                blocks: vec![Block::Text("b".to_string())],
-            },
-            HistoryEntry {
-                role: Role::Assistant,
-                blocks: vec![Block::Text("c".to_string())],
-            },
-        ];
-        let normalized = normalize_history(&entries);
-        assert_eq!(normalized.len(), 2);
-        assert_eq!(normalized[0].text(), "a\nb");
-        assert!(find_pairing_violations(&normalized).is_empty());
     }
 
     #[test]

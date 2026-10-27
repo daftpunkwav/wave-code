@@ -61,7 +61,12 @@ export interface ExecOptions {
 export interface ExecResult {
   /** Process exit code (0 completed, 130 interrupted, 1 failed). */
   code: number;
-  /** The turn ended at an interrupt checkpoint. */
+  /**
+   * The turn ended at an interrupt checkpoint. On Windows the child is
+   * terminated outright (Node delivers no console interrupt there), so
+   * the 130/interrupted contract holds on Unix only; see
+   * [`ExecSession.interrupt`].
+   */
   interrupted: boolean;
 }
 
@@ -90,7 +95,16 @@ export interface ExecSession {
    * its final error event.
    */
   wait(): Promise<ExecResult>;
-  /** SIGINT-equivalent: interrupt the running turn. */
+  /**
+   * SIGINT-equivalent: interrupt the running turn.
+   *
+   * Unix delivers the interrupt signal, the turn unwinds at its next
+   * checkpoint, and `wait()` resolves with code 130 and
+   * `interrupted: true`. Windows has no per-process interrupt signal —
+   * Node terminates the child outright, so the stream simply ends with
+   * no `turn_completed` event and `wait()` resolves with the kill exit
+   * code and `interrupted: false`.
+   */
   interrupt(): void;
 }
 

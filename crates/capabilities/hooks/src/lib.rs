@@ -546,18 +546,12 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
         }
         match (stdout.as_mut(), stderr.as_mut()) {
             (Some(stdout), Some(stderr)) => {
-                use tokio::io::AsyncReadExt;
-                let mut out_buf = Vec::new();
-                let mut err_buf = Vec::new();
                 let (out, err, status) = tokio::join!(
-                    stdout.read_to_end(&mut out_buf),
-                    stderr.read_to_end(&mut err_buf),
+                    read_capped(stdout, PROMPT_CONTEXT_MAX_BYTES),
+                    read_capped(stderr, PROMPT_CONTEXT_MAX_BYTES),
                     child.wait(),
                 );
-                // Read failures degrade to a partial capture; the exit code
-                // still surfaces (same contract as `wait_with_output`).
-                let _ = (out, err);
-                status.map(move |status| (out_buf, err_buf, status))
+                status.map(move |status| (out, err, status))
             }
             // Both streams are piped above; a missing one still waits.
             _ => child
@@ -614,6 +608,37 @@ async fn kill_hook_tree(child: &mut tokio::process::Child) {
         infrastructure_base::kill_tree_blocking(pid).await;
     }
     let _ = child.start_kill();
+}
+
+/// Buffer at most `cap + 1` bytes from `reader`, then drain the rest to
+/// EOF without buffering it.
+///
+/// Hooks are the per-tool-call hot path, so the capture must not be the
+/// one place a chatty child can grow memory without bound — the buffer
+/// stops at the cap and the drain keeps the child's writes from blocking
+/// on a full pipe (which would turn a fast producer into a timeout). The
+/// extra byte lets [`capture_context`] tell "exactly full" from "cut":
+/// its truncation marker only fires on a real overflow. A read error
+/// degrades to whatever was captured so far, matching the
+/// `wait_with_output` contract.
+async fn read_capped<R>(reader: &mut R, cap: usize) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let _ = (&mut *reader)
+        .take(cap as u64 + 1)
+        .read_to_end(&mut buf)
+        .await;
+    let mut sink = [0u8; 8192];
+    loop {
+        match reader.read(&mut sink).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    buf
 }
 
 /// Cap one prompt hook's captured stdout: over-budget output is cut at a
@@ -771,6 +796,17 @@ mod tests {
             "ping -n 10 127.0.0.1 >nul".to_owned()
         } else {
             "sleep 10".to_owned()
+        }
+    }
+
+    /// Roughly 3 MB of stdout: far over [`PROMPT_CONTEXT_MAX_BYTES`] and
+    /// far over any OS pipe buffer, so a capture that stops draining
+    /// would block the child until the timeout instead of finishing.
+    fn bulk_output_cmd() -> String {
+        if cfg!(windows) {
+            "powershell -NoProfile -Command [Console]::Out.Write('a' * 3000000)".to_owned()
+        } else {
+            "head -c 3000000 /dev/zero | tr '\\0' 'a'".to_owned()
         }
     }
 
@@ -1156,6 +1192,32 @@ mod tests {
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert!(report.warnings.is_empty());
         assert_eq!(report.context, "ctx-from-hook");
+    }
+
+    /// The capture cap is enforced while the child runs, not after: an
+    /// over-budget prompt hook still completes successfully (the over-cap
+    /// output is drained, so the child's writes never block on a full
+    /// pipe) and its context is cut at the budget with a visible marker.
+    #[tokio::test]
+    async fn prompt_hook_capture_stops_at_the_context_budget() {
+        let e = HookEngine::new(HashMap::new());
+        e.register_prompt_hook(HookEventPoint::UserPromptSubmit, def(&bulk_output_cmd()));
+        let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
+        assert_eq!(report.verdict, HookVerdict::Allow);
+        assert!(
+            report.warnings.is_empty(),
+            "a capped capture must not turn into a timeout: {report:?}"
+        );
+        assert!(
+            report.context.len() <= PROMPT_CONTEXT_MAX_BYTES + PROMPT_CONTEXT_TRUNCATED.len(),
+            "context stays at the budget: {}",
+            report.context.len()
+        );
+        assert!(
+            report.context.contains(PROMPT_CONTEXT_TRUNCATED),
+            "the truncation is visible: {}",
+            report.context.len()
+        );
     }
 
     /// A failing prompt hook must not block its point: exit code 2 (the

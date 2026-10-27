@@ -6,7 +6,7 @@ English | [中文](README.zh.md)
 |---|---|
 | `Cargo.toml` | Manifest; the boundary comment records the zero-internal-dependency rule |
 | `src/` | The library source: components, editor, markdown/mermaid/math renderers, and the differential screen (see its README) |
-| `tests/` | Black-box integration tests over the public API only: `markdown_contract.rs` (render contract, caching, fence seam) and `mermaid_dispatch.rs` (diagram dispatch and `MermaidFences`) |
+| `tests/` | Black-box integration tests over the public API only: `markdown_contract.rs` (render contract, caching, fence seam), `mermaid_dispatch.rs` (diagram dispatch and `MermaidFences`), and `width_allocation.rs` (allocation bounds of the width/tokenizer path) |
 
 The engine is a pure rendering library with zero internal workspace
 dependencies — external crates only (`crossterm`, `unicode-width`,

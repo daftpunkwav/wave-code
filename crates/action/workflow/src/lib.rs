@@ -445,7 +445,14 @@ pub async fn ralph_run(
                     break;
                 }
             }
-            Err(reason) => return Err(RalphError::RoundFailed { round, reason }),
+            Err(reason) => {
+                // The round is abandoned (poll timeout, failed child); stop
+                // the child still in flight so a failed loop does not leave
+                // an orphan burning tokens and injecting a completion notice
+                // into later turns. Stopping a finished id is a no-op.
+                tasks.stop(&task_id);
+                return Err(RalphError::RoundFailed { round, reason });
+            }
         }
     }
     Ok(RalphReport {
@@ -745,6 +752,26 @@ mod tests {
             .expect("ralph runs");
         assert!(!report.completed);
         assert_eq!(report.rounds.len(), 3);
+    }
+
+    /// A failed round stops its child before surfacing the error: the
+    /// abandoned round's task must not keep burning tokens and later
+    /// inject a completion notice into the session.
+    #[tokio::test]
+    async fn a_failed_ralph_round_stops_its_child() {
+        let service = FailAllRecordingStops {
+            stopped: Mutex::new(Vec::new()),
+            spawned: Mutex::new(Vec::new()),
+        };
+        let err = ralph_run("impossible objective", 3, &service)
+            .await
+            .expect_err("the round fails");
+        assert!(matches!(
+            err,
+            RalphError::RoundFailed { round: 1, .. }
+        ));
+        let stopped = service.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(*stopped, vec!["task-1".to_string()]);
     }
 
     #[tokio::test]

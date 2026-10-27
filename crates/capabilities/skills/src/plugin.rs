@@ -50,8 +50,9 @@ fn valid_name(name: &str) -> bool {
 
 /// Raw MCP server entry from a plugin manifest.
 ///
-/// Mirrors the config-crate server shape without depending on it; the
-/// assembly layer converts these into configured servers.
+/// Mirrors the config-crate server shape without depending on it.
+/// Retained for listing and diagnostics; no session assembly consumes
+/// these entries today.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginMcpServer {
     /// Stdio executable command (stdio servers).
@@ -71,8 +72,9 @@ pub struct PluginMcpServer {
 
 /// Raw hook rule from a plugin hooks file.
 ///
-/// Mirrors the config-crate hook rule without depending on it; the
-/// assembly layer converts these into engine definitions.
+/// Mirrors the config-crate hook rule without depending on it.
+/// Retained for listing and diagnostics; no session assembly converts
+/// these into engine definitions today.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginHookRule {
     /// Tool-name matcher (optional).
@@ -123,9 +125,10 @@ pub struct LoadedPlugin {
     pub version: String,
     /// Skills discovered from `skills_dir` ([`SkillSource::User`]).
     pub skills: SkillSet,
-    /// Raw MCP entries for assembly, sorted by server name.
+    /// Raw MCP entries, sorted by server name (listing only; see the
+    /// module docs for the inventory-only contract).
     pub mcp_servers: Vec<(String, PluginMcpServer)>,
-    /// Raw hook rules for assembly, keyed by event-point name.
+    /// Raw hook rules, keyed by event-point name (listing only).
     pub hooks: HashMap<String, Vec<PluginHookRule>>,
 }
 

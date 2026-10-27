@@ -1353,7 +1353,7 @@ where
     /// completed sample, TurnCompleted exactly once as the last event.
     /// The declared calls are announced up front and settled after
     /// dispatch; the three paths that never reach dispatch — the
-    /// post-approval interrupt checkpoint, a truncation-batch dispatch
+    /// pre-dispatch interrupt checkpoint, a truncation-batch dispatch
     /// failure, and the repeat breaker — settle the already-declared
     /// calls with synthetic results and emit no Begin/End pair for them,
     /// so those calls exist in the history (and on resume replay) but

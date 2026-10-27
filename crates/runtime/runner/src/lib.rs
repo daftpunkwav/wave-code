@@ -1351,6 +1351,13 @@ where
     /// sample, ToolCallBegin all upfront in declaration order, ToolCallEnd
     /// all after in declaration order, TokenCount on every settle with a
     /// completed sample, TurnCompleted exactly once as the last event.
+    /// The declared calls are announced up front and settled after
+    /// dispatch; the three paths that never reach dispatch — the
+    /// post-approval interrupt checkpoint, a truncation-batch dispatch
+    /// failure, and the repeat breaker — settle the already-declared
+    /// calls with synthetic results and emit no Begin/End pair for them,
+    /// so those calls exist in the history (and on resume replay) but
+    /// were never visible as live events.
     /// Usage settle runs on every sampling exit; with no completed sample
     /// it is a no-op that neither covers the carry nor emits TokenCount.
     pub async fn run_turn(

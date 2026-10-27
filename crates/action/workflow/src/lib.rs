@@ -52,6 +52,12 @@ pub const DEFAULT_FANOUT_PARALLEL: usize = 4;
 pub const MAX_FANOUT_PARALLEL: usize = 16;
 /// Ready steps taken per wave walk (see [`run_workflow`]).
 pub const MAX_WAVE_PARALLEL: usize = 8;
+/// Upper bound on steps in one spec: every step is a child run, so an
+/// unbounded step list would let one spec queue an unbounded token bill.
+pub const MAX_SPEC_STEPS: usize = 64;
+/// Upper bound on entries in one fan-out input array, for the same
+/// reason as [`MAX_SPEC_STEPS`] (the multiplier side of the product).
+pub const MAX_FANOUT_ITEMS: usize = 256;
 /// Poll interval while waiting on a spawned child task.
 const POLL_INTERVAL_MS: u64 = 10;
 /// Poll attempts before waiting gives up (10ms x 30000 = 300s).
@@ -172,8 +178,27 @@ pub fn contains_done_marker(summary: &str) -> bool {
     summary.lines().any(|line| line.trim() == RALPH_DONE_MARKER)
 }
 
-/// Validate step ids and edges: duplicates, blanks, unknown deps, cycles.
+/// Validate step ids and edges: duplicates, blanks, unknown deps, cycles,
+/// and the step/fan-out size bounds (every step and every fan-out entry
+/// is a full child run, so a spec is a token budget and needs a ceiling).
 pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
+    if spec.steps.len() > MAX_SPEC_STEPS {
+        return Err(WorkflowError::InvalidSpec(format!(
+            "a workflow carries at most {MAX_SPEC_STEPS} steps (got {})",
+            spec.steps.len()
+        )));
+    }
+    for step in &spec.steps {
+        if let serde_json::Value::Array(items) = &step.input
+            && items.len() > MAX_FANOUT_ITEMS
+        {
+            return Err(WorkflowError::InvalidSpec(format!(
+                "fan-out step '{}' carries at most {MAX_FANOUT_ITEMS} entries (got {})",
+                step.id,
+                items.len()
+            )));
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     for step in &spec.steps {
         if step.id.trim().is_empty() {
@@ -482,6 +507,34 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_spec_over_the_step_bound() {
+        let steps: Vec<WorkflowStep> = (0..=MAX_SPEC_STEPS)
+            .map(|index| task_step(&format!("s{index}"), "x", &[]))
+            .collect();
+        let err = validate_spec(&WorkflowSpec { steps }).expect_err("over the bound");
+        assert!(
+            matches!(err, WorkflowError::InvalidSpec(ref text) if text.contains("at most 64 steps")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_fanout_over_the_entry_bound() {
+        let entries: Vec<String> = (0..=MAX_FANOUT_ITEMS)
+            .map(|index| format!("x{index}"))
+            .collect();
+        let spec = spec_from_json(&format!(
+            r#"{{"steps": [{{"id": "fan", "kind": "fanout", "input": {}}}]}}"#,
+            serde_json::to_string(&entries).unwrap()
+        ));
+        let err = validate_spec(&spec).expect_err("over the bound");
+        assert!(
+            matches!(err, WorkflowError::InvalidSpec(ref text) if text.contains("at most 256 entries")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn rejects_unknown_dependency() {
         let spec = WorkflowSpec {
             steps: vec![task_step("a", "x", &["ghost"])],
@@ -766,10 +819,7 @@ mod tests {
         let err = ralph_run("impossible objective", 3, &service)
             .await
             .expect_err("the round fails");
-        assert!(matches!(
-            err,
-            RalphError::RoundFailed { round: 1, .. }
-        ));
+        assert!(matches!(err, RalphError::RoundFailed { round: 1, .. }));
         let stopped = service.stopped.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(*stopped, vec!["task-1".to_string()]);
     }

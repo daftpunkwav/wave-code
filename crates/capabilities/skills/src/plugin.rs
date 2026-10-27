@@ -6,8 +6,14 @@
  * Responsibilities:
  * - Discover plugin packs in the user plugins dir.
  * - Validate pack names and load skills through the Discovery pipeline.
- * - Return raw MCP entries and hook rules for the assembly layer.
- * - Warn-and-skip invalid packs without failing assembly.
+ * - Expose per-pack counts and the raw MCP entries/hook rules/skills.
+ * - Warn-and-skip invalid packs without failing discovery.
+ *
+ * Constraints:
+ * - This module is inventory only: the session assembly consumes
+ *   builtin/user/project skill roots and never merges pack contents, so
+ *   a pack's skills, MCP servers, and hooks are counted and surfaced
+ *   (e.g. by `plugin list`) but do not take effect.
  *
  * This module must not depend on: workspace crates beyond its own
  * (manifest shapes mirror config/hook types instead of importing them).
@@ -18,10 +24,12 @@
 //!
 //! A manifest carries `{name, version, skills_dir?, hooks_file?}` plus
 //! optional `[mcp_servers.<server>]` inline tables. Skills load through
-//! the [`discover`] pipeline with [`SkillSource::User`]; MCP entries and
-//! hook rules return raw so the composition root (which owns the
-//! config/hook dependencies) converts them. Invalid packs warn-and-skip
-//! with a reason and never fail assembly.
+//! the [`discover`] pipeline with [`SkillSource::User`]. The loader is
+//! inventory only: MCP entries and hook rules are returned raw (mirrors
+//! of the config/hook shapes, so this module imports neither), and
+//! nothing currently converts them into configured servers or active
+//! hook rules — consumers read counts and entries for listing and
+//! diagnostics. Invalid packs warn-and-skip with a reason.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -194,6 +202,9 @@ impl PluginLoader {
 
     /// Merge every pack's skills into `set` (same names override, so
     /// later packs win over earlier ones).
+    ///
+    /// No production caller today — the session assembly never merges
+    /// pack skills; this is the hook a wiring pass would call.
     pub fn apply_skills(&self, set: &mut SkillSet) {
         for plugin in &self.plugins {
             for skill in plugin.skills.iter() {

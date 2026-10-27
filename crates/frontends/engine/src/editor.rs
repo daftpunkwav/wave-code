@@ -1178,7 +1178,7 @@ fn paint_body(text: &str, style: &EditorStyle, first_row: bool) -> String {
     } else if token.starts_with('!') {
         style.shell_command
     } else {
-        return style.text.paint(text);
+        return format!("{}{}", marker, style.text.paint(text));
     };
     format!(
         "{}{}{}",

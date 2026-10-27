@@ -129,6 +129,23 @@ fn textual_reason(command: &str) -> Option<&'static str> {
     None
 }
 
+/// The script text a shell wrapper hands its interpreter, if the segment
+/// invokes one in script mode: `sh -c`, `cmd /C`, `powershell -Command`
+/// and their pathed/`.exe`-suffixed spellings. `cmd` and `powershell`
+/// consume the whole remaining line as the script, so the tokens after
+/// the flag are re-joined (whitespace tokenization already lost the
+/// original quoting; the re-screen only needs the words back).
+fn shell_script_arg(shell: &str, rest: &[String]) -> Option<String> {
+    let flag = match shell {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "ash" => "-c",
+        "cmd" => "/c",
+        "powershell" | "pwsh" => "-command",
+        _ => return None,
+    };
+    let pos = rest.iter().position(|token| token == flag)?;
+    Some(rest[pos + 1..].join(" "))
+}
+
 /// One command segment's dangerous construct, if any. A segment is one
 /// (possibly compound-flattened) command text from the AST walk.
 fn segment_reason(segment: &str) -> Option<&'static str> {
@@ -157,6 +174,14 @@ fn segment_reason(segment: &str) -> Option<&'static str> {
     let cmd = tokens.get(idx)?;
     let bare = program_name(cmd);
     let rest = &tokens[idx + 1..];
+    // Shell indirection (`sh -c '<script>'`, `cmd /C <script>`,
+    // `powershell -Command <script>`): the script decides what actually
+    // runs, so the same table re-screens its text instead of letting the
+    // interpreter's own name pass. The recursion consumes at least the
+    // shell and flag tokens, so it terminates.
+    if let Some(script) = shell_script_arg(bare, rest) {
+        return segment_reason(&script);
+    }
     match bare {
         // Disk and filesystem destroyers: writing a raw image to a block
         // device, building or wiping filesystems, partition editors.
@@ -297,6 +322,38 @@ mod tests {
             reason("rm missing.txt -r -f /"),
             Some("rm -rf targets a system root")
         );
+    }
+
+    /// A shell invoked in script mode hands the decision to its script,
+    /// so the script gets the same table: `sh -c 'rm -rf /'` is the same
+    /// danger as a bare `rm -rf /`, and a benign script stays unmarked.
+    #[test]
+    fn shell_script_wrappers_are_screened_with_the_same_table() {
+        assert_eq!(
+            reason("sh -c 'rm -rf /'"),
+            Some("rm -rf targets a system root")
+        );
+        assert_eq!(
+            reason("/bin/bash -c 'rm -rf /etc'"),
+            Some("rm -rf targets a system root")
+        );
+        assert_eq!(
+            reason("sh -c 'mkfs.ext4 /dev/sdb1'"),
+            Some("mkfs builds a filesystem")
+        );
+        assert_eq!(reason("bash -c shutdown"), Some("a power-control command"));
+        assert_eq!(
+            reason("cmd /C diskpart"),
+            Some("a partition editor was invoked")
+        );
+        assert!(
+            reason("powershell -Command \"Remove-Item -Recurse -Force /\"").is_some(),
+            "the powershell script re-screen fires"
+        );
+        // The interpreter's own name is no longer the whole story, but a
+        // benign script still asks nobody.
+        assert_eq!(reason("sh -c 'echo hello'"), None);
+        assert_eq!(reason("cmd /C echo hello"), None);
     }
 
     #[test]

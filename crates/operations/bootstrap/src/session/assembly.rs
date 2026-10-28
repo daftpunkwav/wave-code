@@ -922,7 +922,7 @@ fn push_text_seed(conv: &mut Conversation, initial_history: &[(bool, String)]) {
 /// joins them by its shared constant — it writes the session compaction
 /// slot, and only the parent turn drains that slot, so a child request
 /// would compact the parent's history.
-fn child_forbidden_tools(
+pub(super) fn child_forbidden_tools(
     registry: &wavecode_tools::Registry,
     native: &Arc<Mutex<NativeExecutor>>,
 ) -> std::collections::HashSet<String> {

@@ -71,21 +71,25 @@ impl HistoryRecord {
     fn from_value(value: serde_json::Value) -> Self {
         let seq = value.get("seq").and_then(serde_json::Value::as_u64);
         match value.get("k").and_then(serde_json::Value::as_str) {
-            Some("append") => Self::Append {
+            Some("append") if value.get("entry").is_some() => Self::Append {
                 seq: seq.unwrap_or(0),
-                entry: value
-                    .get("entry")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
+                entry: value.get("entry").cloned().unwrap_or(serde_json::Value::Null),
             },
-            Some("replace") => Self::Replace {
-                seq: seq.unwrap_or(0),
-                entries: value
-                    .get("entries")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-                    .unwrap_or_default(),
-            },
+            Some("replace") if value.get("entries").is_some_and(|e| e.is_array()) => {
+                Self::Replace {
+                    seq: seq.unwrap_or(0),
+                    entries: value
+                        .get("entries")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                }
+            }
+            // A kind this format names with a missing payload field is not
+            // interpretable as that kind: decoding it as an empty entry or
+            // replacement would let a malformed record clear the verified
+            // prefix on replay. `Unknown` stops the replay as a gap.
+            Some("append") | Some("replace") => Self::Unknown { seq, raw: value },
             _ => Self::Unknown { seq, raw: value },
         }
     }
@@ -260,6 +264,37 @@ mod tests {
             }
         );
         assert!(!read.torn_tail && !read.mid_gap);
+    }
+
+    /// A parseable `replace` record missing its `entries` payload is not
+    /// a valid empty replacement (that would clear the verified prefix on
+    /// replay without a gap report): it decodes as `Unknown`.
+    #[test]
+    fn malformed_replace_decodes_as_unknown() {
+        let record = HistoryRecord::from_value(serde_json::json!({
+            "k": "replace",
+            "seq": 4,
+        }));
+        assert_eq!(
+            record,
+            HistoryRecord::Unknown {
+                seq: Some(4),
+                raw: serde_json::json!({"k": "replace", "seq": 4}),
+            }
+        );
+        // An explicit empty array stays a valid (empty) replacement.
+        let record = HistoryRecord::from_value(serde_json::json!({
+            "k": "replace",
+            "seq": 4,
+            "entries": [],
+        }));
+        assert_eq!(
+            record,
+            HistoryRecord::Replace {
+                seq: 4,
+                entries: Vec::new(),
+            }
+        );
     }
 
     #[test]

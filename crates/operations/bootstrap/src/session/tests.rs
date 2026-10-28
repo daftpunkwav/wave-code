@@ -1002,3 +1002,73 @@ fn gapped_journal_is_rewritten_before_new_records() {
     assert_eq!(replayed.entries.len(), 2);
     assert_eq!(replayed.entries[1].text(), "after");
 }
+
+/// The child-forbidden set derives from the declarative Spawn class: a
+/// newly registered Spawn tool lands in the set with no name-list edit,
+/// from either catalog, alongside the parent-only compaction channel —
+/// so a child cannot invoke it even when its allowed-tools names it.
+#[test]
+fn spawn_tools_derive_into_the_child_forbidden_set() {
+    use wavecode_tools::Tool;
+    #[derive(Debug)]
+    struct FreshSpawnTool;
+    #[async_trait::async_trait]
+    impl Tool for FreshSpawnTool {
+        fn name(&self) -> &str {
+            "fresh_spawn"
+        }
+        fn description(&self) -> &str {
+            "a spawn tool registered after the forbidden list moved to kinds"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_read_only(&self) -> bool {
+            false
+        }
+        fn kind(&self) -> wavecode_protocol::ToolKind {
+            wavecode_protocol::ToolKind::Spawn
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &wavecode_tools::ToolCtx,
+        ) -> wavecode_tools::Result<wavecode_tools::ToolOutput> {
+            Err(wavecode_tools::ToolsError::InvalidInput {
+                message: "unreachable in this test".to_string(),
+            })
+        }
+    }
+
+    let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
+    registry.register(std::sync::Arc::new(FreshSpawnTool));
+    let native = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::native::NativeExecutor::new(),
+    ));
+    native
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .register(crate::native::NativeTool {
+            name: "fresh_native_spawn".to_string(),
+            description: "native spawn".to_string(),
+            read_only: false,
+            destructive: false,
+            kind: wavecode_protocol::ToolKind::Spawn,
+            handler: std::sync::Arc::new(|_| (String::new(), false)),
+        });
+
+    let forbidden = super::assembly::child_forbidden_tools(&registry, &native);
+    // Both catalogs' Spawn tools derive in, and the compaction channel
+    // joins through its constant. (The delegation tools `task`/`skill`
+    // register late in assembly against the shared registry; this bare
+    // registry pins the derivation mechanism itself.)
+    for name in ["fresh_spawn", "fresh_native_spawn", "compact_context"] {
+        assert!(
+            forbidden.contains(name),
+            "'{name}' must be forbidden for children: {forbidden:?}"
+        );
+    }
+    // Read-only and shell tools stay invokable for children.
+    assert!(!forbidden.contains("read"));
+    assert!(!forbidden.contains("shell"));
+}

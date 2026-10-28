@@ -1274,6 +1274,9 @@ fn assemble_hooks(
 /// Build the engine's definitions: config-declared rules come first at
 /// every event point; pack rules append after (pack directory order,
 /// then file order within a pack) with the same matcher/timeout
+/// Build the engine's definitions: config-declared rules come first at
+/// every event point; pack rules append after (pack directory order,
+/// then file order within a pack) with the same matcher/timeout
 /// semantics as config rules.
 pub(super) fn hook_defs(
     config: &wavecode_config::Config,
@@ -1282,28 +1285,51 @@ pub(super) fn hook_defs(
 ) -> HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>> {
     let mut defs: HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>> =
         HashMap::new();
+    config_hook_defs(config, &mut defs, warnings);
+    pack_hook_defs(plugins, &mut defs, warnings);
+    defs
+}
+
+/// One config `HookRule` in engine form (absent timeout/once fall back
+/// to the engine defaults).
+fn config_rule_to_def(rule: &wavecode_config::HookRule) -> wavecode_hooks::HookDef {
+    wavecode_hooks::HookDef {
+        matcher: rule.matcher.clone(),
+        command: rule.command.clone(),
+        timeout_ms: rule
+            .timeout_ms
+            .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
+        once: rule.once.unwrap_or(false),
+    }
+}
+
+/// Insert the config-declared rules; an unknown event point warns and
+/// skips (config keys are free-form TOML).
+fn config_hook_defs(
+    config: &wavecode_config::Config,
+    defs: &mut HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>>,
+    warnings: &mut Vec<String>,
+) {
     for (point_name, ruleset) in &config.hooks {
         match wavecode_hooks::HookEventPoint::parse(point_name) {
             None => warnings.push(format!("unknown hook point {point_name:?}; skipped")),
             Some(point) => {
                 defs.insert(
                     point,
-                    ruleset
-                        .rules()
-                        .iter()
-                        .map(|rule| wavecode_hooks::HookDef {
-                            matcher: rule.matcher.clone(),
-                            command: rule.command.clone(),
-                            timeout_ms: rule
-                                .timeout_ms
-                                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
-                            once: rule.once.unwrap_or(false),
-                        })
-                        .collect(),
+                    ruleset.rules().iter().map(config_rule_to_def).collect(),
                 );
             }
         }
     }
+}
+
+/// Append the pack rules after the config rules at every event point
+/// (an unknown pack point warns with the pack attribution).
+fn pack_hook_defs(
+    plugins: &wavecode_skills::plugin::PluginLoader,
+    defs: &mut HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>>,
+    warnings: &mut Vec<String>,
+) {
     for plugin in plugins.plugins() {
         for (point_name, rules) in &plugin.hooks {
             match wavecode_hooks::HookEventPoint::parse(point_name) {
@@ -1311,24 +1337,22 @@ pub(super) fn hook_defs(
                     "plugin {}: unknown hook point {point_name:?}; skipped",
                     plugin.name
                 )),
-                Some(point) => {
-                    defs.entry(point)
-                        .or_default()
-                        .extend(rules.iter().map(|rule| {
-                            wavecode_hooks::HookDef {
-                                matcher: rule.matcher.clone(),
-                                command: rule.command.clone(),
-                                timeout_ms: rule
-                                    .timeout_ms
-                                    .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
-                                once: rule.once.unwrap_or(false),
-                            }
-                        }));
-                }
+                Some(point) => defs
+                    .entry(point)
+                    .or_default()
+                    .extend(rules.iter().map(|rule| {
+                        wavecode_hooks::HookDef {
+                            matcher: rule.matcher.clone(),
+                            command: rule.command.clone(),
+                            timeout_ms: rule
+                                .timeout_ms
+                                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
+                            once: rule.once.unwrap_or(false),
+                        }
+                    })),
             }
         }
     }
-    defs
 }
 
 /// Convert pack MCP entries into config-crate servers for the live

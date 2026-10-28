@@ -143,99 +143,14 @@ impl ShellJob {
         // up at process exit. A failed assign degrades to the pid path.
         #[cfg(windows)]
         let tree_job = infrastructure_base::ProcessTreeJob::assign(&child).map(Arc::new);
-        tokio::spawn(async move {
-            // Raw byte lines decoded per line through the console
-            // code-page fallback: a plain `lines()` stream is UTF-8
-            // only, so one invalid byte would error the reader and
-            // silently close the pipe mid-command.
-            let mut out = BufReader::new(stdout);
-            let mut err = BufReader::new(stderr);
-            let mut out_bytes = Vec::new();
-            let mut err_bytes = Vec::new();
-            let mut killed = false;
-            let mut out_open = true;
-            let mut err_open = true;
-            // Deadline for the cancelled job's pipes to drain; the
-            // timer only runs once the cancel landed.
-            let mut drain_deadline = tokio::time::Instant::now();
-            let mut draining = false;
-            while out_open || err_open {
-                tokio::select! {
-                    biased;
-                    _ = killer.notified(), if !killed => {
-                        killed = true;
-                        // The shell's descendants inherit the output
-                        // pipes, so killing only the shell orphans them
-                        // and the pipes never reach EOF. `cancel` runs
-                        // the tree kill; wait for it to land before
-                        // killing the shell itself, because `taskkill /T`
-                        // walks the tree from a live parent and a shell
-                        // that died first leaves its descendants behind.
-                        // The wait is bounded: a stuck tree kill ends
-                        // the job anyway (see TREE_KILL_JOIN).
-                        let _ =
-                            tokio::time::timeout(TREE_KILL_JOIN, tree_killer.notified()).await;
-                        let _ = child.start_kill();
-                        drain_deadline = tokio::time::Instant::now() + CANCEL_DRAIN_GRACE;
-                        draining = true;
-                    }
-                    _ = tokio::time::sleep_until(drain_deadline), if draining => {
-                        // A descendant outlived the tree kill and still
-                        // holds the pipe open: stop waiting for EOF so
-                        // the job still reports a terminal event.
-                        out_open = false;
-                        err_open = false;
-                    }
-                    read = out.read_until(b'\n', &mut out_bytes), if out_open => match read {
-                        Ok(0) => {
-                            if !out_bytes.is_empty() {
-                                let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
-                                out_bytes.clear();
-                                if tx.send(ShellEvent::Out(line)).await.is_err() {
-                                    return;
-                                }
-                            }
-                            out_open = false;
-                        }
-                        Ok(_) => {
-                            let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
-                            out_bytes.clear();
-                            if tx.send(ShellEvent::Out(line)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Err(_) => out_open = false,
-                    },
-                    read = err.read_until(b'\n', &mut err_bytes), if err_open => match read {
-                        Ok(0) => {
-                            if !err_bytes.is_empty() {
-                                let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
-                                err_bytes.clear();
-                                if tx.send(ShellEvent::Err(line)).await.is_err() {
-                                    return;
-                                }
-                            }
-                            err_open = false;
-                        }
-                        Ok(_) => {
-                            let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
-                            err_bytes.clear();
-                            if tx.send(ShellEvent::Err(line)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Err(_) => err_open = false,
-                    },
-                }
-            }
-            let status = child.wait().await;
-            let code = if killed {
-                None
-            } else {
-                status.ok().and_then(|status| status.code())
-            };
-            let _ = tx.send(ShellEvent::Done(code)).await;
-        });
+        tokio::spawn(pump_shell_events(
+            tx,
+            child,
+            stdout,
+            stderr,
+            killer,
+            tree_killer,
+        ));
         Ok(Self {
             rx,
             kill,
@@ -321,6 +236,114 @@ impl ShellJob {
         });
     }
 }
+
+/// The `!` shell job's pump: forwards decoded lines until both pipes
+/// close or the cancel path lands, then reports the terminal event.
+///
+/// Raw byte lines decode per line through the console code-page
+/// fallback: a plain `lines()` stream is UTF-8 only, so one invalid
+/// byte would error the reader and silently close the pipe
+/// mid-command.
+#[allow(clippy::too_many_arguments)]
+async fn pump_shell_events(
+    tx: mpsc::Sender<ShellEvent>,
+    mut child: tokio::process::Child,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    killer: Arc<Notify>,
+    tree_killer: Arc<Notify>,
+) {
+    // Raw byte lines decoded per line through the console
+    // code-page fallback: a plain `lines()` stream is UTF-8
+    // only, so one invalid byte would error the reader and
+    // silently close the pipe mid-command.
+    let mut out = BufReader::new(stdout);
+    let mut err = BufReader::new(stderr);
+    let mut out_bytes = Vec::new();
+    let mut err_bytes = Vec::new();
+    let mut killed = false;
+    let mut out_open = true;
+    let mut err_open = true;
+    // Deadline for the cancelled job's pipes to drain; the
+    // timer only runs once the cancel landed.
+    let mut drain_deadline = tokio::time::Instant::now();
+    let mut draining = false;
+    while out_open || err_open {
+        tokio::select! {
+            biased;
+            _ = killer.notified(), if !killed => {
+                killed = true;
+                // The shell's descendants inherit the output
+                // pipes, so killing only the shell orphans them
+                // and the pipes never reach EOF. `cancel` runs
+                // the tree kill; wait for it to land before
+                // killing the shell itself, because `taskkill /T`
+                // walks the tree from a live parent and a shell
+                // that died first leaves its descendants behind.
+                // The wait is bounded: a stuck tree kill ends
+                // the job anyway (see TREE_KILL_JOIN).
+                let _ =
+                    tokio::time::timeout(TREE_KILL_JOIN, tree_killer.notified()).await;
+                let _ = child.start_kill();
+                drain_deadline = tokio::time::Instant::now() + CANCEL_DRAIN_GRACE;
+                draining = true;
+            }
+            _ = tokio::time::sleep_until(drain_deadline), if draining => {
+                // A descendant outlived the tree kill and still
+                // holds the pipe open: stop waiting for EOF so
+                // the job still reports a terminal event.
+                out_open = false;
+                err_open = false;
+            }
+            read = out.read_until(b'\n', &mut out_bytes), if out_open => match read {
+                Ok(0) => {
+                    if !out_bytes.is_empty() {
+                        let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
+                        out_bytes.clear();
+                        if tx.send(ShellEvent::Out(line)).await.is_err() {
+                            return;
+                        }
+                    }
+                    out_open = false;
+                }
+                Ok(_) => {
+                    let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
+                    out_bytes.clear();
+                    if tx.send(ShellEvent::Out(line)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(_) => out_open = false,
+            },
+            read = err.read_until(b'\n', &mut err_bytes), if err_open => match read {
+                Ok(0) => {
+                    if !err_bytes.is_empty() {
+                        let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
+                        err_bytes.clear();
+                        if tx.send(ShellEvent::Err(line)).await.is_err() {
+                            return;
+                        }
+                    }
+                    err_open = false;
+                }
+                Ok(_) => {
+                    let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
+                    err_bytes.clear();
+                    if tx.send(ShellEvent::Err(line)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(_) => err_open = false,
+            },
+        }
+    }
+    let status = child.wait().await;
+    let code = if killed {
+        None
+    } else {
+        status.ok().and_then(|status| status.code())
+    };
+    let _ = tx.send(ShellEvent::Done(code)).await;}
 
 #[cfg(test)]
 mod tests {

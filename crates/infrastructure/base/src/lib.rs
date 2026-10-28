@@ -317,10 +317,13 @@ unsafe impl Sync for ProcessTreeJob {}
 impl ProcessTreeJob {
     /// Create a kill-on-close job and assign the spawned child to it.
     ///
-    /// Assignment must happen before the child spawns descendants the
-    /// cancel wants covered (a process joins with everything it has
-    /// already spawned only when the job is created broken-away-safe —
-    /// this plain assignment covers the child and its future spawns).
+    /// The assignment covers the child and everything it spawns after
+    /// it: descendants spawned between the spawn and this call escape
+    /// the job (`Command::spawn` cannot start the child suspended), so
+    /// a cancel that takes the Job Object path could leave such a
+    /// descendant alive. The window is one scheduler tick wide — the
+    /// assign runs immediately after the spawn — and the pid-path
+    /// fallback below stays the belt-and-braces answer for it.
     pub fn assign(child: &tokio::process::Child) -> Option<Self> {
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,

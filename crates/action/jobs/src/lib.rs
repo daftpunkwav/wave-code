@@ -534,6 +534,11 @@ async fn kill_and_reap(
     slot: &Arc<JobSlot>,
     child: &mut tokio::process::Child,
 ) -> Option<std::process::ExitStatus> {
+    // The Windows path reads the slot's Job Object; the pid path below
+    // needs nothing from it, so the parameter is consumed explicitly to
+    // stay lint-clean on non-Windows targets.
+    #[cfg(not(windows))]
+    let _ = slot;
     #[cfg(windows)]
     if let Some(job) = slot.tree_job.get() {
         job.terminate();

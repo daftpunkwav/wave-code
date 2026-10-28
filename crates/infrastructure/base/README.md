@@ -22,5 +22,8 @@ tree to die, so the crate also owns the off-worker variant that keeps
 that wait off a runtime worker. A caller that reaps the child must reap
 it only after the kill has landed: the reap releases the pid, and a
 kill that starts afterwards can hit a process the system already handed
-that pid to. The crate depends on `tokio` (the blocking pool) and, on
-Unix, `libc`.
+that pid to. The crate depends on `tokio` (the blocking pool),
+`encoding_rs` (the console code-page fallback shared by every surface
+that shows child bytes), and, on Unix, `libc` / on Windows,
+`windows-sys` (the pid liveness probe and the cancel-path Job
+Object).

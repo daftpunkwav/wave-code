@@ -124,22 +124,6 @@ pub(crate) fn render_event(
             stderr.push_str(&format!("[history rewound: {turns} turns]\n"));
             None
         }
-        EventMsg::PlanProposed { text } => {
-            stderr.push_str(&format!("[plan proposed]\n{}\n", clean(text)));
-            None
-        }
-        EventMsg::PlanApproved => {
-            stderr.push_str("[plan approved]\n");
-            None
-        }
-        EventMsg::GoalSet { objective } => {
-            stderr.push_str(&format!("[goal set]\n{}\n", clean(objective)));
-            None
-        }
-        EventMsg::GoalCompleted => {
-            stderr.push_str("[goal completed]\n");
-            None
-        }
         EventMsg::Warning { message } => {
             stderr.push_str(&format!("[warn] {}\n", clean(message)));
             None

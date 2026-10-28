@@ -217,15 +217,27 @@ fn initialize_result() -> serde_json::Value {
 }
 
 /// `tools/list` result from the registry specs (sorted by name there).
+///
+/// Each tool carries MCP `annotations` mirroring the local per-tool
+/// effect classification, so a client can style or pre-gate calls on
+/// the same signal the local policy gate sees.
 fn tools_list(registry: &wavecode_tools::Registry) -> serde_json::Value {
     let tools: Vec<serde_json::Value> = registry
         .specs()
         .into_iter()
         .map(|spec| {
+            let (read_only, destructive) = registry
+                .get(&spec.name)
+                .map(|tool| (tool.is_read_only(), tool.is_destructive()))
+                .unwrap_or((false, false));
             serde_json::json!({
                 "name": spec.name,
                 "description": spec.description,
                 "inputSchema": spec.input_schema,
+                "annotations": {
+                    "readOnlyHint": read_only,
+                    "destructiveHint": destructive,
+                },
             })
         })
         .collect();
@@ -536,6 +548,12 @@ mod tests {
         let echo = tools.iter().find(|t| t["name"] == "echo_tool").unwrap();
         assert_eq!(echo["description"], "test echo tool");
         assert_eq!(echo["inputSchema"], serde_json::json!({"type": "object"}));
+        // MCP annotations mirror the per-tool effect classification: the
+        // echo tool is read-only and not destructive.
+        assert_eq!(
+            echo["annotations"],
+            serde_json::json!({"readOnlyHint": true, "destructiveHint": false})
+        );
     }
 
     #[tokio::test]

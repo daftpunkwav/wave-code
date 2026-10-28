@@ -181,6 +181,13 @@ fn is_private_addr(addr: std::net::IpAddr) -> bool {
 /// literals skip DNS entirely, so a literal redirect target is judged
 /// per hop by [`is_link_local_host`] (link-local refused; the
 /// loopback/RFC1918 allowance is documented there).
+///
+/// The reserved name `localhost` is treated as the loopback literal it
+/// is (RFC 6761: it never names a remote machine and must not be
+/// forwarded to DNS): the resolver answers it with the loopback
+/// addresses directly, so the same local-dev reach a `127.0.0.1`
+/// literal already has covers the name too, and a hosts-file override
+/// can never point it elsewhere.
 #[derive(Debug)]
 struct NonPrivateResolver;
 
@@ -188,6 +195,16 @@ impl reqwest::dns::Resolve for NonPrivateResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let name = name.as_str().to_string();
         Box::pin(async move {
+            if name.eq_ignore_ascii_case("localhost") {
+                return Ok(Box::new(
+                    [
+                        std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                        std::net::SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 1], 0)),
+                    ]
+                    .into_iter(),
+                )
+                    as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>);
+            }
             let host = name.clone();
             let addrs = tokio::task::spawn_blocking(move || {
                 std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), 0u16))
@@ -196,21 +213,36 @@ impl reqwest::dns::Resolve for NonPrivateResolver {
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
-            let vetted: Vec<std::net::SocketAddr> = addrs
-                .into_iter()
-                .filter(|addr| !is_private_addr(addr.ip()))
-                .collect();
-            if vetted.is_empty() {
-                return Err(Box::new(std::io::Error::other(format!(
-                    "host '{name}' resolves only into private address ranges; \
-                     this tool never reaches private networks by name"
-                )))
-                    as Box<dyn std::error::Error + Send + Sync>);
-            }
+            let vetted = vet_public_addrs(&name, addrs).map_err(
+                |message| -> Box<dyn std::error::Error + Send + Sync> {
+                    Box::new(std::io::Error::other(message))
+                },
+            )?;
             Ok(Box::new(vetted.into_iter())
                 as Box<dyn Iterator<Item = std::net::SocketAddr> + Send>)
         })
     }
+}
+
+/// Filter resolved addresses down to the publicly routable ones; empty
+/// output means the name resolves only into private space and the fetch
+/// is refused (a mixed answer keeps its public legs, so a rebinding
+/// attempt cannot smuggle a private leg past the vet).
+fn vet_public_addrs(
+    name: &str,
+    addrs: Vec<std::net::SocketAddr>,
+) -> std::result::Result<Vec<std::net::SocketAddr>, String> {
+    let vetted: Vec<std::net::SocketAddr> = addrs
+        .into_iter()
+        .filter(|addr| !is_private_addr(addr.ip()))
+        .collect();
+    if vetted.is_empty() {
+        return Err(format!(
+            "host '{name}' resolves only into private address ranges; \
+             this tool never reaches private networks by name"
+        ));
+    }
+    Ok(vetted)
 }
 
 /// Decode a body as text: explicit latin-1 family charsets decode each
@@ -660,15 +692,38 @@ mod tests {
         }
     }
 
-    /// A name resolving only into private space fails the resolver;
-    /// `localhost` is the universally available specimen (hosts file,
-    /// no network needed).
+    /// A name resolving only into private space fails the vet; a mixed
+    /// answer keeps only its public legs (rebinding cannot smuggle a
+    /// private leg past the filter).
+    #[test]
+    fn names_resolving_only_private_are_refused() {
+        let addr = |ip: [u8; 4]| std::net::SocketAddr::from((ip, 80u16));
+        let err = vet_public_addrs("private.example", vec![addr([127, 0, 0, 1])]).unwrap_err();
+        assert!(err.contains("private address ranges"), "{err}");
+        let kept = vet_public_addrs(
+            "rebinding.example",
+            vec![addr([10, 0, 0, 5]), addr([8, 8, 8, 8])],
+        )
+        .unwrap();
+        assert_eq!(kept, vec![addr([8, 8, 8, 8])]);
+    }
+
+    /// The reserved name `localhost` resolves as the loopback literal it
+    /// is (RFC 6761): the same reach a `127.0.0.1` literal has covers
+    /// the name, answered without DNS so no hosts override applies.
     #[tokio::test]
-    async fn resolver_blocks_names_resolving_private() {
+    async fn localhost_resolves_as_the_loopback_literal() {
         use reqwest::dns::Resolve as _;
-        let name: reqwest::dns::Name = "localhost".parse().unwrap();
-        let result = NonPrivateResolver.resolve(name).await;
-        assert!(result.is_err(), "localhost must not resolve");
+        for spelling in ["localhost", "LOCALHOST"] {
+            let name: reqwest::dns::Name = spelling.parse().unwrap();
+            let addrs: Vec<std::net::SocketAddr> =
+                NonPrivateResolver.resolve(name).await.unwrap().collect();
+            assert!(!addrs.is_empty(), "{spelling} resolves");
+            assert!(
+                addrs.iter().all(|addr| addr.ip().is_loopback()),
+                "localhost answers loopback only: {addrs:?}"
+            );
+        }
     }
 
     /// Redirect targets get the same literal check as the initial URL:

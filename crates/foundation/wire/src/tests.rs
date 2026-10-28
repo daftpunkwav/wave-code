@@ -160,20 +160,6 @@ fn wire_tags_event_msg_are_locked() {
         ),
         (EventMsg::HistoryRewound { turns: 1 }, "history_rewound"),
         (
-            EventMsg::PlanProposed {
-                text: "x".to_string(),
-            },
-            "plan_proposed",
-        ),
-        (EventMsg::PlanApproved, "plan_approved"),
-        (
-            EventMsg::GoalSet {
-                objective: "x".to_string(),
-            },
-            "goal_set",
-        ),
-        (EventMsg::GoalCompleted, "goal_completed"),
-        (
             EventMsg::Warning {
                 message: "w".to_string(),
             },
@@ -375,10 +361,6 @@ fn event_tag(msg: &EventMsg) -> &'static str {
         EventMsg::CompactStarted { .. } => "compact_started",
         EventMsg::CompactCompleted { .. } => "compact_completed",
         EventMsg::HistoryRewound { .. } => "history_rewound",
-        EventMsg::PlanProposed { .. } => "plan_proposed",
-        EventMsg::PlanApproved => "plan_approved",
-        EventMsg::GoalSet { .. } => "goal_set",
-        EventMsg::GoalCompleted => "goal_completed",
         EventMsg::Warning { .. } => "warning",
         EventMsg::Error { .. } => "error",
         EventMsg::TurnCompleted { .. } => "turn_completed",
@@ -453,14 +435,6 @@ fn every_event_msg_variant_round_trips_with_its_locked_tag() {
         // nosemgrep: codacy.yaml.security.hard-coded-tokens
         EventMsg::CompactCompleted { summary_tokens: 99 },
         EventMsg::HistoryRewound { turns: 2 },
-        EventMsg::PlanProposed {
-            text: "plan".to_string(),
-        },
-        EventMsg::PlanApproved,
-        EventMsg::GoalSet {
-            objective: "ship".to_string(),
-        },
-        EventMsg::GoalCompleted,
         EventMsg::Warning {
             message: "w".to_string(),
         },

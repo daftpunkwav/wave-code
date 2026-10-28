@@ -1126,13 +1126,14 @@ async fn pack_contents_reach_the_session_under_standard_precedence() {
     );
 
     // Hooks: the unknown pack point warns with the pack attribution.
+    let unknown_point = handle
+        .warnings
+        .iter()
+        .any(|w| w.contains("plugin demo") && w.contains("unknown hook point"));
     assert!(
-        handle
-            .warnings
-            .iter()
-            .any(|w| w.contains("plugin demo") && w.contains("unknown hook point")),
-        "{:?}",
-        handle.warnings
+        unknown_point,
+        "unknown-point warning missing (warnings_count={})",
+        handle.warnings.len()
     );
 }
 
@@ -1172,13 +1173,14 @@ async fn configured_mcp_server_wins_over_pack_entry() {
         .collect();
     assert_eq!(lints.len(), 1, "the pack entry must not ride along");
     assert_eq!(lints[0].1.command.as_deref(), Some("config-server"));
+    let name_owned = handle
+        .warnings
+        .iter()
+        .any(|w| w.contains("already owns that name"));
     assert!(
-        handle
-            .warnings
-            .iter()
-            .any(|w| w.contains("already owns that name")),
-        "{:?}",
-        handle.warnings
+        name_owned,
+        "collision warning missing (warnings_count={})",
+        handle.warnings.len()
     );
 }
 
@@ -1210,11 +1212,13 @@ fn pack_hook_rules_join_config_rules_at_the_same_point() {
     // config-declared rules.
     assert_eq!(post[0].timeout_ms, wavecode_hooks::DEFAULT_TIMEOUT_MS);
 
+    let unknown_point = warnings
+        .iter()
+        .any(|w| w.contains("plugin demo") && w.contains("BogusPoint"));
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("plugin demo") && w.contains("BogusPoint")),
-        "{warnings:?}"
+        unknown_point,
+        "unknown-point warning missing (warnings_count={})",
+        warnings.len()
     );
 }
 
@@ -1255,12 +1259,15 @@ fn pack_mcp_entries_convert_with_config_priority_and_pack_order() {
             .filter(|w| w.contains("already owns that name"))
             .count(),
         2,
-        "both packs' lint entries drop against config: {warnings:?}"
+        "both packs' lint entries drop against config (warnings_count={})",
+        warnings.len()
     );
+    let replaced = warnings
+        .iter()
+        .any(|w| w.contains("replaces the earlier pack's entry"));
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("replaces the earlier pack's entry")),
-        "{warnings:?}"
+        replaced,
+        "pack-vs-pack warning missing (warnings_count={})",
+        warnings.len()
     );
 }

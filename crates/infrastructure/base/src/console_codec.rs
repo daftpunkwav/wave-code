@@ -155,14 +155,17 @@ mod tests {
         assert!(out.ends_with('\n'), "{out:?}");
     }
 
-    /// The single-line entry point mirrors the whole-buffer behavior on
-    /// pinned GBK input.
+    /// The single-line entry point shares the whole-buffer decode's
+    /// first rule: valid UTF-8 passes through byte-for-byte regardless
+    /// of the host codec (the fallback codec is host-resolved, so the
+    /// pinned-codec behavior lives in the fallback tests above).
     #[test]
     fn line_decode_matches_the_buffer_decode() {
-        let (gbk, _, _) = encoding_rs::GBK.encode("的目录");
+        let text = "café 你好";
+        assert_eq!(decode_console_line(text.as_bytes()), text);
         assert_eq!(
-            decode_console_line(&gbk),
-            decode_with_fallback(&gbk, Some(encoding_rs::GBK))
+            decode_console_line(text.as_bytes()),
+            decode_with_fallback(text.as_bytes(), console_codec())
         );
     }
 

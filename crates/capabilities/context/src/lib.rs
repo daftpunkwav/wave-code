@@ -681,7 +681,7 @@ pub fn should_evict_tool_results(used_tokens: u64, cfg: &EvictionConfig) -> bool
 
 /// Map every assistant `tool_use` id to its tool name (ids are unique per
 /// conversation); used to name eviction stubs after the call they belonged to.
-fn tool_use_names(history: &[Message]) -> HashMap<&str, &str> {
+fn tool_use_names(history: &[Message]) -> HashMap<String, String> {
     let mut names = HashMap::new();
     for m in history {
         if m.role != Role::Assistant {
@@ -689,7 +689,10 @@ fn tool_use_names(history: &[Message]) -> HashMap<&str, &str> {
         }
         for b in &m.content {
             if let ContentBlock::ToolUse { id, name, .. } = b {
-                names.insert(id.as_str(), name.as_str());
+                // Owned keys and values so the map outlives the caller's
+                // move of history into the in-place pass (the map is
+                // tool-name sized, never payload sized).
+                names.insert(id.clone(), name.clone());
             }
         }
     }
@@ -724,7 +727,7 @@ fn text_tokens(text: &str) -> u64 {
 /// minus the stub it is replaced with. Non-tool content never shrinks, and a
 /// message that is already a stub saves nothing, which is what keeps the
 /// pass idempotent.
-fn eviction_saving(message: &Message, names: &HashMap<&str, &str>) -> u64 {
+fn eviction_saving(message: &Message, names: &HashMap<String, String>) -> u64 {
     #[cfg(test)]
     SAVINGS_MEASURED.with(|count| count.set(count.get() + 1));
     if message.role != Role::User {
@@ -742,7 +745,7 @@ fn eviction_saving(message: &Message, names: &HashMap<&str, &str>) -> u64 {
             _ => None,
         })
         .map(|(tool_use_id, content)| {
-            let stub = evicted_result_stub(tool_use_id, names.get(tool_use_id.as_str()).copied());
+            let stub = evicted_result_stub(tool_use_id, names.get(tool_use_id.as_str()).map(String::as_str));
             text_tokens(content).saturating_sub(text_tokens(&stub))
         })
         .sum()
@@ -779,7 +782,7 @@ fn savings_measured() -> usize {
 fn eviction_frontier(
     history: &[Message],
     cfg: &EvictionConfig,
-    names: &HashMap<&str, &str>,
+    names: &HashMap<String, String>,
     start: usize,
     end: usize,
 ) -> usize {
@@ -837,16 +840,20 @@ fn eviction_frontier(
 /// further. When the anchored prefix and the recent window overlap (short
 /// history), the evictable range is empty and the history passes through
 /// unchanged (saturating arithmetic, never panics).
-pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<Message> {
+pub fn evict_old_tool_results(history: Vec<Message>, cfg: &EvictionConfig) -> Vec<Message> {
     let end = history.len().saturating_sub(cfg.recent_window);
     let start = cfg.anchored_prefix.min(end);
     if start >= end {
-        return history.to_vec();
+        return history;
     }
-    let names = tool_use_names(history);
-    let limit = eviction_frontier(history, cfg, &names, start, end);
-    let mut out = Vec::with_capacity(history.len());
-    for (i, m) in history.iter().enumerate() {
+    let names = tool_use_names(&history);
+    let limit = eviction_frontier(&history, cfg, &names, start, end);
+    // By value and in place: every message moves into the output and
+    // only the stubbed blocks clone (the id plus the stub text), so a
+    // full-history pass costs one move per message instead of a deep
+    // copy of it.
+    let mut out = history;
+    for (i, m) in out.iter_mut().enumerate() {
         let has_tool_result = m.role == Role::User
             && i >= start
             && i < limit
@@ -854,32 +861,28 @@ pub fn evict_old_tool_results(history: &[Message], cfg: &EvictionConfig) -> Vec<
                 .iter()
                 .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
         if !has_tool_result {
-            out.push(m.clone());
             continue;
         }
-        let content = m
-            .content
-            .iter()
-            .map(|b| match b {
+        for block in m.content.iter_mut() {
+            let replacement = match block {
                 ContentBlock::ToolResult {
                     tool_use_id,
                     is_error,
                     ..
-                } => ContentBlock::ToolResult {
+                } => Some(ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),
                     content: evicted_result_stub(
                         tool_use_id,
-                        names.get(tool_use_id.as_str()).copied(),
+                        names.get(tool_use_id.as_str()).map(String::as_str),
                     ),
                     is_error: *is_error,
-                },
-                other => other.clone(),
-            })
-            .collect();
-        out.push(Message {
-            role: m.role,
-            content,
-        });
+                }),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                *block = replacement;
+            }
+        }
     }
     out
 }
@@ -1491,7 +1494,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
                 batch_messages: 1,
                 soft_threshold_tokens,
             };
-            evict_old_tool_results(&history, &cfg)
+            evict_old_tool_results(history.clone(), &cfg)
                 .iter()
                 .flat_map(|m| m.content.iter())
                 .filter(|b| {
@@ -1534,7 +1537,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             soft_threshold_tokens: total.saturating_sub(1),
         };
         let before = savings_measured();
-        let evicted = evict_old_tool_results(&history, &cfg);
+        let evicted = evict_old_tool_results(history.clone(), &cfg);
         let measured = savings_measured() - before;
         assert_eq!(evicted.len(), history.len(), "the pass keeps every message");
         assert!(
@@ -1555,7 +1558,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             soft_threshold_tokens: 0,
             ..Default::default()
         };
-        let out = evict_old_tool_results(&history, &cfg);
+        let out = evict_old_tool_results(history.clone(), &cfg);
         // Message count unchanged (payload replacement, never removal).
         assert_eq!(out.len(), history.len());
         // Evictable band [2..8]: results at index 3 (t1) and 6 (t2) stubbed,
@@ -1600,8 +1603,8 @@ Concurrent stock-deduction test; settlement ledger integration.";
             recent_window: 2,
             ..Default::default()
         };
-        let once = evict_old_tool_results(&history, &cfg);
-        let twice = evict_old_tool_results(&once, &cfg);
+        let once = evict_old_tool_results(history.clone(), &cfg);
+        let twice = evict_old_tool_results(once.clone(), &cfg);
         assert_eq!(once, twice, "second pass must change nothing further");
     }
 
@@ -1632,7 +1635,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             soft_threshold_tokens: 0,
             ..Default::default()
         };
-        let out = evict_old_tool_results(&history, &cfg);
+        let out = evict_old_tool_results(history.clone(), &cfg);
         assert_eq!(out.len(), 4);
         // Head and tail entries untouched.
         assert_eq!(out[0], history[0]);
@@ -1667,7 +1670,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             soft_threshold_tokens: 0,
             ..Default::default()
         };
-        let out = evict_old_tool_results(&history, &cfg);
+        let out = evict_old_tool_results(history.clone(), &cfg);
         assert!(matches!(
             &out[2].content[0],
             ContentBlock::ToolResult { content, .. }
@@ -1697,7 +1700,7 @@ Concurrent stock-deduction test; settlement ledger integration.";
             ..Default::default()
         };
         assert_eq!(
-            evict_old_tool_results(&history, &cfg),
+            evict_old_tool_results(history.clone(), &cfg),
             history,
             "overlapping windows leave a short history untouched"
         );

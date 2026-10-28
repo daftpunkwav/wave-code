@@ -573,6 +573,17 @@ fn extended_fields_are_backward_compatible() {
     assert_eq!(wire["duration_ms"], 1234);
     let back: EventMsg = serde_json::from_value(wire).unwrap();
     assert_eq!(full, back);
+
+    // The synthetic pre-dispatch settle carries its own locked tag.
+    let undispatched = serde_json::to_value(EventMsg::ToolCallEnd {
+        call_id: "c".to_string(),
+        is_error: true,
+        output: None,
+        outcome: ToolOutcome::NotDispatched,
+        duration_ms: 0,
+    })
+    .unwrap();
+    assert_eq!(undispatched["outcome"], "not_dispatched");
 }
 
 #[test]

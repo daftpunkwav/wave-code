@@ -1351,13 +1351,14 @@ where
     /// sample, ToolCallBegin all upfront in declaration order, ToolCallEnd
     /// all after in declaration order, TokenCount on every settle with a
     /// completed sample, TurnCompleted exactly once as the last event.
-    /// The declared calls are announced up front and settled after
-    /// dispatch; the three paths that never reach dispatch — the
+    /// Every declared call is announced and settled on the wire, even when
+    /// it never reaches dispatch: the three pre-dispatch exits — the
     /// pre-dispatch interrupt checkpoint, a truncation-batch dispatch
-    /// failure, and the repeat breaker — settle the already-declared
-    /// calls with synthetic results and emit no Begin/End pair for them,
-    /// so those calls exist in the history (and on resume replay) but
-    /// were never visible as live events.
+    /// failure, and the repeat breaker — settle the already-declared calls
+    /// with synthetic results and emit their Begin/End pair around them
+    /// (outcome `interrupted` for the checkpoint, `not_dispatched` for the
+    /// two refusals), so live consumers see exactly what a session replay
+    /// shows and the metrics ledger counts.
     /// Usage settle runs on every sampling exit; with no completed sample
     /// it is a no-op that neither covers the carry nor emits TokenCount.
     pub async fn run_turn(
@@ -1898,6 +1899,7 @@ where
                     Role::User,
                     result_blocks(&results, std::time::SystemTime::now()),
                 );
+                emit_undispatched_pairs(&calls, &results, ToolOutcome::Interrupted, &emit_msg);
                 settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                 emit_msg(EventMsg::TurnCompleted { interrupted: true });
                 return StopReason::Interrupted;
@@ -1925,6 +1927,7 @@ where
                     Role::User,
                     result_blocks(&results, std::time::SystemTime::now()),
                 );
+                emit_undispatched_pairs(&calls, &results, ToolOutcome::NotDispatched, &emit_msg);
                 if continuations < self.cfg.max_continuations {
                     continuations += 1;
                     emit_msg(EventMsg::Warning {
@@ -1966,6 +1969,7 @@ where
                         Role::User,
                         result_blocks(&results, std::time::SystemTime::now()),
                     );
+                    emit_undispatched_pairs(&calls, &results, ToolOutcome::NotDispatched, &emit_msg);
                     settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::RepeatBreaker;
@@ -2735,6 +2739,42 @@ fn interrupted_result(call: &ToolCall) -> ToolResult {
         call_id: call.call_id.clone(),
         content: "interrupted by user".to_string(),
         is_error: true,
+    }
+}
+
+/// Emit the Begin/End pair for declared calls that never reach dispatch.
+///
+/// The pre-dispatch exits (interrupt checkpoint, truncation-batch refusal,
+/// repeat breaker) push synthetic results into history; the matching pair
+/// keeps the live wire aligned with what a replay shows and what the
+/// metrics ledger counts. Ends mirror the synthetic results in call order
+/// with the same bounded preview a dispatched call carries and a zero
+/// duration — no body ever ran, so none may read as a fast or slow tool.
+fn emit_undispatched_pairs(
+    calls: &[ToolCall],
+    results: &[ToolResult],
+    outcome: ToolOutcome,
+    emit: &(dyn Fn(EventMsg) + Send + Sync),
+) {
+    for call in calls {
+        emit(EventMsg::ToolCallBegin {
+            call_id: call.call_id.clone(),
+            name: call.name.clone(),
+            input: call.input.clone(),
+        });
+    }
+    for (call, result) in calls.iter().zip(results) {
+        debug_assert_eq!(call.call_id, result.call_id, "results follow call order");
+        emit(EventMsg::ToolCallEnd {
+            call_id: result.call_id.clone(),
+            is_error: result.is_error,
+            output: Some(ToolCallPreview::head(
+                &result.content,
+                TOOL_OUTPUT_PREVIEW_BYTES,
+            )),
+            outcome,
+            duration_ms: 0,
+        });
     }
 }
 
@@ -4003,15 +4043,38 @@ mod run_loop_tests {
         .await;
         assert_eq!(outcome, StopReason::Completed);
         let kinds = fx.event_kinds();
-        // The first (truncated) batch never starts; the re-issued one does.
+        // The truncated batch is announced and settled synthetically
+        // (not_dispatched); the re-issued round starts once and runs.
         assert_eq!(
             kinds
                 .iter()
                 .filter(|k| k.as_str() == "tool_call_begin")
                 .count(),
-            1
+            2
         );
         assert!(kinds.iter().any(|k| k == "warning"));
+        // The synthetic batch is wire-visible as a not_dispatched pair that
+        // closes before the re-issued call opens.
+        let log = fx.lock_events();
+        let position = |pred: &dyn Fn(&EventMsg) -> bool| {
+            log.iter().position(|e| pred(&e.msg)).unwrap()
+        };
+        let synthetic_end = position(&|msg| {
+            matches!(
+                msg,
+                EventMsg::ToolCallEnd { outcome: ToolOutcome::NotDispatched, .. }
+            )
+        });
+        let reissued_begin = position(&|msg| {
+            matches!(
+                msg,
+                EventMsg::ToolCallBegin { call_id, .. } if call_id == "c2"
+            )
+        });
+        assert!(
+            synthetic_end < reissued_begin,
+            "the refused batch must settle before the re-issue announces"
+        );
         let history = conv
             .snapshot()
             .iter()
@@ -4083,6 +4146,22 @@ mod run_loop_tests {
             })
             .await;
         assert_eq!(outcome, StopReason::Interrupted);
+        // The checkpoint announces and settles the never-dispatched call:
+        // the pair closes before TurnCompleted, with the interrupted outcome.
+        let ends: Vec<(String, ToolOutcome)> = fx
+            .lock_events()
+            .iter()
+            .filter_map(|e| match &e.msg {
+                EventMsg::ToolCallEnd { call_id, outcome, .. } => {
+                    Some((call_id.clone(), *outcome))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            vec![("c1".to_string(), ToolOutcome::Interrupted)]
+        );
         let history = conv
             .snapshot()
             .iter()
@@ -6269,6 +6348,30 @@ mod run_loop_tests {
         assert_eq!(outcome, StopReason::RepeatBreaker);
         // Five rounds ran; the sixth repeat was refused.
         assert_eq!(run.executor.lock_executed().len(), 5);
+        // The refused call is announced and settled on the wire with the
+        // not_dispatched outcome; every executed round closed with Executed.
+        let ends: Vec<(String, ToolOutcome)> = events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|event| match &event.msg {
+                EventMsg::ToolCallEnd { call_id, outcome, .. } => {
+                    Some((call_id.clone(), *outcome))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            vec![
+                ("c0".to_string(), ToolOutcome::Executed),
+                ("c1".to_string(), ToolOutcome::Executed),
+                ("c2".to_string(), ToolOutcome::Executed),
+                ("c3".to_string(), ToolOutcome::Executed),
+                ("c4".to_string(), ToolOutcome::Executed),
+                ("c5".to_string(), ToolOutcome::NotDispatched),
+            ]
+        );
 
         let history = conv
             .snapshot()

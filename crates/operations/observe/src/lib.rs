@@ -93,7 +93,8 @@ pub struct ToolStat {
     /// Interrupted before the body ran.
     pub interrupted: u64,
     /// Ends that never ran a body for any other reason (duplicate call id,
-    /// `ask_user` answers, unavailable question, missing slot).
+    /// `ask_user` answers, unavailable question, missing slot, a batch the
+    /// harness refused to dispatch).
     pub other: u64,
     /// Sum of reported body durations, in milliseconds.
     pub busy_ms: u64,
@@ -177,6 +178,7 @@ impl Metrics {
                     ToolOutcome::HookBlocked | ToolOutcome::SurfaceBlocked => stat.blocked += 1,
                     ToolOutcome::Interrupted => stat.interrupted += 1,
                     ToolOutcome::Duplicate
+                    | ToolOutcome::NotDispatched
                     | ToolOutcome::Answered
                     | ToolOutcome::AskUnavailable
                     | ToolOutcome::Missing => stat.other += 1,

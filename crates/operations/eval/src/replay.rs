@@ -129,20 +129,23 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
             // Settles run once per completed sample, so a multi-sample turn
             // legitimately carries several TokenCount events.
             EventMsg::TokenCount { .. } => {}
-            EventMsg::TurnCompleted { interrupted } => {
+            EventMsg::TurnCompleted { .. } => {
                 if !started.contains(id) {
                     violations.push(format!("#{index} ({id}): TurnCompleted before TurnStarted"));
                 }
                 if !completed.insert(id) {
                     violations.push(format!("#{index} ({id}): duplicate TurnCompleted"));
                 }
-                if !*interrupted {
-                    for (call_id, owner) in &open_calls {
-                        if owner == &id {
-                            violations.push(format!(
-                                "#{index} ({id}): call {call_id} never ended in a completed turn"
-                            ));
-                        }
+                // Pairing is mandatory on every terminal exit: even the
+                // pre-dispatch settles (interrupt checkpoint, truncation
+                // refusal, repeat breaker) announce and settle their calls,
+                // so an open call at TurnCompleted is a contract break in an
+                // interrupted turn too.
+                for (call_id, owner) in &open_calls {
+                    if owner == &id {
+                        violations.push(format!(
+                            "#{index} ({id}): call {call_id} never ended in a completed turn"
+                        ));
                     }
                 }
                 open_calls.retain(|_, owner| owner != &id);
@@ -444,8 +447,11 @@ mod tests {
         );
     }
 
+    /// Pairing is mandatory even in an interrupted turn: the run loop
+    /// settles its declared calls with `interrupted` synthetic ends, so an
+    /// open call at `TurnCompleted` is a contract break on either exit.
     #[test]
-    fn interrupted_turns_may_leave_calls_open() {
+    fn interrupted_turns_must_still_close_their_calls() {
         let events = vec![
             event(
                 "s1",
@@ -459,6 +465,44 @@ mod tests {
                     call_id: "c1".into(),
                     name: "shell".into(),
                     input: serde_json::Value::Null,
+                },
+            ),
+            event("s1", EventMsg::TurnCompleted { interrupted: true }),
+        ];
+        let violations = validate_contract(&events);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("never ended"));
+    }
+
+    /// The shape the run loop actually emits on the interrupt checkpoint:
+    /// the declared calls are announced and settled with `interrupted`
+    /// synthetic ends before TurnCompleted, so the turn passes even though
+    /// it was stopped.
+    #[test]
+    fn interrupted_turn_with_settled_calls_passes() {
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::ToolCallBegin {
+                    call_id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::Value::Null,
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::ToolCallEnd {
+                    call_id: "c1".into(),
+                    is_error: true,
+                    output: None,
+                    outcome: ToolOutcome::Interrupted,
+                    duration_ms: 0,
                 },
             ),
             event("s1", EventMsg::TurnCompleted { interrupted: true }),

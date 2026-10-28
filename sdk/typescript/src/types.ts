@@ -32,6 +32,7 @@ export type ToolOutcome =
   | "hook_blocked"
   | "surface_blocked"
   | "interrupted"
+  | "not_dispatched"
   | "duplicate"
   | "answered"
   | "ask_unavailable"

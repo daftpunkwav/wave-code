@@ -118,6 +118,12 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `max_tool_rounds` config key.
 - Edit tool cards and edit settings render as a single unified diff
   column (the `diff layout` setting is gone).
+- Past the 100k-token eviction threshold the per-sample pass no
+  longer deep-copies the whole history three times: the eviction pass
+  consumes and rewrites the message vector in place and the
+  HistoryEntry-to-provider-shape round trip moves blocks instead of
+  cloning them, so a full-history sample costs one move per block
+  plus stub-sized clones.
 - Internal module organization: the oversized source files named by
   the static-analysis findings split at real seams (LSP tools into
   `lsp/` transport/client/diagnostics/providers/tools, dialogs into

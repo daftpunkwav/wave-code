@@ -93,11 +93,7 @@ impl<G> EvictingGateway<G> {
         if !should_evict_tool_results(Self::usage_estimate(&request), &self.cfg) {
             return request;
         }
-        let messages: Vec<Message> = request
-            .messages
-            .into_iter()
-            .map(to_message)
-            .collect();
+        let messages: Vec<Message> = request.messages.into_iter().map(to_message).collect();
         let evicted = evict_old_tool_results(messages, &self.cfg);
         request.messages = evicted.into_iter().map(from_message).collect();
         request
@@ -128,11 +124,7 @@ fn to_message(entry: HistoryEntry) -> Message {
 fn from_content_block(block: ContentBlock) -> Block {
     match block {
         ContentBlock::Text { text } => Block::Text(text),
-        ContentBlock::Image { id, mime, base64 } => Block::Image {
-            id,
-            mime,
-            base64,
-        },
+        ContentBlock::Image { id, mime, base64 } => Block::Image { id, mime, base64 },
         ContentBlock::ToolUse { id, name, input } => Block::ToolUse {
             call_id: id,
             name,
@@ -160,7 +152,11 @@ fn from_message(message: Message) -> HistoryEntry {
         } else {
             HistoryRole::User
         },
-        blocks: message.content.into_iter().map(from_content_block).collect(),
+        blocks: message
+            .content
+            .into_iter()
+            .map(from_content_block)
+            .collect(),
     }
 }
 

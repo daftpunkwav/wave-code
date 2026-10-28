@@ -161,6 +161,15 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   statistics and eviction estimates count tokens without materializing
   full text, and the eviction frontier measures only the batches it
   consumes.
+- Plugin pack contents take effect in sessions instead of staying
+  inventory-only: pack skills merge into the catalog as the new `pack`
+  source (below user and project, which keep their slots on a name
+  collision), pack MCP entries convert into configured servers for the
+  live connect path (a user-configured server owns its name; later
+  packs win among themselves), and pack hook rules join the engine
+  after the config-declared ones with the same matcher/timeout
+  semantics. Collisions and invalid entries degrade to session
+  warnings; `plugin list` notes that pack contents are wired.
 
 ### Fixed
 - Leaving the console TUI runs the SessionEnd hooks and the memory

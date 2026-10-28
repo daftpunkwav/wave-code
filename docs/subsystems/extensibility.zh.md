@@ -34,7 +34,7 @@ Frontmatter 解析使用 `serde-saphyr` 而不是手写扫描器——一个刻�
 
 ## 插件（`crates/runtime/plugin/src/lib.rs`、`crates/capabilities/skills/src/plugin.rs`）
 
-runtime 的 `Registry` 按清单依赖顺序启动插件，逆序停止；`ServiceMap` 以 type-id 键控查找注入类型化服务。发现读取 `runtime.toml` 清单（`{name, version, depends?}` 身份）并按**警告并跳过**降级：无效清单带原因警告并被跳过，绝不让装配失败。skills crate 中的 `PluginLoader` 加载用户插件包（`plugin.toml`：`name`、`version`、可选 `skills_dir`、hooks、MCP 服务器条目），带同样的 warn-and-skip 契约，把它们的技能/钩子/MCP 服务器喂进正常装配。
+runtime 的 `Registry` 按清单依赖顺序启动插件，逆序停止；`ServiceMap` 以 type-id 键控查找注入类型化服务。发现读取 `runtime.toml` 清单（`{name, version, depends?}` 身份）并按**警告并跳过**降级：无效清单带原因警告并被跳过，绝不让装配失败。skills crate 中的 `PluginLoader` 加载用户插件包（`plugin.toml`：`name`、`version`、可选 `skills_dir`、hooks、MCP 服务器条目），带同样的 warn-and-skip 契约，其内容会在会话中生效：包技能以 `pack` 来源并入目录，优先级低于 user 与 project（同名的 user/project 技能保有自己的槽位）；包 MCP 条目转换为已配置服务器（用户配置的服务器拥有其名字；多个包之间按目录顺序后者获胜）；包 hook 规则以与配置规则相同的 matcher/timeout 语义追加到引擎中配置规则之后。
 
 ## 命名的 agent 定义（`crates/capabilities/tools/src/agent_task_tool.rs`）
 

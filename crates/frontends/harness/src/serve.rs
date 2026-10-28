@@ -62,6 +62,10 @@ pub(crate) fn run_plugin_list(home: Option<PathBuf>) {
             plugin.name, plugin.version, plugin.skills, plugin.mcp_servers, plugin.hooks
         );
     }
+    println!(
+        "pack contents take effect in new sessions; a same-named user skill or \
+         configured mcp server wins over a pack entry"
+    );
 }
 
 /// Serve live sessions over local HTTP until Ctrl-C or `POST /shutdown`.

@@ -995,3 +995,283 @@ fn gapped_journal_is_rewritten_before_new_records() {
     assert_eq!(replayed.entries.len(), 2);
     assert_eq!(replayed.entries[1].text(), "after");
 }
+
+/// Lay out a home dir holding one plugin pack with the given files
+/// (the same harness the loader tests in wavecode-skills use).
+fn home_with_pack(name: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let pack = home.path().join(".wavecode").join("plugins").join(name);
+    std::fs::create_dir_all(&pack).unwrap();
+    for (rel, content) in files {
+        let path = pack.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+    home
+}
+
+/// Write a skill dir holding one SKILL.md with the given description.
+fn write_skill(root: &std::path::Path, name: &str, description: &str) {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\ndescription: {description}.\n---\n\nBody.\n"),
+    )
+    .unwrap();
+}
+
+const PACK_MANIFEST: &str = r#"
+name = "demo"
+version = "0.1.0"
+skills_dir = "skills"
+hooks_file = "hooks.toml"
+
+[mcp_servers.lint]
+command = "lint-server"
+args = ["--fast"]
+"#;
+
+const PACK_HOOKS: &str = r#"
+[[PreToolUse]]
+command = "pack.sh"
+timeout_ms = 250
+
+[[PostToolUse]]
+command = "fmt.sh"
+
+[BogusPoint]
+command = "x.sh"
+"#;
+
+/// Pack contents reach the assembled session end to end: pack skills
+/// merge into the catalog under the user and project sources, the pack
+/// MCP entry converts into a pending server, and the pack hook rules
+/// join the engine (including the unknown-point warning).
+#[tokio::test]
+async fn pack_contents_reach_the_session_under_standard_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = home_with_pack(
+        "demo",
+        &[
+            ("plugin.toml", PACK_MANIFEST),
+            ("hooks.toml", PACK_HOOKS),
+        ],
+    );
+    // Pack skills merge under the standard sources: the user skill
+    // overrides the pack skill, and the project skill overrides both,
+    // so only the project description may surface for `greet`.
+    let pack_skills = home
+        .path()
+        .join(".wavecode")
+        .join("plugins")
+        .join("demo")
+        .join("skills");
+    write_skill(&pack_skills, "greet", "pack greet helper");
+    write_skill(&pack_skills, "packonly", "packonly helper");
+    write_skill(
+        &home.path().join(".wavecode").join("skills"),
+        "greet",
+        "user greet helper",
+    );
+    write_skill(
+        &dir.path().join(".wavecode").join("skills"),
+        "greet",
+        "project greet helper",
+    );
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, CONFIG).unwrap();
+
+    let handle = assemble_session(AssembleOptions {
+        config_path: Some(config_path),
+        model_override: None,
+        provider_override: None,
+        permission_override: None,
+        thinking_override: None,
+        wave_denylist: None,
+        cwd: dir.path().to_path_buf(),
+        home: Some(home.path().to_path_buf()),
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: true,
+        initial_history: Vec::new(),
+        session_id: None,
+    })
+    .unwrap();
+
+    // Skills: project > user > pack, and the pack-only skill lands.
+    assert!(
+        handle.system.contains("project greet helper"),
+        "project skill must win: {}",
+        handle.system
+    );
+    assert!(!handle.system.contains("user greet helper"));
+    assert!(!handle.system.contains("pack greet helper"));
+    assert!(handle.system.contains("packonly helper"));
+    assert!(handle.skill_names.iter().any(|name| name == "packonly"));
+
+    // MCP: the pack entry converts into a pending server with the OAuth
+    // fields absent, and the display line lists it.
+    let lint = handle
+        .mcp_pending
+        .iter()
+        .find(|(name, _)| name == "lint")
+        .expect("pack server rides the pending list");
+    assert_eq!(lint.1.command.as_deref(), Some("lint-server"));
+    assert_eq!(lint.1.args, vec!["--fast".to_string()]);
+    assert!(lint.1.oauth_token_url.is_none());
+    assert!(
+        handle
+            .mcp_servers
+            .iter()
+            .any(|line| line.contains("lint") && line.contains("lint-server"))
+    );
+
+    // Hooks: the unknown pack point warns with the pack attribution.
+    assert!(
+        handle
+            .warnings
+            .iter()
+            .any(|w| w.contains("plugin demo") && w.contains("unknown hook point")),
+        "{:?}",
+        handle.warnings
+    );
+}
+
+/// A user-configured MCP server owns its name: the colliding pack entry
+/// warns and drops instead of reaching the connect path.
+#[tokio::test]
+async fn configured_mcp_server_wins_over_pack_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "{CONFIG}\n[mcp_servers.lint]\ncommand = \"config-server\"\n"
+        ),
+    )
+    .unwrap();
+    let home = home_with_pack(
+        "demo",
+        &[("plugin.toml", PACK_MANIFEST)],
+    );
+
+    let handle = assemble_session(AssembleOptions {
+        config_path: Some(config_path),
+        model_override: None,
+        provider_override: None,
+        permission_override: None,
+        thinking_override: None,
+        wave_denylist: None,
+        cwd: dir.path().to_path_buf(),
+        home: Some(home.path().to_path_buf()),
+        identity: DEFAULT_IDENTITY.to_string(),
+        headless: true,
+        initial_history: Vec::new(),
+        session_id: None,
+    })
+    .unwrap();
+
+    let lints: Vec<&(String, wavecode_config::McpServerRaw)> = handle
+        .mcp_pending
+        .iter()
+        .filter(|(name, _)| name == "lint")
+        .collect();
+    assert_eq!(lints.len(), 1, "the pack entry must not ride along");
+    assert_eq!(lints[0].1.command.as_deref(), Some("config-server"));
+    assert!(
+        handle
+            .warnings
+            .iter()
+            .any(|w| w.contains("already owns that name")),
+        "{:?}",
+        handle.warnings
+    );
+}
+
+/// Hook definitions: config rules keep their point slot, pack rules
+/// append after them with the same timeout/once semantics, and an
+/// unknown pack point warns with the pack attribution.
+#[test]
+fn pack_hook_rules_join_config_rules_at_the_same_point() {
+    let config = config_with("\n[hooks.PreToolUse]\ncommand = \"config.sh\"\n");
+    let home = home_with_pack(
+        "demo",
+        &[
+            ("plugin.toml", PACK_MANIFEST),
+            ("hooks.toml", PACK_HOOKS),
+        ],
+    );
+    let plugins = wavecode_skills::plugin::PluginLoader::load(Some(home.path()));
+    let mut warnings = Vec::new();
+    let defs = super::assembly::hook_defs(&config, &plugins, &mut warnings);
+
+    let pre = &defs[&wavecode_hooks::HookEventPoint::PreToolUse];
+    assert_eq!(pre.len(), 2);
+    assert_eq!(pre[0].command, "config.sh");
+    assert_eq!(pre[1].command, "pack.sh");
+    assert_eq!(pre[1].timeout_ms, 250);
+    assert!(!pre[1].once);
+
+    let post = &defs[&wavecode_hooks::HookEventPoint::PostToolUse];
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].command, "fmt.sh");
+    // Absent timeout/once fall back to the engine defaults, same as
+    // config-declared rules.
+    assert_eq!(post[0].timeout_ms, wavecode_hooks::DEFAULT_TIMEOUT_MS);
+
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("plugin demo") && w.contains("BogusPoint")),
+        "{warnings:?}"
+    );
+}
+
+/// Pack MCP entries: a configured server wins the name, later packs win
+/// among themselves, and the survivors convert in sorted order.
+#[test]
+fn pack_mcp_entries_convert_with_config_priority_and_pack_order() {
+    let config = config_with(
+        "\n[mcp_servers.lint]\ncommand = \"config-server\"\n[mcp_servers.only]\ncommand = \"only-server\"\n",
+    );
+    let home = tempfile::tempdir().unwrap();
+    let plugins_root = home.path().join(".wavecode").join("plugins");
+    for (pack, command) in [("aaa", "first-server"), ("zzz", "second-server")] {
+        let pack_dir = plugins_root.join(pack);
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(
+            pack_dir.join("plugin.toml"),
+            format!("name = \"{pack}\"\nversion = \"1\"\n\n[mcp_servers.fetch]\ncommand = \"{command}\"\n[mcp_servers.lint]\ncommand = \"{command}\"\n"),
+        )
+        .unwrap();
+    }
+    let plugins = wavecode_skills::plugin::PluginLoader::load(Some(home.path()));
+    let mut warnings = Vec::new();
+    let servers = super::assembly::pack_mcp_servers(&config, &plugins, &mut warnings);
+
+    // `lint` collides with config (both packs drop with a warning),
+    // `fetch` collides across packs (the later pack wins, warned).
+    let names: Vec<&str> = servers.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["fetch"]);
+    assert_eq!(
+        servers[0].1.command.as_deref(),
+        Some("second-server"),
+        "the later pack (zzz) wins the shared name"
+    );
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| w.contains("already owns that name"))
+            .count(),
+        2,
+        "both packs' lint entries drop against config: {warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("replaces the earlier pack's entry")),
+        "{warnings:?}"
+    );
+}

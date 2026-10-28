@@ -343,7 +343,8 @@ async fn pump_shell_events(
     } else {
         status.ok().and_then(|status| status.code())
     };
-    let _ = tx.send(ShellEvent::Done(code)).await;}
+    let _ = tx.send(ShellEvent::Done(code)).await;
+}
 
 #[cfg(test)]
 mod tests {

@@ -54,6 +54,21 @@ const CHANNEL_CAP: usize = 1024;
 /// keeps them open, and the job must still report a terminal event.
 const CANCEL_DRAIN_GRACE: Duration = Duration::from_millis(500);
 
+/// Upper bound on waiting for the cancel path's tree kill to land: a
+/// stuck `taskkill` must not hold the always-terminal pump open past
+/// it (the kill keeps running on its own thread; only the wait is
+/// bounded, and the direct child kill plus the drain grace still end
+/// the job).
+const TREE_KILL_JOIN: Duration = Duration::from_secs(2);
+
+/// Strip the trailing `\n` / `\r\n` a byte-line read keeps (the
+/// `lines()` helper this pump replaced stripped them before decoding).
+fn strip_eol(line: &str) -> String {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    line.to_owned()
+}
+
 /// A spawned shell command.
 pub struct ShellJob {
     rx: mpsc::Receiver<ShellEvent>,
@@ -64,10 +79,16 @@ pub struct ShellJob {
     /// leaves its descendants behind.
     tree_killed: Arc<Notify>,
     /// Platform pid of the shell child, captured before it moves into
-    /// the pump task. `cancel` tree-kills this pid: `taskkill /T` on
-    /// Windows, and the process group on Unix (the child is spawned as
-    /// the group leader).
+    /// the pump task. `cancel` tree-kills this pid: the Job Object on
+    /// Windows (when the assign succeeded), `taskkill /T` on Windows
+    /// otherwise, and the process group on Unix (the child is spawned
+    /// as the group leader).
     pid: Option<u32>,
+    /// Windows-only: the Job Object holding the spawned tree, set when
+    /// the assign at spawn succeeded — `terminate` replaces the
+    /// `taskkill` process spawn (and its tree wait) on the cancel path.
+    #[cfg(windows)]
+    tree_job: Option<Arc<infrastructure_base::ProcessTreeJob>>,
     /// Set once a cancel has been requested.
     ///
     /// Esc and Ctrl+C both reach the same job, so `cancel` can be
@@ -116,9 +137,21 @@ impl ShellJob {
         let tree_killed = Arc::new(Notify::new());
         let tree_killer = Arc::clone(&tree_killed);
         let child_pid = child.id();
+        // Assign the tree to a Job Object when possible: cancel then
+        // ends the whole membership with one kernel call instead of a
+        // `taskkill` spawn, and kill-on-close cleans an abandoned job
+        // up at process exit. A failed assign degrades to the pid path.
+        #[cfg(windows)]
+        let tree_job = infrastructure_base::ProcessTreeJob::assign(&child).map(Arc::new);
         tokio::spawn(async move {
-            let mut out = BufReader::new(stdout).lines();
-            let mut err = BufReader::new(stderr).lines();
+            // Raw byte lines decoded per line through the console
+            // code-page fallback: a plain `lines()` stream is UTF-8
+            // only, so one invalid byte would error the reader and
+            // silently close the pipe mid-command.
+            let mut out = BufReader::new(stdout);
+            let mut err = BufReader::new(stderr);
+            let mut out_bytes = Vec::new();
+            let mut err_bytes = Vec::new();
             let mut killed = false;
             let mut out_open = true;
             let mut err_open = true;
@@ -138,7 +171,10 @@ impl ShellJob {
                         // killing the shell itself, because `taskkill /T`
                         // walks the tree from a live parent and a shell
                         // that died first leaves its descendants behind.
-                        tree_killer.notified().await;
+                        // The wait is bounded: a stuck tree kill ends
+                        // the job anyway (see TREE_KILL_JOIN).
+                        let _ =
+                            tokio::time::timeout(TREE_KILL_JOIN, tree_killer.notified()).await;
                         let _ = child.start_kill();
                         drain_deadline = tokio::time::Instant::now() + CANCEL_DRAIN_GRACE;
                         draining = true;
@@ -150,21 +186,45 @@ impl ShellJob {
                         out_open = false;
                         err_open = false;
                     }
-                    line = out.next_line(), if out_open => match line {
-                        Ok(Some(line)) => {
+                    read = out.read_until(b'\n', &mut out_bytes), if out_open => match read {
+                        Ok(0) => {
+                            if !out_bytes.is_empty() {
+                                let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
+                                out_bytes.clear();
+                                if tx.send(ShellEvent::Out(line)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            out_open = false;
+                        }
+                        Ok(_) => {
+                            let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
+                            out_bytes.clear();
                             if tx.send(ShellEvent::Out(line)).await.is_err() {
                                 return;
                             }
                         }
-                        _ => out_open = false,
+                        Err(_) => out_open = false,
                     },
-                    line = err.next_line(), if err_open => match line {
-                        Ok(Some(line)) => {
+                    read = err.read_until(b'\n', &mut err_bytes), if err_open => match read {
+                        Ok(0) => {
+                            if !err_bytes.is_empty() {
+                                let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
+                                err_bytes.clear();
+                                if tx.send(ShellEvent::Err(line)).await.is_err() {
+                                    return;
+                                }
+                            }
+                            err_open = false;
+                        }
+                        Ok(_) => {
+                            let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
+                            err_bytes.clear();
                             if tx.send(ShellEvent::Err(line)).await.is_err() {
                                 return;
                             }
                         }
-                        _ => err_open = false,
+                        Err(_) => err_open = false,
                     },
                 }
             }
@@ -181,6 +241,8 @@ impl ShellJob {
             kill,
             tree_killed,
             pid: child_pid,
+            #[cfg(windows)]
+            tree_job,
             cancelled: AtomicBool::new(false),
             #[cfg(test)]
             tree_kills: AtomicUsize::new(0),
@@ -230,12 +292,30 @@ impl ShellJob {
         // the whole tree to die, and the UI thread may not block on
         // that wait. The signal tells the pump the tree kill landed.
         let pid = self.pid;
+        #[cfg(windows)]
+        let tree_job = self.tree_job.clone();
         let landed = Arc::clone(&self.tree_killed);
         #[cfg(test)]
         self.tree_kills.fetch_add(1, Ordering::SeqCst);
         std::thread::spawn(move || {
+            #[cfg(windows)]
+            if let Some(job) = &tree_job {
+                // One kernel call ends the child and everything it
+                // spawned; no tree walk from a live parent, no process
+                // spawn, no pid reuse exposure.
+                job.terminate();
+                landed.notify_one();
+                return;
+            }
             if let Some(pid) = pid {
-                infrastructure_base::kill_tree(pid);
+                // A recycled pid may now name an unrelated process:
+                // probe before handing it to the tree kill. The probe
+                // narrows the reuse window to probe-to-kill; a fully
+                // handle-based design needs process identities, not
+                // pids, and a cancel holds only a pid.
+                if infrastructure_base::pid_alive(pid) {
+                    infrastructure_base::kill_tree(pid);
+                }
             }
             landed.notify_one();
         });

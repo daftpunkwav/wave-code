@@ -16,5 +16,17 @@ tokio.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# Console code-page decoding (GetACP), the pid liveness probe, and the
+# cancel-path Job Object: the three Windows-only runtime primitives this
+# crate owns beside the process-group kill.
+[target.'cfg(windows)'.dependencies]
+encoding_rs.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true

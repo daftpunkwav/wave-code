@@ -59,7 +59,7 @@ fn decode_with_fallback(bytes: &[u8], codec: Option<&'static encoding_rs::Encodi
     for line in bytes.split_inclusive(|byte| *byte == b'\n') {
         match std::str::from_utf8(line) {
             Ok(text) => out.push_str(text),
-            Err(_) => out.push_str(&codec.decode_without_bom_handling(line).0.into_owned()),
+            Err(_) => out.push_str(&codec.decode_without_bom_handling(line).0),
         }
     }
     out

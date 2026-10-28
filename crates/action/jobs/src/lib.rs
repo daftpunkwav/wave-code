@@ -540,10 +540,10 @@ async fn kill_and_reap(
         let _ = child.kill().await;
         return child.wait().await.ok();
     }
-    if let Some(pid) = child.id() {
-        if infrastructure_base::pid_alive(pid) {
-            let _ = tokio::time::timeout(TREE_KILL_JOIN, kill_tree_blocking(pid)).await;
-        }
+    if let Some(pid) = child.id()
+        && infrastructure_base::pid_alive(pid)
+    {
+        let _ = tokio::time::timeout(TREE_KILL_JOIN, kill_tree_blocking(pid)).await;
     }
     let _ = child.kill().await;
     child.wait().await.ok()

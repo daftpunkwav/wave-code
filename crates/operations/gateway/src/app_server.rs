@@ -62,10 +62,7 @@ struct ApiJson(serde_json::Value);
 impl<S: Send + Sync> axum::extract::FromRequest<S> for ApiJson {
     type Rejection = axum::response::Response;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match axum::Json::<serde_json::Value>::from_request(req, state).await {
             Ok(Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(error_json(rejection.status(), rejection.body_text())),

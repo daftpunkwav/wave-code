@@ -511,6 +511,10 @@ mod tests {
     /// name the model should expect in its own command strings.
     #[test]
     fn display_shell_name_is_the_program_stem() {
+        // Backslashes separate only on Windows: the stem rule itself is
+        // cross-platform, so the Windows-shaped input is asserted where
+        // the shape means what it says.
+        #[cfg(windows)]
         assert_eq!(display_shell_name(r"C:\Windows\system32\cmd.exe"), "cmd");
         assert_eq!(display_shell_name("/bin/zsh"), "zsh");
         assert_eq!(display_shell_name("pwsh"), "pwsh");

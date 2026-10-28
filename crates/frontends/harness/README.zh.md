@@ -10,7 +10,7 @@
 | `src/repl.rs` | 交互式 REPL：slash 命令文法、多轮输入循环，以及旧线程 `resume` surface |
 | `src/tui.rs` | 全屏 TUI 组装（resume seed、`/model` 选择器目录、UI 接线），跑在实时 harness 会话之上 |
 | `src/serve.rs` | 服务器形态 surface：MCP stdio、ACP stdio、插件清单，以及本地 HTTP app-server（REST + SSE，经 `operations-gateway` 运行） |
-| `src/surfaces/` | 从不组装会话的自包含命令 surface：`doctor`、`grants`、`metrics` 只读本地；`update_cmd` 是唯一联网的一个（自更新） |
+| `src/surfaces/` | 从不组装会话的自包含命令 surface，只作用于本地状态（`grants` 可撤销已持久化的授权）；`update_cmd` 是唯一联网的一个（自更新） |
 | `src/logging.rs` | `~/.wavecode/logs` 下的按日滚动文件日志；只写文件，协议流与 TUI 因此保持干净 |
 | `src/task_eval.rs` | 任务级 eval 执行：fixture 隔离、经 `AgentStep` seam 走 `exec` surface 的 agent 步骤、真实进程的 `World`、文本/JSON 报告；评分在 `operations-eval` |
 | `src/update.rs` | 对照 GitHub releases 的版本检查与校验和验证的自安装，保留 `.bak` 回滚副本 |

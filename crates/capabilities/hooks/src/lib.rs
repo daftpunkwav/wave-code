@@ -573,9 +573,14 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
             ExecOutcome::Timeout
         }
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
-        Ok(Ok(((out, out_truncated), (err, _), status))) => {
+        Ok(Ok(((out, out_truncated), (err, err_truncated), status))) => {
             let stdout = String::from_utf8_lossy(&out).trim().to_owned();
-            let stderr = String::from_utf8_lossy(&err).trim().to_owned();
+            let mut stderr = String::from_utf8_lossy(&err).trim().to_owned();
+            // stderr rides the outcome as the block/warning reason; mark a
+            // cut capture so a silently shortened reason is visible.
+            if err_truncated {
+                stderr.push_str(PROMPT_CONTEXT_TRUNCATED);
+            }
             match status.code() {
                 Some(0) => ExecOutcome::Success {
                     stdout,
@@ -1261,6 +1266,20 @@ mod tests {
         );
         let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
         assert_capped_cleanly(&report);
+    }
+
+    /// The buffering property the end-to-end over-budget tests cannot
+    /// observe: read_capped stops buffering at the budget (plus the
+    /// overflow byte) and still drains the whole stream, so the caller
+    /// gets a bounded buffer and a fully consumed reader.
+    #[tokio::test]
+    async fn read_capped_buffers_the_budget_and_drains_the_rest() {
+        let total = PROMPT_CONTEXT_MAX_BYTES + 1000;
+        let mut reader = std::io::Cursor::new(vec![b'x'; total]);
+        let (buf, truncated) = read_capped(&mut reader, PROMPT_CONTEXT_MAX_BYTES).await;
+        assert_eq!(buf.len(), PROMPT_CONTEXT_MAX_BYTES + 1);
+        assert!(truncated);
+        assert_eq!(reader.position(), total as u64, "the remainder is drained");
     }
 
     /// A failing prompt hook must not block its point: exit code 2 (the

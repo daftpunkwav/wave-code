@@ -382,6 +382,14 @@ mod tests {
             reason("powershell -Command \"Remove-Item -Recurse -Force /\"").is_some(),
             "the powershell script re-screen fires"
         );
+        // PowerShell syntax rides the same layered screen: the AST reads
+        // the words it can, and a script the parser cannot read still
+        // gets the raw-text table — never a silent pass.
+        assert!(
+            reason("powershell -Command \"Get-Content a; Remove-Item -Recurse -Force /\"")
+                .is_some(),
+            "a compound powershell script is screened"
+        );
         // The interpreter's own name is no longer the whole story, but a
         // benign script still asks nobody.
         assert_eq!(reason("sh -c 'echo hello'"), None);

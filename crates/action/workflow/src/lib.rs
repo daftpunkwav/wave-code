@@ -242,9 +242,10 @@ pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
     Ok(())
 }
 
-/// The spec size bounds: every step and every fan-out entry is a full
-/// child run, so a spec is a token budget and needs a ceiling on both
-/// the step count and the per-step fan-out multiplier.
+/// The spec size bounds: every step is a full child run, so the step
+/// count gets a ceiling; a fan-out step multiplies that by its input
+/// array, so the array gets one too. A `task` step's input renders to a
+/// single child either way and carries no multiplier.
 fn validate_size_bounds(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
     if spec.steps.len() > MAX_SPEC_STEPS {
         return Err(WorkflowError::InvalidSpec(format!(
@@ -253,7 +254,8 @@ fn validate_size_bounds(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
         )));
     }
     for step in &spec.steps {
-        if let serde_json::Value::Array(items) = &step.input
+        if step.kind == StepKind::Fanout
+            && let serde_json::Value::Array(items) = &step.input
             && items.len() > MAX_FANOUT_ITEMS
         {
             return Err(WorkflowError::InvalidSpec(format!(
@@ -523,6 +525,21 @@ mod tests {
             matches!(err, WorkflowError::InvalidSpec(ref text) if text.contains("at most 64 steps")),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn a_task_step_takes_an_input_of_any_size() {
+        // The entry bound exists to cap the child count a fan-out can
+        // queue; a task step renders its whole input to one child, so a
+        // large array input is one large string, not a multiplier.
+        let entries: Vec<String> = (0..=MAX_FANOUT_ITEMS)
+            .map(|index| format!("x{index}"))
+            .collect();
+        let spec = spec_from_json(&format!(
+            r#"{{"steps": [{{"id": "one", "kind": "task", "input": {}}}]}}"#,
+            serde_json::to_string(&entries).unwrap()
+        ));
+        assert!(validate_spec(&spec).is_ok());
     }
 
     #[test]

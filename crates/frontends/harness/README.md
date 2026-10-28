@@ -10,7 +10,7 @@ English | [中文](README.zh.md)
 | `src/repl.rs` | The interactive REPL: slash-command grammar, the multi-turn input loop, and the legacy-thread `resume` surface |
 | `src/tui.rs` | The fullscreen TUI assembly over a live harness session (resume seed, `/model` picker catalog, UI wiring) |
 | `src/serve.rs` | Server-like surfaces: MCP stdio, ACP stdio, plugin inventory, and the local HTTP app-server (REST + SSE, run through `operations-gateway`) |
-| `src/surfaces/` | Self-contained command surfaces that never assemble a session: `doctor`, `grants`, and `metrics` stay local; `update_cmd` is the one that talks to the network (self-update) |
+| `src/surfaces/` | Self-contained command surfaces that never assemble a session and operate only on local state (`grants` can revoke persisted grants); `update_cmd` is the one that talks to the network (self-update) |
 | `src/logging.rs` | Daily rolling file logging under `~/.wavecode/logs`; file-only, so protocol streams and the TUI stay clean |
 | `src/task_eval.rs` | Task-level eval execution: fixture isolation, the agent step through the `exec` surface behind the `AgentStep` seam, a real-process `World`, text/JSON reports; scoring lives in `operations-eval` |
 | `src/update.rs` | Release check and checksum-verified self-install against GitHub releases, keeping a `.bak` rollback copy |

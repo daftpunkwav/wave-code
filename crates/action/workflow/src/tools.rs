@@ -59,6 +59,10 @@ impl Tool for WorkflowRunTool {
         "workflow_run"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Spawn
+    }
+
     fn description(&self) -> &str {
         "Run a workflow DAG through child tasks and return one JSON object \
          of step summaries keyed by step id. Spec JSON: {\"steps\": \
@@ -133,6 +137,10 @@ impl RalphRunTool {
 impl Tool for RalphRunTool {
     fn name(&self) -> &str {
         "ralph_run"
+    }
+
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Spawn
     }
 
     fn description(&self) -> &str {

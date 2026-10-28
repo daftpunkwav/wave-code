@@ -109,6 +109,18 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   free-text prompt, and bare `/undo` opens the rewind picker instead
   of dropping a turn immediately (while busy it still refuses).
 - The previous deepwave identity stays selectable via `/theme deepwave`.
+- The child surface's forbidden set derives from the new
+  `ToolKind::Spawn` class — declared by `task`, `skill`,
+  `task_continue`, `child_spawn`, `workflow_run`, and `ralph_run` —
+  instead of a hand-maintained name list, so a newly registered spawn
+  tool is excluded from children automatically; `compact_context`
+  joins the set through its shared name constant. The history
+  journal's record envelope (the `append`/`replace` kinds and the
+  `seq` field) moved into `state-persistence` as a typed
+  `HistoryRecord`, so `HISTORY_FORMAT_VERSION` covers the whole
+  on-disk layout from one crate. The never-read `ToolAllowlist`
+  handle is removed; the live gates remain `RunAllowlist` and
+  `Registry::name_subset`.
 - Fenced code frames hug their content instead of spanning the
   terminal (still capped at 80 columns on wide terminals).
 - `max_tool_rounds` default raised from 32 to 256, and goal

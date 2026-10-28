@@ -967,12 +967,19 @@ fn gapped_journal_is_rewritten_before_new_records() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.jsonl");
     let journal = state_persistence::history::HistoryJournal::new(&path);
+    use state_persistence::history::HistoryRecord;
     journal
-            .append(&serde_json::json!({"k":"append","seq":0,"entry":{"role":"user","blocks":[{"text":"kept"}]}}))
-            .unwrap();
+        .append_record(&HistoryRecord::Append {
+            seq: 0,
+            entry: serde_json::json!({"role": "user", "blocks": [{"text": "kept"}]}),
+        })
+        .unwrap();
     journal
-            .append(&serde_json::json!({"k":"append","seq":2,"entry":{"role":"assistant","blocks":[{"text":"dropped"}]}}))
-            .unwrap();
+        .append_record(&HistoryRecord::Append {
+            seq: 2,
+            entry: serde_json::json!({"role": "assistant", "blocks": [{"text": "dropped"}]}),
+        })
+        .unwrap();
     let mut warnings = Vec::new();
     let mut conv = seed_conversation(Some(journal.clone()), &[], &mut warnings);
     assert!(

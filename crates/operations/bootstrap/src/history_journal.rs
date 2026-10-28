@@ -14,7 +14,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use state_persistence::history::HistoryJournal;
+use state_persistence::history::{HistoryJournal, HistoryRecord};
 use state_store::{HistoryEntry, HistorySink};
 
 /// Record kind whose absence would reopen a settled tool call.
@@ -22,6 +22,10 @@ const UNKNOWN_OUTCOME: &str = "wavecode lost this call's result while the sessio
      or may not have run, so do not assume either — verify before repeating it";
 
 /// Mirrors history mutations into one session's journal.
+///
+/// The record envelope (kinds, `seq` field, format version) lives in
+/// `state-persistence`; this side owns only the counter that allocates
+/// sequence numbers.
 #[derive(Debug)]
 pub struct JournalSink {
     journal: HistoryJournal,
@@ -42,16 +46,13 @@ impl JournalSink {
         }
     }
 
-    /// Encode and append one record; a failure costs durability only, never
-    /// the running turn (history keeps advancing in memory, and the gap
-    /// surfaces at the next replay through the sequence jump).
-    fn write(&self, record: serde_json::Value) {
+    /// Allocate the next sequence number and encode and append the record
+    /// built from it; a failure costs durability only, never the running
+    /// turn (history keeps advancing in memory, and the gap surfaces at
+    /// the next replay through the sequence jump).
+    fn write(&self, build: impl FnOnce(u64) -> HistoryRecord) {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let mut record = record;
-        if let Some(object) = record.as_object_mut() {
-            object.insert("seq".to_string(), serde_json::json!(seq));
-        }
-        if let Err(error) = self.journal.append(&record) {
+        if let Err(error) = self.journal.append_record(&build(seq)) {
             tracing::warn!("history journal write failed (seq {seq}): {error}");
         }
     }
@@ -59,11 +60,18 @@ impl JournalSink {
 
 impl HistorySink for JournalSink {
     fn appended(&self, entry: &HistoryEntry) {
-        self.write(serde_json::json!({"k": "append", "entry": entry}));
+        self.write(|seq| HistoryRecord::Append {
+            seq,
+            entry: serde_json::json!(entry),
+        });
     }
 
     fn replaced(&self, entries: &[HistoryEntry]) {
-        self.write(serde_json::json!({"k": "replace", "entries": entries}));
+        let encoded: Vec<serde_json::Value> = entries.iter().map(|entry| serde_json::json!(entry)).collect();
+        self.write(|seq| HistoryRecord::Replace {
+            seq,
+            entries: encoded,
+        });
     }
 }
 
@@ -97,35 +105,38 @@ pub fn replay_history(journal: &HistoryJournal) -> Replayed {
     let mut gapped = read.mid_gap;
     let mut next_seq = 0u64;
     for record in &read.records {
-        let seq = record.get("seq").and_then(serde_json::Value::as_u64);
         // Stop before applying a record whose sequence jumped. Applying it
         // and then closing open calls at the very end puts a synthetic
         // tool result after later messages, which providers reject.
-        if seq != Some(expected_seq) {
+        let continues = match record {
+            HistoryRecord::Append { seq, entry } => {
+                *seq == expected_seq
+                    && match decode_entry(Some(entry)) {
+                        Some(entry) => {
+                            entries.push(entry);
+                            true
+                        }
+                        None => false,
+                    }
+            }
+            HistoryRecord::Replace { seq, entries: replacement } => {
+                *seq == expected_seq
+                    && match decode_entries(Some(replacement)) {
+                        Some(replacement) => {
+                            entries = replacement;
+                            true
+                        }
+                        None => false,
+                    }
+            }
+            // A kind this reader's format does not define predates or
+            // postdates it: stop rather than rebuild a history from
+            // records it cannot interpret.
+            HistoryRecord::Unknown { .. } => false,
+        };
+        if !continues {
             gapped = true;
             break;
-        }
-        match record.get("k").and_then(serde_json::Value::as_str) {
-            Some("append") => match decode_entry(record.get("entry")) {
-                Some(entry) => entries.push(entry),
-                None => {
-                    gapped = true;
-                    break;
-                }
-            },
-            Some("replace") => match decode_entries(record.get("entries")) {
-                Some(replacement) => entries = replacement,
-                None => {
-                    gapped = true;
-                    break;
-                }
-            },
-            // An unknown kind predates this reader's format: stop rather
-            // than rebuild a history from records it cannot interpret.
-            _ => {
-                gapped = true;
-                break;
-            }
         }
         expected_seq += 1;
         next_seq = expected_seq;
@@ -144,8 +155,8 @@ fn decode_entry(value: Option<&serde_json::Value>) -> Option<HistoryEntry> {
     serde_json::from_value(value?.clone()).ok()
 }
 
-fn decode_entries(value: Option<&serde_json::Value>) -> Option<Vec<HistoryEntry>> {
-    serde_json::from_value(value?.clone()).ok()
+fn decode_entries(value: Option<&Vec<serde_json::Value>>) -> Option<Vec<HistoryEntry>> {
+    serde_json::from_value(serde_json::Value::Array(value?.clone())).ok()
 }
 
 #[cfg(test)]
@@ -273,10 +284,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = journal_in(dir.path());
         journal
-            .append(&serde_json::json!({"k":"append","seq":0,"entry":{"role":"user","blocks":[{"text":"a"}]}}))
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"role": "user", "blocks": [{"text": "a"}]}),
+            })
             .unwrap();
         journal
-            .append(&serde_json::json!({"k":"append","seq":2,"entry":{"role":"assistant","blocks":[{"text":"b"}]}}))
+            .append_record(&HistoryRecord::Append {
+                seq: 2,
+                entry: serde_json::json!({"role": "assistant", "blocks": [{"text": "b"}]}),
+            })
             .unwrap();
         let replayed = replay_history(&journal);
         assert!(replayed.gapped);
@@ -292,21 +309,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = journal_in(dir.path());
         journal
-            .append(&serde_json::json!({
-                "k": "append",
-                "seq": 0,
-                "entry": {
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({
                     "role": "assistant",
                     "blocks": [{"tool_use": {"call_id": "c1", "name": "shell", "input": {"command": "ls"}}}]
-                }
-            }))
+                }),
+            })
             .unwrap();
         journal
-            .append(&serde_json::json!({
-                "k": "append",
-                "seq": 2,
-                "entry": {"role": "assistant", "blocks": [{"text": "later"}]}
-            }))
+            .append_record(&HistoryRecord::Append {
+                seq: 2,
+                entry: serde_json::json!({"role": "assistant", "blocks": [{"text": "later"}]}),
+            })
             .unwrap();
         let replayed = replay_history(&journal);
         assert!(replayed.gapped);
@@ -333,24 +348,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = journal_in(dir.path());
         journal
-            .append(&serde_json::json!({
-                "k": "append",
-                "seq": 0,
-                "entry": {
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({
                     "role": "assistant",
                     "blocks": [{"tool_use": {"call_id": "c1", "name": "write", "input": {}}}]
-                }
-            }))
+                }),
+            })
             .unwrap();
         journal
-            .append(&serde_json::json!({
-                "k": "append",
-                "seq": 1,
-                "entry": {
+            .append_record(&HistoryRecord::Append {
+                seq: 1,
+                entry: serde_json::json!({
                     "role": "user",
                     "blocks": [{"tool_result": {"call_id": "c1", "content": "written", "is_error": false}}]
-                }
-            }))
+                }),
+            })
             .unwrap();
         let replayed = replay_history(&journal);
         assert_eq!(replayed.entries.len(), 2);

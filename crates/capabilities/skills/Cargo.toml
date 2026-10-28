@@ -21,6 +21,7 @@ toml.workspace = true
 # Tool-trait rendering for the `skill` tool (same-tier edge, like
 # wavecode-mcp -> wavecode-tools).
 async-trait.workspace = true
+wavecode-protocol = { path = "../../foundation/protocol" }
 wavecode-tools = { path = "../tools" }
 
 [dev-dependencies]

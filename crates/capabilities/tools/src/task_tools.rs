@@ -197,6 +197,10 @@ impl Tool for TaskContinueTool {
         "task_continue"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Spawn
+    }
+
     fn description(&self) -> &str {
         "Send a follow-up instruction to a finished child task: it spawns \
          a new generation carrying the parent's tool surface and lineage \

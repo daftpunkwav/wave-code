@@ -179,26 +179,9 @@ pub fn contains_done_marker(summary: &str) -> bool {
 }
 
 /// Validate step ids and edges: duplicates, blanks, unknown deps, cycles,
-/// and the step/fan-out size bounds (every step and every fan-out entry
-/// is a full child run, so a spec is a token budget and needs a ceiling).
+/// and the spec size bounds.
 pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
-    if spec.steps.len() > MAX_SPEC_STEPS {
-        return Err(WorkflowError::InvalidSpec(format!(
-            "a workflow carries at most {MAX_SPEC_STEPS} steps (got {})",
-            spec.steps.len()
-        )));
-    }
-    for step in &spec.steps {
-        if let serde_json::Value::Array(items) = &step.input
-            && items.len() > MAX_FANOUT_ITEMS
-        {
-            return Err(WorkflowError::InvalidSpec(format!(
-                "fan-out step '{}' carries at most {MAX_FANOUT_ITEMS} entries (got {})",
-                step.id,
-                items.len()
-            )));
-        }
-    }
+    validate_size_bounds(spec)?;
     let mut seen = std::collections::HashSet::new();
     for step in &spec.steps {
         if step.id.trim().is_empty() {
@@ -255,6 +238,30 @@ pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
     }
     if drained != spec.steps.len() {
         return Err(WorkflowError::Cycle);
+    }
+    Ok(())
+}
+
+/// The spec size bounds: every step and every fan-out entry is a full
+/// child run, so a spec is a token budget and needs a ceiling on both
+/// the step count and the per-step fan-out multiplier.
+fn validate_size_bounds(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
+    if spec.steps.len() > MAX_SPEC_STEPS {
+        return Err(WorkflowError::InvalidSpec(format!(
+            "a workflow carries at most {MAX_SPEC_STEPS} steps (got {})",
+            spec.steps.len()
+        )));
+    }
+    for step in &spec.steps {
+        if let serde_json::Value::Array(items) = &step.input
+            && items.len() > MAX_FANOUT_ITEMS
+        {
+            return Err(WorkflowError::InvalidSpec(format!(
+                "fan-out step '{}' carries at most {MAX_FANOUT_ITEMS} entries (got {})",
+                step.id,
+                items.len()
+            )));
+        }
     }
     Ok(())
 }

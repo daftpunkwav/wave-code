@@ -4074,34 +4074,12 @@ mod run_loop_tests {
             .steps
             .lock()
             .unwrap()
-            .push_back(ModelStep::Answer(SampleResponse {
-                blocks: vec![SampleBlock::ToolUse {
-                    call_id: "c1".to_string(),
-                    name: "read_file".to_string(),
-                    input: serde_json::json!({"path": "a.txt"}),
-                }],
-                input_tokens: Some(10),
-                output_tokens: Some(1),
-                truncated: true,
-                cache_read_tokens: 0,
-                cache_creation_tokens: 0,
-            }));
+            .push_back(ModelStep::Answer(truncated_tool_use_response("c1", true)));
         model
             .steps
             .lock()
             .unwrap()
-            .push_back(ModelStep::Answer(SampleResponse {
-                blocks: vec![SampleBlock::ToolUse {
-                    call_id: "c2".to_string(),
-                    name: "read_file".to_string(),
-                    input: serde_json::json!({"path": "a.txt"}),
-                }],
-                input_tokens: Some(10),
-                output_tokens: Some(1),
-                truncated: false,
-                cache_read_tokens: 0,
-                cache_creation_tokens: 0,
-            }));
+            .push_back(ModelStep::Answer(truncated_tool_use_response("c2", false)));
         model
             .steps
             .lock()
@@ -4136,8 +4114,36 @@ mod run_loop_tests {
             2
         );
         assert!(kinds.iter().any(|k| k == "warning"));
-        // The synthetic batch is wire-visible as a not_dispatched pair that
-        // closes before the re-issued call opens.
+        assert_synthetic_batch_settles_before_the_reissue(&fx, "c2");
+        let history = conv
+            .snapshot()
+            .iter()
+            .map(|e| e.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(history.contains("arguments may be truncated"));
+    }
+
+    /// One tool-use sample carrying a single `read_file` call, truncated
+    /// or complete per the flag.
+    fn truncated_tool_use_response(call_id: &str, truncated: bool) -> SampleResponse {
+        SampleResponse {
+            blocks: vec![SampleBlock::ToolUse {
+                call_id: call_id.to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "a.txt"}),
+            }],
+            input_tokens: Some(10),
+            output_tokens: Some(1),
+            truncated,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        }
+    }
+
+    /// The synthetic batch is wire-visible as a not_dispatched pair that
+    /// closes before the re-issued call with `reissue_id` opens.
+    fn assert_synthetic_batch_settles_before_the_reissue(fx: &Fixture, reissue_id: &str) {
         let log = fx.lock_events();
         let position =
             |pred: &dyn Fn(&EventMsg) -> bool| log.iter().position(|e| pred(&e.msg)).unwrap();
@@ -4150,23 +4156,17 @@ mod run_loop_tests {
                 }
             )
         });
+        let reissued_id = reissue_id.to_string();
         let reissued_begin = position(&|msg| {
             matches!(
                 msg,
-                EventMsg::ToolCallBegin { call_id, .. } if call_id == "c2"
+                EventMsg::ToolCallBegin { call_id, .. } if call_id == &reissued_id
             )
         });
         assert!(
             synthetic_end < reissued_begin,
             "the refused batch must settle before the re-issue announces"
         );
-        let history = conv
-            .snapshot()
-            .iter()
-            .map(|e| e.text())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(history.contains("arguments may be truncated"));
     }
 
     /// A stop that lands during a truncated sample wins over the truncation

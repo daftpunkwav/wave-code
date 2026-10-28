@@ -156,6 +156,11 @@ impl JobSnapshot {
 }
 
 /// Live tracking slot for one job.
+/// Upper bound on waiting for the tree kill to land: a stuck
+/// `taskkill` must not hold the driver's always-terminal flow open
+/// past it (the blocking kill keeps running; only the wait is bounded).
+const TREE_KILL_JOIN: Duration = Duration::from_secs(2);
+
 struct JobSlot {
     /// Owner charged at spawn, for cap accounting.
     owner: String,
@@ -194,6 +199,11 @@ struct JobSlot {
     /// terminated exactly once.
     #[cfg(test)]
     tree_kills: AtomicUsize,
+    /// Windows-only: the Job Object holding the spawned tree, set once
+    /// by the driver right after the spawn — `terminate` replaces the
+    /// `taskkill` spawn on every termination path.
+    #[cfg(windows)]
+    tree_job: std::sync::OnceLock<Arc<infrastructure_base::ProcessTreeJob>>,
     /// Wakeup for `wait` callers on terminal transitions.
     done: tokio::sync::Notify,
 }
@@ -277,6 +287,8 @@ impl JobService {
             pid: Mutex::new(None),
             #[cfg(test)]
             tree_kills: AtomicUsize::new(0),
+            #[cfg(windows)]
+            tree_job: std::sync::OnceLock::new(),
             done: tokio::sync::Notify::new(),
         });
         jobs.insert(id.clone(), slot.clone());
@@ -457,6 +469,10 @@ async fn drive_job(
             return;
         }
     };
+    #[cfg(windows)]
+    if let Some(job) = infrastructure_base::ProcessTreeJob::assign(&child) {
+        let _ = slot.tree_job.set(Arc::new(job));
+    }
     // Published for the tests that must tell the spawn apart from the
     // pre-start stop; the driver itself reads the pid from the child
     // handle when it kills the tree.
@@ -469,7 +485,7 @@ async fn drive_job(
     if slot.cancelled.load(Ordering::SeqCst) {
         #[cfg(test)]
         slot.tree_kills.fetch_add(1, Ordering::SeqCst);
-        let _ = kill_and_reap(&mut child).await;
+        let _ = kill_and_reap(&slot, &mut child).await;
         finish(&id, &slot, &notifications, None);
         return;
     }
@@ -489,7 +505,7 @@ async fn drive_job(
         _ = slot.cancel_requested.notified() => {
             #[cfg(test)]
             slot.tree_kills.fetch_add(1, Ordering::SeqCst);
-            kill_and_reap(&mut child).await
+            kill_and_reap(&slot, &mut child).await
         }
         result = wait_for_exit(&slot, &mut child, request.timeout_ms) => result,
     };
@@ -506,9 +522,28 @@ async fn drive_job(
 /// the pid, and a kill that starts after it can hit a process the
 /// system already handed that pid to. Every termination path goes
 /// through this helper, so the order holds for all of them.
-async fn kill_and_reap(child: &mut tokio::process::Child) -> Option<std::process::ExitStatus> {
+///
+/// On Windows the slot's Job Object (assigned at spawn) terminates the
+/// whole membership with one kernel call when it exists; otherwise the
+/// `taskkill` path runs behind a pid liveness probe — a kill aimed at
+/// a pid whose owner already exited can hit an unrelated process the
+/// OS recycled that pid onto. The kill wait is bounded either way: a
+/// stuck tree kill must not hold the driver's always-terminal flow
+/// open past it.
+async fn kill_and_reap(
+    slot: &Arc<JobSlot>,
+    child: &mut tokio::process::Child,
+) -> Option<std::process::ExitStatus> {
+    #[cfg(windows)]
+    if let Some(job) = slot.tree_job.get() {
+        job.terminate();
+        let _ = child.kill().await;
+        return child.wait().await.ok();
+    }
     if let Some(pid) = child.id() {
-        kill_tree_blocking(pid).await;
+        if infrastructure_base::pid_alive(pid) {
+            let _ = tokio::time::timeout(TREE_KILL_JOIN, kill_tree_blocking(pid)).await;
+        }
     }
     let _ = child.kill().await;
     child.wait().await.ok()
@@ -533,7 +568,7 @@ async fn wait_for_exit(
             }
             Err(_) => {
                 slot.timed_out.store(true, Ordering::SeqCst);
-                kill_and_reap(child).await
+                kill_and_reap(slot, child).await
             }
         },
         None => match child.wait().await {

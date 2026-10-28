@@ -116,7 +116,10 @@ async fn run_once(command: &str, snapshot: serde_json::Value) -> anyhow::Result<
         drop(stdin);
     }
     let out = tokio::time::timeout(KILL_AFTER, child.wait_with_output()).await??;
-    let text = String::from_utf8_lossy(&out.stdout);
+    // The console code-page fallback, not a bare lossy UTF-8 decode:
+    // children inherit the console code page, so a non-ASCII path from
+    // a GBK-host builtin would otherwise render as diamond noise.
+    let text = infrastructure_base::console_codec::decode_console_output(&out.stdout);
     let line = sanitize_terminal(text.lines().next().unwrap_or_default().trim());
     if line.is_empty() {
         anyhow::bail!("empty status line");

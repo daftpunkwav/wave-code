@@ -28,6 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+pub mod console_codec;
+
 /// Capacity of the main event channel per session.
 pub const EVENT_CHANNEL_CAP: usize = 256;
 /// Capacity of the control channel for interrupts and approvals.
@@ -232,6 +234,146 @@ async fn on_blocking_pool<F: FnOnce() + Send + 'static>(work: F) {
     // The join result carries only a panic, and the tree kill is best
     // effort by contract, so a failed task must not fail the caller.
     let _ = tokio::task::spawn_blocking(work).await;
+}
+
+/// Liveness probe for a pid the kill paths captured earlier.
+///
+/// A tree kill aimed at a pid whose owner already exited can hit an
+/// unrelated process the OS recycled the pid onto; probing first
+/// narrows that window to the gap between probe and kill (a fully
+/// handle-based design needs process identities, not pids, and the
+/// spawn paths have only pids by the time a cancel arrives).
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    // SAFETY: OpenProcess/GetExitCodeProcess take a pid and an out
+    // pointer and close nothing; the returned handle is closed on every
+    // path below.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe {
+        let process = windows_sys::Win32::System::Threading::OpenProcess(
+            windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        );
+        if process.is_null() {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let alive = windows_sys::Win32::System::Threading::GetExitCodeProcess(
+            process,
+            &mut exit_code,
+        ) != 0
+            // STILL_ACTIVE (0x103) is the sentinel GetExitCodeProcess
+            // reports while the process keeps running.
+            && exit_code as i32 == windows_sys::Win32::Foundation::STILL_ACTIVE;
+        windows_sys::Win32::Foundation::CloseHandle(process);
+        alive
+    }
+}
+
+/// Liveness probe for a pid the kill paths captured earlier (see the
+/// Windows variant for the rationale).
+#[cfg(unix)]
+pub fn pid_alive(pid: u32) -> bool {
+    // SAFETY: kill with signal 0 touches no Rust state; a 0 or an EPERM
+    // both mean the process exists.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe {
+        let result = libc::kill(pid as libc::pid_t, 0);
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
+/// A Job Object holding one spawned child for lifetime control
+/// (Windows): `terminate` ends the child and everything it spawned
+/// with one kernel call, replacing the `taskkill` process spawn (and
+/// its ~0.5s tree wait) on every cancel path, and the kill-on-close
+/// flag makes an abandoned job clean its membership up at process
+/// exit. `None` at the assign sites degrades to the [`kill_tree`]
+/// path, so a failed assignment costs latency, not correctness.
+#[cfg(windows)]
+pub struct ProcessTreeJob {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+// SAFETY: the raw handle is never dereferenced in Rust — every use is a
+// kernel call taking it by value — and access goes through the shared
+// `Arc` the cancel paths hold, so sending and sharing it carries no
+// data race.
+// nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+#[cfg(windows)]
+unsafe impl Send for ProcessTreeJob {}
+// SAFETY: see the Send impl.
+// nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+#[cfg(windows)]
+unsafe impl Sync for ProcessTreeJob {}
+
+#[cfg(windows)]
+impl ProcessTreeJob {
+    /// Create a kill-on-close job and assign the spawned child to it.
+    ///
+    /// Assignment must happen before the child spawns descendants the
+    /// cancel wants covered (a process joins with everything it has
+    /// already spawned only when the job is created broken-away-safe —
+    /// this plain assignment covers the child and its future spawns).
+    pub fn assign(child: &tokio::process::Child) -> Option<Self> {
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            SetInformationJobObject,
+        };
+        let process = child.raw_handle()?;
+        // SAFETY: the job is created unnamed; the limit struct is
+        // zeroed and filled before the sized setter call; the child
+        // handle is a live process handle from the spawn.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set == 0 || AssignProcessToJobObject(job, process) == 0 {
+                windows_sys::Win32::Foundation::CloseHandle(job);
+                return None;
+            }
+            Some(Self { handle: job })
+        }
+    }
+
+    /// Terminate every process in the job (the child and its spawn
+    /// tree). Best effort: a failure is invisible here by contract.
+    pub fn terminate(&self) {
+        // SAFETY: the handle is a live job handle owned by this value;
+        // the exit code has no consumer.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            windows_sys::Win32::System::JobObjects::TerminateJobObject(self.handle, 1);
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTreeJob {
+    fn drop(&mut self) {
+        // SAFETY: this value owns the handle and drops once.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
 }
 
 /// Absolute path to the Windows tree-kill utility.

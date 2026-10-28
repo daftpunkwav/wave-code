@@ -1894,15 +1894,15 @@ where
             // ahead of the truncation guard so a stop that lands during a
             // truncated sample can never be swallowed by the settle below.
             if interrupt.is_triggered() {
-                let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
-                conv.push_blocks(
-                    Role::User,
-                    result_blocks(&results, std::time::SystemTime::now()),
+                return settle_interrupted_turn(
+                    conv,
+                    &calls,
+                    &last_input,
+                    &last_output,
+                    &state,
+                    window,
+                    &emit_msg,
                 );
-                emit_undispatched_pairs(&calls, &results, ToolOutcome::Interrupted, &emit_msg);
-                settle(conv, &last_input, &last_output, &state, window, &emit_msg);
-                emit_msg(EventMsg::TurnCompleted { interrupted: true });
-                return StopReason::Interrupted;
             }
 
             // A response cut off at the output limit can end mid-tool-call:
@@ -1912,35 +1912,20 @@ where
             // the whole batch with an explanatory result so the model re-issues
             // complete calls; the continuation budget bounds the retry loop.
             if response.truncated {
-                let results: Vec<ToolResult> = calls
-                    .iter()
-                    .map(|call| ToolResult {
-                        call_id: call.call_id.clone(),
-                        content: "the response hit the output limit before this tool call was \
-                                  fully transmitted; its arguments may be truncated, so it was \
-                                  not executed. Re-issue the tool call with complete arguments."
-                            .to_string(),
-                        is_error: true,
-                    })
-                    .collect();
-                conv.push_blocks(
-                    Role::User,
-                    result_blocks(&results, std::time::SystemTime::now()),
-                );
-                emit_undispatched_pairs(&calls, &results, ToolOutcome::NotDispatched, &emit_msg);
-                if continuations < self.cfg.max_continuations {
-                    continuations += 1;
-                    emit_msg(EventMsg::Warning {
-                        message: format!(
-                            "output truncated mid-tool-call; failing the batch and continuing ({continuations}/{})",
-                            self.cfg.max_continuations
-                        ),
-                    });
-                    continue;
+                match refuse_truncated_batch(
+                    conv,
+                    &calls,
+                    &last_input,
+                    &last_output,
+                    &state,
+                    window,
+                    &mut continuations,
+                    self.cfg.max_continuations,
+                    &emit_msg,
+                ) {
+                    Some(stop) => return stop,
+                    None => continue,
                 }
-                settle(conv, &last_input, &last_output, &state, window, &emit_msg);
-                emit_msg(EventMsg::TurnCompleted { interrupted: false });
-                return StopReason::Completed;
             }
 
             // Repeat breaker: the same call issued round after round is the
@@ -1951,33 +1936,16 @@ where
             if self.cfg.max_repeat_streak > 0 {
                 let streak = state.note_call_signature(&tool_call_signature(&calls));
                 if streak >= self.cfg.max_repeat_streak {
-                    let handoff = repeat_handoff(streak);
-                    emit_msg(EventMsg::Warning {
-                        message: format!(
-                            "same tool call repeated {streak} times; stopping the turn for a text handoff"
-                        ),
-                    });
-                    let results: Vec<ToolResult> = calls
-                        .iter()
-                        .map(|call| ToolResult {
-                            call_id: call.call_id.clone(),
-                            content: handoff.clone(),
-                            is_error: true,
-                        })
-                        .collect();
-                    conv.push_blocks(
-                        Role::User,
-                        result_blocks(&results, std::time::SystemTime::now()),
-                    );
-                    emit_undispatched_pairs(
+                    return refuse_repeat_streak(
+                        conv,
                         &calls,
-                        &results,
-                        ToolOutcome::NotDispatched,
+                        &last_input,
+                        &last_output,
+                        &state,
+                        window,
+                        streak,
                         &emit_msg,
                     );
-                    settle(conv, &last_input, &last_output, &state, window, &emit_msg);
-                    emit_msg(EventMsg::TurnCompleted { interrupted: false });
-                    return StopReason::RepeatBreaker;
                 }
                 if streak >= REPEAT_REMINDER_AT[0] {
                     emit_msg(EventMsg::Warning {
@@ -2745,6 +2713,116 @@ fn interrupted_result(call: &ToolCall) -> ToolResult {
         content: "interrupted by user".to_string(),
         is_error: true,
     }
+}
+
+/// Settle a turn stopped at the pre-tool interrupt checkpoint: the
+/// declared calls close with `interrupted` results, the settle runs,
+/// and `TurnCompleted` closes the turn as interrupted.
+#[allow(clippy::too_many_arguments)]
+fn settle_interrupted_turn(
+    conv: &mut Conversation,
+    calls: &[ToolCall],
+    last_input: &Option<u64>,
+    last_output: &Option<u64>,
+    state: &TurnState,
+    window: u64,
+    emit: &(dyn Fn(EventMsg) + Send + Sync),
+) -> StopReason {
+    let results: Vec<ToolResult> = calls.iter().map(interrupted_result).collect();
+    conv.push_blocks(
+        Role::User,
+        result_blocks(&results, std::time::SystemTime::now()),
+    );
+    emit_undispatched_pairs(calls, &results, ToolOutcome::Interrupted, emit);
+    settle(conv, last_input, last_output, state, window, emit);
+    emit(EventMsg::TurnCompleted { interrupted: true });
+    StopReason::Interrupted
+}
+
+/// Fail a batch cut off at the output limit: every declared call closes
+/// with an explanatory `not_dispatched` result so the model re-issues
+/// complete calls. `Some(stop)` when the continuation budget is
+/// exhausted (the caller returns it); `None` when the loop continues.
+#[allow(clippy::too_many_arguments)]
+fn refuse_truncated_batch(
+    conv: &mut Conversation,
+    calls: &[ToolCall],
+    last_input: &Option<u64>,
+    last_output: &Option<u64>,
+    state: &TurnState,
+    window: u64,
+    continuations: &mut u8,
+    max_continuations: u8,
+    emit: &(dyn Fn(EventMsg) + Send + Sync),
+) -> Option<StopReason> {
+    let results: Vec<ToolResult> = calls
+        .iter()
+        .map(|call| ToolResult {
+            call_id: call.call_id.clone(),
+            content: "the response hit the output limit before this tool call was \
+                      fully transmitted; its arguments may be truncated, so it was \
+                      not executed. Re-issue the tool call with complete arguments."
+                .to_string(),
+            is_error: true,
+        })
+        .collect();
+    conv.push_blocks(
+        Role::User,
+        result_blocks(&results, std::time::SystemTime::now()),
+    );
+    emit_undispatched_pairs(calls, &results, ToolOutcome::NotDispatched, emit);
+    if *continuations < max_continuations {
+        *continuations += 1;
+        emit(EventMsg::Warning {
+            message: format!(
+                "output truncated mid-tool-call; failing the batch and continuing ({}/{max_continuations})",
+                *continuations
+            ),
+        });
+        return None;
+    }
+    settle(conv, last_input, last_output, state, window, emit);
+    emit(EventMsg::TurnCompleted { interrupted: false });
+    Some(StopReason::Completed)
+}
+
+/// Refuse a repeat-streak batch: the same call issued round after round
+/// is the signature failure mode of a stuck loop, so past the ceiling
+/// the calls close with the breaker handoff and the turn ends for a
+/// text answer instead of burning rounds.
+#[allow(clippy::too_many_arguments)]
+fn refuse_repeat_streak(
+    conv: &mut Conversation,
+    calls: &[ToolCall],
+    last_input: &Option<u64>,
+    last_output: &Option<u64>,
+    state: &TurnState,
+    window: u64,
+    streak: u32,
+    emit: &(dyn Fn(EventMsg) + Send + Sync),
+) -> StopReason {
+    emit(EventMsg::Warning {
+        message: format!(
+            "same tool call repeated {streak} times; stopping the turn for a text handoff"
+        ),
+    });
+    let handoff = repeat_handoff(streak);
+    let results: Vec<ToolResult> = calls
+        .iter()
+        .map(|call| ToolResult {
+            call_id: call.call_id.clone(),
+            content: handoff.clone(),
+            is_error: true,
+        })
+        .collect();
+    conv.push_blocks(
+        Role::User,
+        result_blocks(&results, std::time::SystemTime::now()),
+    );
+    emit_undispatched_pairs(calls, &results, ToolOutcome::NotDispatched, emit);
+    settle(conv, last_input, last_output, state, window, emit);
+    emit(EventMsg::TurnCompleted { interrupted: false });
+    StopReason::RepeatBreaker
 }
 
 /// Emit the Begin/End pair for declared calls that never reach dispatch.

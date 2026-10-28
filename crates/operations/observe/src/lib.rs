@@ -69,7 +69,7 @@ pub struct Metrics {
     /// name is retained: ends carry an id, and without this pairing the
     /// per-tool split would be impossible.
     #[serde(skip)]
-    open_calls: HashMap<String, String>,
+    open_calls: HashMap<String, Vec<String>>,
 }
 
 /// Per-tool counters folded from one stream of tool calls.
@@ -144,7 +144,15 @@ impl Metrics {
             }
             EventMsg::ToolCallBegin { call_id, name, .. } => {
                 self.tool_calls += 1;
-                self.open_calls.insert(call_id.clone(), name.clone());
+                // One slot per open call: the same call id can be
+                // outstanding more than once at a time (a pre-dispatch
+                // exit settles a batch where the model repeated an id),
+                // and each end must attribute to the tool, not collapse
+                // into the placeholder bucket.
+                self.open_calls
+                    .entry(call_id.clone())
+                    .or_default()
+                    .push(name.clone());
             }
             EventMsg::ToolCallEnd {
                 call_id,
@@ -161,7 +169,8 @@ impl Metrics {
                 // outcome still counts somewhere.
                 let name = self
                     .open_calls
-                    .remove(call_id)
+                    .get_mut(call_id)
+                    .and_then(|slots| slots.pop())
                     .unwrap_or_else(|| String::from("<unknown>"));
                 let stat = self.tools.entry(name).or_default();
                 match outcome {
@@ -369,6 +378,49 @@ mod tests {
         assert_eq!(metrics.warnings, 1);
         assert_eq!(metrics.errors, 0);
         assert_eq!(metrics.tool_error_rate(), Some(1.0));
+    }
+
+    /// A pre-dispatch batch where the model repeated a call id emits
+    /// Begin, Begin, End, End: every end attributes to the tool instead
+    /// of collapsing into the `<unknown>` placeholder bucket.
+    #[test]
+    fn duplicate_ids_attribute_every_end_to_the_tool() {
+        let mut metrics = Metrics::new();
+        for msg in [
+            EventMsg::TurnStarted {
+                model: "claude-test".to_string(),
+            },
+            EventMsg::ToolCallBegin {
+                call_id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::Value::Null,
+            },
+            EventMsg::ToolCallBegin {
+                call_id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::Value::Null,
+            },
+            EventMsg::ToolCallEnd {
+                call_id: "c1".to_string(),
+                is_error: true,
+                output: None,
+                outcome: ToolOutcome::NotDispatched,
+                duration_ms: 0,
+            },
+            EventMsg::ToolCallEnd {
+                call_id: "c1".to_string(),
+                is_error: true,
+                output: None,
+                outcome: ToolOutcome::NotDispatched,
+                duration_ms: 0,
+            },
+        ] {
+            metrics.record(&event(msg));
+        }
+        assert_eq!(metrics.tool_calls, 2);
+        let shell = &metrics.tools["shell"];
+        assert_eq!(shell.other, 2, "both ends land on the tool: {shell:?}");
+        assert!(!metrics.tools.contains_key("<unknown>"));
     }
 
     #[test]

@@ -1969,7 +1969,12 @@ where
                         Role::User,
                         result_blocks(&results, std::time::SystemTime::now()),
                     );
-                    emit_undispatched_pairs(&calls, &results, ToolOutcome::NotDispatched, &emit_msg);
+                    emit_undispatched_pairs(
+                        &calls,
+                        &results,
+                        ToolOutcome::NotDispatched,
+                        &emit_msg,
+                    );
                     settle(conv, &last_input, &last_output, &state, window, &emit_msg);
                     emit_msg(EventMsg::TurnCompleted { interrupted: false });
                     return StopReason::RepeatBreaker;
@@ -4056,13 +4061,15 @@ mod run_loop_tests {
         // The synthetic batch is wire-visible as a not_dispatched pair that
         // closes before the re-issued call opens.
         let log = fx.lock_events();
-        let position = |pred: &dyn Fn(&EventMsg) -> bool| {
-            log.iter().position(|e| pred(&e.msg)).unwrap()
-        };
+        let position =
+            |pred: &dyn Fn(&EventMsg) -> bool| log.iter().position(|e| pred(&e.msg)).unwrap();
         let synthetic_end = position(&|msg| {
             matches!(
                 msg,
-                EventMsg::ToolCallEnd { outcome: ToolOutcome::NotDispatched, .. }
+                EventMsg::ToolCallEnd {
+                    outcome: ToolOutcome::NotDispatched,
+                    ..
+                }
             )
         });
         let reissued_begin = position(&|msg| {
@@ -4152,16 +4159,13 @@ mod run_loop_tests {
             .lock_events()
             .iter()
             .filter_map(|e| match &e.msg {
-                EventMsg::ToolCallEnd { call_id, outcome, .. } => {
-                    Some((call_id.clone(), *outcome))
-                }
+                EventMsg::ToolCallEnd {
+                    call_id, outcome, ..
+                } => Some((call_id.clone(), *outcome)),
                 _ => None,
             })
             .collect();
-        assert_eq!(
-            ends,
-            vec![("c1".to_string(), ToolOutcome::Interrupted)]
-        );
+        assert_eq!(ends, vec![("c1".to_string(), ToolOutcome::Interrupted)]);
         let history = conv
             .snapshot()
             .iter()
@@ -6355,9 +6359,9 @@ mod run_loop_tests {
             .unwrap_or_else(|e| e.into_inner())
             .iter()
             .filter_map(|event| match &event.msg {
-                EventMsg::ToolCallEnd { call_id, outcome, .. } => {
-                    Some((call_id.clone(), *outcome))
-                }
+                EventMsg::ToolCallEnd {
+                    call_id, outcome, ..
+                } => Some((call_id.clone(), *outcome)),
                 _ => None,
             })
             .collect();

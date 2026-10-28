@@ -573,25 +573,34 @@ async fn run_command(point: HookEventPoint, def: &HookDef, input: &HookInput<'_>
             ExecOutcome::Timeout
         }
         Ok(Err(e)) => ExecOutcome::SpawnFailed(e.to_string()),
-        Ok(Ok(((out, out_truncated), (err, err_truncated), status))) => {
-            let stdout = String::from_utf8_lossy(&out).trim().to_owned();
-            let mut stderr = String::from_utf8_lossy(&err).trim().to_owned();
-            // stderr rides the outcome as the block/warning reason; mark a
-            // cut capture so a silently shortened reason is visible.
-            if err_truncated {
-                stderr.push_str(PROMPT_CONTEXT_TRUNCATED);
-            }
-            match status.code() {
-                Some(0) => ExecOutcome::Success {
-                    stdout,
-                    truncated: out_truncated,
-                },
-                Some(2) => ExecOutcome::Blocked(stderr),
-                Some(code) => ExecOutcome::NonZero(code, stderr),
-                // Killed by a signal (no exit code): allow with a nonzero warning.
-                None => ExecOutcome::NonZero(-1, stderr),
-            }
-        }
+        Ok(Ok((out, err, status))) => finished_outcome(out, err, status),
+    }
+}
+
+/// Build the outcome from one finished run: the exit-code contract over
+/// the trimmed streams, with a cut capture marked so neither the model's
+/// block reason nor a warning is silently shortened.
+fn finished_outcome(
+    (out, out_truncated): (Vec<u8>, bool),
+    (err, err_truncated): (Vec<u8>, bool),
+    status: std::process::ExitStatus,
+) -> ExecOutcome {
+    let stdout = String::from_utf8_lossy(&out).trim().to_owned();
+    let mut stderr = String::from_utf8_lossy(&err).trim().to_owned();
+    // stderr rides the outcome as the block/warning reason; mark a cut
+    // capture so a silently shortened reason is visible.
+    if err_truncated {
+        stderr.push_str(PROMPT_CONTEXT_TRUNCATED);
+    }
+    match status.code() {
+        Some(0) => ExecOutcome::Success {
+            stdout,
+            truncated: out_truncated,
+        },
+        Some(2) => ExecOutcome::Blocked(stderr),
+        Some(code) => ExecOutcome::NonZero(code, stderr),
+        // Killed by a signal (no exit code): allow with a nonzero warning.
+        None => ExecOutcome::NonZero(-1, stderr),
     }
 }
 
@@ -1221,15 +1230,18 @@ mod tests {
         assert_eq!(report.context, "ctx-from-hook");
     }
 
-    /// The shared criteria of the over-budget tests: the hook ran clean
-    /// (no timeout — the drained capture must never block the child) and
-    /// the injected context stays at the budget with a visible marker.
-    fn assert_capped_cleanly(report: &HookReport) {
+    /// The run itself stayed clean: allowed, and no timeout or failure
+    /// warning (a capture that stops draining would surface as one).
+    fn assert_ran_clean(report: &HookReport) {
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert!(
             report.warnings.is_empty(),
             "a capped capture must not turn into a timeout: {report:?}"
         );
+    }
+
+    /// The injected context stayed at the budget with a visible marker.
+    fn assert_capped(report: &HookReport) {
         assert!(
             report.context.len() <= PROMPT_CONTEXT_MAX_BYTES + PROMPT_CONTEXT_TRUNCATED.len(),
             "context stays at the budget: {}",
@@ -1251,7 +1263,8 @@ mod tests {
         let e = HookEngine::new(HashMap::new());
         e.register_prompt_hook(HookEventPoint::UserPromptSubmit, def(&bulk_output_cmd()));
         let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
-        assert_capped_cleanly(&report);
+        assert_ran_clean(&report);
+        assert_capped(&report);
     }
 
     /// Whitespace-only over-budget output must still be marked: the trim
@@ -1265,7 +1278,7 @@ mod tests {
             def(&bulk_whitespace_cmd()),
         );
         let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
-        assert_capped_cleanly(&report);
+        assert_capped(&report);
     }
 
     /// The buffering property the end-to-end over-budget tests cannot

@@ -113,6 +113,20 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   terminal (still capped at 80 columns on wide terminals).
 - `max_tool_rounds` default raised from 32 to 256, and goal
   continuations per turn from 5 to 8, for super-long-horizon turns.
+- October-review contract decisions land: the four never-produced
+  wire events (`plan_proposed`, `plan_approved`, `goal_set`,
+  `goal_completed`) are removed together with their frontend consumers
+  and the TS SDK members (breaking wire change — nothing ever emitted
+  them); the app server answers every failed request, extractor
+  rejections included, with the same JSON `{"error": ...}` body;
+  `mcp serve` `tools/list` carries MCP `annotations`
+  (`readOnlyHint`/`destructiveHint`) mirroring each tool's effect
+  classification; `web_fetch` treats the reserved name `localhost` as
+  the loopback literal it is (RFC 6761, answered without DNS), so it
+  reaches local dev servers exactly like the already-allowed
+  `127.0.0.1` literal; and the system prompt's `Shell:` line reports
+  the shell the `WAVECODE_SHELL` override actually spawns instead of
+  the login shell.
 - Warnings and loop notices render in the theme's warning color
   instead of dim body text, and the round-limit warning names the
   `max_tool_rounds` config key.

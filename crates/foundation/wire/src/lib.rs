@@ -367,20 +367,6 @@ pub enum EventMsg {
         /// a warning instead of this event).
         turns: u32,
     },
-    /// A reviewed plan was proposed and awaits approval (display routing).
-    PlanProposed {
-        /// Proposed plan text for transcript rendering.
-        text: String,
-    },
-    /// A reviewed plan was approved.
-    PlanApproved,
-    /// A durable goal was set (display routing).
-    GoalSet {
-        /// Goal objective text for transcript rendering.
-        objective: String,
-    },
-    /// A durable goal was completed.
-    GoalCompleted,
     /// Non-fatal condition worth surfacing.
     Warning {
         /// Human-readable warning text.

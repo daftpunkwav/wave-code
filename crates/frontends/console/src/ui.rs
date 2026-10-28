@@ -60,7 +60,7 @@ use crate::messages::usage::UsagePanel;
 use crate::messages::{AssistantMessage, ExpandedFlag, StatusLine, Thinking, UserMessage};
 use crate::panes;
 use crate::slash;
-use crate::state::{AppState, GoalBadge, StreamingPhase, TodoEntry, TodoStatus};
+use crate::state::{AppState, StreamingPhase, TodoEntry, TodoStatus};
 use crate::theme::{self, Token};
 use crate::transcript::Transcript;
 use crate::welcome::Welcome;
@@ -1016,27 +1016,6 @@ impl ConsoleUi {
             }
             EventMsg::HistoryRewound { turns } => {
                 self.apply_rewound(*turns);
-                true
-            }
-            EventMsg::PlanProposed { text } => {
-                let text = tui_engine::sanitize::sanitize_terminal(text);
-                self.push_assistant_message(&text);
-                true
-            }
-            EventMsg::PlanApproved => {
-                self.push_status("plan approved", false);
-                true
-            }
-            EventMsg::GoalSet { objective } => {
-                self.state.goal = Some(GoalBadge {
-                    since: Instant::now(),
-                });
-                self.push_status(&format!("goal set: {objective}"), false);
-                true
-            }
-            EventMsg::GoalCompleted => {
-                self.state.goal = None;
-                self.push_status("goal completed", false);
                 true
             }
             EventMsg::Warning { message } => {

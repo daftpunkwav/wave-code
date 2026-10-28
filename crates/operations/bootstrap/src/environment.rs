@@ -33,24 +33,12 @@ pub fn describe(cwd: &Path) -> String {
     lines.join("\n")
 }
 
-/// Best-effort shell name: `$SHELL` basename on Unix, `%COMSPEC%` basename
-/// (defaulting to cmd.exe) on Windows, "unknown" when nothing is set.
+/// Best-effort shell name: the same resolution every command-spawn path
+/// uses (`WAVECODE_SHELL` override, else the platform default), so the
+/// prompt describes the shell that will actually run the commands, not
+/// the login shell.
 fn shell_name() -> String {
-    let var = if cfg!(windows) { "COMSPEC" } else { "SHELL" };
-    std::env::var(var)
-        .ok()
-        .and_then(|path| {
-            Path::new(&path)
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                "cmd.exe".into()
-            } else {
-                "unknown".into()
-            }
-        })
+    infrastructure_base::shell_name()
 }
 
 #[cfg(test)]

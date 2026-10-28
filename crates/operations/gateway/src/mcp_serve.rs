@@ -217,15 +217,37 @@ fn initialize_result() -> serde_json::Value {
 }
 
 /// `tools/list` result from the registry specs (sorted by name there).
+///
+/// Each tool carries MCP `annotations` mirroring the local per-tool
+/// effect classification, so a client can style or pre-gate calls on
+/// the same signal the local policy gate sees.
 fn tools_list(registry: &wavecode_tools::Registry) -> serde_json::Value {
     let tools: Vec<serde_json::Value> = registry
         .specs()
         .into_iter()
         .map(|spec| {
+            let (read_only, destructive) = registry
+                .get(&spec.name)
+                .map(|tool| {
+                    let read_only = tool.is_read_only();
+                    // MCP defaults `destructiveHint` to true for a
+                    // non-read-only tool. The local attribute only knows
+                    // "explicitly destructive" versus "unclassified" (the
+                    // trait default), so advertising the default false
+                    // would claim additive-only for tools like `shell`
+                    // that can delete. The cautious advertisement is the
+                    // protocol default itself.
+                    (read_only, !read_only)
+                })
+                .unwrap_or((false, true));
             serde_json::json!({
                 "name": spec.name,
                 "description": spec.description,
                 "inputSchema": spec.input_schema,
+                "annotations": {
+                    "readOnlyHint": read_only,
+                    "destructiveHint": destructive,
+                },
             })
         })
         .collect();
@@ -344,7 +366,35 @@ mod tests {
         }
     }
 
+    struct DestructiveTool;
+
     struct FaultyTool;
+
+    #[async_trait::async_trait]
+    impl Tool for DestructiveTool {
+        fn name(&self) -> &str {
+            "remover_tool"
+        }
+        fn description(&self) -> &str {
+            "test destructive tool"
+        }
+        fn input_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn is_read_only(&self) -> bool {
+            false
+        }
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &ToolCtx,
+        ) -> ToolResultAlias<ToolOutput> {
+            Ok(ToolOutput {
+                content: "gone".to_string(),
+                is_error: false,
+            })
+        }
+    }
 
     #[async_trait::async_trait]
     impl Tool for FaultyTool {
@@ -404,6 +454,7 @@ mod tests {
         registry.register(Arc::new(EchoTool));
         registry.register(Arc::new(FaultyTool));
         registry.register(Arc::new(PrefixSuccessTool));
+        registry.register(Arc::new(DestructiveTool));
         Arc::new(registry)
     }
 
@@ -536,6 +587,20 @@ mod tests {
         let echo = tools.iter().find(|t| t["name"] == "echo_tool").unwrap();
         assert_eq!(echo["description"], "test echo tool");
         assert_eq!(echo["inputSchema"], serde_json::json!({"type": "object"}));
+        // MCP annotations mirror the per-tool effect classification: the
+        // echo tool is read-only and therefore advertised additive-only.
+        assert_eq!(
+            echo["annotations"],
+            serde_json::json!({"readOnlyHint": true, "destructiveHint": false})
+        );
+        // A non-read-only tool is advertised at the protocol default
+        // (potentially destructive), never less cautious than it — even
+        // though the local attribute leaves it "unclassified".
+        let faulty = tools.iter().find(|t| t["name"] == "remover_tool").unwrap();
+        assert_eq!(
+            faulty["annotations"],
+            serde_json::json!({"readOnlyHint": false, "destructiveHint": true})
+        );
     }
 
     #[tokio::test]

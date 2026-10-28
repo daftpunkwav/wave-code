@@ -237,6 +237,57 @@ async fn healthz_is_open_and_other_routes_require_the_token() {
     let _ = done;
 }
 
+/// Every failed request - handler validation, extractor rejection, and
+/// the auth guard alike - answers the same JSON `{"error": ...}` shape.
+#[tokio::test]
+async fn errors_speak_one_json_shape() {
+    let (token, port, done) = start(vec![]).await;
+    let http = client(&token);
+    // Handler validation error.
+    let bad_prompt = http
+        .post(server_url(port, "/sessions/s-x/prompt"))
+        .json(&serde_json::json!({"no_text": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_prompt.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = bad_prompt.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("text"), "{body}");
+    // Extractor rejection: a malformed body keeps its 400 but speaks
+    // the JSON shape too.
+    let malformed = http
+        .post(server_url(port, "/sessions/s-x/prompt"))
+        .header("content-type", "application/json")
+        .body("{not json".to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = malformed.json().await.unwrap();
+    assert!(body["error"].is_string(), "{body}");
+    // A missing JSON content type keeps its 415 and speaks the shape.
+    let untyped = http
+        .post(server_url(port, "/sessions/s-x/prompt"))
+        .body("{}".to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(untyped.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body: serde_json::Value = untyped.json().await.unwrap();
+    assert!(body["error"].is_string(), "{body}");
+    // Auth guard.
+    let anonymous = reqwest::Client::new();
+    let refused = anonymous
+        .get(server_url(port, "/sessions"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("token"), "{body}");
+    let _ = done;
+}
+
 /// Every frame on an SSE stream carries the wire `Event` shape — a
 /// correlation `id` plus the payload — including the one frame the
 /// server raises itself: a consumer that parses each `data:` payload as

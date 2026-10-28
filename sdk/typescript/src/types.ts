@@ -106,14 +106,6 @@ export type WireEventPayload =
   | { type: "compact_completed"; summary_tokens: number }
   /** A rewind landed: the dropped turns are gone from the history. */
   | { type: "history_rewound"; turns: number }
-  /** A reviewed plan was proposed and awaits approval. */
-  | { type: "plan_proposed"; text: string }
-  /** A reviewed plan was approved. */
-  | { type: "plan_approved" }
-  /** A durable goal was set. */
-  | { type: "goal_set"; objective: string }
-  /** A durable goal was completed. */
-  | { type: "goal_completed" }
   /** Non-fatal condition worth surfacing. */
   | { type: "warning"; message: string }
   /** Fatal condition for this run. */

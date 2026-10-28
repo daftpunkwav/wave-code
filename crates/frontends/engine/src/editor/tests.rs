@@ -53,6 +53,38 @@ fn leading_slash_token_is_painted() {
 }
 
 #[test]
+fn leading_slash_token_stays_painted_with_the_cursor_at_column_zero() {
+    // The cursor marker is inserted at the front of the row when the
+    // cursor sits on column 0; the token decision must still see the
+    // leading `/` underneath it.
+    let mut editor = Editor::new(marked_style());
+    type_string(&mut editor, "/help now");
+    let _ = editor.handle_key(KeyEvent::plain(Key::Home));
+    let rows = editor.render_box(40, 4);
+    let body = &rows[1];
+    assert!(body.contains("\x1b[1m"), "bold slash token: {body:?}");
+    assert!(body.contains(CURSOR_MARKER), "cursor marker kept: {body:?}");
+    assert!(plain_row(&rows, 1).contains("❯ /help now"), "{body:?}");
+}
+
+#[test]
+fn plain_text_keeps_the_cursor_marker_at_column_zero() {
+    // A non-command first row takes the plain-text path, and that path
+    // must re-attach the peeled-off marker too — dropping it would leave
+    // the cursor invisible on plain input at column 0.
+    let mut editor = Editor::new(marked_style());
+    type_string(&mut editor, "hello world");
+    let _ = editor.handle_key(KeyEvent::plain(Key::Home));
+    let rows = editor.render_box(40, 4);
+    let body = &rows[1];
+    assert!(
+        !body.contains("\x1b[1m") && !body.contains("\x1b[4m"),
+        "unpainted body: {body:?}"
+    );
+    assert!(body.contains(CURSOR_MARKER), "cursor marker kept: {body:?}");
+}
+
+#[test]
 fn leading_shell_token_is_painted() {
     let mut editor = Editor::new(marked_style());
     type_string(&mut editor, "!ls -la");

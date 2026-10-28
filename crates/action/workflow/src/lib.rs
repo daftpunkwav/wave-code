@@ -52,6 +52,12 @@ pub const DEFAULT_FANOUT_PARALLEL: usize = 4;
 pub const MAX_FANOUT_PARALLEL: usize = 16;
 /// Ready steps taken per wave walk (see [`run_workflow`]).
 pub const MAX_WAVE_PARALLEL: usize = 8;
+/// Upper bound on steps in one spec: every step is a child run, so an
+/// unbounded step list would let one spec queue an unbounded token bill.
+pub const MAX_SPEC_STEPS: usize = 64;
+/// Upper bound on entries in one fan-out input array, for the same
+/// reason as [`MAX_SPEC_STEPS`] (the multiplier side of the product).
+pub const MAX_FANOUT_ITEMS: usize = 256;
 /// Poll interval while waiting on a spawned child task.
 const POLL_INTERVAL_MS: u64 = 10;
 /// Poll attempts before waiting gives up (10ms x 30000 = 300s).
@@ -172,8 +178,10 @@ pub fn contains_done_marker(summary: &str) -> bool {
     summary.lines().any(|line| line.trim() == RALPH_DONE_MARKER)
 }
 
-/// Validate step ids and edges: duplicates, blanks, unknown deps, cycles.
+/// Validate step ids and edges: duplicates, blanks, unknown deps, cycles,
+/// and the spec size bounds.
 pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
+    validate_size_bounds(spec)?;
     let mut seen = std::collections::HashSet::new();
     for step in &spec.steps {
         if step.id.trim().is_empty() {
@@ -230,6 +238,32 @@ pub fn validate_spec(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
     }
     if drained != spec.steps.len() {
         return Err(WorkflowError::Cycle);
+    }
+    Ok(())
+}
+
+/// The spec size bounds: every step is a full child run, so the step
+/// count gets a ceiling; a fan-out step multiplies that by its input
+/// array, so the array gets one too. A `task` step's input renders to a
+/// single child either way and carries no multiplier.
+fn validate_size_bounds(spec: &WorkflowSpec) -> Result<(), WorkflowError> {
+    if spec.steps.len() > MAX_SPEC_STEPS {
+        return Err(WorkflowError::InvalidSpec(format!(
+            "a workflow carries at most {MAX_SPEC_STEPS} steps (got {})",
+            spec.steps.len()
+        )));
+    }
+    for step in &spec.steps {
+        if step.kind == StepKind::Fanout
+            && let serde_json::Value::Array(items) = &step.input
+            && items.len() > MAX_FANOUT_ITEMS
+        {
+            return Err(WorkflowError::InvalidSpec(format!(
+                "fan-out step '{}' carries at most {MAX_FANOUT_ITEMS} entries (got {})",
+                step.id,
+                items.len()
+            )));
+        }
     }
     Ok(())
 }
@@ -445,7 +479,14 @@ pub async fn ralph_run(
                     break;
                 }
             }
-            Err(reason) => return Err(RalphError::RoundFailed { round, reason }),
+            Err(reason) => {
+                // The round is abandoned (poll timeout, failed child); stop
+                // the child still in flight so a failed loop does not leave
+                // an orphan burning tokens and injecting a completion notice
+                // into later turns. Stopping a finished id is a no-op.
+                tasks.stop(&task_id);
+                return Err(RalphError::RoundFailed { round, reason });
+            }
         }
     }
     Ok(RalphReport {
@@ -472,6 +513,49 @@ mod tests {
 
     fn spec_from_json(text: &str) -> WorkflowSpec {
         serde_json::from_str(text).expect("test spec parses")
+    }
+
+    #[test]
+    fn rejects_a_spec_over_the_step_bound() {
+        let steps: Vec<WorkflowStep> = (0..=MAX_SPEC_STEPS)
+            .map(|index| task_step(&format!("s{index}"), "x", &[]))
+            .collect();
+        let err = validate_spec(&WorkflowSpec { steps }).expect_err("over the bound");
+        assert!(
+            matches!(err, WorkflowError::InvalidSpec(ref text) if text.contains("at most 64 steps")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_task_step_takes_an_input_of_any_size() {
+        // The entry bound exists to cap the child count a fan-out can
+        // queue; a task step renders its whole input to one child, so a
+        // large array input is one large string, not a multiplier.
+        let entries: Vec<String> = (0..=MAX_FANOUT_ITEMS)
+            .map(|index| format!("x{index}"))
+            .collect();
+        let spec = spec_from_json(&format!(
+            r#"{{"steps": [{{"id": "one", "kind": "task", "input": {}}}]}}"#,
+            serde_json::to_string(&entries).unwrap()
+        ));
+        assert!(validate_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_fanout_over_the_entry_bound() {
+        let entries: Vec<String> = (0..=MAX_FANOUT_ITEMS)
+            .map(|index| format!("x{index}"))
+            .collect();
+        let spec = spec_from_json(&format!(
+            r#"{{"steps": [{{"id": "fan", "kind": "fanout", "input": {}}}]}}"#,
+            serde_json::to_string(&entries).unwrap()
+        ));
+        let err = validate_spec(&spec).expect_err("over the bound");
+        assert!(
+            matches!(err, WorkflowError::InvalidSpec(ref text) if text.contains("at most 256 entries")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -745,6 +829,23 @@ mod tests {
             .expect("ralph runs");
         assert!(!report.completed);
         assert_eq!(report.rounds.len(), 3);
+    }
+
+    /// A failed round stops its child before surfacing the error: the
+    /// abandoned round's task must not keep burning tokens and later
+    /// inject a completion notice into the session.
+    #[tokio::test]
+    async fn a_failed_ralph_round_stops_its_child() {
+        let service = FailAllRecordingStops {
+            stopped: Mutex::new(Vec::new()),
+            spawned: Mutex::new(Vec::new()),
+        };
+        let err = ralph_run("impossible objective", 3, &service)
+            .await
+            .expect_err("the round fails");
+        assert!(matches!(err, RalphError::RoundFailed { round: 1, .. }));
+        let stopped = service.stopped.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(*stopped, vec!["task-1".to_string()]);
     }
 
     #[tokio::test]

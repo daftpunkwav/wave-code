@@ -6,8 +6,14 @@
  * Responsibilities:
  * - Discover plugin packs in the user plugins dir.
  * - Validate pack names and load skills through the Discovery pipeline.
- * - Return raw MCP entries and hook rules for the assembly layer.
- * - Warn-and-skip invalid packs without failing assembly.
+ * - Expose per-pack counts and the raw MCP entries/hook rules/skills.
+ * - Warn-and-skip invalid packs without failing discovery.
+ *
+ * Constraints:
+ * - This module is inventory only: the session assembly consumes
+ *   builtin/user/project skill roots and never merges pack contents, so
+ *   a pack's skills, MCP servers, and hooks are counted and surfaced
+ *   (e.g. by `plugin list`) but do not take effect.
  *
  * This module must not depend on: workspace crates beyond its own
  * (manifest shapes mirror config/hook types instead of importing them).
@@ -18,10 +24,12 @@
 //!
 //! A manifest carries `{name, version, skills_dir?, hooks_file?}` plus
 //! optional `[mcp_servers.<server>]` inline tables. Skills load through
-//! the [`discover`] pipeline with [`SkillSource::User`]; MCP entries and
-//! hook rules return raw so the composition root (which owns the
-//! config/hook dependencies) converts them. Invalid packs warn-and-skip
-//! with a reason and never fail assembly.
+//! the [`discover`] pipeline with [`SkillSource::User`]. The loader is
+//! inventory only: MCP entries and hook rules are returned raw (mirrors
+//! of the config/hook shapes, so this module imports neither), and
+//! nothing currently converts them into configured servers or active
+//! hook rules — consumers read counts and entries for listing and
+//! diagnostics. Invalid packs warn-and-skip with a reason.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,8 +50,9 @@ fn valid_name(name: &str) -> bool {
 
 /// Raw MCP server entry from a plugin manifest.
 ///
-/// Mirrors the config-crate server shape without depending on it; the
-/// assembly layer converts these into configured servers.
+/// Mirrors the config-crate server shape without depending on it.
+/// Retained for listing and diagnostics; no session assembly consumes
+/// these entries today.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginMcpServer {
     /// Stdio executable command (stdio servers).
@@ -63,8 +72,9 @@ pub struct PluginMcpServer {
 
 /// Raw hook rule from a plugin hooks file.
 ///
-/// Mirrors the config-crate hook rule without depending on it; the
-/// assembly layer converts these into engine definitions.
+/// Mirrors the config-crate hook rule without depending on it.
+/// Retained for listing and diagnostics; no session assembly converts
+/// these into engine definitions today.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginHookRule {
     /// Tool-name matcher (optional).
@@ -115,9 +125,10 @@ pub struct LoadedPlugin {
     pub version: String,
     /// Skills discovered from `skills_dir` ([`SkillSource::User`]).
     pub skills: SkillSet,
-    /// Raw MCP entries for assembly, sorted by server name.
+    /// Raw MCP entries, sorted by server name (listing only; see the
+    /// module docs for the inventory-only contract).
     pub mcp_servers: Vec<(String, PluginMcpServer)>,
-    /// Raw hook rules for assembly, keyed by event-point name.
+    /// Raw hook rules, keyed by event-point name (listing only).
     pub hooks: HashMap<String, Vec<PluginHookRule>>,
 }
 
@@ -194,6 +205,9 @@ impl PluginLoader {
 
     /// Merge every pack's skills into `set` (same names override, so
     /// later packs win over earlier ones).
+    ///
+    /// No production caller today — the session assembly never merges
+    /// pack skills; this is the hook a wiring pass would call.
     pub fn apply_skills(&self, set: &mut SkillSet) {
         for plugin in &self.plugins {
             for skill in plugin.skills.iter() {

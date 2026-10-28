@@ -6,7 +6,7 @@
 |---|---|
 | `Cargo.toml` | 清单；边界注释记录了零内部依赖规则 |
 | `src/` | 库源码：组件、editor、markdown/mermaid/math 渲染器与差分屏幕渲染（见其 README） |
-| `tests/` | 只测公开 API 的黑盒集成测试：`markdown_contract.rs`（渲染契约、缓存、fence seam）与 `mermaid_dispatch.rs`（图形分发与 `MermaidFences`） |
+| `tests/` | 只测公开 API 的黑盒集成测试：`markdown_contract.rs`（渲染契约、缓存、fence seam）、`mermaid_dispatch.rs`（图形分发与 `MermaidFences`）与 `width_allocation.rs`（宽度/分词路径的分配上限） |
 
 引擎是零内部 workspace 依赖的纯渲染库——只有外部 crate
 （`crossterm`、`unicode-width`、`unicode-segmentation`、

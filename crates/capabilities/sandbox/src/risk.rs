@@ -87,6 +87,13 @@ const SHELL_CONSUMERS: [&str; 8] = [
     "iex",
 ];
 
+/// Depth cap for the shell-wrapper recursion: each `-c`//C level
+/// re-screens its script as a whole command. A real command nests one or
+/// two wrappers at most; the cap keeps a pathological nest (`sh -c 'sh -c
+/// …'` repeated) bounded, and the overflow verdict is the conservative
+/// "ask", never a silent pass.
+const MAX_SHELL_NESTING: usize = 8;
+
 /// Raw-text reasons: constructs whose danger lives in the relation between
 /// pipeline stages (invisible once the AST walk flattens segments).
 fn textual_reason(command: &str) -> Option<&'static str> {
@@ -129,9 +136,38 @@ fn textual_reason(command: &str) -> Option<&'static str> {
     None
 }
 
+/// The script text a shell wrapper hands its interpreter, if the segment
+/// invokes one in script mode: `sh -c`, `cmd /C`, `powershell -Command`
+/// and their pathed/`.exe`-suffixed spellings. POSIX shells accept the
+/// flag combined with other short options (`bash -lc`), so any
+/// single-dash token of lowercase option letters containing `c` counts —
+/// an over-match can only mean a command that is not a real invocation
+/// gets asked about, never that danger slips through. `cmd` and
+/// `powershell` consume the whole remaining line as the script, so the
+/// tokens after the flag are re-joined (whitespace tokenization already
+/// lost the original quoting; the re-screen only needs the words back).
+fn shell_script_arg(shell: &str, rest: &[String]) -> Option<String> {
+    let is_flag = |token: &str| match shell {
+        "sh" | "bash" | "dash" | "zsh" | "ksh" | "ash" => {
+            token.starts_with('-')
+                && !token.starts_with("--")
+                && token.contains('c')
+                && token[1..].chars().all(|c| c.is_ascii_lowercase())
+        }
+        "cmd" => token == "/c",
+        "powershell" | "pwsh" => token == "-command",
+        _ => false,
+    };
+    let pos = rest.iter().position(|token| is_flag(token))?;
+    Some(rest[pos + 1..].join(" "))
+}
+
 /// One command segment's dangerous construct, if any. A segment is one
-/// (possibly compound-flattened) command text from the AST walk.
-fn segment_reason(segment: &str) -> Option<&'static str> {
+/// (possibly compound-flattened) command text from the AST walk. `depth`
+/// bounds the shell-wrapper recursion so a pathological nest costs a
+/// bounded number of tokenizations; past the bound the verdict stays on
+/// the safe side (ask) instead of declaring the command clean.
+fn segment_reason(segment: &str, depth: usize) -> Option<&'static str> {
     let tokens = tokens(segment);
     let mut idx = 0;
     // Indirection wrappers (`sudo rm ...`, `env rm ...`, `nohup shutdown
@@ -157,6 +193,14 @@ fn segment_reason(segment: &str) -> Option<&'static str> {
     let cmd = tokens.get(idx)?;
     let bare = program_name(cmd);
     let rest = &tokens[idx + 1..];
+    // Shell indirection (`sh -c '<script>'`, `cmd /C <script>`,
+    // `powershell -Command <script>`): the script decides what actually
+    // runs, so it goes through the whole-command screen — raw-text
+    // patterns included — because a script is free to carry compound and
+    // piped commands the single-segment table would miss.
+    if let Some(script) = shell_script_arg(bare, rest) {
+        return dangerous_reason_nested(&script, depth + 1);
+    }
     match bare {
         // Disk and filesystem destroyers: writing a raw image to a block
         // device, building or wiping filesystems, partition editors.
@@ -238,11 +282,24 @@ fn fallback_reason(command: &str) -> Option<&'static str> {
 /// raw-text table only — a command the parser cannot read still gets the
 /// destructive-pattern screen, just without segment analysis.
 pub(crate) fn dangerous_reason(command: &str) -> Option<&'static str> {
+    dangerous_reason_nested(command, 0)
+}
+
+/// The re-entrant form of [`dangerous_reason`]: a shell script handed to
+/// `-c`//C/-Command is screened as a whole command at the next depth, so
+/// compound and piped content inside the script gets the same coverage as
+/// a top-level command. Each level consumes at least the shell and flag
+/// tokens, and [`MAX_SHELL_NESTING`] stops the depth: past it the verdict
+/// is the conservative "ask", never a silent pass.
+fn dangerous_reason_nested(command: &str, depth: usize) -> Option<&'static str> {
+    if depth > MAX_SHELL_NESTING {
+        return Some("a shell wrapper nests beyond the screening depth");
+    }
     if let Some(reason) = textual_reason(command) {
         return Some(reason);
     }
     match crate::bash::parsed_command_segments(command) {
-        Some(segments) => segments.iter().find_map(|s| segment_reason(s)),
+        Some(segments) => segments.iter().find_map(|s| segment_reason(s, depth)),
         None => fallback_reason(command),
     }
 }
@@ -297,6 +354,82 @@ mod tests {
             reason("rm missing.txt -r -f /"),
             Some("rm -rf targets a system root")
         );
+    }
+
+    /// A shell invoked in script mode hands the decision to its script,
+    /// so the script gets the same table: `sh -c 'rm -rf /'` is the same
+    /// danger as a bare `rm -rf /`, and a benign script stays unmarked.
+    #[test]
+    fn shell_script_wrappers_are_screened_with_the_same_table() {
+        assert_eq!(
+            reason("sh -c 'rm -rf /'"),
+            Some("rm -rf targets a system root")
+        );
+        assert_eq!(
+            reason("/bin/bash -c 'rm -rf /etc'"),
+            Some("rm -rf targets a system root")
+        );
+        assert_eq!(
+            reason("sh -c 'mkfs.ext4 /dev/sdb1'"),
+            Some("mkfs builds a filesystem")
+        );
+        assert_eq!(reason("bash -c shutdown"), Some("a power-control command"));
+        assert_eq!(
+            reason("cmd /C diskpart"),
+            Some("a partition editor was invoked")
+        );
+        assert!(
+            reason("powershell -Command \"Remove-Item -Recurse -Force /\"").is_some(),
+            "the powershell script re-screen fires"
+        );
+        // PowerShell syntax rides the same layered screen: the AST reads
+        // the words it can, and a script the parser cannot read still
+        // gets the raw-text table — never a silent pass.
+        assert!(
+            reason("powershell -Command \"Get-Content a; Remove-Item -Recurse -Force /\"")
+                .is_some(),
+            "a compound powershell script is screened"
+        );
+        // The interpreter's own name is no longer the whole story, but a
+        // benign script still asks nobody.
+        assert_eq!(reason("sh -c 'echo hello'"), None);
+        assert_eq!(reason("cmd /C echo hello"), None);
+    }
+
+    /// The script goes through the whole-command screen, so a compound or
+    /// piped script body is covered the same way a top-level command is,
+    /// and combined short flags (`bash -lc`) still count as script mode.
+    #[test]
+    fn shell_scripts_get_the_full_screen() {
+        assert_eq!(
+            reason("sh -c 'echo hi; rm -rf /'"),
+            Some("rm -rf targets a system root")
+        );
+        assert_eq!(
+            reason("bash -lc 'rm -rf /'"),
+            Some("rm -rf targets a system root")
+        );
+        assert_eq!(reason("sh -lc 'echo hello'"), None);
+    }
+
+    /// A pathological wrapper nest stops at the depth bound with the
+    /// conservative verdict instead of running unbounded or passing.
+    #[test]
+    fn a_wrapper_nest_beyond_the_depth_bound_asks() {
+        let mut command = String::from("echo deep");
+        for _ in 0..12 {
+            command = format!("sh -c '{}'", command);
+        }
+        assert_eq!(
+            reason(&command),
+            Some("a shell wrapper nests beyond the screening depth")
+        );
+        // Within the bound a real nested danger is still found.
+        let mut command = String::from("rm -rf /");
+        for _ in 0..3 {
+            command = format!("sh -c '{}'", command);
+        }
+        assert_eq!(reason(&command), Some("rm -rf targets a system root"));
     }
 
     #[test]

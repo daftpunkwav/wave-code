@@ -181,12 +181,12 @@ where
     loop {
         tokio::select! {
             incoming = read_line_capped(&mut reader) => {
-                let line = match incoming? {
-                    IncomingLine::Eof => {
+                let line = match incoming {
+                    Ok(IncomingLine::Eof) => {
                         // EOF (or stdio close): clean shutdown, no sentinel needed.
                         break;
                     }
-                    IncomingLine::TooLong => {
+                    Ok(IncomingLine::TooLong) => {
                         write_error(
                             &writer,
                             &serde_json::Value::Null,
@@ -196,7 +196,16 @@ where
                         .await;
                         continue;
                     }
-                    IncomingLine::Line(line) => line,
+                    Ok(IncomingLine::Line(line)) => line,
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        // Frame-level corruption: the bytes are fully
+                        // consumed, so the frame gets a parse error and the
+                        // session keeps serving — the same tier as
+                        // malformed JSON, never a shutdown.
+                        write_non_utf8_error(&writer).await;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 };
                 if line.trim().is_empty() {
                     continue;
@@ -1046,6 +1055,24 @@ async fn write_error<W>(
     write_line(writer, &error_response(id.clone(), code, message)).await;
 }
 
+/// Answer one non-UTF-8 frame with a parse error.
+///
+/// The reader consumes the whole frame either way, so the loop keeps
+/// serving: non-UTF-8 bytes are frame-level corruption, the same tier as
+/// malformed JSON, never a shutdown.
+async fn write_non_utf8_error<W>(writer: &Arc<Mutex<W>>)
+where
+    W: AsyncWrite + Unpin,
+{
+    write_error(
+        writer,
+        &serde_json::Value::Null,
+        PARSE_ERROR,
+        "invalid request: line is not UTF-8",
+    )
+    .await;
+}
+
 /// Emit a server-to-client notification.
 async fn write_notification<W>(writer: &Arc<Mutex<W>>, method: &str, params: serde_json::Value)
 where
@@ -1744,6 +1771,29 @@ mod tests {
         // Raw non-JSON text is not valid NDJSON JSON-RPC either.
         use tokio::io::AsyncWriteExt as _;
         h.to_server.write_all(b"not json\n").await.unwrap();
+        let parse = h.next_line().await;
+        assert_eq!(
+            parse.pointer("/error/code"),
+            Some(&serde_json::json!(PARSE_ERROR))
+        );
+        let init = h
+            .request(
+                "initialize",
+                serde_json::json!({ "protocolVersion": ACP_PROTOCOL_VERSION }),
+            )
+            .await;
+        assert!(init.get("result").is_some());
+    }
+
+    /// Raw non-UTF-8 bytes are frame-level corruption, not a shutdown:
+    /// the frame draws a parse error and the session keeps serving, the
+    /// same tier as malformed JSON (a host integration that emits binary
+    /// noise must not take every in-flight session down with it).
+    #[tokio::test]
+    async fn non_utf8_frames_fail_without_killing_the_server() {
+        let (mut h, _server) = spawn_server(vec![]).await;
+        use tokio::io::AsyncWriteExt as _;
+        h.to_server.write_all(b"\xff\xfe not utf8\n").await.unwrap();
         let parse = h.next_line().await;
         assert_eq!(
             parse.pointer("/error/code"),

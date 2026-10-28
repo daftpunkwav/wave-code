@@ -101,8 +101,11 @@ impl MemoryStore {
                 }
             }
             // Owner-only: rewritten category files carry user content.
+            // Atomic: the rewrite replaces the whole category file, so a
+            // crash mid-write must leave the previous entries intact
+            // instead of truncating every memory in the category.
             let target = self.root().join(category.file_name());
-            infrastructure_base::write_private(&target, body.as_bytes())?;
+            infrastructure_base::atomic_write_private(&target, body.as_bytes())?;
             changed = true;
         }
         if changed {
@@ -117,7 +120,10 @@ impl MemoryStore {
                     ));
                 }
             }
-            infrastructure_base::write_private(&self.root().join(INDEX_FILE), index.as_bytes())?;
+            infrastructure_base::atomic_write_private(
+                &self.root().join(INDEX_FILE),
+                index.as_bytes(),
+            )?;
         }
         Ok(dropped)
     }

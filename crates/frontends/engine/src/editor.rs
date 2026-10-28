@@ -1163,6 +1163,14 @@ fn paint_body(text: &str, style: &EditorStyle, first_row: bool) -> String {
     if !first_row {
         return style.text.paint(text);
     }
+    // The zero-width cursor marker is inserted before this call and can
+    // sit at the very front (cursor on column 0); it must not turn the
+    // leading `/` or `!` token into a non-command word, so it is peeled
+    // off for the token decision and re-attached to the painted output.
+    let (marker, text) = match text.strip_prefix(CURSOR_MARKER) {
+        Some(rest) => (CURSOR_MARKER, rest),
+        None => ("", text),
+    };
     let token_end = text.find(char::is_whitespace).unwrap_or(text.len());
     let (token, rest) = text.split_at(token_end);
     let token_style = if token.starts_with('/') {
@@ -1170,9 +1178,14 @@ fn paint_body(text: &str, style: &EditorStyle, first_row: bool) -> String {
     } else if token.starts_with('!') {
         style.shell_command
     } else {
-        return style.text.paint(text);
+        return format!("{}{}", marker, style.text.paint(text));
     };
-    format!("{}{}", token_style.paint(token), style.text.paint(rest))
+    format!(
+        "{}{}{}",
+        marker,
+        token_style.paint(token),
+        style.text.paint(rest)
+    )
 }
 
 /// Byte offset of grapheme index `col` in `line`.

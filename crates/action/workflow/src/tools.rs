@@ -64,8 +64,9 @@ impl Tool for WorkflowRunTool {
          of step summaries keyed by step id. Spec JSON: {\"steps\": \
          [{\"id\", \"kind\": \"task\"|\"fanout\", \"input\", \"depends_on\": \
          [ids], \"max_parallel\"}]}. Fan-out steps take an input array and \
-         run one child per item. A failing step fails the run with its id \
-         named; there is no partial retry."
+         run one child per item; a spec carries at most 64 steps and a \
+         fan-out at most 256 entries. A failing step fails the run with \
+         its id named; there is no partial retry."
     }
 
     fn input_schema(&self) -> serde_json::Value {

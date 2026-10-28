@@ -90,11 +90,17 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   layout let a local attacker who pre-created the directory swap the
   profile between write and read.
 
+- Dangerous-command screening compares program names instead of raw
+  path spellings (`curl … | /bin/sh` and `shutdown.exe` were
+  previously unmarked), and a shell invoked in script mode
+  (`sh -c '<script>'`, `cmd /C`, `powershell -Command`) re-screens its
+  script with the same table.
+
 ### Changed
 - All three themes re-tune their neutrals: the dark theme's lavender
   (violet-cast) ramp becomes a true graphite ramp under one azure
   accent, the light theme's slate grays neutralize, and both lock
-  WCAG contrast (body ≥ 7:1, dim ≥ 4.5:1, muted ≥ 3.5:1) and a
+  WCAG contrast (body ≥ 7:1, dim ≥ 4.5:1, muted ≥ 4.5:1) and a
   no-violet-grays contract in tests; deepwave keeps its teal identity
   with a brighter muted step.
 - Parameterized slash commands open their interactive surface when
@@ -126,6 +132,26 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   preseeds the wizard), and the `/settings` panel expands to ten
   tunables (thinking expansion, streaming draft, footer meter and
   tips, confirm-exit, history limit, wave denylist).
+
+- Console rendering polish: mermaid diagrams draw at the full body
+  width in the theme ink instead of the code-frame cap (wide diagrams
+  no longer fall back to the source view), gantt bars offset by their
+  start dates, quadrant charts de-clutter coincident points, ER edges
+  carry their cardinalities, class/entity/requirement boxes draw a
+  title separator rule, overflowing members collapse into an explicit
+  tail row, sequence notes render while activation directives are
+  tolerated, TD/LR bands sort by barycenter with gutter-routed LR
+  edges, list continuations hang under the marker width, headings gain
+  a separating blank line, and animation frames land on the render
+  tick (100 ms spinners, 500 ms blink).
+- Streaming renders cheaper: syntax-highlighted code blocks are cached
+  across stream flushes (bounded LRU, dropped on a theme switch), the
+  width tokenizer scans in place instead of building a token vector
+  per measurement, message body width is measured once per text
+  change, the status line caches its rendered frame, history
+  statistics and eviction estimates count tokens without materializing
+  full text, and the eviction frontier measures only the batches it
+  consumes.
 
 ### Fixed
 - Leaving the console TUI runs the SessionEnd hooks and the memory
@@ -180,6 +206,47 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
 - The session event channel is bounded: a stalled frontend can no
   longer grow the queue without limit during heavy streaming
   (overflowing notices degrade to a warning, never a hang).
+
+- The `!` shell job cancellation always ends with a terminal event
+  (a descendant holding the output pipes can no longer leave a live
+  shell card behind), and the `WAVECODE_SHELL` override reaches the
+  `!` shell, the external editor, and the status line through the
+  shared platform shell resolution.
+- A width tokenizer hardening: an ESC sequence ending right before a
+  multi-byte character no longer panics rendering (a hand-edited
+  session title or model alias could crash the console).
+- `workflow_run`'s `max_rounds` rejects out-of-range values instead of
+  silently truncating them into the legal range.
+- `TurnStarted.model` names the model actually serving the turn, so a
+  `/model` switch no longer bills later turns to the previous model.
+- SSE lag warnings on the app-server event stream are real wire
+  events, so a consumer parsing every `data:` payload no longer fails
+  on the warning frame.
+- The TypeScript SDK mirrors `turn_started.model`,
+  `tool_call_end.outcome`, and `tool_call_end.duration_ms`, and its
+  `ApprovalDecision` type accepts `deny` again.
+- ACP and MCP stdio servers answer a non-UTF-8 frame with a parse
+  error instead of exiting: one bad frame no longer ends every session
+  the host has in flight.
+- A timed-out or failed `ralph_run` round stops its child task instead
+  of leaving it running to burn tokens and inject a completion notice.
+- `workflow_run` rejects a spec over 64 steps or a fan-out array over
+  256 entries instead of queueing an unbounded child bill.
+- Hook output capture is bounded while the hook runs: an over-budget
+  hook is cut at the context budget and its remaining output drained,
+  so a chatty hook can neither grow memory without bound nor wedge on
+  a full pipe until its timeout.
+- Memory consolidation rewrites category files and the index
+  atomically, so a crash mid-rewrite cannot truncate stored memories.
+- The input editor keeps the `/command`/`!command` first-token style
+  when the cursor sits on column 0.
+- The round-limit re-arm reminder reports the goal continuations
+  actually consumed instead of a fabricated 0.
+- The SDK passes the prompt after a `--` separator, so prompt text
+  starting with `-` or `--flag=value` can no longer be parsed as CLI
+  options (which rejected the run or rewrote model, permission, or
+  config choices), and `interrupt()`/`interrupted` document their
+  Windows behavior (hard termination, no 130 exit code).
 
 ### Removed
 - The `ls` tool (redundant with `shell` / `glob` / `read`).

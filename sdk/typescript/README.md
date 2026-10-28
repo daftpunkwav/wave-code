@@ -22,6 +22,11 @@ for await (const event of session.events) {
 const { code, interrupted } = await session.wait();
 ```
 
+Interrupting a run (`session.interrupt()`) unwinds the turn at its next
+checkpoint and exits with code 130 on Unix. Windows has no per-process
+interrupt signal: Node terminates the child outright, so the stream ends
+without a `turn_completed` event and `interrupted` comes back `false`.
+
 Drive approvals (opt-in; without `approvals: true` the run is fail-closed
 and approvals deny):
 

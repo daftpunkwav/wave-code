@@ -843,19 +843,19 @@ pub(super) fn seed_conversation(
     let mut next_seq = replayed.next_seq;
     let mut snapshot_durable = false;
     if replayed.gapped || replayed.torn_tail {
-        let records: Vec<state_persistence::history::HistoryRecord> =
-            if replayed.entries.is_empty() {
-                Vec::new()
-            } else {
-                vec![state_persistence::history::HistoryRecord::Replace {
-                    seq: 0,
-                    entries: replayed
-                        .entries
-                        .iter()
-                        .map(|entry| serde_json::json!(entry))
-                        .collect(),
-                }]
-            };
+        let records: Vec<state_persistence::history::HistoryRecord> = if replayed.entries.is_empty()
+        {
+            Vec::new()
+        } else {
+            vec![state_persistence::history::HistoryRecord::Replace {
+                seq: 0,
+                entries: replayed
+                    .entries
+                    .iter()
+                    .map(|entry| serde_json::json!(entry))
+                    .collect(),
+            }]
+        };
         match journal.rewrite(&records) {
             Ok(()) => {
                 next_seq = if records.is_empty() { 0 } else { 1 };
@@ -929,9 +929,12 @@ fn child_forbidden_tools(
     let mut forbidden: Vec<String> = registry
         .names_of_kind(wavecode_protocol::ToolKind::Spawn)
         .into_iter()
-        .chain(native.lock().unwrap_or_else(|e| e.into_inner()).names_of_kind(
-            wavecode_protocol::ToolKind::Spawn,
-        ))
+        .chain(
+            native
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .names_of_kind(wavecode_protocol::ToolKind::Spawn),
+        )
         .collect();
     forbidden.push(crate::compaction_tool::COMPACT_CONTEXT_TOOL.to_string());
     forbidden.into_iter().collect()

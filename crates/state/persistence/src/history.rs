@@ -73,7 +73,10 @@ impl HistoryRecord {
         match value.get("k").and_then(serde_json::Value::as_str) {
             Some("append") => Self::Append {
                 seq: seq.unwrap_or(0),
-                entry: value.get("entry").cloned().unwrap_or(serde_json::Value::Null),
+                entry: value
+                    .get("entry")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
             },
             Some("replace") => Self::Replace {
                 seq: seq.unwrap_or(0),
@@ -243,8 +246,10 @@ mod tests {
             })
             .unwrap();
         let mut raw = std::fs::read_to_string(journal.path()).unwrap();
-        raw.push_str("{\"k\":\"snapshot_v9\",\"seq\":1,\"blob\":{}}
-");
+        raw.push_str(
+            "{\"k\":\"snapshot_v9\",\"seq\":1,\"blob\":{}}
+",
+        );
         std::fs::write(journal.path(), &raw).unwrap();
         let read = journal.read();
         assert_eq!(

@@ -67,7 +67,10 @@ impl HistorySink for JournalSink {
     }
 
     fn replaced(&self, entries: &[HistoryEntry]) {
-        let encoded: Vec<serde_json::Value> = entries.iter().map(|entry| serde_json::json!(entry)).collect();
+        let encoded: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|entry| serde_json::json!(entry))
+            .collect();
         self.write(|seq| HistoryRecord::Replace {
             seq,
             entries: encoded,
@@ -119,7 +122,10 @@ pub fn replay_history(journal: &HistoryJournal) -> Replayed {
                         None => false,
                     }
             }
-            HistoryRecord::Replace { seq, entries: replacement } => {
+            HistoryRecord::Replace {
+                seq,
+                entries: replacement,
+            } => {
                 *seq == expected_seq
                     && match decode_entries(Some(replacement)) {
                         Some(replacement) => {

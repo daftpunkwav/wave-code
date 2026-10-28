@@ -867,27 +867,33 @@ pub fn evict_old_tool_results(history: Vec<Message>, cfg: &EvictionConfig) -> Ve
             continue;
         }
         for block in m.content.iter_mut() {
-            let replacement = match block {
-                ContentBlock::ToolResult {
-                    tool_use_id,
-                    is_error,
-                    ..
-                } => Some(ContentBlock::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: evicted_result_stub(
-                        tool_use_id,
-                        names.get(tool_use_id.as_str()).map(String::as_str),
-                    ),
-                    is_error: *is_error,
-                }),
-                _ => None,
-            };
-            if let Some(replacement) = replacement {
-                *block = replacement;
-            }
+            evict_block_in_place(block, &names);
         }
     }
     out
+}
+
+/// Replace one block with its stub when it is a tool result; other
+/// blocks pass through untouched.
+fn evict_block_in_place(block: &mut ContentBlock, names: &HashMap<String, String>) {
+    let replacement = match block {
+        ContentBlock::ToolResult {
+            tool_use_id,
+            is_error,
+            ..
+        } => Some(ContentBlock::ToolResult {
+            tool_use_id: tool_use_id.clone(),
+            content: evicted_result_stub(
+                tool_use_id,
+                names.get(tool_use_id.as_str()).map(String::as_str),
+            ),
+            is_error: *is_error,
+        }),
+        _ => None,
+    };
+    if let Some(replacement) = replacement {
+        *block = replacement;
+    }
 }
 
 // ---------------------------------------------------------------------------

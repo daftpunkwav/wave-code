@@ -1216,15 +1216,10 @@ mod tests {
         assert_eq!(report.context, "ctx-from-hook");
     }
 
-    /// The capture cap is enforced while the child runs, not after: an
-    /// over-budget prompt hook still completes successfully (the over-cap
-    /// output is drained, so the child's writes never block on a full
-    /// pipe) and its context is cut at the budget with a visible marker.
-    #[tokio::test]
-    async fn prompt_hook_capture_stops_at_the_context_budget() {
-        let e = HookEngine::new(HashMap::new());
-        e.register_prompt_hook(HookEventPoint::UserPromptSubmit, def(&bulk_output_cmd()));
-        let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
+    /// The shared criteria of the over-budget tests: the hook ran clean
+    /// (no timeout — the drained capture must never block the child) and
+    /// the injected context stays at the budget with a visible marker.
+    fn assert_capped_cleanly(report: &HookReport) {
         assert_eq!(report.verdict, HookVerdict::Allow);
         assert!(
             report.warnings.is_empty(),
@@ -1242,6 +1237,18 @@ mod tests {
         );
     }
 
+    /// The capture cap is enforced while the child runs, not after: an
+    /// over-budget prompt hook still completes successfully (the over-cap
+    /// output is drained, so the child's writes never block on a full
+    /// pipe) and its context is cut at the budget with a visible marker.
+    #[tokio::test]
+    async fn prompt_hook_capture_stops_at_the_context_budget() {
+        let e = HookEngine::new(HashMap::new());
+        e.register_prompt_hook(HookEventPoint::UserPromptSubmit, def(&bulk_output_cmd()));
+        let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
+        assert_capped_cleanly(&report);
+    }
+
     /// Whitespace-only over-budget output must still be marked: the trim
     /// removes every kept byte, so the marker rides on the capture-side
     /// overflow flag, not on the trimmed length.
@@ -1253,11 +1260,7 @@ mod tests {
             def(&bulk_whitespace_cmd()),
         );
         let report = e.run(HookEventPoint::UserPromptSubmit, &input(None)).await;
-        assert_eq!(report.verdict, HookVerdict::Allow);
-        assert!(
-            report.context.contains(PROMPT_CONTEXT_TRUNCATED),
-            "the truncation survives the trim: {report:?}"
-        );
+        assert_capped_cleanly(&report);
     }
 
     /// A failing prompt hook must not block its point: exit code 2 (the

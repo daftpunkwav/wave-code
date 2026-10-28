@@ -198,17 +198,11 @@ where
                     }
                     Ok(IncomingLine::Line(line)) => line,
                     Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                        // A non-UTF-8 line is frame-level corruption: the
-                        // bytes are fully consumed, so the frame gets a
-                        // parse error and the session keeps serving — the
-                        // same tier as malformed JSON, never a shutdown.
-                        write_error(
-                            &writer,
-                            &serde_json::Value::Null,
-                            PARSE_ERROR,
-                            "invalid request: line is not UTF-8",
-                        )
-                        .await;
+                        // Frame-level corruption: the bytes are fully
+                        // consumed, so the frame gets a parse error and the
+                        // session keeps serving — the same tier as
+                        // malformed JSON, never a shutdown.
+                        write_non_utf8_error(&writer).await;
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -1059,6 +1053,24 @@ async fn write_error<W>(
     W: AsyncWrite + Unpin,
 {
     write_line(writer, &error_response(id.clone(), code, message)).await;
+}
+
+/// Answer one non-UTF-8 frame with a parse error.
+///
+/// The reader consumes the whole frame either way, so the loop keeps
+/// serving: non-UTF-8 bytes are frame-level corruption, the same tier as
+/// malformed JSON, never a shutdown.
+async fn write_non_utf8_error<W>(writer: &Arc<Mutex<W>>)
+where
+    W: AsyncWrite + Unpin,
+{
+    write_error(
+        writer,
+        &serde_json::Value::Null,
+        PARSE_ERROR,
+        "invalid request: line is not UTF-8",
+    )
+    .await;
 }
 
 /// Emit a server-to-client notification.

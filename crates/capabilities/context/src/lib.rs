@@ -745,7 +745,10 @@ fn eviction_saving(message: &Message, names: &HashMap<String, String>) -> u64 {
             _ => None,
         })
         .map(|(tool_use_id, content)| {
-            let stub = evicted_result_stub(tool_use_id, names.get(tool_use_id.as_str()).map(String::as_str));
+            let stub = evicted_result_stub(
+                tool_use_id,
+                names.get(tool_use_id.as_str()).map(String::as_str),
+            );
             text_tokens(content).saturating_sub(text_tokens(&stub))
         })
         .sum()

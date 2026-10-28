@@ -73,7 +73,10 @@ impl HistoryRecord {
         match value.get("k").and_then(serde_json::Value::as_str) {
             Some("append") if value.get("entry").is_some() => Self::Append {
                 seq: seq.unwrap_or(0),
-                entry: value.get("entry").cloned().unwrap_or(serde_json::Value::Null),
+                entry: value
+                    .get("entry")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
             },
             Some("replace") if value.get("entries").is_some_and(|e| e.is_array()) => {
                 Self::Replace {

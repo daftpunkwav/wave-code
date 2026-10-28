@@ -1042,9 +1042,7 @@ fn spawn_tools_derive_into_the_child_forbidden_set() {
 
     let (registry, _todos) = wavecode_tools::Registry::builtin_with_todos();
     registry.register(std::sync::Arc::new(FreshSpawnTool));
-    let native = std::sync::Arc::new(std::sync::Mutex::new(
-        crate::native::NativeExecutor::new(),
-    ));
+    let native = std::sync::Arc::new(std::sync::Mutex::new(crate::native::NativeExecutor::new()));
     native
         .lock()
         .unwrap_or_else(|e| e.into_inner())

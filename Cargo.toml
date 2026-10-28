@@ -58,7 +58,7 @@ encoding_rs = "0.8"
 windows-sys = "0.61"
 # TUI rendering is the in-house tui-engine over crossterm (no ratatui);
 # crossterm's event-stream + bracketed-paste features are both in use.
-crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
 # Syntax highlighting for code blocks (syntect on the pure-Rust
 # fancy-regex backend, no onig C dependency) plus extra syntax
 # definitions (TypeScript, TOML, ...) on the same backend.

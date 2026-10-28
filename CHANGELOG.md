@@ -108,7 +108,8 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   `/editor`, `/export`, `/compact`, and `/btw` open a prefilled
   free-text prompt, and bare `/undo` opens the rewind picker instead
   of dropping a turn immediately (while busy it still refuses).
-- The previous deepwave identity stays selectable via `/theme deepwave`.
+- crossterm moves to 0.29 (the 0.28 pin was a review-round scoping
+  deferral); no API use changes.
 - Fenced code frames hug their content instead of spanning the
   terminal (still capped at 80 columns on wide terminals).
 - `max_tool_rounds` default raised from 32 to 256, and goal

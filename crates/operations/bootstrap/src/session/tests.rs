@@ -1100,8 +1100,7 @@ async fn pack_contents_reach_the_session_under_standard_precedence() {
     // Skills: project > user > pack, and the pack-only skill lands.
     assert!(
         handle.system.contains("project greet helper"),
-        "project skill must win: {}",
-        handle.system
+        "the project skill must win the greet slot"
     );
     assert!(!handle.system.contains("user greet helper"));
     assert!(!handle.system.contains("pack greet helper"));
@@ -1130,11 +1129,7 @@ async fn pack_contents_reach_the_session_under_standard_precedence() {
         .warnings
         .iter()
         .any(|w| w.contains("plugin demo") && w.contains("unknown hook point"));
-    assert!(
-        unknown_point,
-        "unknown-point warning missing (warnings_count={})",
-        handle.warnings.len()
-    );
+    assert!(unknown_point, "unknown-point warning missing");
 }
 
 /// A user-configured MCP server owns its name: the colliding pack entry
@@ -1177,11 +1172,7 @@ async fn configured_mcp_server_wins_over_pack_entry() {
         .warnings
         .iter()
         .any(|w| w.contains("already owns that name"));
-    assert!(
-        name_owned,
-        "collision warning missing (warnings_count={})",
-        handle.warnings.len()
-    );
+    assert!(name_owned, "collision warning missing");
 }
 
 /// Hook definitions: config rules keep their point slot, pack rules

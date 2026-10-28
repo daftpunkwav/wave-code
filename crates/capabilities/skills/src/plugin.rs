@@ -301,8 +301,8 @@ impl PluginLoader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::Skill;
+    use super::*;
 
     const SKILL_MD: &str = "---\ndescription: Review helper skill.\n---\n\nReview body here.\n";
 

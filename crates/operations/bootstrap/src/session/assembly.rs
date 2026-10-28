@@ -1312,16 +1312,18 @@ pub(super) fn hook_defs(
                     plugin.name
                 )),
                 Some(point) => {
-                    defs.entry(point).or_default().extend(rules.iter().map(
-                        |rule| wavecode_hooks::HookDef {
-                            matcher: rule.matcher.clone(),
-                            command: rule.command.clone(),
-                            timeout_ms: rule
-                                .timeout_ms
-                                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
-                            once: rule.once.unwrap_or(false),
-                        },
-                    ));
+                    defs.entry(point)
+                        .or_default()
+                        .extend(rules.iter().map(|rule| {
+                            wavecode_hooks::HookDef {
+                                matcher: rule.matcher.clone(),
+                                command: rule.command.clone(),
+                                timeout_ms: rule
+                                    .timeout_ms
+                                    .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
+                                once: rule.once.unwrap_or(false),
+                            }
+                        }));
                 }
             }
         }
@@ -1368,7 +1370,9 @@ pub(super) fn pack_mcp_servers(
 
 /// Lift a pack MCP entry into the config-crate shape. Packs carry no
 /// OAuth fields, so those default to absent.
-fn plugin_mcp_to_config(raw: &wavecode_skills::plugin::PluginMcpServer) -> wavecode_config::McpServerRaw {
+fn plugin_mcp_to_config(
+    raw: &wavecode_skills::plugin::PluginMcpServer,
+) -> wavecode_config::McpServerRaw {
     wavecode_config::McpServerRaw {
         command: raw.command.clone(),
         args: raw.args.clone(),

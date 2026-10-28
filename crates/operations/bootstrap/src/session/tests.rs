@@ -1055,10 +1055,7 @@ async fn pack_contents_reach_the_session_under_standard_precedence() {
     let dir = tempfile::tempdir().unwrap();
     let home = home_with_pack(
         "demo",
-        &[
-            ("plugin.toml", PACK_MANIFEST),
-            ("hooks.toml", PACK_HOOKS),
-        ],
+        &[("plugin.toml", PACK_MANIFEST), ("hooks.toml", PACK_HOOKS)],
     );
     // Pack skills merge under the standard sources: the user skill
     // overrides the pack skill, and the project skill overrides both,
@@ -1147,15 +1144,10 @@ async fn configured_mcp_server_wins_over_pack_entry() {
     let config_path = dir.path().join("config.toml");
     std::fs::write(
         &config_path,
-        format!(
-            "{CONFIG}\n[mcp_servers.lint]\ncommand = \"config-server\"\n"
-        ),
+        format!("{CONFIG}\n[mcp_servers.lint]\ncommand = \"config-server\"\n"),
     )
     .unwrap();
-    let home = home_with_pack(
-        "demo",
-        &[("plugin.toml", PACK_MANIFEST)],
-    );
+    let home = home_with_pack("demo", &[("plugin.toml", PACK_MANIFEST)]);
 
     let handle = assemble_session(AssembleOptions {
         config_path: Some(config_path),
@@ -1198,10 +1190,7 @@ fn pack_hook_rules_join_config_rules_at_the_same_point() {
     let config = config_with("\n[hooks.PreToolUse]\ncommand = \"config.sh\"\n");
     let home = home_with_pack(
         "demo",
-        &[
-            ("plugin.toml", PACK_MANIFEST),
-            ("hooks.toml", PACK_HOOKS),
-        ],
+        &[("plugin.toml", PACK_MANIFEST), ("hooks.toml", PACK_HOOKS)],
     );
     let plugins = wavecode_skills::plugin::PluginLoader::load(Some(home.path()));
     let mut warnings = Vec::new();

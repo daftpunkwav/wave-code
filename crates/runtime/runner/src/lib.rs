@@ -4181,18 +4181,7 @@ mod run_loop_tests {
             .steps
             .lock()
             .unwrap()
-            .push_back(ModelStep::Answer(SampleResponse {
-                blocks: vec![SampleBlock::ToolUse {
-                    call_id: "c1".to_string(),
-                    name: "read_file".to_string(),
-                    input: serde_json::json!({"path": "a.txt"}),
-                }],
-                input_tokens: Some(10),
-                output_tokens: Some(1),
-                truncated: true,
-                cache_read_tokens: 0,
-                cache_creation_tokens: 0,
-            }));
+            .push_back(ModelStep::Answer(truncated_tool_use_response("c1", true)));
         let model = InterruptingModel {
             inner: model,
             trigger: fx.interrupt.clone(),

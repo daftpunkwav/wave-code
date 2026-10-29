@@ -43,9 +43,7 @@ async fn assembly_builds_a_live_client_offline() {
             .warnings
             .iter()
             .any(|w| w.contains("child-forbidden")),
-        // Reviewed: assertion diagnostics for a synthetic test session.
-        "unexpected drift warning: {:?}",
-        handle.warnings
+        "unexpected drift warning emitted for a synthetic test session"
     );
     // The client submits without network access; shutdown closes cleanly.
     handle
@@ -234,9 +232,7 @@ async fn stale_provider_override_falls_back_and_reports_configured_provider() {
             .warnings
             .iter()
             .any(|w| w.contains("provider override")),
-        // Reviewed: assertion diagnostics for a synthetic test session.
-        "fallback must warn: {:?}",
-        handle.warnings
+        "fallback must warn"
     );
     assert_eq!(handle.provider_id, "p1");
     handle
@@ -340,8 +336,7 @@ async fn malformed_catalog_warns_and_assembly_continues() {
             .warnings
             .iter()
             .any(|w| w.contains("model catalog ignored")),
-        "the broken catalog warning was not emitted (warnings_count={})",
-        handle.warnings.len()
+        "the broken catalog warning was not emitted"
     );
     handle
         .client
@@ -406,13 +401,7 @@ base_url = "https://fb.example.com/anthropic"
         .iter()
         .filter(|w| w.contains("skipping fallback provider"))
         .collect();
-    assert_eq!(
-        skips.len(),
-        2,
-        // Reviewed: assertion diagnostics for a synthetic test session.
-        "both broken fallbacks warn individually: {:?}",
-        handle.warnings
-    );
+    assert_eq!(skips.len(), 2, "both broken fallbacks warn individually");
     assert!(
         skips
             .iter()
@@ -428,8 +417,7 @@ base_url = "https://fb.example.com/anthropic"
     assert!(
         !handle.warnings.iter().any(|w| w.contains("fb-good")),
         // Reviewed: assertion diagnostics for a synthetic test session.
-        "the resolvable fallback joins the chain without a warning: {:?}",
-        handle.warnings
+        "the resolvable fallback joins the chain without a warning"
     );
     // The primary identity is untouched by the fallback detour.
     assert_eq!(handle.provider_id, "p1");

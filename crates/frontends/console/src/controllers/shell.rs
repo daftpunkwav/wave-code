@@ -295,45 +295,17 @@ async fn pump_shell_events(
                 out_open = false;
                 err_open = false;
             }
-            read = out.read_until(b'\n', &mut out_bytes), if out_open => match read {
-                Ok(0) => {
-                    if !out_bytes.is_empty() {
-                        let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
-                        out_bytes.clear();
-                        if tx.send(ShellEvent::Out(line)).await.is_err() {
-                            return;
-                        }
-                    }
-                    out_open = false;
+            read = out.read_until(b'\n', &mut out_bytes), if out_open => {
+                match pump_pipe(&tx, &mut out_bytes, read, ShellEvent::Out).await {
+                    None => return,
+                    Some(open) => out_open = open,
                 }
-                Ok(_) => {
-                    let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&out_bytes));
-                    out_bytes.clear();
-                    if tx.send(ShellEvent::Out(line)).await.is_err() {
-                        return;
-                    }
-                }
-                Err(_) => out_open = false,
             },
-            read = err.read_until(b'\n', &mut err_bytes), if err_open => match read {
-                Ok(0) => {
-                    if !err_bytes.is_empty() {
-                        let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
-                        err_bytes.clear();
-                        if tx.send(ShellEvent::Err(line)).await.is_err() {
-                            return;
-                        }
-                    }
-                    err_open = false;
+            read = err.read_until(b'\n', &mut err_bytes), if err_open => {
+                match pump_pipe(&tx, &mut err_bytes, read, ShellEvent::Err).await {
+                    None => return,
+                    Some(open) => err_open = open,
                 }
-                Ok(_) => {
-                    let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(&err_bytes));
-                    err_bytes.clear();
-                    if tx.send(ShellEvent::Err(line)).await.is_err() {
-                        return;
-                    }
-                }
-                Err(_) => err_open = false,
             },
         }
     }
@@ -344,6 +316,40 @@ async fn pump_shell_events(
         status.ok().and_then(|status| status.code())
     };
     let _ = tx.send(ShellEvent::Done(code)).await;
+}
+
+/// One pipe side of the pump: decode the completed byte line, forward
+/// it, and close the side on EOF or read error. `None` means the
+/// receiver is gone and the pump exits; `Some(open)` is the side's
+/// next open flag (a partial tail flushes on EOF before closing, the
+/// shape a killed child leaves behind).
+async fn pump_pipe(
+    tx: &mpsc::Sender<ShellEvent>,
+    bytes: &mut Vec<u8>,
+    read: std::io::Result<usize>,
+    wrap: fn(String) -> ShellEvent,
+) -> Option<bool> {
+    match read {
+        Ok(0) => {
+            if !bytes.is_empty() {
+                let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(
+                    bytes,
+                ));
+                bytes.clear();
+                tx.send(wrap(line)).await.ok()?;
+            }
+            Some(false)
+        }
+        Ok(_) => {
+            let line = strip_eol(&infrastructure_base::console_codec::decode_console_line(
+                bytes,
+            ));
+            bytes.clear();
+            tx.send(wrap(line)).await.ok()?;
+            Some(true)
+        }
+        Err(_) => Some(false),
+    }
 }
 
 #[cfg(test)]

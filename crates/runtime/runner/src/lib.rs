@@ -4124,6 +4124,22 @@ mod run_loop_tests {
         assert!(history.contains("arguments may be truncated"));
     }
 
+    /// Every `ToolCallEnd` on the log, as `(call id, outcome)` pairs in
+    /// emission order — the wire ledger a repeat-breaker test asserts on.
+    fn tool_call_end_log(events: &std::sync::Arc<Mutex<Vec<Event>>>) -> Vec<(String, ToolOutcome)> {
+        events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter_map(|event| match &event.msg {
+                EventMsg::ToolCallEnd {
+                    call_id, outcome, ..
+                } => Some((call_id.clone(), *outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// One tool-use sample carrying a single `read_file` call, truncated
     /// or complete per the flag.
     fn truncated_tool_use_response(call_id: &str, truncated: bool) -> SampleResponse {
@@ -6421,19 +6437,8 @@ mod run_loop_tests {
         assert_eq!(run.executor.lock_executed().len(), 5);
         // The refused call is announced and settled on the wire with the
         // not_dispatched outcome; every executed round closed with Executed.
-        let ends: Vec<(String, ToolOutcome)> = events
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter_map(|event| match &event.msg {
-                EventMsg::ToolCallEnd {
-                    call_id, outcome, ..
-                } => Some((call_id.clone(), *outcome)),
-                _ => None,
-            })
-            .collect();
         assert_eq!(
-            ends,
+            tool_call_end_log(&events),
             vec![
                 ("c0".to_string(), ToolOutcome::Executed),
                 ("c1".to_string(), ToolOutcome::Executed),

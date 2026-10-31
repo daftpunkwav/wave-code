@@ -522,15 +522,24 @@ skills_dir = \"skills\"
             )
         };
         let home = home_with_pack("aaa", &[("plugin.toml", &manifest("aaa"))]);
+        // Distinct SKILL.md fixtures: both packs carry the same skill
+        // name, so the merged entry's description is what tells the
+        // later pack's body apart from the first pack's.
+        let first_skill = "---\ndescription: First pack skill.\n---\n\nFirst pack body.\n";
+        let later_skill = "---\ndescription: Later pack skill.\n---\n\nLater pack body.\n";
         let pack = home.path().join(".wavecode").join("plugins").join("bbb");
         std::fs::create_dir_all(pack.join("skills").join("greet")).unwrap();
         std::fs::write(pack.join("plugin.toml"), manifest("bbb")).unwrap();
-        std::fs::write(pack.join("skills").join("greet").join("SKILL.md"), SKILL_MD).unwrap();
+        std::fs::write(
+            pack.join("skills").join("greet").join("SKILL.md"),
+            later_skill,
+        )
+        .unwrap();
         let first = home.path().join(".wavecode").join("plugins").join("aaa");
         std::fs::create_dir_all(first.join("skills").join("greet")).unwrap();
         std::fs::write(
             first.join("skills").join("greet").join("SKILL.md"),
-            SKILL_MD,
+            first_skill,
         )
         .unwrap();
         let loader = PluginLoader::load(Some(home.path()));
@@ -539,10 +548,13 @@ skills_dir = \"skills\"
         let mut set = SkillSet::default();
         loader.apply_skills(&mut set);
         assert_eq!(set.get("greet").unwrap().source, SkillSource::Pack);
+        assert_eq!(
+            set.get("greet").unwrap().meta.description,
+            "Later pack skill.",
+            "the later pack's body displaced the first pack's entry"
+        );
 
-        // The later pack's body displaced the first pack's entry (both
-        // packs carry the same SKILL.md fixture, so the slot survives the
-        // collision with one entry and no duplicate).
+        // The collision leaves one entry, not a duplicate.
         assert_eq!(set.len(), 1);
     }
 }

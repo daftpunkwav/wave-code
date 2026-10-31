@@ -170,6 +170,10 @@ pub enum ToolOutcome {
     SurfaceBlocked,
     /// Interrupted before the body ran.
     Interrupted,
+    /// Settled without ever reaching dispatch: the harness refused the
+    /// batch (output truncated mid-call) or the repeat breaker declined
+    /// another run of the same call.
+    NotDispatched,
     /// The model reused a call id; only the first occurrence runs.
     Duplicate,
     /// An interactive question's answer stood in for running the tool.

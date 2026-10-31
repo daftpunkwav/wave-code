@@ -83,7 +83,10 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut started: HashSet<&str> = HashSet::new();
     let mut completed: HashSet<&str> = HashSet::new();
-    let mut open_calls: HashMap<String, &str> = HashMap::new();
+    // One slot per open call: the same call id can be outstanding more
+    // than once at a time (a pre-dispatch exit settles a batch where the
+    // model repeated an id), so each Begin opens another slot.
+    let mut open_calls: HashMap<String, Vec<&str>> = HashMap::new();
 
     for (index, event) in events.iter().enumerate() {
         let id = event.id.as_str();
@@ -100,14 +103,29 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
                 if !started.contains(id) {
                     violations.push(format!("#{index} ({id}): ToolCallBegin before TurnStarted"));
                 }
-                open_calls.insert(call_id.clone(), id);
+                open_calls.entry(call_id.clone()).or_default().push(id);
             }
-            EventMsg::ToolCallEnd { call_id, .. } => match open_calls.remove(call_id) {
-                Some(_) => {}
-                None => violations.push(format!(
-                    "#{index} ({id}): ToolCallEnd for unopened call {call_id}"
-                )),
-            },
+            EventMsg::ToolCallEnd { call_id, .. } => {
+                // An end settles the slot its own submission opened: with
+                // interleaved submissions sharing a call id, popping the
+                // last slot would close another submission's call and
+                // leave the ending one open at TurnCompleted.
+                let settled = match open_calls.get_mut(call_id) {
+                    Some(slots) => match slots.iter().rposition(|owner| *owner == id) {
+                        Some(slot) => {
+                            slots.remove(slot);
+                            true
+                        }
+                        None => false,
+                    },
+                    None => false,
+                };
+                if !settled {
+                    violations.push(format!(
+                        "#{index} ({id}): ToolCallEnd for unopened call {call_id}"
+                    ));
+                }
+            }
             // One AgentMessageComplete per sample is the documented order:
             // a tool-using (or continued) turn completes once per round, so
             // repeats under one submission id are legal.
@@ -129,23 +147,27 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
             // Settles run once per completed sample, so a multi-sample turn
             // legitimately carries several TokenCount events.
             EventMsg::TokenCount { .. } => {}
-            EventMsg::TurnCompleted { interrupted } => {
+            EventMsg::TurnCompleted { .. } => {
                 if !started.contains(id) {
                     violations.push(format!("#{index} ({id}): TurnCompleted before TurnStarted"));
                 }
                 if !completed.insert(id) {
                     violations.push(format!("#{index} ({id}): duplicate TurnCompleted"));
                 }
-                if !*interrupted {
-                    for (call_id, owner) in &open_calls {
-                        if owner == &id {
-                            violations.push(format!(
-                                "#{index} ({id}): call {call_id} never ended in a completed turn"
-                            ));
-                        }
+                // Pairing is mandatory on every terminal exit: even the
+                // pre-dispatch settles (interrupt checkpoint, truncation
+                // refusal, repeat breaker) announce and settle their calls,
+                // so an open call at TurnCompleted is a contract break in an
+                // interrupted turn too. One violation per call id, however
+                // many slots are open.
+                for (call_id, slots) in &open_calls {
+                    if slots.contains(&id) {
+                        violations.push(format!(
+                            "#{index} ({id}): call {call_id} never ended in a completed turn"
+                        ));
                     }
                 }
-                open_calls.retain(|_, owner| owner != &id);
+                open_calls.retain(|_, slots| !slots.contains(&id));
             }
             // Warnings/errors/approvals carry no ordering constraint beyond
             // the after-completion guard above.
@@ -444,8 +466,157 @@ mod tests {
         );
     }
 
+    /// A pre-dispatch batch where the model repeated a call id emits
+    /// Begin, Begin, End, End: both slots must be tracked, so the pair
+    /// closes cleanly instead of the second End reading as unopened.
     #[test]
-    fn interrupted_turns_may_leave_calls_open() {
+    fn duplicate_ids_settle_both_slots() {
+        let begin = |id: &str| {
+            event(
+                "s1",
+                EventMsg::ToolCallBegin {
+                    call_id: id.to_string(),
+                    name: "shell".into(),
+                    input: serde_json::Value::Null,
+                },
+            )
+        };
+        let end = |id: &str| {
+            event(
+                "s1",
+                EventMsg::ToolCallEnd {
+                    call_id: id.to_string(),
+                    is_error: true,
+                    output: None,
+                    outcome: ToolOutcome::NotDispatched,
+                    duration_ms: 0,
+                },
+            )
+        };
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            begin("c1"),
+            begin("c1"),
+            end("c1"),
+            end("c1"),
+            event("s1", EventMsg::TurnCompleted { interrupted: true }),
+        ];
+        assert!(
+            validate_contract(&events).is_empty(),
+            "both duplicate slots close"
+        );
+        // One End fewer leaves the call open — reported once, not per slot.
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            begin("c1"),
+            begin("c1"),
+            end("c1"),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        let violations = validate_contract(&events);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("c1 never ended"));
+    }
+
+    /// Interleaved submissions may share a call id: each end must settle
+    /// the slot its own submission opened. Popping the most recent slot
+    /// instead would let the first end close the other submission's call,
+    /// report the first submission's call as never ended, and read the
+    /// second end as unopened.
+    #[test]
+    fn interleaved_submissions_settle_their_own_slots() {
+        let begin = |sub: &str| {
+            event(
+                sub,
+                EventMsg::ToolCallBegin {
+                    call_id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::Value::Null,
+                },
+            )
+        };
+        let end = |sub: &str| {
+            event(
+                sub,
+                EventMsg::ToolCallEnd {
+                    call_id: "c1".into(),
+                    is_error: true,
+                    output: None,
+                    outcome: ToolOutcome::NotDispatched,
+                    duration_ms: 0,
+                },
+            )
+        };
+        // s1 finishes first while s2's call on the shared id is still
+        // outstanding: the owner-matched removal leaves s2's slot alone,
+        // so s1 completes cleanly and s2's later end still finds its slot.
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event(
+                "s2",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            begin("s1"),
+            begin("s2"),
+            end("s1"),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+            end("s2"),
+            event("s2", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        assert!(
+            validate_contract(&events).is_empty(),
+            "each submission closes its own slot"
+        );
+
+        // An end from a submission that never opened the call still
+        // violates: the owner check does not silently consume a foreign
+        // slot, and the real owner stays open at TurnCompleted.
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event(
+                "s2",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            begin("s1"),
+            end("s2"),
+            event("s2", EventMsg::TurnCompleted { interrupted: false }),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        let violations = validate_contract(&events);
+        assert_eq!(violations.len(), 2, "{violations:?}");
+        assert!(violations.iter().any(|v| v.contains("unopened call c1")));
+        assert!(violations.iter().any(|v| v.contains("c1 never ended")));
+    }
+
+    /// Pairing is mandatory even in an interrupted turn: the run loop
+    /// settles its declared calls with `interrupted` synthetic ends, so an
+    /// open call at `TurnCompleted` is a contract break on either exit.
+    #[test]
+    fn interrupted_turns_must_still_close_their_calls() {
         let events = vec![
             event(
                 "s1",
@@ -459,6 +630,44 @@ mod tests {
                     call_id: "c1".into(),
                     name: "shell".into(),
                     input: serde_json::Value::Null,
+                },
+            ),
+            event("s1", EventMsg::TurnCompleted { interrupted: true }),
+        ];
+        let violations = validate_contract(&events);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("never ended"));
+    }
+
+    /// The shape the run loop actually emits on the interrupt checkpoint:
+    /// the declared calls are announced and settled with `interrupted`
+    /// synthetic ends before TurnCompleted, so the turn passes even though
+    /// it was stopped.
+    #[test]
+    fn interrupted_turn_with_settled_calls_passes() {
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::ToolCallBegin {
+                    call_id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::Value::Null,
+                },
+            ),
+            event(
+                "s1",
+                EventMsg::ToolCallEnd {
+                    call_id: "c1".into(),
+                    is_error: true,
+                    output: None,
+                    outcome: ToolOutcome::Interrupted,
+                    duration_ms: 0,
                 },
             ),
             event("s1", EventMsg::TurnCompleted { interrupted: true }),

@@ -24,6 +24,7 @@ mod ledger;
 pub use ledger::{Ledger, LedgerRead, TurnSample};
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use wavecode_wire::{Event, EventMsg, ToolOutcome};
 
@@ -67,9 +68,10 @@ pub struct Metrics {
     pub tools: HashMap<String, ToolStat>,
     /// Open tool calls awaiting their end event, keyed by call id. Only the
     /// name is retained: ends carry an id, and without this pairing the
-    /// per-tool split would be impossible.
+    /// per-tool split would be impossible. Entries are dropped once their
+    /// last slot settles, so a live fold equals its serialized twin.
     #[serde(skip)]
-    open_calls: HashMap<String, String>,
+    open_calls: HashMap<String, VecDeque<String>>,
 }
 
 /// Per-tool counters folded from one stream of tool calls.
@@ -93,7 +95,8 @@ pub struct ToolStat {
     /// Interrupted before the body ran.
     pub interrupted: u64,
     /// Ends that never ran a body for any other reason (duplicate call id,
-    /// `ask_user` answers, unavailable question, missing slot).
+    /// `ask_user` answers, unavailable question, missing slot, a batch the
+    /// harness refused to dispatch).
     pub other: u64,
     /// Sum of reported body durations, in milliseconds.
     pub busy_ms: u64,
@@ -143,7 +146,15 @@ impl Metrics {
             }
             EventMsg::ToolCallBegin { call_id, name, .. } => {
                 self.tool_calls += 1;
-                self.open_calls.insert(call_id.clone(), name.clone());
+                // One slot per open call: the same call id can be
+                // outstanding more than once at a time (a pre-dispatch
+                // exit settles a batch where the model repeated an id),
+                // and each end must attribute to the tool, not collapse
+                // into the placeholder bucket.
+                self.open_calls
+                    .entry(call_id.clone())
+                    .or_default()
+                    .push_back(name.clone());
             }
             EventMsg::ToolCallEnd {
                 call_id,
@@ -157,11 +168,25 @@ impl Metrics {
                 }
                 // Ends can arrive without a begin (a recording that starts
                 // mid-turn); fold those under a placeholder key so their
-                // outcome still counts somewhere.
-                let name = self
+                // outcome still counts somewhere. Ends pair with begins in
+                // FIFO order — both producers emit every begin before any
+                // end, in declaration order — so a repeated call id across
+                // two different tools still attributes each end correctly.
+                // A fully settled call drops its entry: an empty slot list
+                // would make a live fold compare unequal to its
+                // deserialized twin, which carries no slots at all.
+                let name = match self
                     .open_calls
-                    .remove(call_id)
-                    .unwrap_or_else(|| String::from("<unknown>"));
+                    .get_mut(call_id)
+                    .and_then(|slots| slots.pop_front().map(|name| (name, slots.is_empty())))
+                {
+                    Some((name, true)) => {
+                        self.open_calls.remove(call_id);
+                        name
+                    }
+                    Some((name, false)) => name,
+                    None => String::from("<unknown>"),
+                };
                 let stat = self.tools.entry(name).or_default();
                 match outcome {
                     ToolOutcome::Executed => {
@@ -177,6 +202,7 @@ impl Metrics {
                     ToolOutcome::HookBlocked | ToolOutcome::SurfaceBlocked => stat.blocked += 1,
                     ToolOutcome::Interrupted => stat.interrupted += 1,
                     ToolOutcome::Duplicate
+                    | ToolOutcome::NotDispatched
                     | ToolOutcome::Answered
                     | ToolOutcome::AskUnavailable
                     | ToolOutcome::Missing => stat.other += 1,
@@ -369,9 +395,110 @@ mod tests {
         assert_eq!(metrics.tool_error_rate(), Some(1.0));
     }
 
+    /// A pre-dispatch batch where the model repeated a call id emits
+    /// Begin, Begin, End, End: every end attributes to the tool instead
+    /// of collapsing into the `<unknown>` placeholder bucket.
+    #[test]
+    fn duplicate_ids_attribute_every_end_to_the_tool() {
+        let mut metrics = Metrics::new();
+        for msg in [
+            EventMsg::TurnStarted {
+                model: "claude-test".to_string(),
+            },
+            EventMsg::ToolCallBegin {
+                call_id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::Value::Null,
+            },
+            EventMsg::ToolCallBegin {
+                call_id: "c1".to_string(),
+                name: "shell".to_string(),
+                input: serde_json::Value::Null,
+            },
+            EventMsg::ToolCallEnd {
+                call_id: "c1".to_string(),
+                is_error: true,
+                output: None,
+                outcome: ToolOutcome::NotDispatched,
+                duration_ms: 0,
+            },
+            EventMsg::ToolCallEnd {
+                call_id: "c1".to_string(),
+                is_error: true,
+                output: None,
+                outcome: ToolOutcome::NotDispatched,
+                duration_ms: 0,
+            },
+        ] {
+            metrics.record(&event(msg));
+        }
+        assert_eq!(metrics.tool_calls, 2);
+        let shell = &metrics.tools["shell"];
+        assert_eq!(shell.other, 2, "both ends land on the tool: {shell:?}");
+        assert!(!metrics.tools.contains_key("<unknown>"));
+    }
+
     #[test]
     fn error_rate_is_none_without_calls() {
         assert_eq!(Metrics::new().tool_error_rate(), None);
+    }
+
+    /// Both producers emit every begin before any end, so a call id
+    /// reused for two different tools pairs in declaration order: the
+    /// first end attributes to the first-begun tool, not to the one
+    /// begun last.
+    #[test]
+    fn reused_call_id_pairs_ends_in_declaration_order() {
+        let mut metrics = Metrics::new();
+        for name in ["shell", "edit"] {
+            metrics.record(&event(EventMsg::ToolCallBegin {
+                call_id: "c1".to_string(),
+                name: name.to_string(),
+                input: serde_json::Value::Null,
+            }));
+        }
+        for (is_error, ms) in [(false, 10u64), (true, 20)] {
+            metrics.record(&event(EventMsg::ToolCallEnd {
+                call_id: "c1".to_string(),
+                is_error,
+                output: None,
+                outcome: ToolOutcome::Executed,
+                duration_ms: ms,
+            }));
+        }
+        let shell = &metrics.tools["shell"];
+        let edit = &metrics.tools["edit"];
+        assert_eq!(shell.executed_ok, 1, "first end lands on the first begin");
+        assert_eq!(shell.busy_ms, 10);
+        assert_eq!(
+            edit.executed_failed, 1,
+            "second end lands on the second begin"
+        );
+        assert_eq!(edit.busy_ms, 20);
+        assert!(!metrics.tools.contains_key("<unknown>"));
+    }
+
+    /// A fully settled call leaves no slot residue: `open_calls` is
+    /// skipped on the wire, so a live fold must equal its deserialized
+    /// twin exactly.
+    #[test]
+    fn settled_calls_leave_no_slot_residue() {
+        let mut metrics = Metrics::new();
+        metrics.record(&event(EventMsg::ToolCallBegin {
+            call_id: "c1".to_string(),
+            name: "shell".to_string(),
+            input: serde_json::Value::Null,
+        }));
+        metrics.record(&event(EventMsg::ToolCallEnd {
+            call_id: "c1".to_string(),
+            is_error: false,
+            output: None,
+            outcome: ToolOutcome::Executed,
+            duration_ms: 1,
+        }));
+        let twin =
+            serde_json::from_slice::<Metrics>(&serde_json::to_vec(&metrics).unwrap()).unwrap();
+        assert_eq!(metrics, twin);
     }
 
     /// The per-tool split is what tells a weak tool apart from a tool that

@@ -6,9 +6,12 @@ The type map lives in [README.md](README.md).
 
 - `Submission`, `Op`, `Event`, and `EventMsg` are defined here. Do not
   add a second copy in `wavecode-protocol` or a frontend.
-- Adding, removing, or renaming a variant or a serde tag updates
-  `wire_tags_are_locked` and the round-trip tests in `src/lib.rs`,
-  plus `sdk/typescript/src/types.ts`, in the same change.
+- Adding, removing, or renaming a variant or a serde tag updates the
+  tag locks in `src/tests/tags.rs` (`wire_tags_op_are_locked`,
+  `wire_tags_event_msg_are_locked`, `wire_tags_wire_decision_are_locked`,
+  `wire_tags_approval_kind_are_locked`), the round-trip tests in
+  `src/tests/round_trips.rs`, plus `sdk/typescript/src/types.ts`, in
+  the same change.
 - `ApprovalKind` is the serde twin of
   `wavecode_protocol::ApprovalKind`. A tag change updates both and the
   byte-equal lock in `operations/bootstrap/src/lib.rs` in the same

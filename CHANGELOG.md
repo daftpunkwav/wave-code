@@ -97,6 +97,15 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   script with the same table.
 
 ### Changed
+- Tool calls that never reach dispatch are now announced and settled
+  on the wire: the pre-dispatch interrupt checkpoint, a
+  truncation-batch refusal, and the repeat breaker emit their
+  `tool_call_begin`/`tool_call_end` pair around the synthetic result
+  (`interrupted` outcome for the checkpoint, new `not_dispatched`
+  outcome for the two refusals), so live streams, session replays, and
+  `Metrics.tool_calls` agree about those calls. The replay contract
+  validator correspondingly requires every announced call to be
+  settled before `turn_completed`, interrupted turns included.
 - All three themes re-tune their neutrals: the dark theme's lavender
   (violet-cast) ramp becomes a true graphite ramp under one azure
   accent, the light theme's slate grays neutralize, and both lock

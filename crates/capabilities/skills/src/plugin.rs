@@ -207,19 +207,22 @@ impl PluginLoader {
 
     /// Merge every pack's skills into `set` as the pack source.
     ///
-    /// Pack skills are the lowest-priority source above builtin: an
-    /// entry already in `set` (user, project, or a merged builtin) keeps
-    /// its slot and the pack only fills the gaps, so the caller merges
-    /// packs after the standard roots. Later packs win among themselves,
-    /// in directory order.
+    /// Pack skills rank between builtin and the standard roots: they
+    /// displace a same-named builtin entry and yield to user and project
+    /// entries, which keep their slots, so the caller merges packs after
+    /// the standard roots. Later packs win among themselves, in
+    /// directory order.
     pub fn apply_skills(&self, set: &mut SkillSet) {
         for plugin in &self.plugins {
             for skill in plugin.skills.iter() {
-                // A non-pack entry (user, project, or builtin) keeps its
-                // slot; a pack entry yields to the later pack, in
-                // directory order.
+                // A user or project entry keeps its slot; a pack entry
+                // yields to the later pack, in directory order; a builtin
+                // entry yields to the pack (source order: builtin < pack
+                // < user < project).
                 let displaced = match set.get(&skill.name) {
-                    Some(existing) => existing.source == SkillSource::Pack,
+                    Some(existing) => {
+                        matches!(existing.source, SkillSource::Builtin | SkillSource::Pack)
+                    }
                     None => true,
                 };
                 if displaced {
@@ -493,6 +496,17 @@ command = "notify.sh"
         set.add(Skill::parse(&greet, SkillSource::User).expect("hand-built skill"));
         loader.apply_skills(&mut set);
         assert_eq!(set.get("greet").unwrap().source, SkillSource::User);
+
+        // A builtin entry yields to the pack: pack ranks above builtin
+        // in the source order (builtin < pack < user < project).
+        let builtin = tempfile::tempdir().unwrap();
+        let greet = builtin.path().join("greet");
+        std::fs::create_dir_all(&greet).unwrap();
+        std::fs::write(greet.join("SKILL.md"), SKILL_MD).unwrap();
+        let mut set = SkillSet::default();
+        set.add(Skill::parse(&greet, SkillSource::Builtin).expect("hand-built skill"));
+        loader.apply_skills(&mut set);
+        assert_eq!(set.get("greet").unwrap().source, SkillSource::Pack);
     }
 
     /// Two packs declaring the same skill name: the later pack (directory

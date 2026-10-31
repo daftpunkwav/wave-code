@@ -548,10 +548,14 @@ skills_dir = \"skills\"
         let mut set = SkillSet::default();
         loader.apply_skills(&mut set);
         assert_eq!(set.get("greet").unwrap().source, SkillSource::Pack);
+        let merged = set.get("greet").unwrap();
         assert_eq!(
-            set.get("greet").unwrap().meta.description,
-            "Later pack skill.",
-            "the later pack's body displaced the first pack's entry"
+            merged.meta.description, "Later pack skill.",
+            "the later pack's metadata displaced the first pack's entry"
+        );
+        assert_eq!(
+            merged.body, "Later pack body.",
+            "the merged entry carries the later pack's body, not just its metadata"
         );
 
         // The collision leaves one entry, not a duplicate.

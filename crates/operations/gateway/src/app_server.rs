@@ -49,6 +49,37 @@ use operations_actor::{AssembleOptions, DEFAULT_IDENTITY, SessionError, SessionS
 use tokio::sync::{Notify, broadcast, mpsc};
 use wavecode_wire::{Event, EventMsg, Op, Submission};
 
+/// JSON body extractor whose rejections speak the server's error shape.
+///
+/// Every failed request — middleware guard, handler validation, and
+/// extractor rejection alike — answers with the same JSON `{"error": …}`
+/// body, so programmatic clients parse one shape instead of sniffing
+/// plain text. The rejection's own status is preserved (400 for a
+/// syntax error, 415 for a missing content type, 422 for a body that
+/// parses but fails serde).
+struct ApiJson(serde_json::Value);
+
+impl<S: Send + Sync> axum::extract::FromRequest<S> for ApiJson {
+    type Rejection = axum::response::Response;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match axum::Json::<serde_json::Value>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(Self(value)),
+            Err(rejection) => Err(error_json(rejection.status(), rejection.body_text())),
+        }
+    }
+}
+
+/// One error shape for every failed request: the status plus a JSON
+/// `{"error": …}` body.
+fn error_json(status: StatusCode, message: impl std::fmt::Display) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({"error": message.to_string()})),
+    )
+        .into_response()
+}
+
 /// Idle TTL after which the reaper closes a served session.
 ///
 /// The longest legitimate quiet stretch inside one running turn is bounded
@@ -325,7 +356,7 @@ async fn auth_and_host_guard(
             .and_then(|v| v.to_str().ok())
             .is_some_and(|value| constant_time_eq(value, &expected));
         if !authorized {
-            return (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response();
+            return error_json(StatusCode::UNAUTHORIZED, "missing or invalid bearer token");
         }
     }
     if !host_allowed(
@@ -334,7 +365,7 @@ async fn auth_and_host_guard(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default(),
     ) {
-        return (StatusCode::FORBIDDEN, "loopback hosts only").into_response();
+        return error_json(StatusCode::FORBIDDEN, "loopback hosts only");
     }
     next.run(request).await
 }
@@ -382,7 +413,7 @@ fn parse_decision(value: &serde_json::Value) -> Option<safety_gate::ApprovalDeci
 
 async fn create_session(
     State(state): State<AppState>,
-    Json(body): Json<serde_json::Value>,
+    ApiJson(body): ApiJson,
 ) -> axum::response::Response {
     // Capacity first: a refused creation must not pay for an assembly.
     if state.sessions.lock().await.len() >= state.max_sessions {
@@ -497,13 +528,13 @@ async fn list_sessions(State(state): State<AppState>) -> axum::response::Respons
 async fn prompt_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    ApiJson(body): ApiJson,
 ) -> axum::response::Response {
     let Some(text) = body.get("text").and_then(serde_json::Value::as_str) else {
-        return (StatusCode::BAD_REQUEST, "`text` is required").into_response();
+        return error_json(StatusCode::BAD_REQUEST, "`text` is required");
     };
     if text.is_empty() {
-        return (StatusCode::BAD_REQUEST, "`text` must not be empty").into_response();
+        return error_json(StatusCode::BAD_REQUEST, "`text` must not be empty");
     }
     // Images parse strictly: a malformed entry answers 400 instead of
     // being silently dropped — a skipped image would otherwise leave the
@@ -516,11 +547,10 @@ async fn prompt_session(
             match serde_json::from_value::<wavecode_wire::UserImage>(item.clone()) {
                 Ok(image) => images.push(image),
                 Err(_) => {
-                    return (
+                    return error_json(
                         StatusCode::BAD_REQUEST,
                         "`images` entries must carry string `mime` and `base64` fields",
-                    )
-                        .into_response();
+                    );
                 }
             }
         }
@@ -539,44 +569,43 @@ async fn prompt_session(
 async fn answer_approval(
     State(state): State<AppState>,
     Path((session_id, call_id)): Path<(String, String)>,
-    Json(body): Json<serde_json::Value>,
+    ApiJson(body): ApiJson,
 ) -> axum::response::Response {
     let Some(decision) = parse_decision(&body) else {
-        return (
+        return error_json(
             StatusCode::BAD_REQUEST,
-            "`decision` must be allow, always, or deny (with optional reason)".to_string(),
-        )
-            .into_response();
+            "`decision` must be allow, always, or deny (with optional reason)",
+        );
     };
     let sessions = state.sessions.lock().await;
     let Some(session) = sessions.get(&session_id) else {
-        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+        return error_json(StatusCode::NOT_FOUND, "unknown session");
     };
     session.touch(state.started);
     if session.approvals.decide(&call_id, decision) {
         StatusCode::OK.into_response()
     } else {
-        (StatusCode::NOT_FOUND, "no parked approval for that call id").into_response()
+        error_json(StatusCode::NOT_FOUND, "no parked approval for that call id")
     }
 }
 
 async fn answer_question(
     State(state): State<AppState>,
     Path((session_id, call_id)): Path<(String, String)>,
-    Json(body): Json<serde_json::Value>,
+    ApiJson(body): ApiJson,
 ) -> axum::response::Response {
     let Some(answer) = body.get("answer").and_then(serde_json::Value::as_str) else {
-        return (StatusCode::BAD_REQUEST, "`answer` is required").into_response();
+        return error_json(StatusCode::BAD_REQUEST, "`answer` is required");
     };
     let sessions = state.sessions.lock().await;
     let Some(session) = sessions.get(&session_id) else {
-        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+        return error_json(StatusCode::NOT_FOUND, "unknown session");
     };
     session.touch(state.started);
     if session.questions.answer(&call_id, answer.to_string()) {
         StatusCode::OK.into_response()
     } else {
-        (StatusCode::NOT_FOUND, "no parked question for that call id").into_response()
+        error_json(StatusCode::NOT_FOUND, "no parked question for that call id")
     }
 }
 
@@ -586,7 +615,7 @@ async fn cancel_session(
 ) -> axum::response::Response {
     let sessions = state.sessions.lock().await;
     let Some(session) = sessions.get(&session_id) else {
-        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+        return error_json(StatusCode::NOT_FOUND, "unknown session");
     };
     session.touch(state.started);
     session.interrupt.trigger();
@@ -603,7 +632,7 @@ async fn drop_session(
         // broadcast sender; the pump exits when the actor goes quiet.
         StatusCode::OK.into_response()
     } else {
-        (StatusCode::NOT_FOUND, "unknown session").into_response()
+        error_json(StatusCode::NOT_FOUND, "unknown session")
     }
 }
 
@@ -632,7 +661,7 @@ async fn stream_events(
 ) -> axum::response::Response {
     let sessions = state.sessions.lock().await;
     let Some(session) = sessions.get(&session_id) else {
-        return (StatusCode::NOT_FOUND, "unknown session").into_response();
+        return error_json(StatusCode::NOT_FOUND, "unknown session");
     };
     // Subscribing is client liveness: the per-turn stream is opened right
     // before a prompt, so it must not race the reaper.
@@ -739,7 +768,7 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
     let send_result = {
         let mut sessions = state.sessions.lock().await;
         let Some(session) = sessions.get_mut(session_id) else {
-            return (StatusCode::NOT_FOUND, "unknown session").into_response();
+            return error_json(StatusCode::NOT_FOUND, "unknown session");
         };
         session.touch(state.started);
         session.submissions += 1;
@@ -755,11 +784,10 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
         // be retried once the pump drains, so answer 429 (not 409) and
         // keep the submission rejection visible instead of dropping it.
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-            let mut response = (
+            let mut response = error_json(
                 StatusCode::TOO_MANY_REQUESTS,
                 "session queue is full; retry shortly",
-            )
-                .into_response();
+            );
             response
                 .headers_mut()
                 .insert("Retry-After", axum::http::HeaderValue::from_static("1"));
@@ -767,7 +795,7 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
         }
         // The pump is gone: the session is closing.
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-            (StatusCode::CONFLICT, "session is closing").into_response()
+            error_json(StatusCode::CONFLICT, "session is closing")
         }
         Ok(()) => match reply_rx.await {
             Ok(Ok(())) => (
@@ -780,7 +808,7 @@ async fn submit(state: AppState, session_id: &str, op: Op) -> axum::response::Re
                 Json(serde_json::json!({"error": e})),
             )
                 .into_response(),
-            Err(_) => (StatusCode::NOT_FOUND, "session closed").into_response(),
+            Err(_) => error_json(StatusCode::NOT_FOUND, "session closed"),
         },
     }
 }

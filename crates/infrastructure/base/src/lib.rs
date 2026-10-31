@@ -123,6 +123,27 @@ pub fn shell_invocation() -> (String, &'static str) {
     }
 }
 
+/// Best-effort display name of the shell [`shell_invocation`] spawns:
+/// the `WAVECODE_SHELL` override's file stem when set, else the
+/// platform default (`cmd` / `sh`).
+///
+/// The system prompt's `Shell:` line reports this name, so the model
+/// sees the shell that will actually run its commands rather than the
+/// login shell — the same resolution every spawn path uses.
+pub fn shell_name() -> String {
+    let (program, _) = shell_invocation();
+    display_shell_name(&program)
+}
+
+/// File stem of a shell program path (`…\cmd.exe` → `cmd`,
+/// `/bin/zsh` → `zsh`); a stemless value passes through.
+fn display_shell_name(program: &str) -> String {
+    std::path::Path::new(program)
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| program.to_owned())
+}
+
 /// Build the command that runs `command` as a command string.
 ///
 /// One place turns the shared resolution into a spawn, so every
@@ -484,6 +505,20 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
+
+    /// The prompt's shell name is the file stem of the spawn program:
+    /// an override's path and the platform default both reduce to the
+    /// name the model should expect in its own command strings.
+    #[test]
+    fn display_shell_name_is_the_program_stem() {
+        // Backslashes separate only on Windows: the stem rule itself is
+        // cross-platform, so the Windows-shaped input is asserted where
+        // the shape means what it says.
+        #[cfg(windows)]
+        assert_eq!(display_shell_name(r"C:\Windows\system32\cmd.exe"), "cmd");
+        assert_eq!(display_shell_name("/bin/zsh"), "zsh");
+        assert_eq!(display_shell_name("pwsh"), "pwsh");
+    }
 
     /// The blocking-pool runner must keep the runtime worker free: the
     /// work runs on the blocking pool, so a task scheduled on the same

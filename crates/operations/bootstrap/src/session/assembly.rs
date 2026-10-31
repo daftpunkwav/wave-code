@@ -1339,30 +1339,49 @@ fn pack_hook_defs(
                     "plugin {}: unknown hook point {point_name:?}; skipped",
                     plugin.name
                 )),
-                Some(point) => {
-                    let slot = defs.entry(point).or_default();
-                    for (idx, rule) in rules.iter().enumerate() {
-                        let def = wavecode_hooks::HookDef {
-                            matcher: rule.matcher.clone(),
-                            command: rule.command.clone(),
-                            timeout_ms: rule
-                                .timeout_ms
-                                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
-                            once: rule.once.unwrap_or(false),
-                        };
-                        let reasons = def.unusable_reasons(point);
-                        if reasons.is_empty() {
-                            slot.push(def);
-                        } else {
-                            warnings.push(format!(
-                                "plugin {}: hook {point_name} entry #{idx} skipped: {}",
-                                plugin.name,
-                                reasons.join("; ")
-                            ));
-                        }
-                    }
-                }
+                Some(point) => file_pack_rules(
+                    &plugin.name,
+                    point_name,
+                    point,
+                    rules,
+                    defs.entry(point).or_default(),
+                    warnings,
+                ),
             }
+        }
+    }
+}
+
+/// File one pack point's rules into `slot` in rule order.
+///
+/// A rule the engine can never fire
+/// ([`wavecode_hooks::HookDef::unusable_reasons`]) warns with the pack
+/// attribution and is skipped instead of joining `slot`.
+fn file_pack_rules(
+    plugin_name: &str,
+    point_name: &str,
+    point: wavecode_hooks::HookEventPoint,
+    rules: &[wavecode_skills::plugin::PluginHookRule],
+    slot: &mut Vec<wavecode_hooks::HookDef>,
+    warnings: &mut Vec<String>,
+) {
+    for (idx, rule) in rules.iter().enumerate() {
+        let def = wavecode_hooks::HookDef {
+            matcher: rule.matcher.clone(),
+            command: rule.command.clone(),
+            timeout_ms: rule
+                .timeout_ms
+                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
+            once: rule.once.unwrap_or(false),
+        };
+        let reasons = def.unusable_reasons(point);
+        if reasons.is_empty() {
+            slot.push(def);
+        } else {
+            warnings.push(format!(
+                "plugin {plugin_name}: hook {point_name} entry #{idx} skipped: {}",
+                reasons.join("; ")
+            ));
         }
     }
 }

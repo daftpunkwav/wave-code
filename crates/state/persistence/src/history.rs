@@ -4,20 +4,99 @@
  *
  * Responsibilities:
  * - Append one JSON line per committed history mutation, durable per write.
+ * - Own the record envelope this file layout defines (the `"k"` kinds and
+ *   the `seq` field `HISTORY_FORMAT_VERSION` names).
  * - Read the log back as the trustworthy prefix, classifying where it stops.
  * - Own the file layout beside the session registry's other per-session file.
  *
  * This module must not depend on: the conversation types, drivers, or tools.
- * Records arrive as already-encoded JSON values — persistence moves bytes,
- * structure lives with the caller (same contract as the crate's turn
- * journal).
+ * Record payloads stay encoded JSON values — persistence owns the envelope,
+ * the payload structure lives with the caller (same contract as the crate's
+ * turn journal).
  */
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// On-disk record layout version, carried by the header line.
+/// On-disk record layout version, carried by the header line. Covers the
+/// header plus every [`HistoryRecord`] kind.
 pub const HISTORY_FORMAT_VERSION: u32 = 1;
+
+/// One history record beside the header — the envelope this file layout
+/// version defines: a `"k"` kind tag plus the record's `seq` sequence
+/// number. Payloads stay encoded JSON values; this crate moves them
+/// without interpreting them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HistoryRecord {
+    /// One history entry appended.
+    Append {
+        /// Sequence number; the gap detector on replay.
+        seq: u64,
+        /// The encoded entry.
+        entry: serde_json::Value,
+    },
+    /// The whole history replaced (compaction, rewind).
+    Replace {
+        /// Sequence number; the gap detector on replay.
+        seq: u64,
+        /// The encoded replacement entries.
+        entries: Vec<serde_json::Value>,
+    },
+    /// A record kind this reader's format does not define (a file written
+    /// by a newer format, or a damaged line that still parses). Replay
+    /// must stop rather than rebuild a history it cannot interpret.
+    Unknown {
+        /// The record's sequence number, when one is readable.
+        seq: Option<u64>,
+        /// The raw record, kept for diagnostics.
+        raw: serde_json::Value,
+    },
+}
+
+impl HistoryRecord {
+    /// Encode one record for append/rewrite.
+    pub fn to_value(&self) -> serde_json::Value {
+        match self {
+            Self::Append { seq, entry } => {
+                serde_json::json!({"k": "append", "seq": seq, "entry": entry})
+            }
+            Self::Replace { seq, entries } => {
+                serde_json::json!({"k": "replace", "seq": seq, "entries": entries})
+            }
+            Self::Unknown { raw, .. } => raw.clone(),
+        }
+    }
+
+    /// Decode one parsed line (the header never reaches here).
+    fn from_value(value: serde_json::Value) -> Self {
+        let seq = value.get("seq").and_then(serde_json::Value::as_u64);
+        match value.get("k").and_then(serde_json::Value::as_str) {
+            Some("append") if value.get("entry").is_some() => Self::Append {
+                seq: seq.unwrap_or(0),
+                entry: value
+                    .get("entry")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            },
+            Some("replace") if value.get("entries").is_some_and(|e| e.is_array()) => {
+                Self::Replace {
+                    seq: seq.unwrap_or(0),
+                    entries: value
+                        .get("entries")
+                        .and_then(serde_json::Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                }
+            }
+            // A kind this format names with a missing payload field is not
+            // interpretable as that kind: decoding it as an empty entry or
+            // replacement would let a malformed record clear the verified
+            // prefix on replay. `Unknown` stops the replay as a gap.
+            Some("append") | Some("replace") => Self::Unknown { seq, raw: value },
+            _ => Self::Unknown { seq, raw: value },
+        }
+    }
+}
 
 /// A history journal bound to one file.
 #[derive(Debug, Clone)]
@@ -29,7 +108,7 @@ pub struct HistoryJournal {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct HistoryRead {
     /// Records in append order, up to the first gap.
-    pub records: Vec<serde_json::Value>,
+    pub records: Vec<HistoryRecord>,
     /// True when the final line was unreadable (an expected crash artifact).
     pub torn_tail: bool,
     /// True when an unreadable line sat *between* records: the caller must
@@ -53,7 +132,14 @@ impl HistoryJournal {
     /// Durability per record is the point: a record that reached memory but
     /// not disk is exactly the gap that makes a resumed session re-run a
     /// tool whose side effect already happened.
-    pub fn append(&self, record: &serde_json::Value) -> std::io::Result<()> {
+    pub fn append_record(&self, record: &HistoryRecord) -> std::io::Result<()> {
+        self.append_value(&record.to_value())
+    }
+
+    /// Append one encoded record and flush it (the raw half of
+    /// [`HistoryJournal::append_record`], kept for repair paths that
+    /// replay raw file contents).
+    fn append_value(&self, record: &serde_json::Value) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -80,7 +166,7 @@ impl HistoryJournal {
     /// has not been written yet. The staging write keeps the previous file
     /// until the replacement is complete, so a crash leaves either the old
     /// log or the repaired one.
-    pub fn rewrite(&self, records: &[serde_json::Value]) -> std::io::Result<()> {
+    pub fn rewrite(&self, records: &[HistoryRecord]) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -89,7 +175,7 @@ impl HistoryJournal {
             serde_json::json!({"k": "header", "format": HISTORY_FORMAT_VERSION})
         );
         for record in records {
-            body.push_str(&record.to_string());
+            body.push_str(&record.to_value().to_string());
             body.push('\n');
         }
         infrastructure_base::atomic_write_private(&self.path, body.as_bytes())?;
@@ -138,7 +224,7 @@ impl HistoryJournal {
             if index == 0 && value.get("k").and_then(|k| k.as_str()) == Some("header") {
                 continue;
             }
-            records.push(value);
+            records.push(HistoryRecord::from_value(value));
         }
         out.records = records;
         out
@@ -151,6 +237,67 @@ mod tests {
 
     fn path_in(dir: &Path) -> PathBuf {
         dir.join("history.jsonl")
+    }
+
+    /// A record kind this format does not define (a newer writer, or a
+    /// damaged-but-parseable line) decodes as `Unknown` carrying its seq
+    /// and raw body, so the replay policy can stop instead of guessing.
+    #[test]
+    fn unknown_record_kind_decodes_with_its_raw_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = HistoryJournal::new(path_in(dir.path()));
+        journal
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"n": 1}),
+            })
+            .unwrap();
+        let mut raw = std::fs::read_to_string(journal.path()).unwrap();
+        raw.push_str(
+            "{\"k\":\"snapshot_v9\",\"seq\":1,\"blob\":{}}
+",
+        );
+        std::fs::write(journal.path(), &raw).unwrap();
+        let read = journal.read();
+        assert_eq!(
+            read.records[1],
+            HistoryRecord::Unknown {
+                seq: Some(1),
+                raw: serde_json::json!({"k": "snapshot_v9", "seq": 1, "blob": {}})
+            }
+        );
+        assert!(!read.torn_tail && !read.mid_gap);
+    }
+
+    /// A parseable `replace` record missing its `entries` payload is not
+    /// a valid empty replacement (that would clear the verified prefix on
+    /// replay without a gap report): it decodes as `Unknown`.
+    #[test]
+    fn malformed_replace_decodes_as_unknown() {
+        let record = HistoryRecord::from_value(serde_json::json!({
+            "k": "replace",
+            "seq": 4,
+        }));
+        assert_eq!(
+            record,
+            HistoryRecord::Unknown {
+                seq: Some(4),
+                raw: serde_json::json!({"k": "replace", "seq": 4}),
+            }
+        );
+        // An explicit empty array stays a valid (empty) replacement.
+        let record = HistoryRecord::from_value(serde_json::json!({
+            "k": "replace",
+            "seq": 4,
+            "entries": [],
+        }));
+        assert_eq!(
+            record,
+            HistoryRecord::Replace {
+                seq: 4,
+                entries: Vec::new(),
+            }
+        );
     }
 
     #[test]
@@ -166,14 +313,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = HistoryJournal::new(path_in(dir.path()));
         journal
-            .append(&serde_json::json!({"k": "append", "n": 1}))
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"n": 1}),
+            })
             .unwrap();
         journal
-            .append(&serde_json::json!({"k": "append", "n": 2}))
+            .append_record(&HistoryRecord::Append {
+                seq: 1,
+                entry: serde_json::json!({"n": 2}),
+            })
             .unwrap();
         let read = journal.read();
         assert_eq!(read.records.len(), 2);
-        assert_eq!(read.records[1]["n"], 2);
+        assert_eq!(
+            read.records[1],
+            HistoryRecord::Append {
+                seq: 1,
+                entry: serde_json::json!({"n": 2})
+            }
+        );
         assert!(!read.torn_tail && !read.mid_gap);
         let raw = std::fs::read_to_string(journal.path()).unwrap();
         assert_eq!(raw.lines().count(), 3, "one header plus two records");
@@ -187,7 +346,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = HistoryJournal::new(path_in(dir.path()));
         journal
-            .append(&serde_json::json!({"k": "append", "n": 1}))
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"n": 1}),
+            })
             .unwrap();
         std::fs::OpenOptions::new()
             .append(true)
@@ -209,7 +371,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = HistoryJournal::new(path_in(dir.path()));
         journal
-            .append(&serde_json::json!({"k": "append", "seq": 0, "entry": {"role": "user", "blocks": [{"text": "你好"}]}}))
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"role": "user", "blocks": [{"text": "你好"}]}),
+            })
             .unwrap();
         // Simulate a torn final write whose tail is a cut 3-byte CJK char.
         let torn = "{\"k\":\"append\",\"seq\":1,\"entry\":{\"role\":\"user\",\"blocks\":[{\"text\":\"\u{4f60}".to_string();
@@ -225,8 +390,14 @@ mod tests {
         assert!(std::fs::read_to_string(journal.path()).is_err());
 
         let read = journal.read();
-        assert_eq!(read.records.len(), 1, "the intact prefix survives");
-        assert_eq!(read.records[0]["seq"], 0);
+        assert_eq!(
+            read.records,
+            vec![HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"role": "user", "blocks": [{"text": "你好"}]})
+            }],
+            "the intact prefix survives"
+        );
         assert!(read.torn_tail, "the torn line is reported, not hidden");
         assert!(!read.mid_gap);
     }
@@ -236,13 +407,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = HistoryJournal::new(path_in(dir.path()));
         journal
-            .append(&serde_json::json!({"k": "append", "n": 1}))
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"n": 1}),
+            })
             .unwrap();
         let mut raw = std::fs::read_to_string(journal.path()).unwrap();
         raw.push_str("{corrupt\n");
         std::fs::write(journal.path(), &raw).unwrap();
         journal
-            .append(&serde_json::json!({"k": "append", "n": 2}))
+            .append_record(&HistoryRecord::Append {
+                seq: 1,
+                entry: serde_json::json!({"n": 2}),
+            })
             .unwrap();
         let read = journal.read();
         assert_eq!(
@@ -261,7 +438,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal = HistoryJournal::new(path_in(dir.path()));
         journal
-            .append(&serde_json::json!({"k": "append", "seq": 0, "n": 1}))
+            .append_record(&HistoryRecord::Append {
+                seq: 0,
+                entry: serde_json::json!({"n": 1}),
+            })
             .unwrap();
         std::fs::OpenOptions::new()
             .append(true)
@@ -270,12 +450,18 @@ mod tests {
             .unwrap();
         assert!(journal.read().torn_tail);
         journal
-            .rewrite(&[serde_json::json!({"k": "replace", "seq": 0, "n": 1})])
+            .rewrite(&[HistoryRecord::Replace {
+                seq: 0,
+                entries: vec![serde_json::json!({"n": 1})],
+            }])
             .unwrap();
         let read = journal.read();
         assert_eq!(
             read.records,
-            vec![serde_json::json!({"k": "replace", "seq": 0, "n": 1})]
+            vec![HistoryRecord::Replace {
+                seq: 0,
+                entries: vec![serde_json::json!({"n": 1})]
+            }]
         );
         assert!(!read.torn_tail && !read.mid_gap);
         let raw = std::fs::read_to_string(journal.path()).unwrap();

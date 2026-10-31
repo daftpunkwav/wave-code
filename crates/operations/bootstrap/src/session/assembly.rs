@@ -12,7 +12,7 @@ use action_tasks::TaskService;
 use operations_actor::SessionActor;
 use runtime_child::ChildRuntime;
 use runtime_prompt::{Budget, DEFAULT_CATALOG_BUDGET, PromptSlots, assemble_budgeted};
-use runtime_runner::{RunInterrupts, RunLoop, ToolExecutor};
+use runtime_runner::{RunInterrupts, RunLoop};
 use safety_gate::{ApprovalGate, QuestionGate};
 use state_store::Conversation;
 
@@ -57,12 +57,11 @@ struct PromptMaterials {
 /// subtraction a child could re-fork `task`/`skill`/workflow spawns and
 /// the runtime depth cap would never see the nested generations;
 /// read-only profiles additionally narrow to the read-only subset. The
-/// forbidden list is a hand-maintained copy of the spawn-tool names (they
-/// live in their tool types), so drift fails loudly as an assembly
-/// warning instead of silently re-opening the recursion hole. The check
-/// runs against registry plus native names — snapshotted after every
-/// late registration, so the native-only `child_spawn` is visible — and
-/// every listed name must exist somewhere in the assembled catalog.
+/// forbidden set derives from the declarative `ToolKind::Spawn` class
+/// across registry and native tools, so a newly registered spawn tool
+/// is covered automatically instead of waiting for a name-list edit;
+/// `compact_context` joins by its shared constant (see
+/// [`child_forbidden_tools`]).
 ///
 /// Returns `(system prompt, tool names)`; the caller keeps both for the
 /// actor spawn and the status surface.
@@ -119,23 +118,6 @@ fn assemble_system_prompt_and_child_surface(
     }
     let system = assembled.system;
 
-    let native_names: Vec<String> = native
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .available_tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect();
-    for name in CHILD_FORBIDDEN_TOOLS {
-        let in_registry = tool_names.iter().any(|offered| offered == name);
-        let in_native = native_names.iter().any(|offered| offered == name);
-        if !in_registry && !in_native {
-            warnings.push(format!(
-                "child-forbidden tool '{name}' is not in the tool catalog; \
-                 update CHILD_FORBIDDEN_TOOLS"
-            ));
-        }
-    }
     tasks.set_system(system.clone());
     tasks.set_surface(crate::child_service::ChildSurface {
         all: tool_names.iter().cloned().collect(),
@@ -145,10 +127,7 @@ fn assemble_system_prompt_and_child_surface(
             .into_iter()
             .map(|spec| spec.name)
             .collect(),
-        forbidden: CHILD_FORBIDDEN_TOOLS
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        forbidden: child_forbidden_tools(registry, native),
     });
     (system, tool_names)
 }
@@ -864,14 +843,18 @@ pub(super) fn seed_conversation(
     let mut next_seq = replayed.next_seq;
     let mut snapshot_durable = false;
     if replayed.gapped || replayed.torn_tail {
-        let records = if replayed.entries.is_empty() {
+        let records: Vec<state_persistence::history::HistoryRecord> = if replayed.entries.is_empty()
+        {
             Vec::new()
         } else {
-            vec![serde_json::json!({
-                "k": "replace",
-                "seq": 0,
-                "entries": &replayed.entries,
-            })]
+            vec![state_persistence::history::HistoryRecord::Replace {
+                seq: 0,
+                entries: replayed
+                    .entries
+                    .iter()
+                    .map(|entry| serde_json::json!(entry))
+                    .collect(),
+            }]
         };
         match journal.rewrite(&records) {
             Ok(()) => {
@@ -931,19 +914,31 @@ fn push_text_seed(conv: &mut Conversation, initial_history: &[(bool, String)]) {
     }
 }
 
-/// Tools a child run may never invoke. Spawn tools would recurse past the
-/// depth cap. `compact_context` writes the session compaction slot, and
-/// only the parent turn drains that slot — a child request would compact
-/// the parent's history.
-const CHILD_FORBIDDEN_TOOLS: [&str; 7] = [
-    "task",
-    "skill",
-    "task_continue",
-    "child_spawn",
-    "workflow_run",
-    "ralph_run",
-    "compact_context",
-];
+/// Tools a child run may never invoke, derived from the declarative
+/// [`ToolKind::Spawn`] class across both catalogs (registry tools and
+/// native closures): spawn tools would recurse past the depth cap, and
+/// a newly registered tool of the class is covered automatically
+/// instead of relying on a hand-maintained name list. `compact_context`
+/// joins them by its shared constant — it writes the session compaction
+/// slot, and only the parent turn drains that slot, so a child request
+/// would compact the parent's history.
+pub(super) fn child_forbidden_tools(
+    registry: &wavecode_tools::Registry,
+    native: &Arc<Mutex<NativeExecutor>>,
+) -> std::collections::HashSet<String> {
+    let mut forbidden: Vec<String> = registry
+        .names_of_kind(wavecode_protocol::ToolKind::Spawn)
+        .into_iter()
+        .chain(
+            native
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .names_of_kind(wavecode_protocol::ToolKind::Spawn),
+        )
+        .collect();
+    forbidden.push(crate::compaction_tool::COMPACT_CONTEXT_TOOL.to_string());
+    forbidden.into_iter().collect()
+}
 
 /// The credential values the journal redaction gate masks: every
 /// provider's env-var key (read now) and inline key. Best-effort
@@ -975,6 +970,7 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
             description: "Spawn a background child task working on the given input.".to_string(),
             read_only: false,
             destructive: false,
+            kind: wavecode_protocol::ToolKind::Spawn,
             handler: Arc::new(move |input| {
                 // Native handlers see no run context, so parent_run_id
                 // stays empty here (correlation via lineage only).
@@ -1007,6 +1003,7 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
             description: "Query a child task by id for its state and outcome.".to_string(),
             read_only: true,
             destructive: false,
+            kind: wavecode_protocol::ToolKind::Other,
             handler: Arc::new(
                 move |input| match input.get("id").and_then(|v| v.as_str()) {
                     Some(id) => match query_service.query(id) {
@@ -1025,6 +1022,7 @@ fn register_child_tools(native: &Arc<Mutex<NativeExecutor>>, tasks: Arc<TurnChil
             description: "Request a child task stop by id.".to_string(),
             read_only: false,
             destructive: false,
+            kind: wavecode_protocol::ToolKind::Other,
             handler: Arc::new(
                 move |input| match input.get("id").and_then(|v| v.as_str()) {
                     Some(id) => (format!("stopped: {}", tasks.stop(id)), false),

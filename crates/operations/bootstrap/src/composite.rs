@@ -141,6 +141,7 @@ mod tests {
             description: "echo".to_string(),
             read_only: true,
             destructive: false,
+            kind: wavecode_protocol::ToolKind::Other,
             handler: Arc::new(|_| ("native!".to_string(), false)),
         });
         // Native side executes with its own attributes and catalog slot.

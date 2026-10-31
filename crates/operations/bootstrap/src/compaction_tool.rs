@@ -23,6 +23,12 @@ use std::sync::Arc;
 use runtime_runner::CompactionRequests;
 use wavecode_tools::{Result, Tool, ToolCtx, ToolOutput};
 
+/// The tool's registered name, shared with the child-surface
+/// derivation (the compaction slot is parent-only: a child request
+/// would compact the parent's history). One constant, so a rename
+/// cannot drift the two sides apart.
+pub const COMPACT_CONTEXT_TOOL: &str = "compact_context";
+
 /// The `compact_context` tool: requests a history compaction.
 pub struct CompactContextTool {
     requests: Arc<CompactionRequests>,
@@ -38,7 +44,7 @@ impl CompactContextTool {
 #[async_trait::async_trait]
 impl Tool for CompactContextTool {
     fn name(&self) -> &str {
-        "compact_context"
+        COMPACT_CONTEXT_TOOL
     }
 
     fn kind(&self) -> wavecode_protocol::ToolKind {

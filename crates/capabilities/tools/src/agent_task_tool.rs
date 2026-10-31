@@ -175,6 +175,10 @@ impl Tool for TaskTool {
         "task"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Spawn
+    }
+
     fn description(&self) -> &str {
         "Delegate a self-contained subtask to a child agent and wait for its \
          result. The child runs with its own conversation and a restricted \

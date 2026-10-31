@@ -120,6 +120,11 @@ pub enum ToolKind {
     SessionState,
     /// Records deliverables in the session manifest (`present`).
     Present,
+    /// Spawns or drives a nested run (`task`, `skill` forks,
+    /// `task_continue`, `child_spawn`, `workflow_run`, `ralph_run`).
+    /// Child-surface derivation excludes this class so a nested
+    /// generation can never recurse past the depth cap.
+    Spawn,
     /// Reads and everything else — the cautious default.
     #[default]
     Other,

@@ -46,6 +46,10 @@ impl Tool for SkillTool {
         "skill"
     }
 
+    fn kind(&self) -> wavecode_protocol::ToolKind {
+        wavecode_protocol::ToolKind::Spawn
+    }
+
     fn description(&self) -> &str {
         "Invoke one discovered skill by name with optional arguments. \
          Use it when the skill catalog matches the current task better than \

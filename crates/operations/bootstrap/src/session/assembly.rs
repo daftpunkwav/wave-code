@@ -1274,9 +1274,6 @@ fn assemble_hooks(
 /// Build the engine's definitions: config-declared rules come first at
 /// every event point; pack rules append after (pack directory order,
 /// then file order within a pack) with the same matcher/timeout
-/// Build the engine's definitions: config-declared rules come first at
-/// every event point; pack rules append after (pack directory order,
-/// then file order within a pack) with the same matcher/timeout
 /// semantics as config rules.
 pub(super) fn hook_defs(
     config: &wavecode_config::Config,
@@ -1323,8 +1320,13 @@ fn config_hook_defs(
     }
 }
 
-/// Append the pack rules after the config rules at every event point
-/// (an unknown pack point warns with the pack attribution).
+/// Append the pack rules after the config rules at every event point.
+///
+/// An unknown pack point warns with the pack attribution; a rule the
+/// engine can never fire (an empty command, a blank matcher, or a
+/// matcher on a point that carries no tool name — the engine's own
+/// [`wavecode_hooks::HookDef::unusable_reasons`] rule) warns with the
+/// pack name and the reason, and is skipped.
 fn pack_hook_defs(
     plugins: &wavecode_skills::plugin::PluginLoader,
     defs: &mut HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>>,
@@ -1337,19 +1339,29 @@ fn pack_hook_defs(
                     "plugin {}: unknown hook point {point_name:?}; skipped",
                     plugin.name
                 )),
-                Some(point) => defs
-                    .entry(point)
-                    .or_default()
-                    .extend(rules.iter().map(|rule| {
-                        wavecode_hooks::HookDef {
+                Some(point) => {
+                    let slot = defs.entry(point).or_default();
+                    for (idx, rule) in rules.iter().enumerate() {
+                        let def = wavecode_hooks::HookDef {
                             matcher: rule.matcher.clone(),
                             command: rule.command.clone(),
                             timeout_ms: rule
                                 .timeout_ms
                                 .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
                             once: rule.once.unwrap_or(false),
+                        };
+                        let reasons = def.unusable_reasons(point);
+                        if reasons.is_empty() {
+                            slot.push(def);
+                        } else {
+                            warnings.push(format!(
+                                "plugin {}: hook {point_name} entry #{idx} skipped: {}",
+                                plugin.name,
+                                reasons.join("; ")
+                            ));
                         }
-                    })),
+                    }
+                }
             }
         }
     }
@@ -1360,7 +1372,12 @@ fn pack_hook_defs(
 ///
 /// A user-configured server owns its name: a colliding pack entry warns
 /// and drops. Among packs the later one wins a shared name (directory
-/// order), matching pack skill precedence.
+/// order), matching pack skill precedence. Every converted entry goes
+/// through the connect path's own conversion
+/// ([`wavecode_mcp::McpServerConfig::from_raw`]) first: an entry that
+/// could never connect warns with the pack name and the reason, and is
+/// skipped — so it also cannot displace an earlier pack's valid entry
+/// on a shared name.
 pub(super) fn pack_mcp_servers(
     config: &wavecode_config::Config,
     plugins: &wavecode_skills::plugin::PluginLoader,
@@ -1376,15 +1393,23 @@ pub(super) fn pack_mcp_servers(
                 ));
                 continue;
             }
+            let server = plugin_mcp_to_config(raw);
+            if let Err(reason) = wavecode_mcp::McpServerConfig::from_raw(name, &server) {
+                warnings.push(format!(
+                    "plugin {}: mcp server {name:?} skipped: {reason}",
+                    plugin.name
+                ));
+                continue;
+            }
             match servers.iter_mut().find(|(known, _)| known == name) {
                 Some(slot) => {
                     warnings.push(format!(
                         "plugin {}: mcp server {name:?} replaces the earlier pack's entry",
                         plugin.name
                     ));
-                    slot.1 = plugin_mcp_to_config(raw);
+                    slot.1 = server;
                 }
-                None => servers.push((name.clone(), plugin_mcp_to_config(raw))),
+                None => servers.push((name.clone(), server)),
             }
         }
     }

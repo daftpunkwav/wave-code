@@ -1262,3 +1262,92 @@ fn pack_mcp_entries_convert_with_config_priority_and_pack_order() {
         warnings.len()
     );
 }
+
+/// A pack rule the engine can never fire (an empty command, a blank
+/// matcher) warns with the pack attribution and is skipped, while the
+/// usable rules from the same pack still load.
+#[test]
+fn unusable_pack_hook_rules_warn_and_skip() {
+    let config = config_with("");
+    let pack_hooks = r#"
+[[PreToolUse]]
+command = "pack.sh"
+
+[[PreToolUse]]
+command = "   "
+
+[[PostToolUse]]
+matcher = "  "
+command = "fmt.sh"
+"#;
+    let home = home_with_pack(
+        "demo",
+        &[("plugin.toml", PACK_MANIFEST), ("hooks.toml", pack_hooks)],
+    );
+    let plugins = wavecode_skills::plugin::PluginLoader::load(Some(home.path()));
+    let mut warnings = Vec::new();
+    let defs = super::assembly::hook_defs(&config, &plugins, &mut warnings);
+
+    // Only the usable rule reaches the engine; the unusable ones warn
+    // with the pack name and never join the definitions.
+    let pre = &defs[&wavecode_hooks::HookEventPoint::PreToolUse];
+    assert_eq!(pre.len(), 1);
+    assert_eq!(pre[0].command, "pack.sh");
+    let post = &defs[&wavecode_hooks::HookEventPoint::PostToolUse];
+    assert!(post.is_empty(), "a blank matcher never fires: {post:?}");
+
+    let skipped = warnings
+        .iter()
+        .filter(|w| w.contains("plugin demo") && w.contains("skipped"))
+        .count();
+    assert_eq!(skipped, 2, "both unusable rules warn: {warnings:?}");
+}
+
+/// An entry that could never connect (neither command nor url) warns
+/// with the pack attribution and is skipped, so a later pack's invalid
+/// entry cannot displace an earlier pack's valid one on a shared name.
+#[test]
+fn invalid_pack_mcp_entry_warns_and_skips() {
+    let config = config_with("");
+    let home = tempfile::tempdir().unwrap();
+    let plugins_root = home.path().join(".wavecode").join("plugins");
+    let first = plugins_root.join("aaa");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::write(
+        first.join("plugin.toml"),
+        "name = \"aaa\"\nversion = \"1\"\n\n[mcp_servers.fetch]\ncommand = \"first-server\"\n",
+    )
+    .unwrap();
+    let second = plugins_root.join("zzz");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(
+        second.join("plugin.toml"),
+        "name = \"zzz\"\nversion = \"1\"\n\n[mcp_servers.fetch]\nargs = []\n",
+    )
+    .unwrap();
+    let plugins = wavecode_skills::plugin::PluginLoader::load(Some(home.path()));
+    let mut warnings = Vec::new();
+    let servers = super::assembly::pack_mcp_servers(&config, &plugins, &mut warnings);
+
+    let names: Vec<&str> = servers.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, vec!["fetch"]);
+    assert_eq!(
+        servers[0].1.command.as_deref(),
+        Some("first-server"),
+        "the later pack's invalid entry cannot displace the valid one"
+    );
+    assert!(
+        warnings.iter().any(|w| w.contains("plugin zzz")
+            && w.contains("skipped")
+            && w.contains("neither command nor url")),
+        "pack-attributed skip warning missing (warnings_count={})",
+        warnings.len()
+    );
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.contains("replaces the earlier pack's entry")),
+        "no replacement happened (warnings_count={})",
+        warnings.len()
+    );
+}

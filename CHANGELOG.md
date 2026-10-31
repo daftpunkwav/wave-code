@@ -112,6 +112,17 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   WCAG contrast (body ≥ 7:1, dim ≥ 4.5:1, muted ≥ 4.5:1) and a
   no-violet-grays contract in tests; deepwave keeps its teal identity
   with a brighter muted step.
+- The cancel paths harden: spawns on Windows join a kill-on-close
+  Job Object so a cancel terminates the whole tree with one kernel
+  call instead of a `taskkill` process spawn (falling back to the old
+  path when the assign fails), every pid-targeted tree kill probes
+  liveness first so a recycled pid is not handed to `taskkill`, the
+  cancel wait for the tree kill is bounded so a stuck kill cannot
+  hold the always-terminal job open, and the console `!` shell plus
+  the external status line decode child output through the shared
+  console code-page fallback (a raw `tasklist` on a GBK host no
+  longer renders as diamond noise, and one invalid byte no longer
+  silently closes the `!` shell pipes).
 - Parameterized slash commands open their interactive surface when
   invoked bare: `/theme` and `/effort` pick from a selector, `/title`,
   `/editor`, `/export`, `/compact`, and `/btw` open a prefilled

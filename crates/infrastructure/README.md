@@ -10,8 +10,8 @@ English | [中文](README.zh.md)
 These crates hold mechanisms, not policy: scattered magic numbers are
 collected here with their rationale, so every upper layer reads one
 constant instead of re-inventing its own. Both depend on no workspace
-crate (`base` declares only `tokio` and, on unix, `libc`; `ratelimit`
-only `thiserror`), and both are consumed from above — `base` by
+crate (`base` declares `tokio` and `encoding_rs`, plus `libc` on unix
+and `windows-sys` on windows; `ratelimit` only `thiserror`), and both are consumed from above — `base` by
 `action/jobs`, `capabilities/hooks`, `capabilities/tools`,
 `operations/actor`, `operations/bootstrap`, `operations/gateway`,
 `runtime/child`, `runtime/runner`, and `state/store`; `ratelimit` by

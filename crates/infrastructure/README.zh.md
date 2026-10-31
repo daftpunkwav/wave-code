@@ -9,7 +9,8 @@
 
 这些 crate 承载机制而非策略：散落的魔法数字在此集中并附上理由，
 所有上层读取同一个常量，而不是各自发明。两者都不依赖任何 workspace
-内 crate（`base` 仅依赖 `tokio`，Unix 上另依赖 `libc`；`ratelimit` 仅
+内 crate（`base` 依赖 `tokio` 与 `encoding_rs`，Unix 上另依赖 `libc`、
+Windows 上另依赖 `windows-sys`；`ratelimit` 仅
 依赖 `thiserror`），并且只被上层消费——`base` 的消费方有 `action/jobs`、
 `capabilities/hooks`、`capabilities/tools`、`operations/actor`、
 `operations/bootstrap`、`operations/gateway`、`runtime/child`、

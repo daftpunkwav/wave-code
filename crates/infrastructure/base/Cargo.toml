@@ -13,8 +13,24 @@ license.workspace = true
 tokio.workspace = true
 # Process-group kill for `kill_tree` (Unix only; Windows routes through
 # `taskkill`, other platforms degrade to a no-op).
+# Console code-page decoding: the fallback type appears in the codec's
+# cross-platform signatures, so the crate carries it on every platform.
+encoding_rs.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
+
+# The pid liveness probe and the cancel-path Job Object: the two
+# Windows-only runtime primitives this crate owns beside the
+# process-group kill.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

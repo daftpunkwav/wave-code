@@ -62,6 +62,10 @@ const SKILL_DIR_VARIABLE: &str = "${WAVECODE_SKILL_DIR}";
 pub enum SkillSource {
     /// Builtin skill set shipped with the binary.
     Builtin,
+    /// Installed plugin pack (`~/.wavecode/plugins/<pack>/…`). Ranks
+    /// below user- and project-level skills: a pack is a bundle someone
+    /// else curated, so the user's own same-named skill wins.
+    Pack,
     /// User-level `~/.wavecode/skills`.
     User,
     /// Project-level `<cwd>/.wavecode/skills`.
@@ -77,6 +81,7 @@ impl SkillSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
+            Self::Pack => "pack",
             Self::User => "user",
             Self::Project => "project",
             Self::Mcp => "mcp",

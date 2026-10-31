@@ -32,9 +32,13 @@ pub struct PluginSummary {
 /// Load every installed plugin pack under `home`.
 ///
 /// Returns the summaries plus non-fatal parse warnings: a broken pack
-/// degrades to a warning, never a hard failure. The summaries are
-/// inventory only — pack skills, MCP servers, and hooks are counted for
-/// listing and diagnostics; none of them is wired into a session.
+/// degrades to a warning, never a hard failure. The summaries mirror
+/// what a session would wire: pack skills merge into the catalog under
+/// user/project sources, pack MCP servers convert into configured
+/// servers, and pack hook rules join the hook engine. Whether a given
+/// entry survives session-time collision checks (a same-named user
+/// skill or configured server wins) depends on the session's cwd and
+/// config, which this listing deliberately does not load.
 pub fn discover_plugin_summaries(home: Option<&Path>) -> (Vec<PluginSummary>, Vec<String>) {
     let loader = wavecode_skills::plugin::PluginLoader::load(home);
     let summaries = loader

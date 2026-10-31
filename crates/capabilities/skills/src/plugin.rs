@@ -10,10 +10,11 @@
  * - Warn-and-skip invalid packs without failing discovery.
  *
  * Constraints:
- * - This module is inventory only: the session assembly consumes
- *   builtin/user/project skill roots and never merges pack contents, so
- *   a pack's skills, MCP servers, and hooks are counted and surfaced
- *   (e.g. by `plugin list`) but do not take effect.
+ * - This module parses and validates but does not decide precedence: the
+ *   session assembly merges pack skills under the standard roots via
+ *   [`PluginLoader::apply_skills`], and the composition root converts
+ *   the raw MCP entries and hook rules into configured servers and
+ *   engine definitions (config-crate types this module must not import).
  *
  * This module must not depend on: workspace crates beyond its own
  * (manifest shapes mirror config/hook types instead of importing them).
@@ -24,12 +25,12 @@
 //!
 //! A manifest carries `{name, version, skills_dir?, hooks_file?}` plus
 //! optional `[mcp_servers.<server>]` inline tables. Skills load through
-//! the [`discover`] pipeline with [`SkillSource::User`]. The loader is
-//! inventory only: MCP entries and hook rules are returned raw (mirrors
-//! of the config/hook shapes, so this module imports neither), and
-//! nothing currently converts them into configured servers or active
-//! hook rules — consumers read counts and entries for listing and
-//! diagnostics. Invalid packs warn-and-skip with a reason.
+//! the [`discover`] pipeline with [`SkillSource::Pack`]. MCP entries and
+//! hook rules are returned raw (mirrors of the config/hook shapes, so
+//! this module imports neither); the session assembly merges the skills
+//! below user/project sources and the composition root converts the
+//! entries into configured servers and active hook rules. Invalid packs
+//! warn-and-skip with a reason.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,8 +52,8 @@ fn valid_name(name: &str) -> bool {
 /// Raw MCP server entry from a plugin manifest.
 ///
 /// Mirrors the config-crate server shape without depending on it.
-/// Retained for listing and diagnostics; no session assembly consumes
-/// these entries today.
+/// The session assembly converts entries into configured servers for
+/// the live connect path.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginMcpServer {
     /// Stdio executable command (stdio servers).
@@ -73,8 +74,8 @@ pub struct PluginMcpServer {
 /// Raw hook rule from a plugin hooks file.
 ///
 /// Mirrors the config-crate hook rule without depending on it.
-/// Retained for listing and diagnostics; no session assembly converts
-/// these into engine definitions today.
+/// The session assembly converts rules into engine definitions with
+/// the same matcher/timeout semantics as config-declared rules.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PluginHookRule {
     /// Tool-name matcher (optional).
@@ -123,12 +124,13 @@ pub struct LoadedPlugin {
     pub name: String,
     /// Pack version string.
     pub version: String,
-    /// Skills discovered from `skills_dir` ([`SkillSource::User`]).
+    /// Skills discovered from `skills_dir` ([`SkillSource::Pack`]).
     pub skills: SkillSet,
-    /// Raw MCP entries, sorted by server name (listing only; see the
-    /// module docs for the inventory-only contract).
+    /// Raw MCP entries, sorted by server name (converted into
+    /// configured servers by the composition root).
     pub mcp_servers: Vec<(String, PluginMcpServer)>,
-    /// Raw hook rules, keyed by event-point name (listing only).
+    /// Raw hook rules, keyed by event-point name (converted into
+    /// engine definitions by the session assembly).
     pub hooks: HashMap<String, Vec<PluginHookRule>>,
 }
 
@@ -203,15 +205,29 @@ impl PluginLoader {
         &self.warnings
     }
 
-    /// Merge every pack's skills into `set` (same names override, so
-    /// later packs win over earlier ones).
+    /// Merge every pack's skills into `set` as the pack source.
     ///
-    /// No production caller today — the session assembly never merges
-    /// pack skills; this is the hook a wiring pass would call.
+    /// Pack skills rank between builtin and the standard roots: they
+    /// displace a same-named builtin entry and yield to user and project
+    /// entries, which keep their slots, so the caller merges packs after
+    /// the standard roots. Later packs win among themselves, in
+    /// directory order.
     pub fn apply_skills(&self, set: &mut SkillSet) {
         for plugin in &self.plugins {
             for skill in plugin.skills.iter() {
-                set.add(skill.clone());
+                // A user or project entry keeps its slot; a pack entry
+                // yields to the later pack, in directory order; a builtin
+                // entry yields to the pack (source order: builtin < pack
+                // < user < project).
+                let displaced = match set.get(&skill.name) {
+                    Some(existing) => {
+                        matches!(existing.source, SkillSource::Builtin | SkillSource::Pack)
+                    }
+                    None => true,
+                };
+                if displaced {
+                    set.add(skill.clone());
+                }
             }
         }
     }
@@ -239,9 +255,9 @@ impl PluginLoader {
         let skills = match &manifest.skills_dir {
             Some(rel) => {
                 // Reuse the Discovery pipeline: same SKILL.md parsing and
-                // per-file warn-and-skip, attributed to the User source.
+                // per-file warn-and-skip, attributed to the Pack source.
                 let roots = [SkillRoot {
-                    source: SkillSource::User,
+                    source: SkillSource::Pack,
                     dir: dir.join(rel),
                 }];
                 let discovery = discover(&roots);
@@ -295,6 +311,7 @@ impl PluginLoader {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Skill;
     use super::*;
 
     const SKILL_MD: &str = "---\ndescription: Review helper skill.\n---\n\nReview body here.\n";
@@ -454,7 +471,7 @@ command = "notify.sh"
     }
 
     #[test]
-    fn apply_skills_merges_as_user_source() {
+    fn apply_skills_merges_as_pack_source_below_existing_entries() {
         let home = home_with_pack(
             "demo",
             &[
@@ -467,6 +484,81 @@ command = "notify.sh"
         let mut set = SkillSet::default();
         loader.apply_skills(&mut set);
         let skill = set.get("greet").expect("merged skill");
-        assert_eq!(skill.source, SkillSource::User);
+        assert_eq!(skill.source, SkillSource::Pack);
+
+        // An entry already in the set keeps its slot: user/project
+        // skills win over a pack skill of the same name.
+        let user = tempfile::tempdir().unwrap();
+        let greet = user.path().join("greet");
+        std::fs::create_dir_all(&greet).unwrap();
+        std::fs::write(greet.join("SKILL.md"), SKILL_MD).unwrap();
+        let mut set = SkillSet::default();
+        set.add(Skill::parse(&greet, SkillSource::User).expect("hand-built skill"));
+        loader.apply_skills(&mut set);
+        assert_eq!(set.get("greet").unwrap().source, SkillSource::User);
+
+        // A builtin entry yields to the pack: pack ranks above builtin
+        // in the source order (builtin < pack < user < project).
+        let builtin = tempfile::tempdir().unwrap();
+        let greet = builtin.path().join("greet");
+        std::fs::create_dir_all(&greet).unwrap();
+        std::fs::write(greet.join("SKILL.md"), SKILL_MD).unwrap();
+        let mut set = SkillSet::default();
+        set.add(Skill::parse(&greet, SkillSource::Builtin).expect("hand-built skill"));
+        loader.apply_skills(&mut set);
+        assert_eq!(set.get("greet").unwrap().source, SkillSource::Pack);
+    }
+
+    /// Two packs declaring the same skill name: the later pack (directory
+    /// order) wins the slot, while a user skill still beats both.
+    #[test]
+    fn later_pack_wins_the_same_named_skill() {
+        let manifest = |name: &str| {
+            format!(
+                "name = \"{name}\"
+version = \"1\"
+skills_dir = \"skills\"
+"
+            )
+        };
+        let home = home_with_pack("aaa", &[("plugin.toml", &manifest("aaa"))]);
+        // Distinct SKILL.md fixtures: both packs carry the same skill
+        // name, so the merged entry's description is what tells the
+        // later pack's body apart from the first pack's.
+        let first_skill = "---\ndescription: First pack skill.\n---\n\nFirst pack body.\n";
+        let later_skill = "---\ndescription: Later pack skill.\n---\n\nLater pack body.\n";
+        let pack = home.path().join(".wavecode").join("plugins").join("bbb");
+        std::fs::create_dir_all(pack.join("skills").join("greet")).unwrap();
+        std::fs::write(pack.join("plugin.toml"), manifest("bbb")).unwrap();
+        std::fs::write(
+            pack.join("skills").join("greet").join("SKILL.md"),
+            later_skill,
+        )
+        .unwrap();
+        let first = home.path().join(".wavecode").join("plugins").join("aaa");
+        std::fs::create_dir_all(first.join("skills").join("greet")).unwrap();
+        std::fs::write(
+            first.join("skills").join("greet").join("SKILL.md"),
+            first_skill,
+        )
+        .unwrap();
+        let loader = PluginLoader::load(Some(home.path()));
+        assert_eq!(loader.plugins().len(), 2);
+
+        let mut set = SkillSet::default();
+        loader.apply_skills(&mut set);
+        assert_eq!(set.get("greet").unwrap().source, SkillSource::Pack);
+        let merged = set.get("greet").unwrap();
+        assert_eq!(
+            merged.meta.description, "Later pack skill.",
+            "the later pack's metadata displaced the first pack's entry"
+        );
+        assert_eq!(
+            merged.body, "Later pack body.",
+            "the merged entry carries the later pack's body, not just its metadata"
+        );
+
+        // The collision leaves one entry, not a duplicate.
+        assert_eq!(set.len(), 1);
     }
 }

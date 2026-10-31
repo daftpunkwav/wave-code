@@ -344,6 +344,7 @@ pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
         skill_catalog,
         skill_names,
         mcp_servers,
+        pack_mcp_servers,
         ..
     } = ctx;
 
@@ -396,8 +397,11 @@ pub fn assemble_session_after_model(parts: WithModel) -> SessionHandle {
         _ => client,
     };
 
+    // Configured servers connect first; converted pack servers append
+    // after (the list is name-sorted anyway).
     let mut mcp_pending: Vec<(String, wavecode_config::McpServerRaw)> =
         config.mcp_servers.clone().into_iter().collect();
+    mcp_pending.extend(pack_mcp_servers);
     mcp_pending.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Frontend status views share the tool-side snapshot root so /plan,
@@ -477,6 +481,11 @@ struct AssembledContext {
     hooks: Arc<wavecode_hooks::HookEngine>,
     /// Configured MCP servers as one display line each.
     mcp_servers: Vec<String>,
+    /// Pack MCP servers converted into config shape for the live
+    /// connect path (user config wins name collisions; later packs win
+    /// among themselves). The finalize phase appends them to the
+    /// pending list after the configured servers.
+    pack_mcp_servers: Vec<(String, wavecode_config::McpServerRaw)>,
 }
 
 /// Build [`AssembledContext`] (phases 1-4): shared stores, the policy
@@ -526,12 +535,18 @@ fn build_assembled_context(
     let sandbox =
         wavecode_sandbox::Sandbox::from_rules(permission_mode, permissions.allow, permissions.deny);
 
-    // 4. Context sources with warn-and-continue degradation.
+    // 4. Context sources with warn-and-continue degradation. Plugin
+    // packs load once here: the skills merge into the catalog, the hook
+    // rules join the engine, and the MCP entries convert into pending
+    // servers; loader warnings degrade like every other source.
+    let plugins = wavecode_skills::plugin::PluginLoader::load(home);
+    warnings.extend(plugins.warnings().iter().cloned());
     let (instruction_memory, memory_index, instruction_sources) =
         assemble_memory(home, cwd, warnings);
-    let (skill_catalog, skill_names, skill_set) = assemble_skills(home, cwd, warnings);
-    let hooks = assemble_hooks(config, warnings);
-    let mcp_servers = describe_mcp_servers(config);
+    let (skill_catalog, skill_names, skill_set) = assemble_skills(&plugins, home, cwd, warnings);
+    let hooks = assemble_hooks(config, &plugins, warnings);
+    let pack_mcp_servers = pack_mcp_servers(config, &plugins, warnings);
+    let mcp_servers = describe_mcp_servers(config, &pack_mcp_servers);
 
     AssembledContext {
         spill_store,
@@ -548,6 +563,7 @@ fn build_assembled_context(
         skill_set,
         hooks,
         mcp_servers,
+        pack_mcp_servers,
     }
 }
 
@@ -1217,13 +1233,18 @@ fn assemble_memory(
 /// Assemble the skill catalog text with discovery warnings preserved,
 /// returning catalog text, directly invokable names for UIs, and the set
 /// itself for the `skill` tool backend.
+///
+/// Pack skills merge under the standard roots: a same-named user or
+/// project skill keeps its slot and a pack only fills the gaps.
 fn assemble_skills(
+    plugins: &wavecode_skills::plugin::PluginLoader,
     home: Option<&Path>,
     cwd: &Path,
     warnings: &mut Vec<String>,
 ) -> (String, Vec<String>, Arc<wavecode_skills::SkillSet>) {
     let roots = wavecode_skills::standard_roots(None, home, cwd);
-    let discovery = wavecode_skills::discover(&roots);
+    let mut discovery = wavecode_skills::discover(&roots);
+    plugins.apply_skills(&mut discovery.set);
     warnings.extend(discovery.warnings.iter().cloned());
     let names: Vec<String> = discovery
         .set
@@ -1238,54 +1259,227 @@ fn assemble_skills(
     )
 }
 
-/// Convert raw config hooks into an engine, warning past bad entries.
+/// Convert raw config hooks plus pack hook rules into an engine, warning
+/// past bad entries.
 fn assemble_hooks(
     config: &wavecode_config::Config,
+    plugins: &wavecode_skills::plugin::PluginLoader,
     warnings: &mut Vec<String>,
 ) -> Arc<wavecode_hooks::HookEngine> {
-    let mut defs = HashMap::new();
+    Arc::new(wavecode_hooks::HookEngine::new(hook_defs(
+        config, plugins, warnings,
+    )))
+}
+
+/// Build the engine's definitions: config-declared rules come first at
+/// every event point; pack rules append after (pack directory order,
+/// then file order within a pack) with the same matcher/timeout
+/// semantics as config rules.
+pub(super) fn hook_defs(
+    config: &wavecode_config::Config,
+    plugins: &wavecode_skills::plugin::PluginLoader,
+    warnings: &mut Vec<String>,
+) -> HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>> {
+    let mut defs: HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>> =
+        HashMap::new();
+    config_hook_defs(config, &mut defs, warnings);
+    pack_hook_defs(plugins, &mut defs, warnings);
+    defs
+}
+
+/// One config `HookRule` in engine form (absent timeout/once fall back
+/// to the engine defaults).
+fn config_rule_to_def(rule: &wavecode_config::HookRule) -> wavecode_hooks::HookDef {
+    wavecode_hooks::HookDef {
+        matcher: rule.matcher.clone(),
+        command: rule.command.clone(),
+        timeout_ms: rule
+            .timeout_ms
+            .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
+        once: rule.once.unwrap_or(false),
+    }
+}
+
+/// Insert the config-declared rules; an unknown event point warns and
+/// skips (config keys are free-form TOML).
+fn config_hook_defs(
+    config: &wavecode_config::Config,
+    defs: &mut HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>>,
+    warnings: &mut Vec<String>,
+) {
     for (point_name, ruleset) in &config.hooks {
         match wavecode_hooks::HookEventPoint::parse(point_name) {
             None => warnings.push(format!("unknown hook point {point_name:?}; skipped")),
             Some(point) => {
                 defs.insert(
                     point,
-                    ruleset
-                        .rules()
-                        .iter()
-                        .map(|rule| wavecode_hooks::HookDef {
-                            matcher: rule.matcher.clone(),
-                            command: rule.command.clone(),
-                            timeout_ms: rule
-                                .timeout_ms
-                                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
-                            once: rule.once.unwrap_or(false),
-                        })
-                        .collect(),
+                    ruleset.rules().iter().map(config_rule_to_def).collect(),
                 );
             }
         }
     }
-    Arc::new(wavecode_hooks::HookEngine::new(defs))
 }
 
-/// Describe configured MCP servers as one display line each.
+/// Append the pack rules after the config rules at every event point.
+///
+/// An unknown pack point warns with the pack attribution; a rule the
+/// engine can never fire (an empty command, a blank matcher, or a
+/// matcher on a point that carries no tool name — the engine's own
+/// [`wavecode_hooks::HookDef::unusable_reasons`] rule) warns with the
+/// pack name and the reason, and is skipped.
+fn pack_hook_defs(
+    plugins: &wavecode_skills::plugin::PluginLoader,
+    defs: &mut HashMap<wavecode_hooks::HookEventPoint, Vec<wavecode_hooks::HookDef>>,
+    warnings: &mut Vec<String>,
+) {
+    for plugin in plugins.plugins() {
+        for (point_name, rules) in &plugin.hooks {
+            match wavecode_hooks::HookEventPoint::parse(point_name) {
+                None => warnings.push(format!(
+                    "plugin {}: unknown hook point {point_name:?}; skipped",
+                    plugin.name
+                )),
+                Some(point) => file_pack_rules(
+                    &plugin.name,
+                    point_name,
+                    point,
+                    rules,
+                    defs.entry(point).or_default(),
+                    warnings,
+                ),
+            }
+        }
+    }
+}
+
+/// File one pack point's rules into `slot` in rule order.
+///
+/// A rule the engine can never fire
+/// ([`wavecode_hooks::HookDef::unusable_reasons`]) warns with the pack
+/// attribution and is skipped instead of joining `slot`.
+fn file_pack_rules(
+    plugin_name: &str,
+    point_name: &str,
+    point: wavecode_hooks::HookEventPoint,
+    rules: &[wavecode_skills::plugin::PluginHookRule],
+    slot: &mut Vec<wavecode_hooks::HookDef>,
+    warnings: &mut Vec<String>,
+) {
+    for (idx, rule) in rules.iter().enumerate() {
+        let def = wavecode_hooks::HookDef {
+            matcher: rule.matcher.clone(),
+            command: rule.command.clone(),
+            timeout_ms: rule
+                .timeout_ms
+                .unwrap_or(wavecode_hooks::DEFAULT_TIMEOUT_MS),
+            once: rule.once.unwrap_or(false),
+        };
+        let reasons = def.unusable_reasons(point);
+        if reasons.is_empty() {
+            slot.push(def);
+        } else {
+            warnings.push(format!(
+                "plugin {plugin_name}: hook {point_name} entry #{idx} skipped: {}",
+                reasons.join("; ")
+            ));
+        }
+    }
+}
+
+/// Convert pack MCP entries into config-crate servers for the live
+/// connect path.
+///
+/// A user-configured server owns its name: a colliding pack entry warns
+/// and drops. Among packs the later one wins a shared name (directory
+/// order), matching pack skill precedence. Every converted entry goes
+/// through the connect path's own conversion
+/// ([`wavecode_mcp::McpServerConfig::from_raw`]) first: an entry that
+/// could never connect warns with the pack name and the reason, and is
+/// skipped — so it also cannot displace an earlier pack's valid entry
+/// on a shared name.
+pub(super) fn pack_mcp_servers(
+    config: &wavecode_config::Config,
+    plugins: &wavecode_skills::plugin::PluginLoader,
+    warnings: &mut Vec<String>,
+) -> Vec<(String, wavecode_config::McpServerRaw)> {
+    let mut servers: Vec<(String, wavecode_config::McpServerRaw)> = Vec::new();
+    for plugin in plugins.plugins() {
+        for (name, raw) in &plugin.mcp_servers {
+            if config.mcp_servers.contains_key(name) {
+                warnings.push(format!(
+                    "plugin {}: mcp server {name:?} ignored: a configured server already owns that name",
+                    plugin.name
+                ));
+                continue;
+            }
+            let server = plugin_mcp_to_config(raw);
+            if let Err(reason) = wavecode_mcp::McpServerConfig::from_raw(name, &server) {
+                warnings.push(format!(
+                    "plugin {}: mcp server {name:?} skipped: {reason}",
+                    plugin.name
+                ));
+                continue;
+            }
+            match servers.iter_mut().find(|(known, _)| known == name) {
+                Some(slot) => {
+                    warnings.push(format!(
+                        "plugin {}: mcp server {name:?} replaces the earlier pack's entry",
+                        plugin.name
+                    ));
+                    slot.1 = server;
+                }
+                None => servers.push((name.clone(), server)),
+            }
+        }
+    }
+    servers.sort_by(|a, b| a.0.cmp(&b.0));
+    servers
+}
+
+/// Lift a pack MCP entry into the config-crate shape. Packs carry no
+/// OAuth fields, so those default to absent.
+fn plugin_mcp_to_config(
+    raw: &wavecode_skills::plugin::PluginMcpServer,
+) -> wavecode_config::McpServerRaw {
+    wavecode_config::McpServerRaw {
+        command: raw.command.clone(),
+        args: raw.args.clone(),
+        env: raw.env.clone(),
+        url: raw.url.clone(),
+        headers: raw.headers.clone(),
+        oauth_token_url: None,
+        oauth_client_id: None,
+        oauth_client_secret: None,
+        oauth_scope: None,
+    }
+}
+
+/// Describe configured and pack MCP servers as one display line each.
 ///
 /// stdio entries show their command, HTTP entries their URL; entries
 /// with neither are reported, never silently dropped.
-fn describe_mcp_servers(config: &wavecode_config::Config) -> Vec<String> {
+fn describe_mcp_servers(
+    config: &wavecode_config::Config,
+    pack_servers: &[(String, wavecode_config::McpServerRaw)],
+) -> Vec<String> {
+    let describe = |name: &str, server: &wavecode_config::McpServerRaw| {
+        if let Some(command) = &server.command {
+            format!("{name} (stdio: {command})")
+        } else if let Some(url) = &server.url {
+            format!("{name} (http: {url})")
+        } else {
+            format!("{name} (unconfigured)")
+        }
+    };
     let mut lines: Vec<String> = config
         .mcp_servers
         .iter()
-        .map(|(name, server)| {
-            if let Some(command) = &server.command {
-                format!("{name} (stdio: {command})")
-            } else if let Some(url) = &server.url {
-                format!("{name} (http: {url})")
-            } else {
-                format!("{name} (unconfigured)")
-            }
-        })
+        .map(|(name, server)| describe(name, server))
+        .chain(
+            pack_servers
+                .iter()
+                .map(|(name, server)| describe(name, server)),
+        )
         .collect();
     lines.sort();
     lines

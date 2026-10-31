@@ -171,6 +171,28 @@ impl HookDef {
             self.timeout_ms
         })
     }
+
+    /// Reasons this entry can never do anything useful at `point`: an
+    /// empty command, a blank matcher, or a matcher on a point that
+    /// carries no tool name. Empty when the entry is usable; a zero
+    /// timeout is not listed because it falls back to the default
+    /// rather than disabling the entry. [`HookEngine::validate`] and
+    /// the assembly layers share this rule, so a skipped entry and the
+    /// static diagnostics cannot drift apart.
+    pub fn unusable_reasons(&self, point: HookEventPoint) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.command.trim().is_empty() {
+            reasons.push("has an empty command (never executes)");
+        }
+        if let Some(matcher) = &self.matcher {
+            if matcher.trim().is_empty() {
+                reasons.push("matcher is blank (never matches)");
+            } else if !is_tool_point(point) {
+                reasons.push("has a matcher but this point carries no tool name (never fires)");
+            }
+        }
+        reasons
+    }
 }
 
 /// An event payload for one hook firing.
@@ -293,30 +315,14 @@ impl HookEngine {
         tables.sort_by_key(|(p, _)| p.as_str());
         for (point, defs) in tables {
             for (idx, def) in defs.iter().enumerate() {
-                if def.command.trim().is_empty() {
-                    out.push(format!(
-                        "[{}] entry #{idx} has an empty command (never executes)",
-                        point.as_str()
-                    ));
+                for reason in def.unusable_reasons(point) {
+                    out.push(format!("[{}] entry #{idx} {reason}", point.as_str()));
                 }
                 if def.timeout_ms == 0 {
                     out.push(format!(
                         "[{}] entry #{idx} timeout_ms is 0 (falls back to {DEFAULT_TIMEOUT_MS}ms)",
                         point.as_str()
                     ));
-                }
-                if let Some(matcher) = &def.matcher {
-                    if matcher.trim().is_empty() {
-                        out.push(format!(
-                            "[{}] entry #{idx} matcher is blank (never matches)",
-                            point.as_str()
-                        ));
-                    } else if !is_tool_point(point) {
-                        out.push(format!(
-                            "[{}] entry #{idx} has a matcher but this point carries no tool name (never fires)",
-                            point.as_str()
-                        ));
-                    }
                 }
             }
         }

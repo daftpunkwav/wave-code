@@ -105,14 +105,27 @@ pub fn validate_contract(events: &[Event]) -> Vec<String> {
                 }
                 open_calls.entry(call_id.clone()).or_default().push(id);
             }
-            EventMsg::ToolCallEnd { call_id, .. } => match open_calls.get_mut(call_id) {
-                Some(slots) if !slots.is_empty() => {
-                    slots.pop();
+            EventMsg::ToolCallEnd { call_id, .. } => {
+                // An end settles the slot its own submission opened: with
+                // interleaved submissions sharing a call id, popping the
+                // last slot would close another submission's call and
+                // leave the ending one open at TurnCompleted.
+                let settled = match open_calls.get_mut(call_id) {
+                    Some(slots) => match slots.iter().rposition(|owner| *owner == id) {
+                        Some(slot) => {
+                            slots.remove(slot);
+                            true
+                        }
+                        None => false,
+                    },
+                    None => false,
+                };
+                if !settled {
+                    violations.push(format!(
+                        "#{index} ({id}): ToolCallEnd for unopened call {call_id}"
+                    ));
                 }
-                _ => violations.push(format!(
-                    "#{index} ({id}): ToolCallEnd for unopened call {call_id}"
-                )),
-            },
+            }
             // One AgentMessageComplete per sample is the documented order:
             // a tool-using (or continued) turn completes once per round, so
             // repeats under one submission id are legal.
@@ -513,6 +526,90 @@ mod tests {
         let violations = validate_contract(&events);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("c1 never ended"));
+    }
+
+    /// Interleaved submissions may share a call id: each end must settle
+    /// the slot its own submission opened. Popping the most recent slot
+    /// instead would let the first end close the other submission's call,
+    /// report the first submission's call as never ended, and read the
+    /// second end as unopened.
+    #[test]
+    fn interleaved_submissions_settle_their_own_slots() {
+        let begin = |sub: &str| {
+            event(
+                sub,
+                EventMsg::ToolCallBegin {
+                    call_id: "c1".into(),
+                    name: "shell".into(),
+                    input: serde_json::Value::Null,
+                },
+            )
+        };
+        let end = |sub: &str| {
+            event(
+                sub,
+                EventMsg::ToolCallEnd {
+                    call_id: "c1".into(),
+                    is_error: true,
+                    output: None,
+                    outcome: ToolOutcome::NotDispatched,
+                    duration_ms: 0,
+                },
+            )
+        };
+        // s1 finishes first while s2's call on the shared id is still
+        // outstanding: the owner-matched removal leaves s2's slot alone,
+        // so s1 completes cleanly and s2's later end still finds its slot.
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event(
+                "s2",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            begin("s1"),
+            begin("s2"),
+            end("s1"),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+            end("s2"),
+            event("s2", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        assert!(
+            validate_contract(&events).is_empty(),
+            "each submission closes its own slot"
+        );
+
+        // An end from a submission that never opened the call still
+        // violates: the owner check does not silently consume a foreign
+        // slot, and the real owner stays open at TurnCompleted.
+        let events = vec![
+            event(
+                "s1",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            event(
+                "s2",
+                EventMsg::TurnStarted {
+                    model: "m".to_string(),
+                },
+            ),
+            begin("s1"),
+            end("s2"),
+            event("s2", EventMsg::TurnCompleted { interrupted: false }),
+            event("s1", EventMsg::TurnCompleted { interrupted: false }),
+        ];
+        let violations = validate_contract(&events);
+        assert_eq!(violations.len(), 2, "{violations:?}");
+        assert!(violations.iter().any(|v| v.contains("unopened call c1")));
+        assert!(violations.iter().any(|v| v.contains("c1 never ended")));
     }
 
     /// Pairing is mandatory even in an interrupted turn: the run loop

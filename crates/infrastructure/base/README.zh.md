@@ -18,4 +18,6 @@
 要等整棵进程树死透，因此本 crate 同时提供把这段等待移出 runtime worker
 的变体。回收子进程的调用方必须在树杀落地之后才回收：回收会释放 pid，
 之后才启动的树杀可能命中已被系统分配该 pid 的其他进程。本 crate 依赖
-`tokio`（blocking pool），Unix 上另依赖 `libc`。
+`tokio`（blocking pool）与 `encoding_rs`（控制台代码页回退，供所有展示
+子进程字节的表面共用），Unix 上另依赖 `libc`，Windows 上另依赖
+`windows-sys`（pid 存活探测与取消路径的 Job Object）。

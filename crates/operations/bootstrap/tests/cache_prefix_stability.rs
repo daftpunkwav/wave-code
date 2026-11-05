@@ -114,7 +114,7 @@ fn projected(history: &[HistoryEntry], cfg: &EvictionConfig) -> (Vec<Message>, b
         })
     });
     if should_evict_tool_results(tokens, cfg) {
-        (evict_old_tool_results(&messages, cfg), true)
+        (evict_old_tool_results(messages.clone(), cfg), true)
     } else {
         (messages, false)
     }
@@ -159,8 +159,8 @@ fn eviction_pass_is_idempotent() {
     };
     let history: Vec<HistoryEntry> = (0..40).flat_map(turn_entries).collect();
     let raw: Vec<Message> = history.iter().map(to_message).collect();
-    let once = evict_old_tool_results(&raw, &cfg);
-    let twice = evict_old_tool_results(&once, &cfg);
+    let once = evict_old_tool_results(raw.clone(), &cfg);
+    let twice = evict_old_tool_results(once.clone(), &cfg);
     assert_ne!(
         once, raw,
         "the pass evicted nothing: idempotency is vacuous"

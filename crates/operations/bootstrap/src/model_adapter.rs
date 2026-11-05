@@ -151,6 +151,40 @@ impl ModelAdapter {
     }
 }
 
+/// Move one history block into the provider shape without cloning.
+///
+/// The eviction pipeline converts the whole request history per
+/// past-threshold sample, so its conversion moves every field; the
+/// `produced_at` wall-clock stamp has no provider counterpart and is
+/// dropped exactly as in the borrowed conversion (the stored history
+/// keeps its original stamped result).
+pub(crate) fn into_content_block(block: Block) -> ContentBlock {
+    match block {
+        Block::Text(text) => ContentBlock::Text { text },
+        Block::ToolUse {
+            call_id,
+            name,
+            input,
+        } => ContentBlock::ToolUse {
+            id: call_id,
+            name,
+            input,
+        },
+        Block::ToolResult {
+            call_id,
+            content,
+            is_error,
+            ..
+        } => ContentBlock::ToolResult {
+            tool_use_id: call_id,
+            content,
+            is_error,
+        },
+        Block::Image { id, mime, base64 } => ContentBlock::Image { id, mime, base64 },
+        Block::Thinking { text, signature } => ContentBlock::Thinking { text, signature },
+    }
+}
+
 /// Map one history block onto the provider block shape.
 pub(crate) fn to_content_block(block: &Block) -> ContentBlock {
     match block {

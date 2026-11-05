@@ -345,11 +345,14 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_terminates_with_done_none() {
-        // A command that would run far past the test budget.
+        // A command that would run far past the test budget. Eight
+        // seconds keeps a wide margin over the proof window below
+        // while capping the worst case (a kill that fails to land) at
+        // a fraction of the suite's wall time.
         let sleep = if cfg!(windows) {
-            "ping -n 30 127.0.0.1"
+            "ping -n 8 127.0.0.1"
         } else {
-            "sleep 30"
+            "sleep 8"
         };
         let mut job = spawn_with_default_shell(sleep).expect("spawn");
         // No settle sleep is needed: `spawn` already awaited the child
@@ -371,7 +374,7 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn cancel_reports_done_when_a_descendant_holds_the_pipe() {
-        let mut job = spawn_with_default_shell("start /B ping -n 30 127.0.0.1").expect("spawn");
+        let mut job = spawn_with_default_shell("start /B ping -n 8 127.0.0.1").expect("spawn");
         // The descendant's output proves it holds the pipe the shell
         // left behind.
         let mut descendant_alive = false;
@@ -398,9 +401,9 @@ mod tests {
         // short-lived command would leave the second tree kill without
         // a live pid to hit.
         let sleep = if cfg!(windows) {
-            "ping -n 30 127.0.0.1"
+            "ping -n 8 127.0.0.1"
         } else {
-            "sleep 30"
+            "sleep 8"
         };
         let mut job = spawn_with_default_shell(sleep).expect("spawn");
         job.cancel();

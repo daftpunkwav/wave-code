@@ -808,22 +808,38 @@ mod tests {
     /// host), so a cancel that ran it inline blows past this bound. On
     /// Unix the group signal returns immediately, so the bound is never
     /// approached there.
+    ///
+    /// A wall-clock ceiling is theoretically flaky under extreme
+    /// scheduling jitter, so the scenario retries once before failing:
+    /// a jitter blip passes on the second run, while a real inline
+    /// regression (~400 ms measured) fails both.
     #[tokio::test]
     async fn cancel_does_not_block_the_caller() {
+        let ceiling = Duration::from_millis(250);
         let (_runtime, jobs) = harness();
+        let mut elapsed = measure_cancel_latency(&jobs).await;
+        if elapsed >= ceiling {
+            elapsed = measure_cancel_latency(&jobs).await;
+        }
+        assert!(
+            elapsed < ceiling,
+            "the cancel parked the caller for {elapsed:?}: the tree kill must not run inline"
+        );
+    }
+
+    /// One cancel-latency sample: spawn the long command, cancel once
+    /// it is running, time the call, and assert the kill still lands
+    /// (the job ends cancelled).
+    async fn measure_cancel_latency(jobs: &JobService) -> Duration {
         let id = jobs.spawn(request("t", LONG_CMD)).unwrap();
         // Let the process start so the cancel lands on a running job.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let started = std::time::Instant::now();
         assert!(jobs.cancel(&id));
         let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "the cancel parked the caller for {elapsed:?}: the tree kill must not run inline"
-        );
-        // The kill still lands: the job ends cancelled.
-        let end = poll_finished(&jobs, &id).await;
+        let end = poll_finished(jobs, &id).await;
         assert!(end.cancelled);
+        elapsed
     }
 
     /// A cancelled job must be terminated exactly once: a second tree

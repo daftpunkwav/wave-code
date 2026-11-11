@@ -21,8 +21,6 @@ use state_store::{Block, CONTEXT_OVERHEAD_TOKENS, CharSplit, HistoryEntry, Role 
 use wavecode_context::{EvictionConfig, evict_old_tool_results, should_evict_tool_results};
 use wavecode_llm::{ContentBlock, Message, Role};
 
-use crate::model_adapter::to_content_block;
-
 /// Gateway decorator replacing old tool-result payloads with stubs.
 ///
 /// The pass runs on the request snapshot only: stored history keeps the
@@ -85,72 +83,80 @@ impl<G> EvictingGateway<G> {
     /// tool name) and leaves short histories unchanged. Consumes the
     /// request: the caller holds no other reference, so the pass-through
     /// path needs no clone at all.
+    ///
+    /// Past the threshold the HistoryEntry→Message→HistoryEntry round
+    /// trip moves blocks end to end (the two shapes differ only in
+    /// field names), so a full-history sample pays one move per block
+    /// plus stub-sized clones instead of three deep copies of every
+    /// payload.
     fn evicted(&self, mut request: SampleRequest) -> SampleRequest {
         if !should_evict_tool_results(Self::usage_estimate(&request), &self.cfg) {
             return request;
         }
-        let messages: Vec<Message> = request.messages.iter().map(to_message).collect();
-        let evicted = evict_old_tool_results(&messages, &self.cfg);
-        request.messages = evicted.iter().map(from_message).collect();
+        let messages: Vec<Message> = request.messages.into_iter().map(to_message).collect();
+        let evicted = evict_old_tool_results(messages, &self.cfg);
+        request.messages = evicted.into_iter().map(from_message).collect();
         request
     }
 }
 
-/// Convert one history entry to the provider message shape.
-fn to_message(entry: &HistoryEntry) -> Message {
+/// Move one history entry into the provider message shape.
+fn to_message(entry: HistoryEntry) -> Message {
     Message {
         role: if entry.role == HistoryRole::Assistant {
             Role::Assistant
         } else {
             Role::User
         },
-        content: entry.blocks.iter().map(to_content_block).collect(),
+        content: entry
+            .blocks
+            .into_iter()
+            .map(crate::model_adapter::into_content_block)
+            .collect(),
     }
 }
 
-/// Map one provider block back onto the canonical history block.
-fn from_content_block(block: &ContentBlock) -> Block {
+/// Move one provider block back onto the canonical history block.
+///
+/// The wall-clock stamp has no provider counterpart; this rebuild feeds
+/// a request snapshot only — the stored history keeps its original
+/// stamped result.
+fn from_content_block(block: ContentBlock) -> Block {
     match block {
-        ContentBlock::Text { text } => Block::Text(text.clone()),
-        ContentBlock::Image { id, mime, base64 } => Block::Image {
-            id: id.clone(),
-            mime: mime.clone(),
-            base64: base64.clone(),
-        },
+        ContentBlock::Text { text } => Block::Text(text),
+        ContentBlock::Image { id, mime, base64 } => Block::Image { id, mime, base64 },
         ContentBlock::ToolUse { id, name, input } => Block::ToolUse {
-            call_id: id.clone(),
-            name: name.clone(),
-            input: input.clone(),
+            call_id: id,
+            name,
+            input,
         },
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             is_error,
         } => Block::ToolResult {
-            call_id: tool_use_id.clone(),
-            content: content.clone(),
-            is_error: *is_error,
-            // The provider block shape carries no wall-clock stamp, and
-            // this rebuild feeds a request snapshot only: the stored
-            // history keeps its original stamped result.
+            call_id: tool_use_id,
+            content,
+            is_error,
             produced_at: None,
         },
-        ContentBlock::Thinking { text, signature } => Block::Thinking {
-            text: text.clone(),
-            signature: signature.clone(),
-        },
+        ContentBlock::Thinking { text, signature } => Block::Thinking { text, signature },
     }
 }
 
-/// Convert one provider message back onto the history shape.
-fn from_message(message: &Message) -> HistoryEntry {
+/// Move one provider message back onto the history shape.
+fn from_message(message: Message) -> HistoryEntry {
     HistoryEntry {
         role: if message.role == Role::Assistant {
             HistoryRole::Assistant
         } else {
             HistoryRole::User
         },
-        blocks: message.content.iter().map(from_content_block).collect(),
+        blocks: message
+            .content
+            .into_iter()
+            .map(from_content_block)
+            .collect(),
     }
 }
 
@@ -413,8 +419,8 @@ mod tests {
                 base64: "aGk=".to_string(),
             }],
         };
-        let message = to_message(&entry);
-        assert_eq!(from_message(&message), entry);
+        let message = to_message(entry.clone());
+        assert_eq!(from_message(message), entry);
         assert!(entry.text().contains("[image image/png: shot]"));
     }
 }

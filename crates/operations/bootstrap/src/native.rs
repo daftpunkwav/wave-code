@@ -36,6 +36,10 @@ pub struct NativeTool {
     pub read_only: bool,
     /// True when the handler can destroy user data.
     pub destructive: bool,
+    /// Declarative capability class (same vocabulary as the `Tool`
+    /// trait's `kind`), so cross-catalog derivations key on the class,
+    /// never on names.
+    pub kind: wavecode_protocol::ToolKind,
     /// Pure handler: input in, (content, is_error) out.
     pub handler: NativeHandler,
 }
@@ -61,6 +65,29 @@ impl NativeExecutor {
     /// True when a native tool shadows the name.
     pub fn contains(&self, name: &str) -> bool {
         self.tools.contains_key(name)
+    }
+
+    /// Declarative kind of a native tool; [`ToolKind::Other`] when the
+    /// name is unknown (the same cautious default the `Tool` trait
+    /// uses).
+    pub fn kind_of(&self, name: &str) -> wavecode_protocol::ToolKind {
+        self.tools
+            .get(name)
+            .map(|tool| tool.kind)
+            .unwrap_or(wavecode_protocol::ToolKind::Other)
+    }
+
+    /// Names of every native tool claiming `kind`, sorted (the
+    /// registry's `names_of_kind` counterpart over the native catalog).
+    pub fn names_of_kind(&self, kind: wavecode_protocol::ToolKind) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .tools
+            .values()
+            .filter(|tool| tool.kind == kind)
+            .map(|tool| tool.name.clone())
+            .collect();
+        names.sort();
+        names
     }
 }
 
@@ -117,6 +144,7 @@ mod tests {
             description: "echo input".to_string(),
             read_only: true,
             destructive: false,
+            kind: wavecode_protocol::ToolKind::Other,
             handler: Arc::new(|input| (input.to_string(), false)),
         });
         executor

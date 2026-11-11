@@ -46,6 +46,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "wavecode-protocol",
  "wavecode-tools",
 ]
 
@@ -2931,6 +2932,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "wavecode-protocol",
  "wavecode-tools",
 ]
 

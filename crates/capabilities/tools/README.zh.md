@@ -4,7 +4,7 @@
 
 | 条目 | 职责 |
 |---|---|
-| `src/lib.rs` | 框架本体：`Tool` trait（read-only / destructive 属性、业务失败语义）、`Registry`（内建集合、`name_subset` / `read_only_subset`、延迟注册）、`ToolCtx`（cwd + `deny_env`）、`ToolOutput`、`ToolAllowlist`（skills 的 `allowed-tools` 工具面）、`is_sensitive_env_name`、`TOOL_FAULT_PREFIX` 实现级故障标记 |
+| `src/lib.rs` | 框架本体：`Tool` trait（read-only / destructive 属性、业务失败语义）、`Registry`（内建集合、`name_subset` / `read_only_subset`、延迟注册）、`ToolCtx`（cwd + `deny_env`）、`ToolOutput`、`is_sensitive_env_name`、`TOOL_FAULT_PREFIX` 实现级故障标记 |
 | `src/fs/` | 限定在 `ToolCtx::cwd` 之下的文件工具：`read`（`read.rs`，2000 行 / 50 KB 预算，负偏移从文件尾部读，未命中时按同级文件给出 did-you-mean 建议）、`write`（`write.rs`，原子写，10 MB 上限）、`edit`（`edit.rs`，精确匹配唯一性检查）、`view`（`image.rs`，按魔数嗅探的图片附件，5 MB）、`present`（`present.rs`，交付物记入共享 `PresentStore`）；`mod.rs` 持有共享上限与辅助函数，还承载 `FileLedger`——`read` 记录每个文件的 (mtime, len) 指纹，`write` / `edit` 在落盘指纹偏离会话最近一次所见时拒绝改写，外部变更（格式化器、git checkout、其他进程）由此强制先重读，而不是被悄悄覆盖 |
 | `src/search/` | 只读搜索：`grep`（`grep.rs`，正则内容搜索，500 条匹配上限）与 `glob`（`glob.rs`，路径模式匹配，1000 条路径上限）；阻塞遍历放进 `spawn_blocking`，命中路径在 canonicalize 后复检以防符号链接逃逸（`mod.rs`） |
 | `src/path_guard.rs` | 路径逃逸守卫：所有检查都在 canonicalize 后的真实路径上进行（符号链接交换的 TOCTOU 窗口有明文记载），返回词法归一化的路径供展示 |

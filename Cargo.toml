@@ -1,6 +1,56 @@
 [workspace]
 resolver = "3"
-members = ["crates/*/*"]
+# Explicit member list: Dependabot's cargo updater parses the manifest with
+# its own TOML reader, which does not expand glob patterns, and then fails
+# `cargo metadata` inside its checkout (the weekly "Dependabot Updates" run
+# on main has been failing for exactly this reason). New crates must be
+# added here.
+members = [
+    "crates/action/browser",
+    "crates/action/jobs",
+    "crates/action/retrieval",
+    "crates/action/tasks",
+    "crates/action/workflow",
+    "crates/capabilities/context",
+    "crates/capabilities/hooks",
+    "crates/capabilities/mcp",
+    "crates/capabilities/memory",
+    "crates/capabilities/sandbox",
+    "crates/capabilities/skills",
+    "crates/capabilities/tools",
+    "crates/foundation/auth",
+    "crates/foundation/config",
+    "crates/foundation/llm",
+    "crates/foundation/protocol",
+    "crates/foundation/wire",
+    "crates/frontends/console",
+    "crates/frontends/engine",
+    "crates/frontends/harness",
+    "crates/infrastructure/base",
+    "crates/infrastructure/ratelimit",
+    "crates/operations/actor",
+    "crates/operations/bootstrap",
+    "crates/operations/eval",
+    "crates/operations/gateway",
+    "crates/operations/observe",
+    "crates/operations/simulate",
+    "crates/runtime/child",
+    "crates/runtime/plugin",
+    "crates/runtime/prompt",
+    "crates/runtime/runner",
+    "crates/runtime/scheduler",
+    "crates/safety/audit",
+    "crates/safety/gate",
+    "crates/safety/guardrail",
+    "crates/safety/secrets",
+    "crates/state/artifact",
+    "crates/state/checkpoint",
+    "crates/state/goal",
+    "crates/state/persistence",
+    "crates/state/plan",
+    "crates/state/store",
+    "crates/transport/mcp",
+]
 
 [workspace.package]
 version = "0.1.0"

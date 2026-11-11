@@ -45,7 +45,7 @@ pub use task_tools::{TaskContinueTool, TaskOutputTool, TaskStopTool};
 pub use todo_tool::{TodoItem, TodoStatus, TodoStore, TodoWrite, format_todos};
 pub use web_search::{DuckDuckGoBackend, SearchBackend, SearchResult, WebSearch};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Unified recovery policy for poisoned locks (single decision point for this crate): these locks guard
@@ -252,33 +252,6 @@ pub enum ToolsError {
 /// Crate-wide Result alias.
 pub type Result<T> = std::result::Result<T, ToolsError>;
 
-/// Shared handle for a name-based tool allowlist (skills `allowed-tools`):
-/// with `Some(set)` only tools in the set may execute, `None` allows all.
-///
-/// Same shape as [`TodoStore`] -- a per-session shared handle, not owned by
-/// [`Registry`] (a pure tool index) or [`ToolCtx`] (a plain data snapshot rebuilt every turn).
-/// The `allowed-tools` enforcement that actually runs today lives in the run
-/// loop's per-run allowlist (`runtime_runner::RunAllowlist`) and
-/// [`Registry::name_subset`]; no pipeline stage reads this handle.
-#[derive(Clone, Default)]
-pub struct ToolAllowlist {
-    inner: Arc<Mutex<Option<HashSet<String>>>>,
-}
-
-impl ToolAllowlist {
-    /// Set the allowlist (None = lift the restriction).
-    pub fn set(&self, names: Option<HashSet<String>>) {
-        *lock(&self.inner) = names;
-    }
-
-    /// Whether a tool may execute (no allowlist -> true).
-    pub fn is_allowed(&self, name: &str) -> bool {
-        lock(&self.inner)
-            .as_ref()
-            .is_none_or(|set| set.contains(name))
-    }
-}
-
 /// Serializes tests that touch environment variables: `set_var` /
 /// `remove_var` mutate process-global state, so parallel unit tests reading
 /// the same names (e.g. the sandbox routing check) must run mutually
@@ -292,8 +265,8 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Tool registry: indexed by name, used by the execution pipeline for lookup and for building the request-side `ToolSpec` list.
 ///
-/// Holds **no** session-level planning / skills state ([`TodoStore`] / [`ToolAllowlist`])
-/// -- those live in the session config so the registry does not become a cross-concern change hub.
+/// Holds **no** session-level planning state ([`TodoStore`])
+/// -- that lives in the session config so the registry does not become a cross-concern change hub.
 ///
 /// The map is interior-mutable: late tools (registered after the registry
 /// is already shared, e.g. once child services exist) become visible to
@@ -417,6 +390,20 @@ impl Registry {
         reg
     }
 
+    /// Names of every tool claiming `kind`, sorted. Cross-catalog
+    /// derivations (the child surface's forbidden set) key on this
+    /// declarative class instead of a hand-maintained name list, so a
+    /// newly registered tool of the class is covered automatically.
+    pub fn names_of_kind(&self, kind: wavecode_protocol::ToolKind) -> Vec<String> {
+        let mut names: Vec<String> = lock(&self.tools)
+            .values()
+            .filter(|tool| tool.kind() == kind)
+            .map(|tool| tool.name().to_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Register a tool (from M3 on, MCP and other dynamic tools register here too); takes `&self` to support
     /// late registration during late assembly (see the struct docs).
     ///
@@ -454,18 +441,6 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The allowlist is unrestricted by default; after set() only listed tools run; clearing restores access.
-    #[test]
-    fn allowlist_gating() {
-        let allowlist = ToolAllowlist::default();
-        assert!(allowlist.is_allowed("shell"));
-        allowlist.set(Some(HashSet::from(["read_file".to_owned()])));
-        assert!(allowlist.is_allowed("read_file"));
-        assert!(!allowlist.is_allowed("shell"));
-        allowlist.set(None);
-        assert!(allowlist.is_allowed("shell"));
-    }
 
     /// name_subset filters by name; unknown names are silently skipped; read/write tools are kept per the list.
     #[test]

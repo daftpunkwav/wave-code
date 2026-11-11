@@ -148,20 +148,6 @@ fn wire_tags_event_msg_are_locked() {
         ),
         (EventMsg::HistoryRewound { turns: 1 }, "history_rewound"),
         (
-            EventMsg::PlanProposed {
-                text: "x".to_string(),
-            },
-            "plan_proposed",
-        ),
-        (EventMsg::PlanApproved, "plan_approved"),
-        (
-            EventMsg::GoalSet {
-                objective: "x".to_string(),
-            },
-            "goal_set",
-        ),
-        (EventMsg::GoalCompleted, "goal_completed"),
-        (
             EventMsg::Warning {
                 message: "w".to_string(),
             },

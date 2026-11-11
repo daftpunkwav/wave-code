@@ -237,6 +237,23 @@ impl ShellJob {
     }
 }
 
+impl Drop for ShellJob {
+    fn drop(&mut self) {
+        // Retire the Job Object without closing its handle: dropping the
+        // last handle fires kill-on-close and would terminate the
+        // detached descendants a finished `!` command deliberately left
+        // behind (a background daemon with redirected output). The
+        // handle stays open until this process exits, which is exactly
+        // the abandonment cleanup the assign documents — and a cancelled
+        // job's tree is already terminated explicitly, so nothing
+        // changes on that path.
+        #[cfg(windows)]
+        if let Some(job) = self.tree_job.take() {
+            std::mem::forget(job);
+        }
+    }
+}
+
 /// The `!` shell job's pump: forwards decoded lines until both pipes
 /// close or the cancel path lands, then reports the terminal event.
 ///

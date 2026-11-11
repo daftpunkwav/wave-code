@@ -42,7 +42,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use infrastructure_base::{kill_tree_blocking, shell_command};
+use infrastructure_base::shell_command;
 use runtime_child::ChildRuntime;
 use tokio::io::AsyncReadExt;
 
@@ -209,6 +209,24 @@ struct JobSlot {
 }
 
 impl JobSlot {
+    /// Retire this slot's Job Object handle without closing it.
+    ///
+    /// Dropping the last handle fires kill-on-close and would terminate
+    /// the detached descendants a finished command deliberately left
+    /// behind (a background daemon with redirected output). Forgetting
+    /// a clone keeps the handle open until this process exits, which is
+    /// the abandonment cleanup the assign documents; a cancelled job's
+    /// tree was already terminated explicitly, so nothing changes on
+    /// that path.
+    fn retire_job_handle(&self) {
+        #[cfg(windows)]
+        if let Some(job) = self.tree_job.get() {
+            std::mem::forget(job.clone());
+        }
+        #[cfg(not(windows))]
+        let _ = self;
+    }
+
     /// Recover guards after a poison; critical sections are single short
     /// writes that leave no half-written invariant behind.
     fn lock_state(&self) -> std::sync::MutexGuard<'_, JobState> {
@@ -267,9 +285,16 @@ impl JobService {
             return Err(JobError::AtCapacity);
         }
         // Bound the table: finished entries are query history, not live
-        // state, so prune them once the table grows past its cap.
+        // state, so prune them once the table grows past its cap. The
+        // pruned slots' Job Object handles retire without closing: a
+        // finished command may leave detached descendants running, and
+        // dropping the last handle would fire kill-on-close and kill
+        // them. The handles stay open until this process exits, which
+        // is the abandonment cleanup the job assign documents.
         if jobs.len() >= MAX_TRACKED_JOBS {
-            jobs.retain(|_, slot| slot.is_running());
+            for (_, slot) in jobs.extract_if(|_, slot| !slot.is_running()) {
+                slot.retire_job_handle();
+            }
         }
         let n = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
         let id = format!("job-{n}");
@@ -527,9 +552,11 @@ async fn drive_job(
 /// whole membership with one kernel call when it exists; otherwise the
 /// `taskkill` path runs behind a pid liveness probe — a kill aimed at
 /// a pid whose owner already exited can hit an unrelated process the
-/// OS recycled that pid onto. The kill wait is bounded either way: a
-/// stuck tree kill must not hold the driver's always-terminal flow
-/// open past it.
+/// OS recycled that pid onto. The wait on the kill is bounded as a
+/// progress expectation (`TREE_KILL_JOIN`), but the reap never races
+/// it: a tree kill that outlives the bound cannot be aborted, so the
+/// child stays unreaped (its pid stays reserved) until the kill
+/// actually returns.
 async fn kill_and_reap(
     slot: &Arc<JobSlot>,
     child: &mut tokio::process::Child,
@@ -548,7 +575,14 @@ async fn kill_and_reap(
     if let Some(pid) = child.id()
         && infrastructure_base::pid_alive(pid)
     {
-        let _ = tokio::time::timeout(TREE_KILL_JOIN, kill_tree_blocking(pid)).await;
+        let mut kill = tokio::task::spawn_blocking(move || infrastructure_base::kill_tree(pid));
+        // `TREE_KILL_JOIN` bounds the expected kill duration, not the
+        // reap: the spawned kill task cannot be aborted, and reaping
+        // the child while it still runs would release the pid it aims
+        // at. Joining it (however late) keeps the pid reserved for the
+        // duration of the kill.
+        let _ = tokio::time::timeout(TREE_KILL_JOIN, &mut kill).await;
+        let _ = kill.await;
     }
     let _ = child.kill().await;
     child.wait().await.ok()

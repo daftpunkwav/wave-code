@@ -116,8 +116,9 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   Job Object so a cancel terminates the whole tree with one kernel
   call instead of a `taskkill` process spawn (falling back to the old
   path when the assign fails), every pid-targeted tree kill probes
-  liveness first so a recycled pid is not handed to `taskkill`, the
-  cancel wait for the tree kill is bounded so a stuck kill cannot
+  liveness first, narrowing the pid-reuse window to the gap between
+  probe and kill, the cancel wait for the tree kill is bounded so a
+  stuck kill cannot
   hold the always-terminal job open, and the console `!` shell plus
   the external status line decode child output through the shared
   console code-page fallback (a raw `tasklist` on a GBK host no

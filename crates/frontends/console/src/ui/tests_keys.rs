@@ -431,9 +431,9 @@ fn empty_bang_reports_usage() {
 #[tokio::test]
 async fn esc_cancels_running_shell() {
     let sleep = if cfg!(windows) {
-        "ping -n 30 127.0.0.1"
+        "ping -n 8 127.0.0.1"
     } else {
-        "sleep 30"
+        "sleep 8"
     };
     let mut ui = ui();
     ui.user_submit(&format!("!{sleep}"));
@@ -480,9 +480,9 @@ fn shell_buffer_tints_editor_chrome() {
 #[tokio::test]
 async fn ctrl_c_cancels_shell_before_exiting() {
     let sleep = if cfg!(windows) {
-        "ping -n 30 127.0.0.1"
+        "ping -n 8 127.0.0.1"
     } else {
-        "sleep 30"
+        "sleep 8"
     };
     let mut ui = ui();
     ui.user_submit(&format!("!{sleep}"));
@@ -515,7 +515,7 @@ async fn ctrl_c_cancels_shell_before_exiting() {
 #[tokio::test]
 async fn esc_cancels_shell_with_a_detached_descendant() {
     let mut ui = ui();
-    ui.user_submit("!start /B ping -n 30 127.0.0.1");
+    ui.user_submit("!start /B ping -n 8 127.0.0.1");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     ui.handle_key(KeyEvent::plain(Key::Esc));
     for _ in 0..400 {

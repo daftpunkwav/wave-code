@@ -466,7 +466,9 @@ fn clear_linux_acl(staging: &std::path::Path) -> Result<()> {
     const ACCESS_ACL: &str = "system.posix_acl_access";
     match xattr::remove(staging, ACCESS_ACL) {
         Ok(()) => Ok(()),
-        // Nothing inherited — the usual path.
+        // A missing attribute is the same fact as "nothing was
+        // inherited": some implementations answer the removal with
+        // ENODATA instead of an idempotent success.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         // A filesystem that keeps no ACL xattrs cannot have handed the
         // staging file one either.

@@ -376,13 +376,16 @@ fn clear_staging_acl(staging: &std::path::Path) -> Result<()> {
 /// rename-step errors clean up in their own arms inside [`apply_swap`].
 fn guarded_staging(
     staging: &std::path::Path,
-    mut file: std::fs::File,
+    file: std::fs::File,
     stage: impl FnOnce(&mut std::fs::File) -> Result<()>,
 ) -> Result<()> {
-    let outcome = stage(&mut file);
-    // Close the handle before unlinking: Windows refuses to remove a
-    // file that is still open.
-    drop(file);
+    // The stage runs with the handle, and the handle closes when the
+    // block ends — before the removal below, which Windows refuses on
+    // a still-open file.
+    let outcome = {
+        let mut file = file;
+        stage(&mut file)
+    };
     if let Err(error) = outcome {
         if let Err(cleanup) = std::fs::remove_file(staging) {
             return Err(error).context(format!(
@@ -1031,7 +1034,10 @@ mod tests {
         // When removal itself fails, the leftover becomes visible on
         // the surfaced error. The directory is made unwritable for the
         // attempt (unlink needs write on the parent), then restored so
-        // the tempdir cleanup can run.
+        // the tempdir cleanup can run. A uid whose privileges bypass
+        // directory modes (root) can unlink through a 0555 directory,
+        // so a pre-flight probe decides whether the failure is even
+        // inducible here before it is asserted.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
@@ -1039,15 +1045,48 @@ mod tests {
             std::fs::create_dir(&locked).unwrap();
             let staging = locked.join("staged-binary");
             let file = std::fs::File::create(&staging).unwrap();
+            let probe = locked.join("removal-probe");
+            std::fs::File::create(&probe).unwrap();
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let removal_fails = std::fs::remove_file(&probe).is_err();
             let error = guarded_staging(&staging, file, |_| Err(anyhow::anyhow!("stage failed")))
                 .expect_err("both failures must surface");
-            assert!(
-                error.to_string().contains("could not be removed"),
-                "{error}"
-            );
+            if removal_fails {
+                assert!(
+                    error.to_string().contains("could not be removed"),
+                    "{error}"
+                );
+                assert!(staging.exists(), "the leftover stays when removal fails");
+            } else {
+                assert!(!staging.exists(), "the cleanup succeeded for this uid");
+            }
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_file(&probe);
         }
+    }
+
+    /// The guard must hold inside `apply_swap` itself, not only under
+    /// the synthetic closure the unit test above drives: a staging step
+    /// that fails in the real flow removes the actual `.download-*`
+    /// file. The vanished target turns the ownership sync into that
+    /// failure — every earlier stage step tolerates a missing target,
+    /// the ownership sync is the first that must read it.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_swap_stage_removes_the_download_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        std::fs::remove_file(&target).unwrap();
+        let error = apply_swap(&target, b"new-binary-bytes")
+            .expect_err("the missing target must fail the stage");
+        assert!(error.to_string().contains("reading"), "{error}");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".download-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
     /// A default ACL on the target's directory hands the freshly

@@ -281,23 +281,39 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
     {
         let mut file = std::fs::File::create(&staging)
             .with_context(|| format!("creating {}", staging.display()))?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        // Mirror the installed binary's mode so the replacement neither
-        // widens nor drops access; fall back to owner-only when the old
-        // mode cannot be read.
-        let permissions = std::fs::metadata(target_exe)
-            .map(|meta| meta.permissions())
-            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o700));
-        std::fs::set_permissions(&staging, permissions)?;
-        // ACLs are invisible to `std::fs`; they must land after the mode
-        // mirror, because writing the ACL re-derives the mode, while a
-        // later chmod would rewrite (and could drop) the copied entries.
-        copy_acl(target_exe, &staging)?;
+        guarded_staging(&staging, || -> Result<()> {
+            file.write_all(bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                // Mirror the installed binary's mode so the replacement
+                // neither widens nor drops access; fall back to
+                // owner-only when the old mode cannot be read.
+                let permissions = std::fs::metadata(target_exe)
+                    .map(|meta| meta.permissions())
+                    .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o700));
+                // Strip any ACL the staging file inherited from its
+                // directory before the mode mirror lands: stripping an
+                // ACL re-derives the mode, and the mirror must be the
+                // last word on it.
+                clear_staging_acl(&staging)?;
+                std::fs::set_permissions(&staging, permissions)?;
+                // ACLs are invisible to `std::fs`; they must land after
+                // the mode mirror, because writing the ACL re-derives
+                // the mode, while a later chmod would rewrite (and
+                // could drop) the copied entries. The copy is a
+                // snapshot taken here, not a lock: an administrator
+                // changing the target's ACL between this probe and the
+                // rename is overwritten — the same accepted window the
+                // mode mirror already has.
+                copy_acl(target_exe, &staging)?;
+            }
+            // The final fsync covers the content, the mode mirror, and
+            // the ACL work together: the rename below is only as
+            // durable as what it names.
+            file.sync_all()?;
+            Ok(())
+        })?;
     }
     // Step the old binary aside as `.bak`, then move the staging file
     // into its place. Windows cannot delete a running exe, but it can
@@ -319,10 +335,51 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Strip any ACL the staged file picked up from its parent directory
+/// before the mode mirror lands. A directory can hand a freshly created
+/// file entries the installed binary never carried (Linux default ACLs
+/// materialize on every create; macOS `file_inherit` entries do the
+/// same), and the rename would install those grants on the replacement.
+#[cfg(unix)]
+fn clear_staging_acl(staging: &std::path::Path) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        clear_linux_acl(staging)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        clear_macos_acl(staging)
+    }
+
+    // Other unix targets ship neither a release binary nor ACL support
+    // in this workspace; there is nothing to strip.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = staging;
+        Ok(())
+    }
+}
+
+/// Run the staging mutations under one guard: a failure at any step
+/// removes the partial download before the error surfaces, so a failed
+/// update never leaves debris next to the target. The rename-step
+/// errors clean up in their own arms inside [`apply_swap`].
+fn guarded_staging(staging: &std::path::Path, stage: impl FnOnce() -> Result<()>) -> Result<()> {
+    let outcome = stage();
+    if outcome.is_err() {
+        let _ = std::fs::remove_file(staging);
+    }
+    outcome
+}
+
 /// Carry a POSIX ACL from the installed binary onto the staged
 /// replacement. Returns `false` when the target has no ACL and `true`
 /// when one was copied; an error aborts the swap, so the update never
-/// installs a replacement that silently drops an access grant.
+/// installs a replacement that silently drops an access grant. The
+/// read is a snapshot taken at swap time — an administrator changing
+/// the target's ACL between this probe and the rename is overwritten,
+/// the same accepted window the mode mirror already has.
 #[cfg(unix)]
 fn copy_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<bool> {
     #[cfg(target_os = "linux")]
@@ -344,6 +401,32 @@ fn copy_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<b
     }
 }
 
+/// True for the errors that mean "this filesystem keeps no POSIX ACL
+/// xattrs at all" (`EOPNOTSUPP`, which std surfaces as
+/// [`std::io::ErrorKind::Unsupported`]): where the kernel stores no
+/// ACLs, a probe failure cannot be concealing a grant to preserve.
+#[cfg(target_os = "linux")]
+fn acl_xattrs_unsupported(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::Unsupported
+}
+
+/// Linux: strip any access ACL the staged file inherited from its
+/// parent directory. A default ACL on the directory materializes an
+/// access ACL on every file created inside it, including this one.
+#[cfg(target_os = "linux")]
+fn clear_linux_acl(staging: &std::path::Path) -> Result<()> {
+    const ACCESS_ACL: &str = "system.posix_acl_access";
+    match xattr::remove(staging, ACCESS_ACL) {
+        Ok(()) => Ok(()),
+        // Nothing inherited — the usual path.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // A filesystem that keeps no ACL xattrs cannot have handed the
+        // staging file one either.
+        Err(error) if acl_xattrs_unsupported(&error) => Ok(()),
+        Err(error) => Err(error).context("stripping the staged file's inherited access ACL"),
+    }
+}
+
 /// Linux: the access ACL lives in a kernel-managed xattr, so preserving
 /// it is a verbatim blob copy — no libacl parsing involved. ACLs the
 /// mode bits already express are never materialized as an xattr (the
@@ -359,7 +442,60 @@ fn copy_linux_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
             Ok(true)
         }
         Ok(None) => Ok(false),
+        // A filesystem that keeps no ACL xattrs cannot carry a grant to
+        // preserve; the mode mirror remains the whole story.
+        Err(error) if acl_xattrs_unsupported(&error) => Ok(false),
         Err(error) => Err(error).context("probing the installed binary's access ACL"),
+    }
+}
+
+/// macOS: strip any ACL the staged file inherited from its directory.
+/// A directory whose ACL entries carry `file_inherit` passes them to
+/// every file created inside it, including this one. The strip probe
+/// stays at face value: this is a best-effort cleanup on a path that
+/// usually carries nothing, so a NULL there means there is nothing to
+/// remove.
+#[cfg(target_os = "macos")]
+fn clear_macos_acl(staging: &std::path::Path) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let staged =
+        CString::new(staging.as_os_str().as_bytes()).context("staging path has a NUL byte")?;
+    // SAFETY: `staged` is a NUL-terminated C string built above; the
+    // returned handle is either valid or NULL, and it is released on
+    // every path below.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let acl = unsafe { acl_ffi::acl_get_file(staged.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        return Ok(());
+    }
+    // SAFETY: `acl` is a handle this function owns.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let _inspected = unsafe { acl_ffi::acl_free(acl) };
+    // Setting an empty ACL is Darwin's programmatic equivalent of
+    // `chmod -N`: the entries go away and the file reports no ACL.
+    // SAFETY: `acl_init(0)` returns either a valid empty handle or
+    // NULL, and the handle is released on every path below.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let empty = unsafe { acl_ffi::acl_init(0) };
+    if empty.is_null() {
+        return Err(std::io::Error::last_os_error())
+            .context("allocating an empty ACL to strip the staged file");
+    }
+    // SAFETY: `staged` is a valid C string and `empty` is a valid owned
+    // handle.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let cleared =
+        unsafe { acl_ffi::acl_set_file(staged.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED, empty) };
+    // SAFETY: `empty` is owned and still valid; freeing after the set
+    // call cannot affect the staged file.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    let _released = unsafe { acl_ffi::acl_free(empty) };
+    if cleared != 0 {
+        Err(std::io::Error::last_os_error()).context("stripping the staged file's inherited ACL")
+    } else {
+        Ok(())
     }
 }
 
@@ -376,17 +512,29 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
         CString::new(target_exe.as_os_str().as_bytes()).context("target path has a NUL byte")?;
     let staged =
         CString::new(staging.as_os_str().as_bytes()).context("staging path has a NUL byte")?;
+    // Darwin returns NULL both when the file carries no ACL and on
+    // probe failures, and the documented `ENOATTR` does not reliably
+    // survive on the absent path — the observed value is whatever the
+    // last failed syscall left behind. errno is snapshotted around the
+    // call, so the NULL is judged by what changed: an errno this call
+    // actually set to anything other than `ENOATTR` is a probe failure
+    // and aborts the swap instead of silently dropping a real ACL,
+    // while an untouched errno keeps the observed face-value reading of
+    // "no ACL". An error that lands on the stale value by coincidence
+    // is read as absent — the same residual as taking the NULL at face
+    // value, but strictly narrower.
+    let before = std::io::Error::last_os_error().raw_os_error();
     // SAFETY: both arguments are NUL-terminated C strings built above;
     // the returned handle is either valid or NULL, and it is released on
-    // every path below. `NULL` means the file has no ACL: Darwin takes
-    // that path without setting a meaningful errno (the documented
-    // `ENOATTR` does not reliably survive — the observed value is
-    // whatever the last failed syscall left behind), so the NULL is
-    // taken at face value instead of being filtered on errno.
+    // every path below.
     // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let acl = unsafe { acl_ffi::acl_get_file(target.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
     if acl.is_null() {
-        return Ok(false);
+        let after = std::io::Error::last_os_error().raw_os_error();
+        if after == before || after == Some(libc::ENOATTR) {
+            return Ok(false);
+        }
+        return Err(std::io::Error::last_os_error()).context("probing the installed binary's ACL");
     }
     // SAFETY: `acl` is a handle this function owns and `staged` is a
     // valid C string.
@@ -406,7 +554,7 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
 }
 
 /// The libSystem ACL API is stable but not exposed by the `libc` crate;
-/// the handles stay opaque, so the FFI surface is three calls plus the
+/// the handles stay opaque, so the FFI surface is four calls plus the
 /// `ACL_TYPE_EXTENDED` constant from `sys/acl.h`. The `acl_size` and
 /// `acl_copy_ext` pair exists only so tests can compare ACLs as bytes.
 #[cfg(target_os = "macos")]
@@ -417,6 +565,7 @@ mod acl_ffi {
 
     unsafe extern "C" {
         pub fn acl_get_file(path: *const libc::c_char, acl_type: libc::c_int) -> Acl;
+        pub fn acl_init(count: libc::c_int) -> Acl;
         pub fn acl_set_file(
             path: *const libc::c_char,
             acl_type: libc::c_int,
@@ -728,5 +877,97 @@ mod tests {
         assert_eq!(macos_acl_blob(&target), None, "no ACL must be invented");
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o750);
+    }
+
+    /// A failure anywhere in the staging section must not leave the
+    /// partial download behind.
+    #[test]
+    fn a_failed_stage_removes_the_staging_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("staged-binary");
+        std::fs::write(&staging, b"partial-download").unwrap();
+        let error = guarded_staging(&staging, || Err(anyhow::anyhow!("stage failed")))
+            .expect_err("the body's error must surface");
+        assert!(error.to_string().contains("stage failed"), "{error}");
+        assert!(!staging.exists(), "the staging file was cleaned up");
+        // A successful stage keeps the file for the rename ahead.
+        std::fs::write(&staging, b"partial-download").unwrap();
+        guarded_staging(&staging, || Ok(())).unwrap();
+        assert!(staging.exists(), "the staged file survives a pass");
+    }
+
+    /// A default ACL on the target's directory hands the freshly
+    /// created staging file an access ACL the installed binary never
+    /// carried; the swap must strip it instead of installing those
+    /// grants on the replacement.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inherited_default_acl_is_stripped_from_the_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let expected_mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        xattr::set(dir.path(), "system.posix_acl_default", &extended_acl_blob()).unwrap();
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
+        assert_eq!(
+            xattr::get(&target, "system.posix_acl_access").unwrap(),
+            None,
+            "the inherited ACL must be stripped, not installed"
+        );
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode, expected_mode, "the mode stays mirrored");
+    }
+
+    /// Only the kernel's "no ACL xattrs on this filesystem" answer
+    /// reads as absence; errors that could conceal a grant keep
+    /// failing the swap.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_acl_xattr_gaps_read_as_unsupported() {
+        // Linux errno 95 (EOPNOTSUPP) is the kernel's "this filesystem
+        // keeps no such xattr namespace" answer.
+        let unsupported = std::io::Error::from_raw_os_error(95);
+        assert!(
+            acl_xattrs_unsupported(&unsupported),
+            "EOPNOTSUPP ({unsupported}) reads as unsupported"
+        );
+        assert!(acl_xattrs_unsupported(&std::io::Error::from(
+            std::io::ErrorKind::Unsupported
+        )));
+        for concealing in [
+            std::io::Error::from_raw_os_error(libc::EACCES),
+            std::io::Error::from_raw_os_error(libc::EIO),
+            std::io::Error::from_raw_os_error(libc::EPERM),
+        ] {
+            assert!(
+                !acl_xattrs_unsupported(&concealing),
+                "{concealing} must not read as unsupported"
+            );
+        }
+    }
+
+    /// `file_inherit` entries on the target's directory pass the entry
+    /// to every file created inside — including the swap's staging
+    /// file; the swap must strip it instead of installing it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn inherited_macos_acl_is_stripped_from_the_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let granted = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,file_inherit"])
+            .arg(dir.path())
+            .output()
+            .expect("chmod runs");
+        assert!(granted.status.success(), "chmod +a failed: {:?}", granted);
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
+        assert_eq!(
+            macos_acl_blob(&target),
+            None,
+            "the inherited ACL must be stripped, not installed"
+        );
     }
 }

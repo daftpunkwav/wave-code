@@ -223,7 +223,16 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   macOS) after mirroring its mode, so users and groups granted access
   beyond the mode bits keep running the updated binary; a failed ACL
   copy aborts the swap instead of silently dropping the grant, and a
-  target without an ACL keeps the mode-only behavior.
+  target without an ACL keeps the mode-only behavior. The swap also
+  strips any ACL the staged file inherited from its directory (Linux
+  default ACLs, macOS `file_inherit` entries) before installing it,
+  reads the absent-ACL answers of ACL-less filesystems (`EOPNOTSUPP`)
+  as "nothing to preserve" instead of failing the update, syncs the
+  staged file once after the mode and ACL work so the copied ACL is
+  as durable as the rename, removes the staged file when any step
+  before the rename fails, and on macOS distinguishes a real ACL
+  probe failure from a file without an ACL by snapshotting errno
+  around the probe.
 - Leaving the console TUI runs the SessionEnd hooks and the memory
   pass inside a bounded drain, matching `exec`; previously neither
   fired on TUI exit.

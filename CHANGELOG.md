@@ -218,6 +218,25 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   warnings; `plugin list` notes that pack contents are wired.
 
 ### Fixed
+- The self-update swap carries the installed binary's POSIX ACL onto
+  the replacement (the access-ACL xattr on Linux, the extended ACL on
+  macOS) after mirroring its mode, so users and groups granted access
+  beyond the mode bits keep running the updated binary; a failed ACL
+  copy aborts the swap instead of silently dropping the grant, and a
+  target without an ACL keeps the mode-only behavior. The swap also
+  strips any ACL the staged file inherited from its directory (Linux
+  default ACLs, macOS `file_inherit` entries) before installing it,
+  aligns the staged file's owner and group with the installed binary
+  before the ACL lands (its object entries are owner-relative; an
+  updater that may not chown aborts), reads the absent-ACL answers of
+  ACL-unsupported volumes (`EOPNOTSUPP` on Linux, `ENOTSUP` on macOS)
+  as "nothing to preserve" instead of failing the update while other
+  probe errors keep aborting, syncs the staged file once after the
+  mode and ACL work so the copied ACL is as durable as the rename,
+  removes the staged file when any step before the rename fails and
+  surfaces a failed removal alongside the staging error, and on macOS
+  distinguishes a real ACL probe failure from a file without an ACL
+  by clearing errno around the probe.
 - Leaving the console TUI runs the SessionEnd hooks and the memory
   pass inside a bounded drain, matching `exec`; previously neither
   fired on TUI exit.

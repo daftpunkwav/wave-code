@@ -591,13 +591,14 @@ mod tests {
 
     /// Canonical three-entry access ACL equivalent to mode 0o750: a
     /// 4-byte version header (`POSIX_ACL_XATTR_VERSION = 2`) followed by
-    /// little-endian (tag, perm, id) records — `USER_OBJ`, `GROUP_OBJ`,
-    /// `OTHER`, with `ACL_UNDEFINED_ID` in the id field as the kernel
-    /// canonicalizes object entries to.
+    /// little-endian (tag, perm, id) records — `ACL_USER_OBJ` (0x01),
+    /// `ACL_GROUP_OBJ` (0x03), `ACL_OTHER` (0x06), with
+    /// `ACL_UNDEFINED_ID` in the id field as the kernel canonicalizes
+    /// object entries to.
     #[cfg(target_os = "linux")]
     fn acl_blob_mode_750() -> Vec<u8> {
         let mut blob = 2u32.to_le_bytes().to_vec();
-        for (tag, perm) in [(1u16, 0o7u16), (3, 0o5), (7, 0o0)] {
+        for (tag, perm) in [(1u16, 0o7u16), (3, 0o5), (6, 0o0)] {
             blob.extend_from_slice(&tag.to_le_bytes());
             blob.extend_from_slice(&perm.to_le_bytes());
             blob.extend_from_slice(&u32::MAX.to_le_bytes());

@@ -218,6 +218,12 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   warnings; `plugin list` notes that pack contents are wired.
 
 ### Fixed
+- The self-update swap carries the installed binary's POSIX ACL onto
+  the replacement (the access-ACL xattr on Linux, the extended ACL on
+  macOS) after mirroring its mode, so users and groups granted access
+  beyond the mode bits keep running the updated binary; a failed ACL
+  copy aborts the swap instead of silently dropping the grant, and a
+  target without an ACL keeps the mode-only behavior.
 - Leaving the console TUI runs the SessionEnd hooks and the memory
   pass inside a bounded drain, matching `exec`; previously neither
   fired on TUI exit.

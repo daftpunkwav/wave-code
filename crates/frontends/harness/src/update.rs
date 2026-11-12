@@ -1070,16 +1070,14 @@ mod tests {
     /// The guard must hold inside `apply_swap` itself, not only under
     /// the synthetic closure the unit test above drives: a staging step
     /// that fails in the real flow removes the actual `.download-*`
-    /// file. The vanished target turns the ownership sync into that
-    /// failure — every earlier stage step tolerates a missing target,
-    /// the ownership sync is the first that must read it.
+    /// file. The missing target is the injected failure — every
+    /// earlier stage step tolerates one, the ownership sync is the
+    /// first that must read it.
     #[cfg(unix)]
     #[test]
     fn a_failed_swap_stage_removes_the_download_file() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
-        std::fs::write(&target, b"old-binary-bytes").unwrap();
-        std::fs::remove_file(&target).unwrap();
         let error = apply_swap(&target, b"new-binary-bytes")
             .expect_err("the missing target must fail the stage");
         assert!(error.to_string().contains("reading"), "{error}");

@@ -383,16 +383,19 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
     // `ENOATTR` does not reliably survive — the observed value is
     // whatever the last failed syscall left behind), so the NULL is
     // taken at face value instead of being filtered on errno.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let acl = unsafe { acl_ffi::acl_get_file(target.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         return Ok(false);
     }
     // SAFETY: `acl` is a handle this function owns and `staged` is a
     // valid C string.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let copied = unsafe { acl_ffi::acl_set_file(staged.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED, acl) };
     // SAFETY: `acl` is owned and still valid; freeing after the set call
     // cannot affect the staged file. `acl_free` has no recoverable error
     // on a valid handle.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let _released = unsafe { acl_ffi::acl_free(acl) };
     if copied != 0 {
         Err(std::io::Error::last_os_error())
@@ -662,6 +665,9 @@ mod tests {
         use std::os::unix::ffi::OsStrExt as _;
 
         let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid C string; the handle is released
+        // on every path below.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let acl = unsafe {
             super::acl_ffi::acl_get_file(c_path.as_ptr(), super::acl_ffi::ACL_TYPE_EXTENDED)
         };
@@ -669,6 +675,7 @@ mod tests {
             return None;
         }
         // SAFETY: `acl` is a valid handle from the call above.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let size = unsafe { super::acl_ffi::acl_size(acl) };
         assert!(
             size > 0,
@@ -677,8 +684,10 @@ mod tests {
         );
         let mut blob = vec![0u8; size as usize];
         // SAFETY: `blob` has the capacity `acl_size` reported.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let written = unsafe { super::acl_ffi::acl_copy_ext(blob.as_mut_ptr().cast(), acl, size) };
         // SAFETY: `acl` is owned and still valid.
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         let _released = unsafe { super::acl_ffi::acl_free(acl) };
         assert!(
             written > 0,

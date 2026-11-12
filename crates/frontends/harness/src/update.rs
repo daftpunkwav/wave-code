@@ -468,8 +468,11 @@ fn clear_linux_acl(staging: &std::path::Path) -> Result<()> {
         Ok(()) => Ok(()),
         // A missing attribute is the same fact as "nothing was
         // inherited": some implementations answer the removal with
-        // ENODATA instead of an idempotent success.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        // ENODATA instead of an idempotent success. std does not
+        // bucket ENODATA into an ErrorKind, so the errno is matched
+        // directly — a missing path (ENOENT) stays an error, the
+        // staging file must exist here.
+        Err(error) if error.raw_os_error() == Some(libc::ENODATA) => Ok(()),
         // A filesystem that keeps no ACL xattrs cannot have handed the
         // staging file one either.
         Err(error) if acl_xattrs_unsupported(&error) => Ok(()),

@@ -35,5 +35,13 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 sha2.workspace = true
 
+# ACL preservation in the self-update swap: Linux carries the access
+# ACL in a kernel xattr; macOS needs libc for the libSystem ACL API.
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

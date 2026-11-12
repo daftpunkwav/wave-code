@@ -294,6 +294,10 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
             .map(|meta| meta.permissions())
             .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o700));
         std::fs::set_permissions(&staging, permissions)?;
+        // ACLs are invisible to `std::fs`; they must land after the mode
+        // mirror, because writing the ACL re-derives the mode, while a
+        // later chmod would rewrite (and could drop) the copied entries.
+        copy_acl(target_exe, &staging)?;
     }
     // Step the old binary aside as `.bak`, then move the staging file
     // into its place. Windows cannot delete a running exe, but it can
@@ -313,6 +317,118 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
         return Err(error).context("install failed; the old binary was restored");
     }
     Ok(())
+}
+
+/// Carry a POSIX ACL from the installed binary onto the staged
+/// replacement. Returns `false` when the target has no ACL and `true`
+/// when one was copied; an error aborts the swap, so the update never
+/// installs a replacement that silently drops an access grant.
+#[cfg(unix)]
+fn copy_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        copy_linux_acl(target_exe, staging)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        copy_macos_acl(target_exe, staging)
+    }
+
+    // Other unix targets ship neither a release binary nor ACL support
+    // in this workspace; the mode mirror remains the base behavior.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (target_exe, staging);
+        Ok(false)
+    }
+}
+
+/// Linux: the access ACL lives in a kernel-managed xattr, so preserving
+/// it is a verbatim blob copy — no libacl parsing involved. The kernel
+/// materializes a minimal (mode-equivalent) ACL after any chmod, so an
+/// absent attribute is the only "no ACL" signal worth probing.
+#[cfg(target_os = "linux")]
+fn copy_linux_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<bool> {
+    const ACCESS_ACL: &str = "system.posix_acl_access";
+    match xattr::get(target_exe, ACCESS_ACL) {
+        Ok(Some(blob)) => {
+            xattr::set(staging, ACCESS_ACL, &blob)
+                .context("copying the installed binary's access ACL onto the staged file")?;
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(error) => Err(error).context("probing the installed binary's access ACL"),
+    }
+}
+
+/// macOS: extended ACLs are not xattrs; libSystem hands them out as
+/// opaque `acl_t` handles. The copy stays handle-level — entries are
+/// never parsed — and `ACL_TYPE_EXTENDED` is the ACL type Darwin keeps
+/// for ordinary files.
+#[cfg(target_os = "macos")]
+fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<bool> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let target =
+        CString::new(target_exe.as_os_str().as_bytes()).context("target path has a NUL byte")?;
+    let staged =
+        CString::new(staging.as_os_str().as_bytes()).context("staging path has a NUL byte")?;
+    // SAFETY: both arguments are NUL-terminated C strings built above;
+    // the returned handle is either valid or NULL, and it is released on
+    // every path below. `NULL` with `ENOATTR` means the file has no ACL.
+    let acl = unsafe { acl_ffi::acl_get_file(target.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::ENOATTR) {
+            Ok(false)
+        } else {
+            Err(error).context("probing the installed binary's ACL")
+        };
+    }
+    // SAFETY: `acl` is a handle this function owns and `staged` is a
+    // valid C string.
+    let copied = unsafe { acl_ffi::acl_set_file(staged.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED, acl) };
+    // SAFETY: `acl` is owned and still valid; freeing after the set call
+    // cannot affect the staged file. `acl_free` has no recoverable error
+    // on a valid handle.
+    let _released = unsafe { acl_ffi::acl_free(acl) };
+    if copied != 0 {
+        Err(std::io::Error::last_os_error())
+            .context("copying the installed binary's ACL onto the staged file")
+    } else {
+        Ok(true)
+    }
+}
+
+/// The libSystem ACL API is stable but not exposed by the `libc` crate;
+/// the handles stay opaque, so the FFI surface is three calls plus the
+/// `ACL_TYPE_EXTENDED` constant from `sys/acl.h`. The `acl_size` and
+/// `acl_copy_ext` pair exists only so tests can compare ACLs as bytes.
+#[cfg(target_os = "macos")]
+mod acl_ffi {
+    pub type Acl = *mut libc::c_void;
+
+    pub const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0010;
+
+    unsafe extern "C" {
+        pub fn acl_get_file(path: *const libc::c_char, acl_type: libc::c_int) -> Acl;
+        pub fn acl_set_file(
+            path: *const libc::c_char,
+            acl_type: libc::c_int,
+            acl: Acl,
+        ) -> libc::c_int;
+        pub fn acl_free(acl: Acl) -> libc::c_int;
+        #[cfg(test)]
+        pub fn acl_size(acl: Acl) -> libc::ssize_t;
+        #[cfg(test)]
+        pub fn acl_copy_ext(
+            buf_out: *mut libc::c_void,
+            acl: Acl,
+            size: libc::ssize_t,
+        ) -> libc::ssize_t;
+    }
 }
 
 #[cfg(test)]
@@ -471,5 +587,124 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".download-"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// Canonical three-entry access ACL equivalent to mode 0o750: a
+    /// 4-byte version header (`POSIX_ACL_XATTR_VERSION = 2`) followed by
+    /// little-endian (tag, perm, id) records — `USER_OBJ`, `GROUP_OBJ`,
+    /// `OTHER`, with `ACL_UNDEFINED_ID` in the id field as the kernel
+    /// canonicalizes object entries to.
+    #[cfg(target_os = "linux")]
+    fn acl_blob_mode_750() -> Vec<u8> {
+        let mut blob = 2u32.to_le_bytes().to_vec();
+        for (tag, perm) in [(1u16, 0o7u16), (3, 0o5), (7, 0o0)] {
+            blob.extend_from_slice(&tag.to_le_bytes());
+            blob.extend_from_slice(&perm.to_le_bytes());
+            blob.extend_from_slice(&u32::MAX.to_le_bytes());
+        }
+        blob
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn posix_acl_survives_the_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let acl = acl_blob_mode_750();
+        xattr::set(&target, "system.posix_acl_access", &acl).unwrap();
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
+        let carried = xattr::get(&target, "system.posix_acl_access")
+            .unwrap()
+            .expect("the access ACL follows the replacement");
+        assert_eq!(carried, acl, "the copied ACL matches the original");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750, "the mode stays mirrored");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_acl_keeps_the_swap_on_the_mode_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(
+            xattr::get(&target, "system.posix_acl_access").unwrap(),
+            None,
+            "no ACL must be invented"
+        );
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750);
+    }
+
+    /// Serialize the path's extended ACL to bytes (`acl_copy_ext`), so
+    /// the tests compare before/after blobs instead of asserting bare
+    /// presence. `None` when the path carries no ACL.
+    #[cfg(all(test, target_os = "macos"))]
+    fn macos_acl_blob(path: &std::path::Path) -> Option<Vec<u8>> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let acl = unsafe {
+            super::acl_ffi::acl_get_file(c_path.as_ptr(), super::acl_ffi::ACL_TYPE_EXTENDED)
+        };
+        if acl.is_null() {
+            return None;
+        }
+        // SAFETY: `acl` is a valid handle from the call above.
+        let size = unsafe { super::acl_ffi::acl_size(acl) };
+        assert!(
+            size > 0,
+            "acl_size failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let mut blob = vec![0u8; size as usize];
+        // SAFETY: `blob` has the capacity `acl_size` reported.
+        let written = unsafe { super::acl_ffi::acl_copy_ext(blob.as_mut_ptr().cast(), acl, size) };
+        // SAFETY: `acl` is owned and still valid.
+        let _released = unsafe { super::acl_ffi::acl_free(acl) };
+        assert!(
+            written > 0,
+            "acl_copy_ext failed: {}",
+            std::io::Error::last_os_error()
+        );
+        blob.truncate(written as usize);
+        Some(blob)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_acl_survives_the_swap() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let granted = std::process::Command::new("/bin/chmod")
+            .args(["+a", "admin allow read,execute"])
+            .arg(&target)
+            .output()
+            .expect("chmod runs");
+        assert!(granted.status.success(), "chmod +a failed: {:?}", granted);
+        let original = macos_acl_blob(&target).expect("the target carries an ACL");
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
+        let carried = macos_acl_blob(&target).expect("the ACL follows the replacement");
+        assert_eq!(carried, original, "the copied ACL matches the original");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn no_macos_acl_keeps_the_swap_on_the_mode_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
+        apply_swap(&target, b"new-binary-bytes").unwrap();
+        assert_eq!(macos_acl_blob(&target), None, "no ACL must be invented");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o750);
     }
 }

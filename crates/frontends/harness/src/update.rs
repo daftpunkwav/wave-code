@@ -345,9 +345,10 @@ fn copy_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<b
 }
 
 /// Linux: the access ACL lives in a kernel-managed xattr, so preserving
-/// it is a verbatim blob copy — no libacl parsing involved. The kernel
-/// materializes a minimal (mode-equivalent) ACL after any chmod, so an
-/// absent attribute is the only "no ACL" signal worth probing.
+/// it is a verbatim blob copy — no libacl parsing involved. ACLs the
+/// mode bits already express are never materialized as an xattr (the
+/// kernel folds them into the mode), so an absent attribute means
+/// there is nothing beyond the mode to carry over.
 #[cfg(target_os = "linux")]
 fn copy_linux_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Result<bool> {
     const ACCESS_ACL: &str = "system.posix_acl_access";
@@ -410,7 +411,7 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
 mod acl_ffi {
     pub type Acl = *mut libc::c_void;
 
-    pub const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0010;
+    pub const ACL_TYPE_EXTENDED: libc::c_int = 0x0000_0100;
 
     unsafe extern "C" {
         pub fn acl_get_file(path: *const libc::c_char, acl_type: libc::c_int) -> Acl;
@@ -589,19 +590,29 @@ mod tests {
         assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 
-    /// Canonical three-entry access ACL equivalent to mode 0o750: a
-    /// 4-byte version header (`POSIX_ACL_XATTR_VERSION = 2`) followed by
-    /// little-endian (tag, perm, id) records — `ACL_USER_OBJ` (0x01),
-    /// `ACL_GROUP_OBJ` (0x03), `ACL_OTHER` (0x06), with
-    /// `ACL_UNDEFINED_ID` in the id field as the kernel canonicalizes
-    /// object entries to.
+    /// Canonical extended access ACL: `USER_OBJ rwx`, named `USER`
+    /// (uid 0, `r-x`) as the grant beyond the mode bits, `GROUP_OBJ
+    /// r-x`, `MASK r-x`, `OTHER none`. Tags are the Linux uapi
+    /// bit-flag values (`0x01`/`0x02`/`0x04`/`0x10`/`0x20` — not the
+    /// sequential POSIX.1e draft numbering), records are little-endian
+    /// (tag u16, perm u16, id u32) after a 4-byte
+    /// `POSIX_ACL_XATTR_VERSION = 2` header, and object entries carry
+    /// `ACL_UNDEFINED_ID`. The named-user entry keeps the ACL
+    /// non-equivalent to the mode, so the kernel stores it instead of
+    /// folding it into the mode bits.
     #[cfg(target_os = "linux")]
-    fn acl_blob_mode_750() -> Vec<u8> {
+    fn extended_acl_blob() -> Vec<u8> {
         let mut blob = 2u32.to_le_bytes().to_vec();
-        for (tag, perm) in [(1u16, 0o7u16), (3, 0o5), (6, 0o0)] {
+        for (tag, perm, id) in [
+            (0x0001u16, 0o7u16, u32::MAX), // ACL_USER_OBJ
+            (0x0002, 0o5, 0),              // ACL_USER, uid 0
+            (0x0004, 0o5, u32::MAX),       // ACL_GROUP_OBJ
+            (0x0010, 0o5, u32::MAX),       // ACL_MASK
+            (0x0020, 0o0, u32::MAX),       // ACL_OTHER
+        ] {
             blob.extend_from_slice(&tag.to_le_bytes());
             blob.extend_from_slice(&perm.to_le_bytes());
-            blob.extend_from_slice(&u32::MAX.to_le_bytes());
+            blob.extend_from_slice(&id.to_le_bytes());
         }
         blob
     }
@@ -612,8 +623,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
         std::fs::write(&target, b"old-binary-bytes").unwrap();
-        let acl = acl_blob_mode_750();
+        let acl = extended_acl_blob();
         xattr::set(&target, "system.posix_acl_access", &acl).unwrap();
+        // Setting the ACL syncs the mode to its canonical form
+        // (owner rwx, mask r-x, other none = 0o750).
         apply_swap(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
         let carried = xattr::get(&target, "system.posix_acl_access")

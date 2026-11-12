@@ -485,8 +485,8 @@ fn clear_macos_acl(staging: &std::path::Path) -> Result<()> {
     }
     // SAFETY: `staged` is a valid C string and `empty` is a valid owned
     // handle.
-    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
     let cleared =
+        // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
         unsafe { acl_ffi::acl_set_file(staged.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED, empty) };
     // SAFETY: `empty` is owned and still valid; freeing after the set
     // call cannot affect the staged file.

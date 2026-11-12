@@ -236,7 +236,7 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   removes the staged file when any step before the rename fails and
   surfaces a failed removal alongside the staging error, and on macOS
   distinguishes a real ACL probe failure from a file without an ACL
-  by snapshotting errno around the probe.
+  by clearing errno around the probe.
 - Leaving the console TUI runs the SessionEnd hooks and the memory
   pass inside a bounded drain, matching `exec`; previously neither
   fired on TUI exit.

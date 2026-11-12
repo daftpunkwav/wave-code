@@ -496,14 +496,21 @@ fn copy_linux_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
 
 /// The macOS probe answers that mean "there is no ACL to read here":
 /// the documented absent marker, a filesystem that cannot store an ACL
-/// at all (`ENOTSUP`), and an errno the call left untouched — Darwin
-/// does not reliably set the absent marker on the no-ACL path, and the
-/// observed value there is whatever the last failed syscall left
-/// behind. Anything else the call actually reported is a probe failure
-/// the caller must not read as absence.
+/// at all (`ENOTSUP`), an errno the call left untouched, and `ENOENT` —
+/// Darwin reports a NULL probe on an ACL-less file with a failing
+/// getattrlist on the absent attribute, which surfaces as `ENOATTR`
+/// per the man page and as `ENOENT` in practice. `ENOENT` is safe to
+/// read as absence because it says the path itself did not resolve: a
+/// file that is not there carries no grant, and the caller's next
+/// operation on the same path fails loudly anyway. Anything else the
+/// call actually reported is a probe failure the caller must not read
+/// as absence.
 #[cfg(target_os = "macos")]
 fn macos_probe_absent(before: Option<libc::c_int>, after: Option<libc::c_int>) -> bool {
-    after == before || after == Some(libc::ENOATTR) || after == Some(libc::ENOTSUP)
+    after == before
+        || after == Some(libc::ENOATTR)
+        || after == Some(libc::ENOTSUP)
+        || after == Some(libc::ENOENT)
 }
 
 /// macOS: strip any ACL the staged file inherited from its directory.

@@ -378,15 +378,14 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
         CString::new(staging.as_os_str().as_bytes()).context("staging path has a NUL byte")?;
     // SAFETY: both arguments are NUL-terminated C strings built above;
     // the returned handle is either valid or NULL, and it is released on
-    // every path below. `NULL` with `ENOATTR` means the file has no ACL.
+    // every path below. `NULL` means the file has no ACL: Darwin takes
+    // that path without setting a meaningful errno (the documented
+    // `ENOATTR` does not reliably survive — the observed value is
+    // whatever the last failed syscall left behind), so the NULL is
+    // taken at face value instead of being filtered on errno.
     let acl = unsafe { acl_ffi::acl_get_file(target.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
     if acl.is_null() {
-        let error = std::io::Error::last_os_error();
-        return if error.raw_os_error() == Some(libc::ENOATTR) {
-            Ok(false)
-        } else {
-            Err(error).context("probing the installed binary's ACL")
-        };
+        return Ok(false);
     }
     // SAFETY: `acl` is a handle this function owns and `staged` is a
     // valid C string.

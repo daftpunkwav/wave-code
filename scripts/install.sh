@@ -32,7 +32,9 @@ esac
 # come from the same release even if one lands mid-publish.
 api="https://api.github.com/repos/$REPO/releases/latest"
 if command -v curl >/dev/null; then
-    tag=$(curl -fsSL "$api" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    # --proto/--proto-redir =https pin the transfer and its redirects
+    # to https so no hop can downgrade to plain HTTP.
+    tag=$(curl -fsSL --proto =https --proto-redir =https "$api" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
 else
     echo "need curl to download releases" >&2
     exit 1
@@ -48,8 +50,8 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 echo "downloading $tag ($target)..."
-curl -fsSL -o "$tmp/$BIN" "$base/$asset"
-curl -fsSL -o "$tmp/$BIN.sha256" "$base/$asset.sha256"
+curl -fsSL --proto =https --proto-redir =https -o "$tmp/$BIN" "$base/$asset"
+curl -fsSL --proto =https --proto-redir =https -o "$tmp/$BIN.sha256" "$base/$asset.sha256"
 
 # The checksum file is "<hex>  <filename>"; compare the downloaded
 # bytes against the published hex only.

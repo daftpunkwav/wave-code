@@ -287,7 +287,13 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
+        // Mirror the installed binary's mode so the replacement neither
+        // widens nor drops access; fall back to owner-only when the old
+        // mode cannot be read.
+        let permissions = std::fs::metadata(target_exe)
+            .map(|meta| meta.permissions())
+            .unwrap_or_else(|_| std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(&staging, permissions)?;
     }
     // Step the old binary aside as `.bak`, then move the staging file
     // into its place. Windows cannot delete a running exe, but it can
@@ -312,6 +318,8 @@ pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
 
     #[test]
     fn newer_patch_and_minor_detections() {
@@ -438,8 +446,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
         std::fs::write(&target, b"old-binary-bytes").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
         apply_swap(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o750, "the swap keeps the installed mode");
+        }
         // The old bytes survive as `.bak` next to the target.
         let backup = dir.path().join("wavecode.exe.bak");
         assert_eq!(std::fs::read(&backup).unwrap(), b"old-binary-bytes");

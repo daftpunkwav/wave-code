@@ -181,7 +181,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - run: pnpm install --no-frozen-lockfile
+      # --ignore-scripts refuses lifecycle scripts from the dependency
+      # graph; the SDK's toolchain (typescript, @types/node) needs none.
+      - run: pnpm install --ignore-scripts --no-frozen-lockfile
       - run: pnpm build
       - run: pnpm test
 

@@ -494,23 +494,37 @@ fn copy_linux_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
     }
 }
 
+/// Zero the thread's errno so a probe that fails without reporting can
+/// never be judged against a stale errno an unrelated earlier call left
+/// behind. Darwin exposes the per-thread errno slot through `__error`,
+/// the same accessor `std::io::Error::last_os_error` reads; the value
+/// only matters until the next FFI call reports its own.
+#[cfg(target_os = "macos")]
+fn macos_clear_errno() {
+    // SAFETY: `__error` returns the thread's errno slot; writing 0
+    // resets it before the probe that follows, and nothing runs in
+    // between.
+    // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
+    unsafe { *libc::__error() = 0 };
+}
+
 /// The macOS probe answers that mean "there is no ACL to read here":
 /// the documented absent marker, a filesystem that cannot store an ACL
-/// at all (`ENOTSUP`), an errno the call left untouched, and `ENOENT` —
-/// Darwin reports a NULL probe on an ACL-less file with a failing
-/// getattrlist on the absent attribute, which surfaces as `ENOATTR`
-/// per the man page and as `ENOENT` in practice. `ENOENT` is safe to
-/// read as absence because it says the path itself did not resolve: a
-/// file that is not there carries no grant, and the caller's next
-/// operation on the same path fails loudly anyway. Anything else the
-/// call actually reported is a probe failure the caller must not read
-/// as absence.
+/// at all (`ENOTSUP`), `ENOENT` — Darwin reports a NULL probe on an
+/// ACL-less file with a failing getattrlist on the absent attribute,
+/// which surfaces as `ENOATTR` per the man page and as `ENOENT` in
+/// practice — and an errno the call left untouched (0, because
+/// [`macos_clear_errno`] zeroed it before the probe; the same quirk
+/// produces this too). With errno zeroed around every probe, whatever
+/// a failed probe reports is genuinely its own answer — a failure
+/// landing on a stale value cannot happen. Anything else is a probe
+/// failure the caller must not read as absence.
 #[cfg(target_os = "macos")]
-fn macos_probe_absent(before: Option<libc::c_int>, after: Option<libc::c_int>) -> bool {
-    after == before
-        || after == Some(libc::ENOATTR)
-        || after == Some(libc::ENOTSUP)
-        || after == Some(libc::ENOENT)
+fn macos_probe_absent(errno: Option<libc::c_int>) -> bool {
+    matches!(
+        errno,
+        Some(0) | Some(libc::ENOATTR) | Some(libc::ENOTSUP) | Some(libc::ENOENT)
+    )
 }
 
 /// macOS: strip any ACL the staged file inherited from its directory.
@@ -525,7 +539,7 @@ fn clear_macos_acl(staging: &std::path::Path) -> Result<()> {
 
     let staged =
         CString::new(staging.as_os_str().as_bytes()).context("staging path has a NUL byte")?;
-    let before = std::io::Error::last_os_error().raw_os_error();
+    macos_clear_errno();
     // SAFETY: `staged` is a NUL-terminated C string built above; the
     // returned handle is either valid or NULL, and it is released on
     // every path below.
@@ -533,7 +547,7 @@ fn clear_macos_acl(staging: &std::path::Path) -> Result<()> {
     let acl = unsafe { acl_ffi::acl_get_file(staged.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         let after = std::io::Error::last_os_error().raw_os_error();
-        if macos_probe_absent(before, after) {
+        if macos_probe_absent(after) {
             return Ok(());
         }
         return Err(std::io::Error::last_os_error()).context("probing the staged file's ACL");
@@ -581,15 +595,14 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
     let staged =
         CString::new(staging.as_os_str().as_bytes()).context("staging path has a NUL byte")?;
     // Darwin returns NULL both when the file carries no ACL and on
-    // probe failures. errno is snapshotted around the call and the
-    // NULL is judged by what changed: an errno this call actually set
-    // — beyond the documented absent marker and the ACL-unsupported
-    // volume — is a probe failure and aborts the swap instead of
-    // silently dropping a real ACL, while an untouched errno keeps the
-    // observed face-value reading of "no ACL". An error that lands on
-    // the stale value by coincidence is read as absent — the same
-    // residual as taking the NULL at face value, but strictly narrower.
-    let before = std::io::Error::last_os_error().raw_os_error();
+    // probe failures. errno is zeroed around the call, so whatever a
+    // failed probe reports is its own answer: an errno the call
+    // actually set — beyond the documented absent marker, the
+    // ACL-unsupported volume, and the quirk answers of an ACL-less
+    // file — aborts the swap instead of silently dropping a real ACL,
+    // while an untouched errno keeps the observed face-value reading
+    // of "no ACL".
+    macos_clear_errno();
     // SAFETY: both arguments are NUL-terminated C strings built above;
     // the returned handle is either valid or NULL, and it is released on
     // every path below.
@@ -597,7 +610,7 @@ fn copy_macos_acl(target_exe: &std::path::Path, staging: &std::path::Path) -> Re
     let acl = unsafe { acl_ffi::acl_get_file(target.as_ptr(), acl_ffi::ACL_TYPE_EXTENDED) };
     if acl.is_null() {
         let after = std::io::Error::last_os_error().raw_os_error();
-        if macos_probe_absent(before, after) {
+        if macos_probe_absent(after) {
             return Ok(false);
         }
         return Err(std::io::Error::last_os_error()).context("probing the installed binary's ACL");
@@ -916,7 +929,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt as _;
 
         let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
-        let before = std::io::Error::last_os_error().raw_os_error();
+        super::macos_clear_errno();
         // SAFETY: `c_path` is a valid C string; the handle is released
         // on every path below.
         // nosemgrep: rust.lang.security.unsafe-usage.unsafe-usage
@@ -927,9 +940,8 @@ mod tests {
             // A NULL is only "no ACL" when the probe says so; a real
             // probe failure must fail the test instead of reading as
             // absence.
-            let after = std::io::Error::last_os_error().raw_os_error();
             assert!(
-                super::macos_probe_absent(before, after),
+                super::macos_probe_absent(std::io::Error::last_os_error().raw_os_error()),
                 "the ACL probe failed: {}",
                 std::io::Error::last_os_error()
             );

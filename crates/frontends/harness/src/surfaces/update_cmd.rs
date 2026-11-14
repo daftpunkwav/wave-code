@@ -47,12 +47,12 @@ pub(crate) async fn run_update_check() {
 }
 
 /// Verify the downloaded bytes against the published checksum, then
-/// swap them in as the running binary. Verification failure returns
-/// before [`update::apply_swap`] runs, so mismatched bytes never touch
-/// the file on disk.
-fn verify_and_install(exe: &std::path::Path, bytes: &[u8], checksum: &str) -> anyhow::Result<()> {
+/// swap them in. The caller holds the target's swap lock; verification
+/// failure returns before [`update::apply_swap`] runs, so mismatched
+/// bytes never touch the file on disk.
+fn verify_and_install(swap: &update::SwapLock, bytes: &[u8], checksum: &str) -> anyhow::Result<()> {
     update::verify_sha256(bytes, checksum)?;
-    update::apply_swap(exe, bytes)
+    update::apply_swap(swap, bytes)
 }
 
 /// Download the newest release and replace this binary with it.
@@ -60,7 +60,10 @@ fn verify_and_install(exe: &std::path::Path, bytes: &[u8], checksum: &str) -> an
 /// Refuses source builds (nothing installed to replace) and
 /// unpublished targets; verifies the download against the published
 /// sha256 before touching the running file, and keeps the replaced
-/// binary as `.bak` next to it for manual rollback.
+/// binary as `.bak` next to it for manual rollback. The install holds
+/// the target's swap lock, which serializes concurrent updaters, and
+/// re-confirms under it that the release is still the newest published
+/// one before the swap runs.
 pub(crate) async fn run_update_install() {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -143,7 +146,22 @@ pub(crate) async fn run_update_install() {
             std::process::exit(Outcome::Failed.exit_code())
         }
     };
-    if let Err(cause) = verify_and_install(&exe, &bytes, &checksum) {
+    let swap = match update::SwapLock::acquire(&exe) {
+        Ok(swap) => swap,
+        Err(cause) => {
+            eprintln!("[fail] {cause:#}");
+            std::process::exit(Outcome::Failed.exit_code())
+        }
+    };
+    // The lock stays held across the freshness re-check and the swap: a
+    // concurrent updater may have installed a newer release while this
+    // download was in flight, and installing this one anyway would
+    // downgrade the binary.
+    if let Err(cause) = update::ensure_latest_release(&client, &release.tag).await {
+        eprintln!("[fail] {cause:#}");
+        std::process::exit(Outcome::Failed.exit_code())
+    }
+    if let Err(cause) = verify_and_install(&swap, &bytes, &checksum) {
         eprintln!("[fail] {cause:#}");
         std::process::exit(Outcome::Failed.exit_code())
     }
@@ -176,8 +194,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
         std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let swap = update::SwapLock::acquire(&target).unwrap();
 
-        let error = verify_and_install(&target, b"tampered-bytes", ABC_CHECKSUM)
+        let error = verify_and_install(&swap, b"tampered-bytes", ABC_CHECKSUM)
             .expect_err("mismatched bytes must not install");
         assert!(error.to_string().contains("checksum mismatch"), "{error}");
 
@@ -204,8 +223,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
         std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let swap = update::SwapLock::acquire(&target).unwrap();
 
-        verify_and_install(&target, b"abc", ABC_CHECKSUM).expect("matching bytes install");
+        verify_and_install(&swap, b"abc", ABC_CHECKSUM).expect("matching bytes install");
         assert_eq!(std::fs::read(&target).unwrap(), b"abc");
     }
 }

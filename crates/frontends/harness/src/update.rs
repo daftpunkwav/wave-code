@@ -356,13 +356,7 @@ impl SwapLock {
             .into_owned();
         let dir = target_exe.parent().context("binary path has no parent")?;
         let lock_path = dir.join(format!(".{file_name}.update.lock"));
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .with_context(|| format!("opening the update lock {}", lock_path.display()))?;
+        let lock = open_lock_file(&lock_path, target_exe)?;
         let deadline = std::time::Instant::now() + wait;
         loop {
             match lock.try_lock() {
@@ -395,6 +389,61 @@ impl SwapLock {
             }
         }
     }
+}
+
+/// Open (creating when missing) the update lock file next to the binary.
+///
+/// The file is coordination state, not data, so it stays usable by later
+/// updates: it is created owner-writable and world-readable, and on unix
+/// its ownership follows the installed binary's, so an elevated update
+/// does not leave a lock the binary's owner can no longer open. A lock
+/// this process may not write — left by another user, or by an earlier
+/// install under different ownership — is opened read-only instead:
+/// advisory locking needs a handle, not write access, so it still
+/// serializes.
+fn open_lock_file(
+    lock_path: &std::path::Path,
+    target_exe: &std::path::Path,
+) -> Result<std::fs::File> {
+    let lock = match std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+    {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return std::fs::File::open(lock_path)
+                .with_context(|| format!("opening the update lock {}", lock_path.display()));
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("opening the update lock {}", lock_path.display()));
+        }
+    };
+    #[cfg(not(unix))]
+    let _ = target_exe;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o644))
+            .with_context(|| format!("setting the mode on {}", lock_path.display()))?;
+        let target = std::fs::metadata(target_exe)
+            .with_context(|| format!("reading {}", target_exe.display()))?;
+        let held = std::fs::metadata(lock_path)
+            .with_context(|| format!("reading {}", lock_path.display()))?;
+        if target.uid() != held.uid() || target.gid() != held.gid() {
+            std::os::unix::fs::chown(lock_path, Some(target.uid()), Some(target.gid()))
+                .with_context(|| {
+                    format!(
+                        "aligning the update lock's ownership with {}",
+                        target_exe.display()
+                    )
+                })?;
+        }
+    }
+    Ok(lock)
 }
 
 /// Replace the lock's target binary with `bytes`, keeping the old file as
@@ -1033,6 +1082,64 @@ mod tests {
         drop(released);
     }
 
+    /// The lock file is shaped for later updaters: owner-writable and
+    /// world-readable, with the installed binary's ownership, so a run
+    /// that is not the creating user can still open it and serialize.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_stays_openable_by_later_updaters() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let swap = SwapLock::acquire(&target).unwrap();
+        let lock_path = dir.path().join(".wavecode.exe.update.lock");
+        let lock = std::fs::metadata(&lock_path).unwrap();
+        assert_eq!(
+            lock.permissions().mode() & 0o777,
+            0o644,
+            "the lock must stay readable for a later updater"
+        );
+        let target = std::fs::metadata(&target).unwrap();
+        assert_eq!(
+            (lock.uid(), lock.gid()),
+            (target.uid(), target.gid()),
+            "the lock follows the installed binary's ownership"
+        );
+        drop(swap);
+    }
+
+    /// A lock this process may not write — left by another user, or by an
+    /// earlier install under different ownership — still serializes: it
+    /// is opened read-only, and the acquire leaves its mode alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_lock_without_write_access_is_still_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let lock_path = dir.path().join(".wavecode.exe.update.lock");
+        std::fs::File::create(&lock_path).unwrap();
+        std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // A uid whose privileges bypass file modes (root) opens the
+        // read-only lock for writing, so the fallback is only inducible
+        // for an unprivileged one; probe before asserting the mode.
+        let probe = dir.path().join("write-probe");
+        std::fs::File::create(&probe).unwrap();
+        std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o444)).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&probe).is_ok() {
+            return;
+        }
+        let swap = SwapLock::acquire(&target).expect("a read-only lock still serializes");
+        assert_eq!(
+            std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o444,
+            "the acquire must not rewrite a lock it may not write"
+        );
+        drop(swap);
+    }
+
     /// The race reported in #52, end to end: the newer updater lands
     /// first; the older one, now holding the lock, re-checks freshness
     /// before the renames and refuses, so the newer binary survives.
@@ -1309,15 +1416,18 @@ mod tests {
     /// The guard must hold inside `apply_swap` itself, not only under
     /// the synthetic closure the unit test above drives: a staging step
     /// that fails in the real flow removes the actual `.download-*`
-    /// file. The missing target is the injected failure — every
-    /// earlier stage step tolerates one, the ownership sync is the
-    /// first that must read it.
+    /// file. Removing the target after the lock is taken is the injected
+    /// failure — every earlier stage step tolerates a missing target,
+    /// the ownership sync is the first that must read it.
     #[cfg(unix)]
     #[test]
     fn a_failed_swap_stage_removes_the_download_file() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
-        let error = swap_locked(&target, b"new-binary-bytes")
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let swap = SwapLock::acquire(&target).unwrap();
+        std::fs::remove_file(&target).unwrap();
+        let error = apply_swap(&swap, b"new-binary-bytes")
             .expect_err("the missing target must fail the stage");
         assert!(error.to_string().contains("reading"), "{error}");
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())

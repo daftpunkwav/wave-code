@@ -228,15 +228,14 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   install a replacement without its ACL. The waiter gives up after 60
   seconds instead of racing the holder, and the lock file stays in
   place because unlinking it would let two processes that opened it at
-  different times lock different inodes. The lock file follows the
-  installed binary's owner and stays owner-writable and world-readable
-  on unix, so an elevated update cannot leave a lock the binary's owner
-  can no longer open; a lock this process may not write is opened
-  read-only instead — advisory locking needs a handle, not write
-  access. Before the renames, the install also re-checks that its
-  release is still the newest published one and leaves the binary
-  untouched when a concurrent updater has already moved on to a newer
-  release.
+  different times lock different inodes. On unix the lock file follows
+  the installed binary's owner, so an elevated update cannot leave a
+  lock the binary's owner can no longer open, and a lock this process
+  may not write is opened read-only instead — advisory locking needs a
+  handle, not write access. Before the renames, the install also
+  re-checks that its release is still the newest published one and
+  leaves the binary untouched when a concurrent updater has already
+  moved on to a newer release.
 - The self-update swap carries the installed binary's POSIX ACL onto
   the replacement (the access-ACL xattr on Linux, the extended ACL on
   macOS) after mirroring its mode, so users and groups granted access

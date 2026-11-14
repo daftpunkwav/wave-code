@@ -394,13 +394,13 @@ impl SwapLock {
 /// Open (creating when missing) the update lock file next to the binary.
 ///
 /// The file is coordination state, not data, so it stays usable by later
-/// updates: it is created owner-writable and world-readable, and on unix
-/// its ownership follows the installed binary's, so an elevated update
-/// does not leave a lock the binary's owner can no longer open. A lock
-/// this process may not write — left by another user, or by an earlier
-/// install under different ownership — is opened read-only instead:
-/// advisory locking needs a handle, not write access, so it still
-/// serializes.
+/// updates: it keeps the creating process's umask and on unix its
+/// ownership follows the installed binary's, so the binary's owner stays
+/// able to read and write it and an elevated update does not leave a
+/// lock that owner can no longer open. A lock this process may not write
+/// — left by another user, or by an earlier install under different
+/// ownership — is opened read-only instead: advisory locking needs a
+/// handle, not write access, so it still serializes.
 fn open_lock_file(
     lock_path: &std::path::Path,
     target_exe: &std::path::Path,
@@ -426,9 +426,7 @@ fn open_lock_file(
     let _ = target_exe;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        std::fs::set_permissions(lock_path, std::fs::Permissions::from_mode(0o644))
-            .with_context(|| format!("setting the mode on {}", lock_path.display()))?;
+        use std::os::unix::fs::MetadataExt as _;
         let target = std::fs::metadata(target_exe)
             .with_context(|| format!("reading {}", target_exe.display()))?;
         let held = std::fs::metadata(lock_path)
@@ -1082,9 +1080,10 @@ mod tests {
         drop(released);
     }
 
-    /// The lock file is shaped for later updaters: owner-writable and
-    /// world-readable, with the installed binary's ownership, so a run
-    /// that is not the creating user can still open it and serialize.
+    /// The lock file is shaped for later updaters: the installed
+    /// binary's ownership (so its owner keeps the read/write pair a later
+    /// update opens) and the creating umask's mode, which keeps it
+    /// readable for another user under the common umask.
     #[cfg(unix)]
     #[test]
     fn the_lock_file_stays_openable_by_later_updaters() {
@@ -1097,9 +1096,9 @@ mod tests {
         let lock_path = dir.path().join(".wavecode.exe.update.lock");
         let lock = std::fs::metadata(&lock_path).unwrap();
         assert_eq!(
-            lock.permissions().mode() & 0o777,
-            0o644,
-            "the lock must stay readable for a later updater"
+            lock.permissions().mode() & 0o600,
+            0o600,
+            "the lock stays readable and writable for its owner"
         );
         let target = std::fs::metadata(&target).unwrap();
         assert_eq!(

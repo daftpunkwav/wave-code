@@ -11,7 +11,11 @@
 //! host only (origin allowlist in [`fetch_release`]), verifies it
 //! against the published sha256 checksum before touching anything,
 //! refuses to touch source builds, and keeps a `.bak` of the replaced
-//! binary as the rollback copy.
+//! binary as the rollback copy. Replacements of one binary serialize on
+//! an advisory lock file next to it, and the swap re-confirms under that
+//! lock that its release is still the newest published one, so two
+//! concurrent installs cannot interleave their step-aside/rename
+//! sequences or downgrade the binary.
 //!
 //! Accepted posture: the sha256 ships as an asset of the same release,
 //! so the trust root is the HTTPS github.com channel plus this origin
@@ -173,6 +177,38 @@ pub fn classify(latest: &str, url: &str) -> UpdateStatus {
     }
 }
 
+/// Confirm the releases API still reports `release` as the newest
+/// published release. The install path runs this while holding the
+/// target's [`SwapLock`], after the download and before the swap: a
+/// concurrent updater may have installed a newer release while this
+/// download was in flight, and installing the older one anyway would
+/// downgrade the binary. No conforming updater can land between this
+/// answer and the renames, because the caller holds the lock across
+/// both.
+pub async fn ensure_latest_release(client: &reqwest::Client, release: &str) -> Result<()> {
+    let latest = fetch_latest(client).await?;
+    release_still_latest(release, latest.as_ref().map(|(tag, _)| tag.as_str()))
+}
+
+/// The freshness verdict [`ensure_latest_release`] applies: only the
+/// release the API still reports as newest may be installed. A repo that
+/// reports no release, or a different one, cannot confirm this download,
+/// so the check fails closed instead of overwriting whatever the target
+/// now holds.
+fn release_still_latest(release: &str, latest: Option<&str>) -> Result<()> {
+    match latest {
+        Some(latest) if latest == release => Ok(()),
+        Some(latest) => anyhow::bail!(
+            "{latest} became the newest release while {release} was downloading; the installed \
+             binary was left unchanged — rerun `wavecode update --install` to install {latest}"
+        ),
+        None => anyhow::bail!(
+            "the repository reports no published release, so {release} cannot be confirmed as the \
+             newest; the installed binary was left unchanged"
+        ),
+    }
+}
+
 /// The release target this binary was built for, matching the
 /// release.yml matrix; `None` on targets the release pipeline does
 /// not publish (installers must fall back to "build from source").
@@ -265,12 +301,111 @@ pub fn verify_sha256(bytes: &[u8], checksum_file: &str) -> Result<()> {
     Ok(())
 }
 
-/// Replace the running binary with `bytes`, keeping the old file as
-/// `<name>.bak` for rollback. The download lands in a staging file
-/// next to the target (same filesystem, so the final step is a
-/// rename); verification happened before this is called.
-pub fn apply_swap(target_exe: &std::path::Path, bytes: &[u8]) -> Result<()> {
+/// How long a swap waits for a concurrent updater to release the
+/// target's lock before failing. The holder's own work is bounded — one
+/// release metadata request under its client timeout plus the staging
+/// writes and two renames — so a wait this long means the holder is
+/// stuck, and the swap must fail instead of racing it.
+const SWAP_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How often the swap lock wait retries while another updater holds it.
+const SWAP_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Advisory exclusive lock serializing replacements of one installed
+/// binary, plus the target it was taken for.
+///
+/// Two `wavecode update --install` runs aimed at the same target stage
+/// into the same directory and, without a lock, interleave inside the
+/// step-aside/rename sequence: the older run can rename its release over
+/// the newer one after the newer run installed it (a downgrade that
+/// leaves the newer build only as `.bak`), and a run whose ACL probe
+/// fires while the other has the target renamed aside reads the missing
+/// file as "no ACL" and installs a replacement without the grant. The
+/// lock file sits next to the binary (`.<name>.update.lock`) and is held
+/// across the metadata probe, the staging writes, and both renames, so
+/// neither window opens.
+///
+/// The lock file stays behind on purpose: unlinking it would let two
+/// processes that opened it at different times lock different inodes and
+/// both believe they are alone.
+#[derive(Debug)]
+#[must_use = "the lock is released when the value is dropped"]
+pub struct SwapLock {
+    /// The binary this lock serializes replacements for.
+    target: std::path::PathBuf,
+    /// The held lock; the platform releases it when the handle closes.
+    _held: std::fs::File,
+}
+
+impl SwapLock {
+    /// Take `target_exe`'s swap lock, waiting up to [`SWAP_LOCK_WAIT`]
+    /// for a concurrent updater. A lock that still cannot be taken fails
+    /// the swap instead of racing it. The wait sleeps the calling thread;
+    /// this is the install surface's only in-flight work, so there is
+    /// nothing else for it to starve.
+    pub fn acquire(target_exe: &std::path::Path) -> Result<Self> {
+        Self::acquire_within(target_exe, SWAP_LOCK_WAIT)
+    }
+
+    /// [`acquire`](Self::acquire) with an explicit wait bound.
+    fn acquire_within(target_exe: &std::path::Path, wait: std::time::Duration) -> Result<Self> {
+        let file_name = target_exe
+            .file_name()
+            .context("binary path has no file name")?
+            .to_string_lossy()
+            .into_owned();
+        let dir = target_exe.parent().context("binary path has no parent")?;
+        let lock_path = dir.join(format!(".{file_name}.update.lock"));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening the update lock {}", lock_path.display()))?;
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => {
+                    return Ok(Self {
+                        target: target_exe.to_path_buf(),
+                        _held: lock,
+                    });
+                }
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(SWAP_LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::WouldBlock) => anyhow::bail!(
+                    "another update is replacing {}; the swap lock was still held after {}s",
+                    target_exe.display(),
+                    wait.as_secs()
+                ),
+                // A signal interruption is not a refusal: the lock can
+                // still be taken on the next attempt, until the bound
+                // runs out.
+                Err(std::fs::TryLockError::Error(error))
+                    if error.kind() == std::io::ErrorKind::Interrupted
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(SWAP_LOCK_POLL);
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| format!("locking {}", lock_path.display()));
+                }
+            }
+        }
+    }
+}
+
+/// Replace the lock's target binary with `bytes`, keeping the old file as
+/// `<name>.bak` for rollback. The caller holds the target's [`SwapLock`],
+/// so the metadata probe below cannot run while another updater has the
+/// target renamed aside. The download lands in a staging file next to the
+/// target (same filesystem, so the final step is a rename); verification
+/// happened before this is called.
+pub fn apply_swap(swap: &SwapLock, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
+    let target_exe = swap.target.as_path();
     let file_name = target_exe
         .file_name()
         .context("binary path has no file name")?
@@ -676,6 +811,12 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
+    /// Swap the way the install path does: under the target's swap lock.
+    fn swap_locked(target: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        let swap = SwapLock::acquire(target)?;
+        apply_swap(&swap, bytes)
+    }
+
     #[test]
     fn newer_patch_and_minor_detections() {
         assert!(version_is_newer("v0.1.1", "0.1.0"));
@@ -710,6 +851,22 @@ mod tests {
             classify("v9.9.9", "https://example.com/new"),
             UpdateStatus::Available { .. }
         ));
+    }
+
+    /// The freshness verdict keeps a download installable only while the
+    /// API still reports its tag as newest; a newer tag or no release at
+    /// all refuses it.
+    #[test]
+    fn only_the_newest_release_stays_installable() {
+        release_still_latest("v0.2.0", Some("v0.2.0")).expect("the newest release installs");
+        let superseded = release_still_latest("v0.2.0", Some("v0.2.1"))
+            .expect_err("a newer release refuses the download")
+            .to_string();
+        assert!(superseded.contains("v0.2.1"), "{superseded}");
+        assert!(
+            release_still_latest("v0.2.0", None).is_err(),
+            "a repo that reports no release cannot confirm the download"
+        );
     }
 
     /// The asset origin allowlist: GitHub release URLs pass; lookalike
@@ -803,7 +960,7 @@ mod tests {
         std::fs::write(&target, b"old-binary-bytes").unwrap();
         #[cfg(unix)]
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
         #[cfg(unix)]
         {
@@ -816,7 +973,7 @@ mod tests {
         // A second install must replace the leftover `.bak`. Windows
         // refuses to rename onto an existing file; Unix rename would
         // have replaced it. Both platforms now drop the old copy first.
-        apply_swap(&target, b"newer-binary-bytes").unwrap();
+        swap_locked(&target, b"newer-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"newer-binary-bytes");
         assert_eq!(std::fs::read(&backup).unwrap(), b"new-binary-bytes");
         // No staging leftovers: the download file was renamed away.
@@ -826,6 +983,85 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".download-"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    /// Two updaters aimed at the same binary must not interleave inside
+    /// the swap: the second waits for the first to release the lock
+    /// instead of renaming over it.
+    #[test]
+    fn concurrent_swaps_of_one_target_serialize_on_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let first = SwapLock::acquire(&target).unwrap();
+        let (acquired, waiting) = std::sync::mpsc::channel();
+        let waiting_target = target.clone();
+        let second = std::thread::spawn(move || {
+            let swap = SwapLock::acquire(&waiting_target).expect("the released lock is taken");
+            acquired.send(()).unwrap();
+            swap
+        });
+        // The second updater cannot enter the swap while the first holds
+        // the lock.
+        assert!(
+            waiting
+                .recv_timeout(std::time::Duration::from_millis(250))
+                .is_err(),
+            "a second updater entered the swap while the lock was held"
+        );
+        drop(first);
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the released lock reaches the waiting updater");
+        drop(second.join().unwrap());
+    }
+
+    /// The wait for a held lock is bounded: a stuck updater fails this
+    /// swap with the lock still held instead of hanging it.
+    #[test]
+    fn the_swap_lock_wait_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"old-binary-bytes").unwrap();
+        let held = SwapLock::acquire(&target).unwrap();
+        let error = SwapLock::acquire_within(&target, std::time::Duration::from_millis(120))
+            .expect_err("a held lock must not be taken");
+        assert!(error.to_string().contains("swap lock"), "{error}");
+        drop(held);
+        let released = SwapLock::acquire_within(&target, std::time::Duration::from_millis(120))
+            .expect("a released lock is taken");
+        drop(released);
+    }
+
+    /// The race reported in #52, end to end: the newer updater lands
+    /// first; the older one, now holding the lock, re-checks freshness
+    /// before the renames and refuses, so the newer binary survives.
+    #[test]
+    fn an_older_release_refuses_after_a_newer_one_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("wavecode.exe");
+        std::fs::write(&target, b"older-binary-bytes").unwrap();
+        {
+            let swap = SwapLock::acquire(&target).unwrap();
+            release_still_latest("v0.2.1", Some("v0.2.1")).unwrap();
+            apply_swap(&swap, b"newer-binary-bytes").unwrap();
+        }
+        let swap = SwapLock::acquire(&target).unwrap();
+        let stale = release_still_latest("v0.2.0", Some("v0.2.1"))
+            .expect_err("the older release must not install");
+        assert!(stale.to_string().contains("v0.2.1"), "{stale}");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"newer-binary-bytes",
+            "the newer binary survives the older updater"
+        );
+        let backup = dir.path().join("wavecode.exe.bak");
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            b"older-binary-bytes",
+            "the newer swap's rollback copy is untouched"
+        );
+        drop(swap);
     }
 
     /// Canonical extended access ACL: `USER_OBJ rwx`, named `USER`
@@ -892,7 +1128,7 @@ mod tests {
         }
         // Setting the ACL syncs the mode to its canonical form
         // (owner rwx, mask r-x, other none = 0o750).
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
         let carried = access_acl(&target)
             .unwrap()
@@ -918,7 +1154,7 @@ mod tests {
             "the fixture must start ACL-free"
         );
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(
             access_acl(&target).unwrap(),
             None,
@@ -992,7 +1228,7 @@ mod tests {
             .expect("chmod runs");
         assert!(granted.status.success(), "chmod +a failed: {:?}", granted);
         let original = macos_acl_blob(&target).expect("the target carries an ACL");
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
         let carried = macos_acl_blob(&target).expect("the ACL follows the replacement");
         assert_eq!(carried, original, "the copied ACL matches the original");
@@ -1014,7 +1250,7 @@ mod tests {
             "the fixture must start ACL-free"
         );
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o750)).unwrap();
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(macos_acl_blob(&target), None, "no ACL must be invented");
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o750);
@@ -1081,7 +1317,7 @@ mod tests {
     fn a_failed_swap_stage_removes_the_download_file() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("wavecode.exe");
-        let error = apply_swap(&target, b"new-binary-bytes")
+        let error = swap_locked(&target, b"new-binary-bytes")
             .expect_err("the missing target must fail the stage");
         assert!(error.to_string().contains("reading"), "{error}");
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
@@ -1114,7 +1350,7 @@ mod tests {
         if !plant_acl(dir.path(), "system.posix_acl_default", &extended_acl_blob()) {
             return;
         }
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
         assert_eq!(
             access_acl(&target).unwrap(),
@@ -1177,7 +1413,7 @@ mod tests {
             .output()
             .expect("chmod runs");
         assert!(granted.status.success(), "chmod +a failed: {:?}", granted);
-        apply_swap(&target, b"new-binary-bytes").unwrap();
+        swap_locked(&target, b"new-binary-bytes").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"new-binary-bytes");
         assert_eq!(
             macos_acl_blob(&target),

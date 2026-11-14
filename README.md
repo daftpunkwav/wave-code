@@ -221,7 +221,11 @@ live UI restores terminal modes before the report prints.
   running binary, then swaps atomically (Windows keeps the replaced
   binary as `<name>.bak` for manual rollback). Refuses source builds
   (`target/`; use `cargo build --release` instead) and platforms
-  without a prebuilt release asset; any failure exits 1.
+  without a prebuilt release asset; any failure exits 1. Concurrent
+  installs for one binary serialize on a `.<name>.update.lock` file next
+  to it (waiting up to 60 s), and the install re-checks under that lock
+  that its release is still the newest published one before the swap,
+  so a second updater cannot downgrade what the first one installed.
 
 ## Permissions
 

@@ -218,6 +218,20 @@ accumulate under `Unreleased` until a `v*` tag publishes them.
   warnings; `plugin list` notes that pack contents are wired.
 
 ### Fixed
+- Self-update swaps are serialized per installed binary: `wavecode
+  update --install` holds an advisory exclusive lock on a
+  `.<name>.update.lock` file next to the binary across the metadata
+  probe, the staging writes, and both renames, so concurrent updaters
+  can no longer interleave inside the step-aside/rename sequence — an
+  interleaving that could rename the older release over the newer one
+  or read the target while another updater had it renamed aside and
+  install a replacement without its ACL. The waiter gives up after 60
+  seconds instead of racing the holder, and the lock file stays in
+  place because unlinking it would let two processes that opened it at
+  different times lock different inodes. Before the renames, the
+  install also re-checks that its release is still the newest published
+  one and leaves the binary untouched when a concurrent updater has
+  already moved on to a newer release.
 - The self-update swap carries the installed binary's POSIX ACL onto
   the replacement (the access-ACL xattr on Linux, the extended ACL on
   macOS) after mirroring its mode, so users and groups granted access
